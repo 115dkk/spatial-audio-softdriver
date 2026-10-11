@@ -24,3 +24,4 @@ dbg_macro = "deny"
 [dependencies]
 bio-types.workspace = true
 bio-abi.workspace = true
+thiserror.workspace = true
