@@ -22,8 +22,14 @@ cargo test --workspace
 cargo deny check
 ```
 
+## 화면 (M4)
+
+- 화면 폰트는 UAC 원격 승인기와 같은 IBM Plex Sans KR(400, 500, 600, 700)입니다. 파일과 라이선스는 `E:\Windows_UAC_Remote_Controller\ui\public\fonts\ibm-plex-sans-kr\`에 있고, 그 저장소의 `tools/ui-fonts.mjs`처럼 SHA-256으로 고정해 들입니다.
+- 고정폭 글꼴이 꼭 필요하면 Sarasa Mono K를 씁니다. 다른 글꼴은 고르지 않습니다.
+
 ## 브랜치와 릴리스
 
 - 기본 브랜치는 `master`입니다. 작업은 브랜치에서 하고 PR로 머지합니다.
-- master에 머지하면 `release.yml`이 사전 릴리스를 냅니다(ADR 0017). 머지가 곧 릴리스 결정입니다.
-- 커밋 제목은 `feat:`, `fix:`, `docs:`, `ci:`, `chore:` 같은 접두어 뒤에 한국어로 씁니다.
+- master에 머지하면 `release.yml`이 릴리스를 냅니다(ADR 0017). 머지가 곧 릴리스 결정입니다. 0.x 버전은 모두 사전 릴리스이고, 태그에 `-pre.N` 같은 꼬리표를 붙이지 않습니다.
+- 커밋 제목은 `feat:`, `fix:`, `docs:`, `ci:`, `chore:` 같은 접두어 뒤에 한국어로 씁니다. `feat`는 다음 릴리스에서 minor를, 나머지는 patch를 올립니다.
+- 공개 저장소라 CI 분량을 아끼지 않습니다. 결함을 잡는 잡이면 더합니다.
