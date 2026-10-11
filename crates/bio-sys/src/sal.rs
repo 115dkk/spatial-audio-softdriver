@@ -125,7 +125,10 @@ impl CaptureSource for SalRing {
                 }
                 Err(error) => {
                     self.pending = None;
-                    return Err(CaptureError::Io(error.to_string()));
+                    return Err(CaptureError::Io(format!(
+                        "{error}; SAL READ header: {:?}",
+                        crate::sal_format::parse_header(&self.scratch[..len])
+                    )));
                 }
             }
             if !writer.is_empty() {

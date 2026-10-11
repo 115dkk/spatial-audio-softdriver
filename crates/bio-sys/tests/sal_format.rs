@@ -7,6 +7,47 @@ use bio_types::{BitstreamCodec, SampleType, SourceFormat};
 use common::{header, read};
 
 #[test]
+fn sal_idle_before_first_format_waits_without_committing_an_epoch() {
+    let mut idle = header();
+    idle.format_changes = 0;
+    idle.total_bytes = 0;
+    idle.rate = 0;
+    idle.block_align = 0;
+    let mut translator = SalTranslator::new();
+    let mut bytes = [0; 1024];
+    let mut writer = RecordWriter::new(&mut bytes);
+    for qpc in 1..4 {
+        assert_eq!(
+            translator.translate(&read(idle, &[]), qpc, &mut writer),
+            Ok(0)
+        );
+        assert!(writer.is_empty());
+    }
+    // A payload cannot be silently discarded just because the format is idle.
+    assert!(
+        translator
+            .translate(&read(idle, &[1]), 4, &mut writer)
+            .is_err()
+    );
+    assert!(writer.is_empty());
+    assert_eq!(
+        translator.translate(&read(header(), &[7]), 5, &mut writer),
+        Ok(3)
+    );
+    let len = writer.len();
+    assert_eq!(
+        records(&bytes[..len]).next().unwrap().unwrap(),
+        Record::StreamStart { epoch: 1, qpc: 5 }
+    );
+    // A reset-looking invalid header during an active stream is still an error.
+    assert!(
+        translator
+            .translate(&read(idle, &[]), 6, &mut RecordWriter::new(&mut bytes))
+            .is_err()
+    );
+}
+
+#[test]
 fn sal_header_round_trip() {
     let mut h = header();
     h.payload_bytes = 4;

@@ -21,7 +21,7 @@ Check cable-play {
 }
 $tone = Join-Path $PSScriptRoot '../../target/release/examples/sal_tone.exe'
 function With-Stimulus($name, [scriptblock]$body) {
-    $sender = Start-Process $tone -ArgumentList 'HDMI' -PassThru -WindowStyle Hidden `
+    $sender = Start-Process $tone -ArgumentList 'HISENSE' -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput "$evidence/$name-stimulus.txt" -RedirectStandardError "$evidence/$name-stimulus-error.txt"
     try {
         Check $name $body

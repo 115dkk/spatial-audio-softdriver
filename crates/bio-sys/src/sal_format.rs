@@ -179,6 +179,18 @@ impl SalTranslator {
         out: &mut RecordWriter<'_>,
     ) -> Result<usize, SalError> {
         let h = parse_header(read)?;
+        // A newly opened SAL device can report an idle ring before its first
+        // format negotiation. No audio or format has been published yet; do
+        // not turn that state into an invalid WAVEFORMATEXTENSIBLE or commit
+        // an epoch. Once anything was published, normal validation applies.
+        if self.previous.is_none()
+            && h.payload_bytes == 0
+            && h.format_changes == 0
+            && h.total_bytes == 0
+            && h.dropped_bytes == 0
+        {
+            return Ok(0);
+        }
         let changed = self.previous.is_none_or(|old| !old.same_format(&h));
         let lost = h.dropped_bytes.saturating_sub(self.dropped);
         let (wave, wave_len) = h.wave_bytes();

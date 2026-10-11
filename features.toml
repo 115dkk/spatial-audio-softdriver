@@ -413,10 +413,11 @@ tests = [
   "bio-sys::sal_format_change_bumps_epoch_for_each_format_field",
   "bio-sys::sal_buffer_full_retry_is_transactional",
   "bio-sys::sal_invalid_format_does_not_commit_state",
+  "bio-sys::sal_idle_before_first_format_waits_without_committing_an_epoch",
   "bio-sys::sal_translation_does_not_allocate_in_steady_state",
   "bio-sys::sal_open_errors_keep_missing_denied_and_busy_distinct",
 ]
-note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). The translation is tested on synthetic READ results; the device itself has not been opened (NotPresent on the dev PC), so real reads wait for the SAL PC. Development only; release builds leave it out"
+note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). The Windows 2025 runner has opened the actual SAL ring; initial idle READs exposed a startup validation defect, now covered by a regression. Live PCM verification is recorded in docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
 
 [[feature]]
 id = "sys.wasapi_output"

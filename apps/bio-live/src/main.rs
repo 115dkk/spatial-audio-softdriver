@@ -621,7 +621,11 @@ mod platform {
             let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
             assert_eq!(n, bio_abi::record_size(16));
             let second = record_qpc(&out);
-            assert!(second - first >= frequency * 9 / 1000, "released early");
+            // Both deadlines are relative to the dump origin. If the first
+            // read wakes late, the second is still due at 20 ms, not 10 ms
+            // after that delayed wake-up.
+            assert!(second >= first);
+            assert!(second - before >= frequency * 19 / 1000, "released early");
             assert_eq!(out[HEADER_BYTES], 2);
 
             assert!(!ended.load(Ordering::Acquire));
