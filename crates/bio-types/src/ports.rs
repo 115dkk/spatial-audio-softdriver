@@ -74,6 +74,12 @@ pub trait OutputSink {
     /// (interleaved, `period_frames * channels` samples), and returns the QPC at
     /// which the period's first frame will play.
     fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError>;
+
+    /// Times the sink restarted its stream after the device stalled; sinks
+    /// that never restart keep the default.
+    fn restarts(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

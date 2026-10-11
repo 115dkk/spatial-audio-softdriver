@@ -69,6 +69,98 @@ fn exclusive_or_shared_fallback_plays_silence() {
     }
 }
 
+/// The sink must take frames at the device rate: a sink that skips device
+/// events consumes too slowly and the crossing ring fills without bound.
+fn assert_real_time_cadence(exclusive: bool) {
+    let mut sink = WasapiOpener {
+        endpoint: None,
+        rate: 48_000,
+        exclusive,
+        period: None,
+    }
+    .open()
+    .unwrap();
+    let format = sink.format();
+    for _ in 0..20 {
+        sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+    }
+    let started = qpc::now();
+    let mut frames = 0_usize;
+    while frames < format.rate as usize * 2 {
+        sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+        frames += format.period_frames;
+    }
+    let seconds = (qpc::now() - started) as f64 / qpc::frequency() as f64;
+    let rate = frames as f64 / seconds;
+    println!(
+        "{} periods of {} frames: {rate:.0} frames/s",
+        frames / format.period_frames,
+        format.period_frames
+    );
+    assert!(
+        (rate / f64::from(format.rate) - 1.0).abs() < 0.01,
+        "the sink took {rate:.0} frames/s at {} Hz",
+        format.rate
+    );
+}
+
+#[test]
+#[ignore = "requires a render endpoint; requests exclusive mode and plays 2 s of silence"]
+fn exclusive_sink_takes_frames_at_the_device_rate() {
+    assert_real_time_cadence(true);
+}
+
+#[test]
+#[ignore = "requires a render endpoint; plays 2 s of silence in shared mode"]
+fn shared_sink_takes_frames_at_the_device_rate() {
+    assert_real_time_cadence(false);
+}
+
+/// A thread that misses a deadline by 30 ms must not leave the device slow.
+/// A TOPPING USB DAC in exclusive mode then signalled only every ~33 ms for
+/// good, until the sink learned to restart its stream.
+#[test]
+#[ignore = "requires a render endpoint; requests exclusive mode and plays 3 s of silence"]
+fn exclusive_sink_recovers_its_cadence_after_a_missed_deadline() {
+    let mut sink = WasapiOpener {
+        endpoint: None,
+        rate: 48_000,
+        exclusive: true,
+        period: None,
+    }
+    .open()
+    .unwrap();
+    let format = sink.format();
+    for _ in 0..200 {
+        sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    // Let a stall show itself and the restart happen.
+    let settle = format.rate as usize / 2;
+    let mut frames = 0;
+    while frames < settle {
+        sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+        frames += format.period_frames;
+    }
+    let started = qpc::now();
+    let mut frames = 0_usize;
+    while frames < format.rate as usize * 2 {
+        sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+        frames += format.period_frames;
+    }
+    let seconds = (qpc::now() - started) as f64 / qpc::frequency() as f64;
+    let rate = frames as f64 / seconds;
+    println!(
+        "{rate:.0} frames/s after the miss, {} restarts",
+        sink.restarts()
+    );
+    assert!(
+        (rate / f64::from(format.rate) - 1.0).abs() < 0.01,
+        "the sink took {rate:.0} frames/s at {} Hz after the miss",
+        format.rate
+    );
+}
+
 #[test]
 fn qpc_ticks_increase_and_frequency_is_nonzero() {
     assert!(qpc::frequency() > 0);

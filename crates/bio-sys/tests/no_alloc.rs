@@ -52,3 +52,29 @@ fn wasapi_shared_periods_do_not_allocate() {
         }
     });
 }
+
+#[test]
+#[ignore = "requires a render endpoint; requests exclusive mode and plays 1 s of silence"]
+fn wasapi_exclusive_periods_and_a_restart_do_not_allocate() {
+    use bio_types::{OutputOpener, OutputSink};
+    let mut sink = bio_sys::output::WasapiOpener {
+        endpoint: None,
+        rate: 48_000,
+        exclusive: true,
+        period: None,
+    }
+    .open()
+    .unwrap();
+    let count = (sink.format().rate as usize / 2).div_ceil(sink.format().period_frames);
+    sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+    assert_no_alloc(|| {
+        for index in 0..count {
+            if index == count / 4 {
+                // Miss a deadline so the stall path and a restart run too.
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+            sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+        }
+    });
+    println!("{} restarts", sink.restarts());
+}

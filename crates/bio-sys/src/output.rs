@@ -44,6 +44,14 @@ pub struct WasapiSink {
     exclusive: bool,
     samples: Vec<f32>,
     bytes: Vec<u8>,
+    /// One whole device buffer of silence, written before each start.
+    silence: Vec<u8>,
+    buffer_frames: usize,
+    running: bool,
+    restarts: u64,
+    /// A wait for the device longer than this (QPC ticks) means the stream
+    /// has stalled.
+    stall_ticks: u64,
     submitted: u64,
     clock_frequency: u64,
     qpc_frequency: u64,
@@ -155,16 +163,12 @@ impl OutputOpener for WasapiOpener {
         if clock_frequency == 0 {
             return Err(OutputError::Io("audio clock has zero frequency".into()));
         }
-        let mut bytes = vec![0; buffer_frames * 2 * encoding.sample_bytes()];
-        // Prime the entire buffer before Start. This silence belongs to the
-        // stream position just like every subsequently submitted frame.
-        render
-            .write_to_device(buffer_frames, &bytes, None)
-            .map_err(output_error)?;
-        bytes.truncate(period_frames * 2 * encoding.sample_bytes());
+        // The stream starts on the first `next_period`, not here: whatever the
+        // caller sets up between open and its first period must not count
+        // against the device (see `start`).
+        let silence = vec![0; buffer_frames * 2 * encoding.sample_bytes()];
+        let bytes = vec![0; period_frames * 2 * encoding.sample_bytes()];
         let samples = vec![0.0; period_frames * 2];
-        let started_qpc = qpc::now();
-        client.start_stream().map_err(output_error)?;
         Ok(WasapiSink {
             client,
             render,
@@ -179,10 +183,15 @@ impl OutputOpener for WasapiOpener {
             exclusive,
             samples,
             bytes,
-            submitted: buffer_frames as u64,
+            silence,
+            buffer_frames,
+            running: false,
+            restarts: 0,
+            stall_ticks: stall_ticks(period_frames, self.rate, qpc::frequency()),
+            submitted: 0,
             clock_frequency,
             qpc_frequency: qpc::frequency(),
-            started_qpc,
+            started_qpc: 0,
             _com: com,
         })
     }
@@ -280,12 +289,33 @@ fn mode_error(error: &WasapiError) -> bool {
     }
 }
 
-impl OutputSink for WasapiSink {
-    fn format(&self) -> OutputFormat {
-        self.format
+impl WasapiSink {
+    /// Primes the whole buffer with silence and starts the stream. The silence
+    /// belongs to the stream position like every later frame.
+    fn start(&mut self) -> Result<(), OutputError> {
+        self.render
+            .write_to_device(self.buffer_frames, &self.silence, None)
+            .map_err(output_error)?;
+        self.submitted = self.buffer_frames as u64;
+        self.started_qpc = qpc::now();
+        self.client.start_stream().map_err(output_error)?;
+        self.running = true;
+        Ok(())
     }
 
-    fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError> {
+    /// Stops, rewinds and restarts the stream (Reset sets the position to 0).
+    fn restart(&mut self) -> Result<(), OutputError> {
+        self.client.stop_stream().map_err(output_error)?;
+        self.client.reset_stream().map_err(output_error)?;
+        self.running = false;
+        self.restarts += 1;
+        self.start()
+    }
+
+    /// Waits until the device asks for a period; returns the QPC ticks that
+    /// took.
+    fn wait_for_space(&mut self) -> Result<u64, OutputError> {
+        let entered = qpc::now();
         loop {
             if let Err(error) = self.event.wait_for_event(2000) {
                 // Device invalidation can stop the event, so query the client
@@ -299,15 +329,45 @@ impl OutputSink for WasapiSink {
                 .map_err(output_error)? as usize
                 >= self.format.period_frames
             {
-                break;
+                return Ok(qpc::now().saturating_sub(entered));
             }
+        }
+    }
+
+    fn played_frames(&self, position: u64) -> u64 {
+        (u128::from(position) * u128::from(self.format.rate))
+            .div_ceil(u128::from(self.clock_frequency)) as u64
+    }
+}
+
+impl OutputSink for WasapiSink {
+    fn format(&self) -> OutputFormat {
+        self.format
+    }
+
+    fn restarts(&self) -> u64 {
+        self.restarts
+    }
+
+    fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError> {
+        if !self.running {
+            self.start()?;
+        }
+        let waited = self.wait_for_space()?;
+        if self.exclusive && waited > self.stall_ticks {
+            // After one missed deadline an exclusive-mode USB endpoint (a
+            // TOPPING DAC on usbaudio2) was seen to signal only every ~33 ms
+            // from then on, at every period size, so the stream fell behind
+            // for good. Its position stops while it starves, so the wait is
+            // the only sign. A restart brings back the normal cadence.
+            self.restart()?;
+            self.wait_for_space()?;
         }
         self.samples.fill(0.0);
         fill(&mut self.samples);
         self.encoding.convert(&self.samples, &mut self.bytes);
         let (position, clock_qpc) = self.clock.get_position().map_err(output_error)?;
-        let played_frames = (u128::from(position) * u128::from(self.format.rate))
-            .div_ceil(u128::from(self.clock_frequency)) as u64;
+        let played_frames = self.played_frames(position);
         // GetPosition continues across underruns. Do not timestamp new audio
         // in the past merely because fewer frames were submitted than played.
         self.submitted = self.submitted.max(played_frames);
@@ -342,6 +402,14 @@ impl Drop for WasapiSink {
     fn drop(&mut self) {
         let _ = self.client.stop_stream();
     }
+}
+
+/// Two periods, and at least 10 ms. A healthy wait is about one period: 3.0 to
+/// 4.3 ms at a 3 ms period and 10.0 to 10.9 ms at 10 ms were measured, while
+/// the stalls lasted 28 to 43 ms.
+fn stall_ticks(period_frames: usize, rate: u32, qpc_frequency: u64) -> u64 {
+    let two_periods = scale(2 * period_frames as u64, qpc_frequency, u64::from(rate));
+    two_periods.max(qpc_frequency / 100)
 }
 
 fn scale(value: u64, numerator: u64, denominator: u64) -> u64 {
