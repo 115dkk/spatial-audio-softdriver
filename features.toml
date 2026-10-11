@@ -248,8 +248,46 @@ note = "uniform partitions only: 22 inputs x 24,000-tap IRs x 480-frame blocks m
 id = "brir.prepare"
 kind = "pipeline"
 milestone = "M1"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "brir::integer_wav_formats_are_decoded_to_float",
+  "brir::standard_speaker_angles_match_contract",
+  "brir::synthetic_hesuvi_maps_every_direction_and_ear",
+  "brir::sixteen_track_hrir_drops_silent_lfe_placeholders",
+  "brir::extended_hesuvi_drops_unmeasured_silent_speakers",
+  "brir::directions_profile_keeps_file_order_and_angles",
+  "brir::headphone_fir_folding_equals_filtering_the_binaural_output",
+  "brir::mono_headphone_fir_applies_to_both_ears",
+  "brir::resampling_44100_to_48000_preserves_impulse_time_and_gain",
+  "brir::profile_toml_resolves_paths_defaults_lfe_and_parses_route",
+  "brir::bad_track_count_and_unknown_lfe_direction_are_errors",
+  "brir::gains_and_lfe_route_become_linear",
+]
+note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs, headphone FIR folded at load (ADR 0016), rubato resampling with delay compensation, no level normalisation"
+
+[[feature]]
+id = "brir.finding_bural_sets"
+kind = "pipeline"
+milestone = "M1"
+status = "implemented"
+tests = [
+  "brir::canonical_name_covers_current_aliases_legacy_names_and_repeats",
+  "brir::angle_presets_cover_every_canonical_direction",
+  "brir::mapped_channels_sidecar_preserves_every_track_delay_and_level",
+  "brir::mapped_reaverb_sidecar_uses_its_track_columns",
+  "brir::mapped_44_track_repeat_row_is_skipped",
+  "brir::mapped_missing_track_reports_sidecar_line",
+  "brir::mapped_alias_duplicate_is_rejected",
+  "brir::folder_aliases_are_canonical_and_follow_documented_order",
+  "brir::folder_rejects_mono_direction_file",
+  "brir::truncation_cuts_all_tracks_fades_and_preserves_the_start",
+  "brir::invalid_truncation_parameters_are_rejected",
+  "brir::angle_override_beats_preset_and_unknown_without_override_errors",
+  "brir::raw_measurement_named_as_headphone_file_is_rejected",
+  "brir::profile_toml_loads_mapped_folder_angles_overrides_and_truncation",
+  "brir::profile_toml_enforces_exactly_one_source_and_mapped_pair",
+]
+note = "42/44-track WAVs with channels.csv or ReaVerb_채널표.csv sidecars and reaverb/ folders; name aliases; Standard, Template21 and Room21 angle presets plus overrides (no angle was ever measured); a common truncation and fade for 6.5 s sets"
 
 [[feature]]
 id = "replay.render"
