@@ -58,11 +58,21 @@ const LATENCY_SAMPLES: usize = 1_024;
 const ASRC_MAX_RELATIVE_RATIO: f64 = 1.002_1;
 const MUTE_RAMP_MS: f64 = 5.0;
 const PI_LIMIT_PPM: f64 = 2_000.0;
-// Ring error is in milliseconds. P turns one millisecond into 2,000 ppm and I
-// adds 200 ppm per millisecond-second. At a 10 ms output period this settles a
-// worst-case 2,000 ppm offset in about 1.5 seconds without overshooting ±2 ms.
-const PI_KP: f64 = 2_000.0;
-const PI_KI: f64 = 200.0;
+// Blocks land in the crossing ring whole (10 ms of PCM or MAT, 32 ms of
+// E-AC-3) while the output takes one period at a time, so the level is a
+// sawtooth whose trough, just before the next block lands, is how close the
+// output came to running dry. The controller holds that trough at target_ms:
+// it reads the lowest level left after each period over a window, and acts
+// once per window. The error is in milliseconds; P turns one millisecond into
+// 60 ppm and I adds 3 ppm per millisecond-second. Larger gains chase the
+// sawtooth itself (2,000 and 200 swung the ratio between the ±2,000 ppm limits
+// on hardware). The quantized simulation in the tests holds the trough within
+// ±1.5 ms of target at ±300 ppm skew without reaching the limit; a QPC-paced
+// source against a USB DAC crystal is within about ±100 ppm, and the limit
+// only bounds transients.
+const PI_KP: f64 = 60.0;
+const PI_KI: f64 = 3.0;
+const CONTROL_WINDOW_SECONDS: f64 = 0.2;
 const FAULT_NONE: u32 = 0;
 const FAULT_CAPTURE: u32 = 1;
 const FAULT_OUTPUT: u32 = 2;
@@ -455,6 +465,7 @@ struct Shared {
     mute: AtomicBool,
     blocks: AtomicU64,
     underruns: AtomicU64,
+    output_restarts: AtomicU64,
     lost_bytes: AtomicU64,
     dropped_events: AtomicU64,
     ring_level_bits: AtomicU32,
@@ -484,6 +495,7 @@ impl Shared {
             mute: AtomicBool::new(false),
             blocks: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            output_restarts: AtomicU64::new(0),
             lost_bytes: AtomicU64::new(0),
             dropped_events: AtomicU64::new(0),
             ring_level_bits: AtomicU32::new(0.0_f32.to_bits()),
@@ -544,6 +556,7 @@ impl Shared {
             },
             ring_level_ms: f32::from_bits(self.ring_level_bits.load(Ordering::Acquire)),
             underruns: self.underruns.load(Ordering::Acquire),
+            output_restarts: self.output_restarts.load(Ordering::Acquire),
             lost_bytes: self.lost_bytes.load(Ordering::Acquire),
             clock_ppm: f64::from_bits(self.clock_ppm_bits.load(Ordering::Acquire)),
             fault: match self.fault.load(Ordering::Acquire) {
@@ -841,6 +854,13 @@ fn output_thread_main<O: OutputOpener>(
         let mut fill = |buffer: &mut [f32]| output.fill(buffer);
         match sink.next_period(&mut fill) {
             Ok(qpc) => {
+                let restarts = sink.restarts();
+                if restarts != shared.output_restarts.load(Ordering::Relaxed) {
+                    shared.output_restarts.store(restarts, Ordering::Relaxed);
+                    // Blocks kept landing while the device stalled; prime
+                    // again so the excess goes instead of becoming latency.
+                    output.priming = true;
+                }
                 output.finish_period(qpc);
             }
             Err(_) => {
@@ -867,7 +887,7 @@ struct OutputState {
     device_rate: u32,
     target_ms: f64,
     qpc_frequency: u64,
-    controller: PiController,
+    controller: TroughController,
     direct: DirectClock,
     asrc: AsrcClock,
     strategy_mode: ClockMode,
@@ -875,6 +895,15 @@ struct OutputState {
     pending_marker: Option<TimingMarker>,
     period_frames: usize,
     period_ring_level_frames: usize,
+    /// Ring level left after this period's frames were taken.
+    period_trough_frames: usize,
+    /// Set at start, after an underrun or a device restart, and when the
+    /// strategy or scene rate changes: output silence until the ring holds target + one block + one
+    /// period, then drop what lies beyond target + one block, so the trough
+    /// starts at the target instead of at zero or a block above it.
+    priming: bool,
+    /// Crossing-ring capacity in frames per channel.
+    capacity_frames: usize,
     period_stream_start: u64,
     period_source_frames: usize,
     period_had_audio: bool,
@@ -895,6 +924,7 @@ impl OutputState {
         shared: Arc<Shared>,
     ) -> Self {
         let asrc = AsrcClock::new(period_frames, device_rate);
+        let capacity_frames = audio.buffer().capacity() / 2;
         let events = EventWriter {
             producer: event_producer,
             shared: Arc::clone(&shared),
@@ -907,7 +937,7 @@ impl OutputState {
             device_rate,
             target_ms: f64::from(target_ms),
             qpc_frequency,
-            controller: PiController::new(),
+            controller: TroughController::new(),
             direct: DirectClock,
             asrc,
             strategy_mode: ClockMode::PendingAuto,
@@ -915,6 +945,9 @@ impl OutputState {
             pending_marker: None,
             period_frames,
             period_ring_level_frames: 0,
+            period_trough_frames: 0,
+            priming: true,
+            capacity_frames,
             period_stream_start: 0,
             period_source_frames: 0,
             period_had_audio: false,
@@ -941,6 +974,16 @@ impl OutputState {
             self.strategy_mode = mode;
             self.controller.reset();
             self.asrc.reset(scene_rate, self.device_rate);
+            self.priming = true;
+        }
+        // Once the source has ended, play out whatever is left.
+        if self.priming && !self.shared.capture_done.load(Ordering::Acquire) {
+            let Some(excess) = self.priming_excess(scene_rate, buffer.len() / 2) else {
+                self.apply_mute(buffer);
+                return;
+            };
+            self.discard(excess);
+            self.priming = false;
         }
 
         let frames = buffer.len() / 2;
@@ -962,8 +1005,51 @@ impl OutputState {
         self.period_had_audio = produced.output_frames != 0;
         if produced.output_frames < frames {
             self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+            self.priming = true;
         }
+        self.period_trough_frames = self.audio.slots() / 2;
         self.apply_mute(buffer);
+    }
+
+    /// `None` until the ring holds target + the next block + one output
+    /// period (capped one block below capacity, where the capture side would
+    /// start dropping blocks instead); then the frames beyond target + one
+    /// block. Blocks land whole, so without that drop the trough would start
+    /// anywhere up to a block (32 ms of E-AC-3) above the target and the slow
+    /// controller would take a minute or more to bring it down.
+    fn priming_excess(&self, scene_rate: u32, period_frames: usize) -> Option<usize> {
+        let rate = f64::from(scene_rate);
+        let block_frames = self.pending_marker.map_or(0.0, |marker| {
+            let marker_rate = if marker.rate == 0 {
+                scene_rate
+            } else {
+                marker.rate
+            };
+            f64::from(marker.frames) * rate / f64::from(marker_rate)
+        });
+        let target_frames = self.target_ms * rate / 1_000.0;
+        let period_scene_frames = period_frames as f64 * rate / f64::from(self.device_rate);
+        let threshold = (target_frames + block_frames + period_scene_frames)
+            .min(self.capacity_frames as f64 - block_frames);
+        let level = self.period_ring_level_frames as f64;
+        if level < threshold {
+            return None;
+        }
+        Some((level - (target_frames + block_frames)).max(0.0) as usize)
+    }
+
+    /// Drops `frames` from the head of the ring, keeping the stream position
+    /// and the latency markers in step.
+    fn discard(&mut self, frames: usize) {
+        if frames == 0 {
+            return;
+        }
+        if let Ok(chunk) = self.audio.read_chunk(frames * 2) {
+            chunk.commit_all();
+        }
+        self.stream_frame = self.stream_frame.saturating_add(frames as u64);
+        self.period_stream_start = self.stream_frame;
+        self.discard_stale_markers();
     }
 
     fn apply_mute(&mut self, buffer: &mut [f32]) {
@@ -991,32 +1077,38 @@ impl OutputState {
         if scene_rate == 0 {
             return;
         }
-        let level_ms = self.period_ring_level_frames as f64 * 1_000.0 / f64::from(scene_rate);
-        self.shared
-            .ring_level_bits
-            .store((level_ms as f32).to_bits(), Ordering::Release);
-        if level_ms == 0.0 && !self.period_had_audio {
+        let to_ms = |frames: usize| frames as f64 * 1_000.0 / f64::from(scene_rate);
+        if !self.period_had_audio {
+            // Priming or starved: show the level that is building up.
+            self.shared.ring_level_bits.store(
+                (to_ms(self.period_ring_level_frames) as f32).to_bits(),
+                Ordering::Release,
+            );
             return;
         }
         let period_seconds = self.period_frames as f64 / f64::from(self.device_rate);
-        let level_error_ms = match self.strategy_mode {
-            ClockMode::Trim => self.target_ms - level_ms,
-            ClockMode::Asrc => level_ms - self.target_ms,
-            ClockMode::PendingAuto => 0.0,
-        };
-        let ppm = self.controller.update(level_error_ms, period_seconds);
-        self.shared
-            .clock_ppm_bits
-            .store(ppm.to_bits(), Ordering::Release);
-        match self.strategy_mode {
-            ClockMode::Trim => self
-                .shared
-                .trim_ppm_bits
-                .store(ppm.to_bits(), Ordering::Release),
-            // The ASRC ratio is output/input. A positive controller value means
-            // the ring is high, so consume faster by reducing that ratio.
-            ClockMode::Asrc => self.asrc.set_ppm(ppm, scene_rate, self.device_rate),
-            ClockMode::PendingAuto => {}
+        if let Some((trough_ms, ppm)) = self.controller.observe(
+            to_ms(self.period_trough_frames),
+            period_seconds,
+            self.target_ms,
+            self.strategy_mode,
+        ) {
+            self.shared
+                .ring_level_bits
+                .store((trough_ms as f32).to_bits(), Ordering::Release);
+            self.shared
+                .clock_ppm_bits
+                .store(ppm.to_bits(), Ordering::Release);
+            match self.strategy_mode {
+                ClockMode::Trim => self
+                    .shared
+                    .trim_ppm_bits
+                    .store(ppm.to_bits(), Ordering::Release),
+                // The ASRC ratio is output/input. A positive controller value
+                // means the ring is high, so consume faster by reducing it.
+                ClockMode::Asrc => self.asrc.set_ppm(ppm, scene_rate, self.device_rate),
+                ClockMode::PendingAuto => {}
+            }
         }
         self.consume_markers(playback_qpc, scene_rate);
     }
@@ -1339,14 +1431,59 @@ impl PiController {
         Self { integral: 0.0 }
     }
 
-    fn reset(&mut self) {
-        self.integral = 0.0;
-    }
-
     fn update(&mut self, error_ms: f64, seconds: f64) -> f64 {
         self.integral =
             (self.integral + error_ms * seconds).clamp(-PI_LIMIT_PPM / PI_KI, PI_LIMIT_PPM / PI_KI);
         (PI_KP * error_ms + PI_KI * self.integral).clamp(-PI_LIMIT_PPM, PI_LIMIT_PPM)
+    }
+}
+
+/// The PI controller fed with the ring's trough: the lowest level left after
+/// an output period, taken over a [`CONTROL_WINDOW_SECONDS`] window.
+struct TroughController {
+    pi: PiController,
+    trough_ms: f64,
+    seconds: f64,
+}
+
+impl TroughController {
+    fn new() -> Self {
+        Self {
+            pi: PiController::new(),
+            trough_ms: f64::INFINITY,
+            seconds: 0.0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Records the level left after one period; when a window completes,
+    /// returns its trough and the new correction in ppm (positive: the source
+    /// is fast, so ASRC consumes faster; trim slows the source with negative).
+    fn observe(
+        &mut self,
+        level_ms: f64,
+        period_seconds: f64,
+        target_ms: f64,
+        mode: ClockMode,
+    ) -> Option<(f64, f64)> {
+        self.trough_ms = self.trough_ms.min(level_ms);
+        self.seconds += period_seconds;
+        if self.seconds < CONTROL_WINDOW_SECONDS {
+            return None;
+        }
+        let trough_ms = self.trough_ms;
+        let error_ms = match mode {
+            ClockMode::Trim => target_ms - trough_ms,
+            ClockMode::Asrc => trough_ms - target_ms,
+            ClockMode::PendingAuto => 0.0,
+        };
+        let ppm = self.pi.update(error_ms, self.seconds);
+        self.trough_ms = f64::INFINITY;
+        self.seconds = 0.0;
+        Some((trough_ms, ppm))
     }
 }
 
@@ -1504,70 +1641,159 @@ fn decode_codec(codec: u8, other: u32) -> BitstreamCodec {
 mod tests {
     use super::*;
 
-    fn simulate_controller(skew_ppm: f64, trim: bool) -> (f64, f64, f64) {
+    struct ClockRun {
+        underruns: u32,
+        clamped: u32,
+        /// Lowest and highest window trough over the second half, in ms.
+        trough: (f64, f64),
+        /// Lowest and highest correction over the second half, in ppm.
+        ppm: (f64, f64),
+        final_ppm: f64,
+    }
+
+    /// The crossing ring at 48 kHz as the runtime sees it: blocks of `block`
+    /// frames land whole at the source rate (device rate times 1 + skew, plus
+    /// the trim), the output takes `period` frames per period (more or fewer
+    /// by the ASRC correction), priming waits for target + block + period and
+    /// drops what lies beyond target + block, and the controller reads the
+    /// level left after each period.
+    fn simulate_clock(
+        skew_ppm: f64,
+        block: usize,
+        period: usize,
+        trim: bool,
+        seconds: f64,
+    ) -> ClockRun {
         let rate = 48_000.0;
-        let period_frames = 480.0;
-        let period_seconds = period_frames / rate;
-        let mut controller = PiController::new();
-        let mut level_frames = rate * 0.012;
-        let mut correction = 0.0;
-        let mut converged_at = None;
-        let mut maximum_error: f64 = 0.0;
-        for period in 0..2_000 {
-            let source_ppm = if trim { correction } else { 0.0 };
-            let consumed_ppm = if trim { 0.0 } else { correction };
-            level_frames += period_frames * ((source_ppm + skew_ppm) * 1.0e-6);
-            level_frames -= if trim {
-                0.0
-            } else {
-                period_frames * (consumed_ppm * 1.0e-6)
-            };
-            level_frames = level_frames.max(0.0);
-            let level_ms = level_frames * 1_000.0 / rate;
-            let level_error = if trim {
-                10.0 - level_ms
-            } else {
-                level_ms - 10.0
-            };
-            correction = controller.update(level_error, period_seconds);
-            let error = (level_ms - 10.0).abs();
-            if period > 1_000 {
-                maximum_error = maximum_error.max(error);
+        let target = 10.0;
+        let to_ms = |frames: f64| frames * 1_000.0 / rate;
+        let mode = if trim {
+            ClockMode::Trim
+        } else {
+            ClockMode::Asrc
+        };
+        let period_seconds = period as f64 / rate;
+        let periods = (seconds / period_seconds) as usize;
+        let mut controller = TroughController::new();
+        let (mut level, mut arriving, mut correction) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let mut priming = true;
+        let mut run = ClockRun {
+            underruns: 0,
+            clamped: 0,
+            trough: (f64::INFINITY, f64::NEG_INFINITY),
+            ppm: (f64::INFINITY, f64::NEG_INFINITY),
+            final_ppm: 0.0,
+        };
+        for index in 0..periods {
+            let source_ppm = skew_ppm + if trim { correction } else { 0.0 };
+            arriving += period as f64 * (1.0 + source_ppm * 1.0e-6);
+            while arriving >= block as f64 {
+                arriving -= block as f64;
+                level += block as f64;
             }
-            let expected = if trim { -skew_ppm } else { skew_ppm };
-            if converged_at.is_none() && error <= 2.05 && (correction - expected).abs() <= 20.0 {
-                converged_at = Some(period as f64 * period_seconds);
+            if priming {
+                if to_ms(level) < target + to_ms(block as f64) + to_ms(period as f64) {
+                    continue;
+                }
+                level = level.min(target * rate / 1_000.0 + block as f64);
+                priming = false;
+            }
+            let consumed_ppm = if trim { 0.0 } else { correction };
+            let wanted = period as f64 * (1.0 + consumed_ppm * 1.0e-6);
+            if level < wanted {
+                run.underruns += 1;
+                priming = true;
+                continue;
+            }
+            level -= wanted;
+            let Some((trough, ppm)) =
+                controller.observe(to_ms(level), period_seconds, target, mode)
+            else {
+                continue;
+            };
+            correction = ppm;
+            if ppm.abs() >= PI_LIMIT_PPM {
+                run.clamped += 1;
+            }
+            if index * 2 >= periods {
+                run.trough = (run.trough.0.min(trough), run.trough.1.max(trough));
+                run.ppm = (run.ppm.0.min(ppm), run.ppm.1.max(ppm));
             }
         }
-        (converged_at.unwrap_or(20.0), maximum_error, correction)
+        run.final_ppm = correction;
+        run
     }
 
     #[test]
     fn pi_controller_clamps_and_integrates() {
         let mut controller = PiController::new();
         assert_eq!(controller.update(100.0, 0.01), PI_LIMIT_PPM);
-        controller.reset();
+        let mut controller = PiController::new();
         let first = controller.update(0.5, 0.01);
         let later = (0..100).fold(first, |_, _| controller.update(0.5, 0.01));
         assert!(later > first);
     }
 
     #[test]
-    fn clock_simulation_converges_for_asrc_and_trim_at_two_thousand_ppm() {
-        for trim in [false, true] {
-            for skew in [-2_000.0, 2_000.0] {
-                let (seconds, maximum_error, correction) = simulate_controller(skew, trim);
-                assert!(seconds <= 8.0, "trim={trim} skew={skew}: {seconds}s");
+    fn clock_holds_the_trough_without_chasing_the_block_sawtooth() {
+        // (block, period): PCM or MAT at a 3 ms exclusive period, E-AC-3 at
+        // 3 ms, E-AC-3 at a 10 ms shared period.
+        for (block, period) in [(480, 144), (1_536, 144), (1_536, 480)] {
+            for trim in [false, true] {
+                let run = simulate_clock(0.0, block, period, trim, 120.0);
+                let label = format!("block {block} period {period} trim {trim}");
+                assert_eq!(run.underruns, 0, "{label}");
+                assert_eq!(run.clamped, 0, "{label}");
+                // The trough read at 10 ms periods steps by up to 2 ms as the
+                // 32 ms blocks fall into different periods, hence 150 ppm.
                 assert!(
-                    maximum_error <= 2.05,
-                    "trim={trim} skew={skew}: steady error {maximum_error}ms"
-                );
-                let expected = if trim { -skew } else { skew };
-                assert!(
-                    (correction - expected).abs() <= 20.0,
-                    "trim={trim} skew={skew}: correction {correction}ppm"
+                    run.ppm.0 >= -150.0 && run.ppm.1 <= 150.0,
+                    "{label}: correction {:?} ppm with no skew",
+                    run.ppm
                 );
             }
+        }
+    }
+
+    #[test]
+    fn clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim() {
+        for (block, period) in [(480, 144), (1_536, 144), (1_536, 480)] {
+            for trim in [false, true] {
+                for skew in [-300.0, 300.0] {
+                    let run = simulate_clock(skew, block, period, trim, 300.0);
+                    let label = format!("block {block} period {period} trim {trim} skew {skew}");
+                    assert_eq!(run.underruns, 0, "{label}");
+                    assert_eq!(run.clamped, 0, "{label}");
+                    assert!(
+                        run.trough.0 >= 8.0 && run.trough.1 <= 12.0,
+                        "{label}: trough {:?} ms",
+                        run.trough
+                    );
+                    let expected = if trim { -skew } else { skew };
+                    assert!(
+                        (run.final_ppm - expected).abs() <= 100.0,
+                        "{label}: correction {} ppm",
+                        run.final_ppm
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clock_with_a_period_as_long_as_a_block_stays_bounded() {
+        // A 10 ms shared period with 10 ms PCM blocks: as the arrival phase
+        // drifts past the period boundary the real trough drops by a block,
+        // so the controller cannot hold it as tightly. It must still not
+        // swing to its limit or starve the output more than now and then.
+        for skew in [-100.0, 100.0] {
+            let run = simulate_clock(skew, 480, 480, false, 300.0);
+            assert_eq!(run.clamped, 0, "skew {skew}");
+            assert!(
+                run.underruns <= 3,
+                "skew {skew}: {} underruns",
+                run.underruns
+            );
         }
     }
 
