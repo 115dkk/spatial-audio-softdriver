@@ -479,3 +479,80 @@ kind = "app"
 milestone = "M4"
 status = "planned"
 tests = []
+
+# ---- Upmix and plugin hosting (ADR 0020, 0021, 0022) ----
+# Not bound to the driver freeze. Milestone M4 marks the app they ship in.
+
+[[feature]]
+id = "upmix.stage"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "upmix stage between the decoder and scene trimming; bed channel tags, latency alignment, fallback signal and crossfades live inside the stage (extension design, candidate 10)"
+
+[[feature]]
+id = "upmix.first_party"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "Rust rewrite of the upmixer posted in dcinside speakers 580088, as a derivative work once its repository and licence are published (ADR 0020); runs in the engine process, separation inference on a worker thread"
+
+[[feature]]
+id = "hostvst.isolation"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "one bio-plughost process per plugin under a job object; shared-memory ring one block behind, the engine never waits; crash and hang restart with state restore (ADR 0021)"
+
+[[feature]]
+id = "hostvst.vst3"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "VST 3 adapter through the vst3 crate (bindings generated from the MIT-licensed SDK 3.8)"
+
+[[feature]]
+id = "hostvst.vst2"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "VST 2 adapter from a Rust translation of Xaymar's clean-room vst2sdk header (BSD-2-Clause), never the Steinberg SDK"
+
+[[feature]]
+id = "app.default_device_guard"
+kind = "app"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "bio-guard restores the three default device roles when the app exits abnormally (ADR 0023, proposed)"
+
+# ---- Entrances (ADR 0024, 0025) ----
+
+[[feature]]
+id = "abi.second_endpoint"
+kind = "abi"
+milestone = "M3"
+status = "planned"
+tests = []
+note = "two render endpoints with per-endpoint format masks; RecordHeader.reserved splits into endpoint u16 + reserved u16; per-endpoint epoch, position and stats (ADR 0024). Part of the frozen v1 contract"
+
+[[feature]]
+id = "ring.streamring"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "cross-process block ring ported from EqualizerAPO-XT StreamRing with its author's permission; shared by the plugin host and the ASIO entrance"
+
+[[feature]]
+id = "asio.entrance"
+kind = "app"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "bioasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Only asio-sys touches the ASIO SDK and carries GPL-3.0-or-later SPDX headers; releases that ship bioasio.dll are GPLv3 as a whole (ADR 0003, 0025)"
