@@ -1,0 +1,36 @@
+# cargo-fuzz targets for the decode adapters (a workspace of its own; needs
+# nightly). Run with `cargo +nightly fuzz run <pcm|ddp>` from crates/decode.
+# `ddp` feeds arbitrary payloads to harletty-bridge's eac3 through our adapter:
+# the bytes a source application writes reach that parser unfiltered.
+[package]
+name = "decode-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+decode = { path = ".." }
+bitstream = { path = "../../bitstream" }
+bio-types = { path = "../../bio-types" }
+
+[[bin]]
+name = "pcm"
+path = "fuzz_targets/pcm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ddp"
+path = "fuzz_targets/ddp.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
