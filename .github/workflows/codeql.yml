@@ -1,0 +1,43 @@
+name: CodeQL
+
+# Static analysis of the Rust sources and of the workflows themselves, on every
+# pull request, every push to master and weekly (new queries land between
+# pushes). Results appear under Security > Code scanning.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}

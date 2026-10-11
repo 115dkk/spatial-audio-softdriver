@@ -58,7 +58,7 @@ $env:BIO_ABI_BLESS = '1'; cargo test -p bio-abi --test c_header; $env:BIO_ABI_BL
 
 ## 릴리스
 
-master에 push할 때마다 `release.yml`이 출하 파일의 변경 여부를 보고 사전 릴리스 `v<버전>-pre.<높이>`를 냅니다([ADR 0017](docs/adr/0017-prerelease-on-every-master-push.md)).
+master에 push할 때마다 `release.yml`이 출하 파일의 변경 여부를 보고 `v0.MINOR.PATCH`를 냅니다. 0.x는 모두 사전 릴리스입니다([ADR 0017](docs/adr/0017-prerelease-on-every-master-push.md)).
 
 ## 라이선스
 
