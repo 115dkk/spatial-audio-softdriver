@@ -1,20 +1,24 @@
 name: Release
 
-# Publishes a GitHub prerelease from every push to master that changes a
-# shipped file (ADR 0017). Until the app reaches users in M5 every release is a
-# prerelease and never takes the "latest" spot.
+# Publishes a release from every push to master that changes a shipped file
+# (ADR 0017). Versions are plain v<major>.<minor>.<patch>; while the major
+# version is 0 every release is a GitHub prerelease and never takes the
+# "latest" spot.
 #
-#   gate           .github/scripts/release_gate.py: tag v<workspace version>-pre.<height>
-#                  (height = commits reachable from the pushed commit), released
-#                  when shipped files changed since the newest v* tag or when a
-#                  dispatch asks for it with force
-#   build-windows  release build of the developer tools, zipped
+#   gate           .github/scripts/release_gate.py: release the workspace
+#                  version if it has no tag yet; otherwise, when shipped files
+#                  changed since its tag, bump it (feat: minor, else patch),
+#                  commit the bump to master as github-actions[bot] and release
+#                  that. A dispatch with force bumps even without changes.
+#   build-windows  tests in release mode, then the developer tools, zipped
 #   build-linux    the same for Linux (bio-replay runs in Linux CI)
 #   publish        SHA256SUMS.txt, notes from the commit subjects, and the
-#                  prerelease itself (assets replaced when the tag exists)
+#                  release itself (assets replaced when the tag exists)
 #
-# Every job checks out release_sha, the commit the gate decided on, so a push
-# that lands while the workflow runs cannot slip into the release.
+# Every job checks out release_sha, the commit the gate decided on (the bump
+# commit when it bumped), so a push that lands meanwhile cannot slip in. The
+# bump is pushed with the workflow token, which starts no workflow, so it does
+# not release itself.
 
 on:
   push:
@@ -22,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: "Release even when no shipped file changed"
+        description: "Bump and release even when no shipped file changed"
         type: boolean
         default: false
 
@@ -41,10 +45,13 @@ jobs:
   gate:
     name: Release gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       should_release: ${{ steps.gate.outputs.should_release }}
       version: ${{ steps.gate.outputs.version }}
       tag: ${{ steps.gate.outputs.tag }}
+      prerelease: ${{ steps.gate.outputs.prerelease }}
       previous_tag: ${{ steps.gate.outputs.previous_tag }}
       release_sha: ${{ steps.gate.outputs.release_sha }}
     steps:
@@ -52,7 +59,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Decide
+      - name: Decide (and bump on master)
         id: gate
         env:
           FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
@@ -79,6 +86,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-windows
+
+      - name: Test (release mode)
+        run: cargo test --workspace --release --locked
 
       - name: Build
         env:
@@ -124,6 +134,9 @@ jobs:
         with:
           shared-key: release-linux
 
+      - name: Test (release mode)
+        run: cargo test --workspace --release --locked
+
       - name: Build
         env:
           BIO_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
@@ -151,7 +164,7 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish the prerelease
+    name: Publish the release
     needs: [gate, build-windows, build-linux]
     if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
@@ -161,6 +174,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.gate.outputs.tag }}
       VERSION: ${{ needs.gate.outputs.version }}
+      PRERELEASE: ${{ needs.gate.outputs.prerelease }}
       PREVIOUS: ${{ needs.gate.outputs.previous_tag }}
       RELEASE_SHA: ${{ needs.gate.outputs.release_sha }}
     steps:
@@ -181,22 +195,24 @@ jobs:
           range="$RELEASE_SHA"
           if [ -n "$PREVIOUS" ]; then range="$PREVIOUS..$RELEASE_SHA"; fi
           {
-            echo "Prerelease built from ${RELEASE_SHA}. Developer tools only; the app arrives in M4."
+            echo "Built from ${RELEASE_SHA}. Developer tools only; the app arrives in M4."
             echo
             echo "## Changes"
-            git log --no-merges --pretty=format:'- %s' "$range"
+            git log --no-merges --pretty=format:'- %s' "$range" | grep -v '^- chore(release): ' || true
             echo
           } > notes.md
           cat notes.md
 
-      - name: Create or update the prerelease
+      - name: Create or update the release
         run: |
           set -euo pipefail
+          flags=(--latest)
+          if [ "$PRERELEASE" = "true" ]; then flags=(--prerelease --latest=false); fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release/* --clobber
-            gh release edit "$TAG" --notes-file notes.md --prerelease
+            gh release edit "$TAG" --notes-file notes.md "${flags[@]}"
           else
             gh release create "$TAG" release/* --target "$RELEASE_SHA" \
-              --title "BIO Atmos $VERSION" --notes-file notes.md --prerelease --latest=false
+              --title "BIO Atmos $VERSION" --notes-file notes.md "${flags[@]}"
           fi
-          gh release view "$TAG" --json assets -q '.assets[].name'
+          gh release view "$TAG" --json assets,isPrerelease -q '{prerelease: .isPrerelease, assets: [.assets[].name]}'
