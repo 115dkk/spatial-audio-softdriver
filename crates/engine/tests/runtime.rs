@@ -74,13 +74,21 @@ struct RecordsCapture {
     next: usize,
     trim_supported: bool,
     gate: Option<Arc<AtomicBool>>,
-    /// Paces the records like a live source: at most `PACED_LEAD` records
-    /// ahead of the sink's periods. Without it every record arrives at once,
-    /// and the output's priming drops what lies beyond target + one block.
-    paced_by: Option<Arc<SinkState>>,
+    /// Without it every record arrives at once, the output's priming drops
+    /// what lies beyond target + one block, and QPCs written in advance no
+    /// longer match when the remaining blocks play.
+    paced_by: Option<Pacing>,
 }
 
-const PACED_LEAD: u64 = 4;
+/// Hands out records like a live source, at most `lead` records ahead of the
+/// sink's periods, and stamps each with the sink's frame count at that moment
+/// (these tests count QPC in frames, `QPC_FREQUENCY` = `RATE`).
+struct Pacing {
+    state: Arc<SinkState>,
+    lead: u64,
+}
+
+const RECORD_QPC: usize = std::mem::offset_of!(bio_abi::RecordHeader, qpc);
 
 impl CaptureSource for RecordsCapture {
     fn read(&mut self, buffer: &mut [u8], _wait: Duration) -> Result<usize, CaptureError> {
@@ -92,8 +100,8 @@ impl CaptureSource for RecordsCapture {
             std::thread::yield_now();
             return Ok(0);
         }
-        if self.paced_by.as_ref().is_some_and(|state| {
-            self.next as u64 > state.periods.load(Ordering::Acquire) + PACED_LEAD
+        if self.paced_by.as_ref().is_some_and(|pacing| {
+            self.next as u64 > pacing.state.periods.load(Ordering::Acquire) + pacing.lead
         }) {
             std::thread::yield_now();
             return Ok(0);
@@ -103,6 +111,10 @@ impl CaptureSource for RecordsCapture {
         };
         assert!(record.len() <= buffer.len());
         buffer[..record.len()].copy_from_slice(record);
+        if let Some(pacing) = &self.paced_by {
+            let now = pacing.state.frames.load(Ordering::Acquire);
+            buffer[RECORD_QPC..RECORD_QPC + 8].copy_from_slice(&now.to_le_bytes());
+        }
         self.next += 1;
         Ok(record.len())
     }
@@ -355,7 +367,10 @@ fn latency_uses_playback_qpc_and_source_qpc() {
         next: 0,
         trim_supported: true,
         gate: None,
-        paced_by: None,
+        paced_by: Some(Pacing {
+            state: Arc::clone(&state),
+            lead: 0,
+        }),
     };
     let engine = start_with_clock(
         config(ClockPreference::Trim),
@@ -368,9 +383,15 @@ fn latency_uses_playback_qpc_and_source_qpc() {
     wait_until(Duration::from_secs(1), || {
         engine.status().latency.samples > 0
     });
+    wait_until(Duration::from_secs(2), || {
+        engine.status().latency.samples >= 5
+    });
+    // The sink plays each period 960 frames (20 ms) after its playback QPC,
+    // and a block waits in the ring behind the primed level: the 10 ms target
+    // (30 ms in all, as measured), at most target + one block + one period.
     let status = engine.status();
     assert!(
-        (status.latency.p50_ms - 20.0).abs() <= 10.0,
+        (25.0..=55.0).contains(&status.latency.p50_ms),
         "latency was {:?}",
         status.latency
     );
@@ -389,7 +410,10 @@ fn mute_changes_samples_by_at_most_one_ramp_increment() {
         next: 0,
         trim_supported: true,
         gate: None,
-        paced_by: Some(Arc::clone(&state)),
+        paced_by: Some(Pacing {
+            state: Arc::clone(&state),
+            lead: 4,
+        }),
     };
     let engine = start_with_clock(
         config(ClockPreference::Trim),
