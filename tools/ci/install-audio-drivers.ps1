@@ -13,6 +13,15 @@ try {
         Set-Service $service -StartupType Automatic
         Start-Service $service
     }
+    # Server images require explicit capture consent even for a virtual cable.
+    # This block only runs inside the GitHub-hosted runner guard above.
+    foreach ($hive in 'HKLM:', 'HKCU:') {
+        $consent = "$hive/Software/Microsoft/Windows/CurrentVersion/CapabilityAccessManager/ConsentStore/microphone"
+        foreach ($key in $consent, "$consent/NonPackaged") {
+            if (!(Test-Path $key)) { New-Item $key -Force | Out-Null }
+            New-ItemProperty $key -Name Value -Value Allow -PropertyType String -Force | Out-Null
+        }
+    }
     $cable = Join-Path $env:RUNNER_TEMP 'vbcable'
     $archive = "$cable.zip"
     Invoke-WebRequest 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip' -OutFile $archive
