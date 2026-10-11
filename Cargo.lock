@@ -53,6 +53,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert_no_alloc"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55ca83137a482d61d916ceb1eba52a684f98004f18e0cafea230fe5579c178a3"
+
+[[package]]
 name = "audio-codec-algorithms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -172,7 +178,8 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 name = "bitstream"
 version = "0.1.0"
 dependencies = [
- "bio-types",
+ "assert_no_alloc",
+ "proptest",
 ]
 
 [[package]]
@@ -309,7 +316,9 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 name = "convolver"
 version = "0.1.0"
 dependencies = [
+ "assert_no_alloc",
  "bio-types",
+ "proptest",
  "realfft",
  "thiserror",
 ]
@@ -333,8 +342,21 @@ dependencies = [
 name = "decode"
 version = "0.1.0"
 dependencies = [
+ "assert_no_alloc",
  "bio-types",
  "bitstream",
+ "eac3",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "eac3"
+version = "0.9.0"
+source = "git+https://github.com/harletty/harletty-bridge?rev=639f0f10f5399755578158bfa598dcea6f60577d#639f0f10f5399755578158bfa598dcea6f60577d"
+dependencies = [
+ "log",
+ "rustfft",
  "thiserror",
 ]
 
@@ -608,7 +630,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "render"
 version = "0.1.0"
 dependencies = [
+ "assert_no_alloc",
  "bio-types",
+ "proptest",
  "thiserror",
 ]
 

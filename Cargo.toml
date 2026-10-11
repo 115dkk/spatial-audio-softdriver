@@ -49,6 +49,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 sha2 = "0.11.0"
 proptest = "1.12.0"
 assert_no_alloc = "1.1.2"
+eac3 = { git = "https://github.com/harletty/harletty-bridge", rev = "639f0f10f5399755578158bfa598dcea6f60577d" }
 
 [profile.release]
 lto = "thin"
