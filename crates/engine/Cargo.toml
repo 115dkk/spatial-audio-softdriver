@@ -1,0 +1,19 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bio-types.workspace = true
+bio-abi.workspace = true
+decode.workspace = true
+render.workspace = true
+convolver.workspace = true
+brir.workspace = true
