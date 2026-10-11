@@ -37,8 +37,16 @@ if (Test-Path "$evidence/sal.biodump") {
     }
 }
 if (Select-String -Path "$evidence/hardware-tests.txt" -Pattern 'SAL open: success' -SimpleMatch -Quiet) {
-    With-Stimulus sal-live {
-        & $live play --profile "$evidence/fixtures/profile.toml" --output 'CABLE Input' --record "$evidence/sal-live.biodump" --seconds 8
+    $captureTool = Join-Path $PSScriptRoot '../../target/release/examples/cable_capture.exe'
+    $listener = Start-Process $captureTool -ArgumentList "`"$evidence/cable-output.wav`"" -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput "$evidence/cable-capture.txt" -RedirectStandardError "$evidence/cable-capture-error.txt"
+    try {
+        With-Stimulus sal-live {
+            & $live play --profile "$evidence/fixtures/profile.toml" --output 'CABLE Input' --record "$evidence/sal-live.biodump" --seconds 8
+        }
+        if (!$listener.WaitForExit(15000)) { $listener.Kill(); $failures.Add('VB-CABLE capture timed out') }
+        elseif ($listener.ExitCode) { $failures.Add("VB-CABLE capture exit $($listener.ExitCode)") }
+    } finally { if (!$listener.HasExited) { $listener.Kill() } }
     }
     Check sal-live-inspect { & $replay inspect "$evidence/sal-live.biodump" }
     $captured = Get-Content "$evidence/sal-live-inspect.txt" -Raw | ConvertFrom-Json

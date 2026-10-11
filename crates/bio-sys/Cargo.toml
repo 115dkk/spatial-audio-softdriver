@@ -32,3 +32,4 @@ wasapi.workspace = true
 
 [dev-dependencies]
 assert_no_alloc.workspace = true
+hound.workspace = true

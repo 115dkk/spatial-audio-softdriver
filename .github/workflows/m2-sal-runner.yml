@@ -42,7 +42,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cargo run --locked --release -p bio-replay --example replay_fixtures -- out/runner/fixtures
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo build --locked --release -p bio-sys --example sal_tone
+          cargo build --locked --release -p bio-sys --examples
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Exercise audio devices and SAL ring
         if: always() && !cancelled()
