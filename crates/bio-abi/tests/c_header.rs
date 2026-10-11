@@ -61,45 +61,59 @@ fn layout_trailer() -> String {
          #define BIO_STATIC_ASSERT(e, m) typedef char BIO_ASSERT_CAT(bio_static_assert_, __LINE__)[(e) ? 1 : -1]\n\
          #endif\n\n",
     );
-    assert_layout!(t, RecordHeader, "BIO_RECORD_HEADER", [
-        kind,
-        flags,
-        epoch,
-        byte_pos,
-        qpc,
-        qpc_written,
-        len,
-        reserved
-    ]);
+    assert_layout!(
+        t,
+        RecordHeader,
+        "BIO_RECORD_HEADER",
+        [
+            kind,
+            flags,
+            epoch,
+            byte_pos,
+            qpc,
+            qpc_written,
+            len,
+            reserved
+        ]
+    );
     assert_layout!(t, OverrunPayload, "BIO_OVERRUN_PAYLOAD", [lost_bytes]);
     assert_layout!(t, ReadRequest, "BIO_READ_REQUEST", [min_bytes, timeout_ms]);
     assert_layout!(t, RateTrim, "BIO_RATE_TRIM", [ppm_q16, reserved]);
-    assert_layout!(t, AbiInfo, "BIO_ABI_INFO", [
-        abi_version,
-        struct_size,
-        driver_version,
-        ring_bytes,
-        compiled_formats,
-        enabled_formats,
-        features,
-        qpc_frequency
-    ]);
-    assert_layout!(t, BioStats, "BIO_STATS", [
-        struct_size,
-        open_count,
-        total_bytes,
-        overruns,
-        lost_bytes,
-        max_timer_lateness_us,
-        reserved
-    ]);
-    assert_layout!(t, DumpHeader, "BIO_DUMP_HEADER", [
-        magic,
-        abi_version,
-        header_size,
-        qpc_frequency,
-        reserved
-    ]);
+    assert_layout!(
+        t,
+        AbiInfo,
+        "BIO_ABI_INFO",
+        [
+            abi_version,
+            struct_size,
+            driver_version,
+            ring_bytes,
+            compiled_formats,
+            enabled_formats,
+            features,
+            qpc_frequency
+        ]
+    );
+    assert_layout!(
+        t,
+        BioStats,
+        "BIO_STATS",
+        [
+            struct_size,
+            open_count,
+            total_bytes,
+            overruns,
+            lost_bytes,
+            max_timer_lateness_us,
+            reserved
+        ]
+    );
+    assert_layout!(
+        t,
+        DumpHeader,
+        "BIO_DUMP_HEADER",
+        [magic, abi_version, header_size, qpc_frequency, reserved]
+    );
     t
 }
 
@@ -140,7 +154,10 @@ fn generate() -> String {
     }
     for name in constant_names(&src) {
         if !name.starts_with("IOCTL_BIO_") {
-            config.export.rename.insert(name.clone(), format!("BIO_{name}"));
+            config
+                .export
+                .rename
+                .insert(name.clone(), format!("BIO_{name}"));
         }
     }
     let mut out = Vec::new();
