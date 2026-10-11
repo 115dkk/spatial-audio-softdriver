@@ -53,6 +53,7 @@ fn wasapi_shared_periods_do_not_allocate() {
     });
 }
 
+#[cfg(windows)]
 #[test]
 #[ignore = "requires a render endpoint; requests exclusive mode and plays 1 s of silence"]
 fn wasapi_exclusive_periods_and_a_restart_do_not_allocate() {
