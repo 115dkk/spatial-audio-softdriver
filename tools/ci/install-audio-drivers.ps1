@@ -42,8 +42,11 @@ try {
         $env:SAL_ERROR_FILE = "$evidence/sal-error.txt"
         & pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; try { & ./tools/Initialize-SpatialAudioLab.ps1 -Component Driver } catch { $_.Exception.Message | Set-Content $env:SAL_ERROR_FILE; exit 1 }' *> "$env:RUNNER_TEMP/sal-initialize.log"
         if ($LASTEXITCODE) { if (Test-Path $env:SAL_ERROR_FILE) { Get-Content $env:SAL_ERROR_FILE }; throw "SAL initialize failed (exit $LASTEXITCODE)" }
-        & pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; try { & ./tools/Install-WdkToolchain.ps1 } catch { $_.Exception.Message | Set-Content $env:SAL_ERROR_FILE; exit 1 }' *> "$env:RUNNER_TEMP/sal-toolchain.log"
-        if ($LASTEXITCODE) { if (Test-Path $env:SAL_ERROR_FILE) { Get-Content $env:SAL_ERROR_FILE }; throw "SAL toolchain failed (exit $LASTEXITCODE)" }
+        $wdkHeader = "${env:ProgramFiles(x86)}/Windows Kits/10/Include/10.0.26100.0/km/ntddk.h"
+        if (!(Test-Path $wdkHeader)) { throw 'The runner is missing the required 26100 WDK' }
+        "Using the runner's installed WDK: $wdkHeader"
+        # The upstream installer requires winget, which Server 2022 lacks.
+        # This image already has SDK/WDK 26100; use that toolchain directly.
         $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
         $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild/**/Bin/amd64/MSBuild.exe' | Select-Object -First 1
         foreach ($project in 'EndpointsCommon/EndpointsCommon.vcxproj','Package/package.vcxproj') {

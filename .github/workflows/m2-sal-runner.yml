@@ -27,6 +27,14 @@ jobs:
         id: drivers
         timeout-minutes: 25
         run: ./tools/ci/install-audio-drivers.ps1
+      - name: Preserve driver diagnostics before the BIO build
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m2-install-${{ github.run_attempt }}
+          path: out/runner/
+          if-no-files-found: error
+          retention-days: 30
       - name: Build BIO tools and fixtures
         if: always() && !cancelled()
         run: |
