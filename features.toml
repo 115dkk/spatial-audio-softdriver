@@ -418,7 +418,7 @@ tests = [
   "bio-sys::sal_translation_does_not_allocate_in_steady_state",
   "bio-sys::sal_open_errors_keep_missing_denied_and_busy_distinct",
 ]
-note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). The Windows 2025 runner has opened the actual SAL ring; initial idle READs exposed a startup validation defect, now covered by a regression. Live PCM verification is recorded in docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
+note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). Windows 2025 CI captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. Initial idle READs and the decoder's 8-channel limit were fixed. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
 
 [[feature]]
 id = "sys.wasapi_output"
@@ -438,7 +438,7 @@ tests = [
   "bio-sys::wasapi_shared_periods_do_not_allocate",
   "bio-sys::wasapi_exclusive_periods_and_a_restart_do_not_allocate",
 ]
-note = "exclusive event-driven (Float32, Int32, Int24in32, Int16) with a shared fallback; the stream starts on the first period. An exclusive stream restarts after a stall (a wait over two periods and 10 ms): after one missed deadline a TOPPING USB DAC otherwise signalled only every ~33 ms for good. Device tests are ignored in CI and pass on the dev PC"
+note = "exclusive event-driven (Float32, Int32, Int24in32, Int16) with a shared fallback; the stream starts on the first period. An exclusive stream restarts after a stall (a wait over two periods and 10 ms): after one missed deadline a TOPPING USB DAC otherwise signalled only every ~33 ms for good. Device tests pass on the dev PC and run explicitly in the opt-in SAL runner experiment"
 
 [[feature]]
 id = "sys.realtime_threads"
@@ -457,7 +457,7 @@ kind = "tool"
 milestone = "M2"
 status = "partial"
 tests = ["bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them"]
-note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace, so the whole live path ran on the dev PC; record and play from the SAL ring wait for the SAL PC"
+note = "bio-live record, play and devices (ADR 0018). Paced dumps exercise the live path on the dev PC. Windows 2025 CI also records and plays actual SAL 7.1.4 PCM into VB-CABLE, retaining the far-end stereo WAV. Game/MAT and Apple Music/JOC source and listening checks remain"
 
 [[feature]]
 id = "ci.sal_runner"

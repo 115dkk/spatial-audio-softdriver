@@ -24,7 +24,16 @@ try {
     }
     $cable = Join-Path $env:RUNNER_TEMP 'vbcable'
     $archive = "$cable.zip"
-    Invoke-WebRequest 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip' -OutFile $archive
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip' -OutFile $archive -TimeoutSec 60
+            break
+        } catch {
+            if ($attempt -eq 3) { throw }
+            Write-Warning "VB-CABLE download attempt $attempt failed; retrying in 5 seconds"
+            Start-Sleep -Seconds 5
+        }
+    }
     $hash = (Get-FileHash $archive -Algorithm SHA256).Hash
     if ($hash -ne 'B950E39F01AF1D04EA623C8F6D8EB9B6EA5C477C637295FABF20631C85116BFB') { throw 'VB-CABLE hash mismatch' }
     Expand-Archive $archive $cable

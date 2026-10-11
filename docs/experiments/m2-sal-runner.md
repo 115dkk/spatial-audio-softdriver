@@ -58,6 +58,17 @@ SAL이 없을 때도 통과하는 일반 장치 시험과 별개로, 이 실험�
 | [38162894250](https://github.com/115dkk/spatial-audio-softdriver/actions/runs/38162894250) | 패키지 생성·시험서명 통과. Server 2022에서 OS 호환성으로 설치 거절, 실행 잡을 2025로 변경. |
 | [38163249191](https://github.com/115dkk/spatial-audio-softdriver/actions/runs/38163249191) | 2025에서 SAL 설치·링 열기 및 장치 시험 8개 통과. 초기 빈 READ 처리 결함 발견. |
 | [38163814823](https://github.com/115dkk/spatial-audio-softdriver/actions/runs/38163814823) | 12채널 PCM 9,169,920바이트 녹화, 손실·파싱 오류 0. BIO 디코더의 8채널 제한 발견. |
+| [38164418226](https://github.com/115dkk/spatial-audio-softdriver/actions/runs/38164418226) | 전체 경로 성공. SAL → BIO → VB-CABLE: 799블록, underrun/재시작/손실 0, READ부터 playback까지 p50 13.1 ms/p99 15.1 ms. 10초 스테레오 WAV, 좌/우 RMS 0.03852/0.03097. |
+
+## 확인된 결과와 다음 시험
+
+GitHub-hosted 러너는 VB-CABLE과 SAL 시험서명 드라이버를 재부팅 없이 실행할 수 있다.
+SAL PCM 7.1.4 캡처, BIO 처리, VB-CABLE의 반대편 녹음까지 아티팩트로 확인했다.
+위 성공 실행의 `m2-sal-windows-2025-1` 아티팩트에 `sal.biodump`, `sal-live.biodump`,
+`sal-render.wav`, `cable-output.wav`와 로그·보고서·SHA-256이 있다.
+
+게임/MAT, Apple Music/JOC 소스, 실제 청취와 구축기 대비 지연 비교는 남아 있다.
+이 실험은 그 시험의 전제였던 SAL 링 접근과 실시간 PCM 경로를 검증한다.
 
 ## 실제 장치 시험에서 고친 BIO 결함
 
