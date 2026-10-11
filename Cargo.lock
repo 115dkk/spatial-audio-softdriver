@@ -115,7 +115,10 @@ dependencies = [
  "bio-abi",
  "bio-sys",
  "bio-types",
+ "brir",
  "clap",
+ "engine",
+ "rtrb",
 ]
 
 [[package]]

@@ -19,3 +19,6 @@ bio-abi.workspace = true
 bio-types.workspace = true
 bio-sys.workspace = true
 clap.workspace = true
+brir.workspace = true
+engine.workspace = true
+rtrb.workspace = true
