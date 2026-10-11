@@ -21,5 +21,5 @@ pub use chain::{
 };
 pub use runtime::{
     ClockPreference, Engine, EngineConfig, EngineEvent, LiveChange, RealtimeThread, Rejected,
-    StartError, StopReport, ThreadHook, start,
+    StartError, StopReport, ThreadHook, start, start_with_clock,
 };
