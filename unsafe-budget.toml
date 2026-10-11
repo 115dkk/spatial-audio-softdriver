@@ -1,0 +1,8 @@
+# Handwritten `unsafe` allowance per crate, counted as `unsafe` tokens in the
+# crate's Rust sources (comments, strings and char literals excluded). Every
+# crate not listed here has 0 and must carry `#![forbid(unsafe_code)]`.
+# A listed crate carries `#![deny(unsafe_code)]` and its own `[lints.rust]`
+# table instead. Raising a number requires an ADR (docs/adr) first.
+[budget]
+# Capture device IOCTLs, MMCSS and QPC through the `windows` crate (ADR 0002).
+bio-sys = 32
