@@ -320,7 +320,7 @@ tests = [
   "bio-replay::render_is_deterministic_and_inspect_still_works",
   "bio-replay::missing_profile_fails_with_a_readable_message",
 ]
-note = "bio-replay render prepares the BRIR for each format before its first record, so no block is dropped; output_sha256 covers the interleaved f32 samples"
+note = "bio-replay render prepares the BRIR for each format before its first record, so no block is dropped; output_sha256 covers the interleaved f32 samples. The hash is stable within one OS but differs between Linux and Windows (platform libm), so CI compares it per OS"
 
 [[feature]]
 id = "golden.blackbox"
@@ -336,44 +336,126 @@ note = "needs ring dumps and the same passages rendered by SAL (MAT) and Omnipho
 id = "engine.realtime"
 kind = "pipeline"
 milestone = "M2"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "engine::format_and_needs_brir_events_reach_poll",
+  "engine::prepared_swap_is_retired_through_poll",
+  "engine::mute_changes_samples_by_at_most_one_ramp_increment",
+  "engine::stop_and_drop_join_threads_promptly",
+  "engine::output_open_failure_is_returned_from_start",
+  "engine::capture_and_output_steady_state_do_not_allocate",
+  "engine::format_seqlock_round_trips_formats",
+]
+note = "capture/DSP and output threads joined by a two-channel rtrb ring; lock-free control queues; retired BRIR sets are freed on the control thread. The output primes (silence until the ring holds target + one block + one period, then drops what lies beyond target + one block) at start, after an underrun and after a device restart"
 
 [[feature]]
 id = "engine.clock_asrc"
 kind = "pipeline"
 milestone = "M2"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "engine::asrc_converts_48_khz_to_44_1_khz_over_ten_seconds",
+  "engine::clock_holds_the_trough_without_chasing_the_block_sawtooth",
+  "engine::clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim",
+  "engine::clock_with_a_period_as_long_as_a_block_stays_bounded",
+  "engine::pi_controller_clamps_and_integrates",
+]
+note = "rubato Async sinc on the binaural pair. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
 
 [[feature]]
 id = "engine.clock_trim"
 kind = "pipeline"
 milestone = "M2"
-status = "planned"
-tests = []
+status = "partial"
+tests = [
+  "engine::clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim",
+  "engine::required_trim_rejects_an_unsupported_capture",
+]
+note = "the controller and the strategy choice are tested, but no capture source accepts a trim yet: SAL does not, and the driver's rate-trim IOCTL arrives in M3"
 
 [[feature]]
 id = "engine.latency"
 kind = "pipeline"
 milestone = "M2"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "engine::latency_uses_playback_qpc_and_source_qpc",
+  "engine::latency_window_publishes_percentiles_without_heap_storage",
+]
+note = "record QPC to the device's playback QPC (correlated GetPosition), p50 and p99 over the last 1,024 blocks. From a paced dump on the dev PC: 13-16 ms p50 in exclusive mode (3 ms period, 10 ms target), 47 ms in shared mode. The SAL figure needs the SAL PC"
+
+[[feature]]
+id = "convolver.non_uniform"
+kind = "pipeline"
+milestone = "M2"
+status = "implemented"
+tests = [
+  "convolver::non_uniform_segments_match_direct_convolution",
+  "convolver::impulses_at_segment_boundaries_are_sample_accurate",
+  "convolver::reset_clears_partially_scheduled_large_window",
+  "convolver::repeated_runs_are_bit_identical",
+  "convolver::partitions_reports_total_across_segments",
+  "convolver::three_segment_process_and_reset_do_not_allocate",
+]
+note = "segments [0,16P) at P, [16P,128P) at 8P and [128P,end) at 64P, the large FFTs spread over fixed slots; 21 inputs x 310,144 taps measured 0.47-0.49 ms mean and 1.0-1.2 ms max per 480-frame block in release"
 
 [[feature]]
 id = "sys.sal_ring"
 kind = "platform"
 milestone = "M2"
-status = "planned"
-tests = []
-note = "development capture adapter over SpatialAudioLab's ring; excluded from release builds"
+status = "partial"
+tests = [
+  "bio-sys::sal_header_round_trip",
+  "bio-sys::sal_rejects_truncated_and_inconsistent_lengths",
+  "bio-sys::sal_ddplus_is_eac3",
+  "bio-sys::sal_float_is_pcm",
+  "bio-sys::sal_records_parse_back_with_positions_qpc_and_drops",
+  "bio-sys::sal_format_change_bumps_epoch_for_each_format_field",
+  "bio-sys::sal_buffer_full_retry_is_transactional",
+  "bio-sys::sal_invalid_format_does_not_commit_state",
+  "bio-sys::sal_translation_does_not_allocate_in_steady_state",
+  "bio-sys::sal_open_errors_keep_missing_denied_and_busy_distinct",
+]
+note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). The translation is tested on synthetic READ results; the device itself has not been opened (NotPresent on the dev PC), so real reads wait for the SAL PC. Development only; release builds leave it out"
 
 [[feature]]
 id = "sys.wasapi_output"
 kind = "platform"
 milestone = "M2"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "bio-sys::playback_timestamp_uses_clock_units_and_queue_distance",
+  "bio-sys::integer_samples_clip_and_left_align",
+  "bio-sys::device_errors_keep_removed_busy_and_not_found_distinct",
+  "bio-sys::render_endpoints_include_a_default",
+  "bio-sys::exclusive_or_shared_fallback_plays_silence",
+  "bio-sys::exclusive_sink_takes_frames_at_the_device_rate",
+  "bio-sys::shared_sink_takes_frames_at_the_device_rate",
+  "bio-sys::exclusive_sink_recovers_its_cadence_after_a_missed_deadline",
+  "bio-sys::shared_silence_has_period_spaced_playback_qpcs",
+  "bio-sys::wasapi_shared_periods_do_not_allocate",
+  "bio-sys::wasapi_exclusive_periods_and_a_restart_do_not_allocate",
+]
+note = "exclusive event-driven (Float32, Int32, Int24in32, Int16) with a shared fallback; the stream starts on the first period. An exclusive stream restarts after a stall (a wait over two periods and 10 ms): after one missed deadline a TOPPING USB DAC otherwise signalled only every ~33 ms for good. Device tests are ignored in CI and pass on the dev PC"
+
+[[feature]]
+id = "sys.realtime_threads"
+kind = "platform"
+milestone = "M2"
+status = "implemented"
+tests = [
+  "bio-sys::mmcss_pro_audio_registration_reverts_on_drop",
+  "bio-sys::qpc_ticks_increase_and_frequency_is_nonzero",
+]
+note = "MMCSS Pro Audio registration that reverts on drop, and QueryPerformanceCounter"
+
+[[feature]]
+id = "live.tool"
+kind = "tool"
+milestone = "M2"
+status = "partial"
+tests = ["bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them"]
+note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace, so the whole live path ran on the dev PC; record and play from the SAL ring wait for the SAL PC"
 
 # ---- Driver and app (M3, M4) ----
 

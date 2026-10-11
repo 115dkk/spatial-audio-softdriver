@@ -3,11 +3,30 @@
 
 //! Every handwritten `unsafe` in the workspace, and everything Windows-only.
 //!
-//! * `ring`: the capture device (the driver's control device from M3; the SAL
-//!   development ring before that, left out of release builds).
-//! * `output`: WASAPI output on its own thread.
-//! * `host`: device enumeration, notifications and the default endpoint (M4).
-//! * `install`: driver package and device node, linked only by bio-setup (M4).
+//! * [`sal_format`] (every OS): the SpatialAudioLab ring's READ result format
+//!   and its translation into the `bio_abi` record stream. Only the interface
+//!   the SAL driver exposes is used (ADR 0005).
+//! * `sal` (Windows): `SalRing`, a `CaptureSource` over SAL's
+//!   `\\.\DolbyDecoderMat`. Development only; release builds leave it out.
+//! * `output` (Windows): WASAPI output, exclusive and event-driven when the
+//!   device allows, opened on the output thread (`OutputOpener`).
+//! * `devices` (Windows): render endpoints by name and id.
+//! * `qpc`, `mmcss` (Windows): QueryPerformanceCounter and MMCSS "Pro Audio"
+//!   registration for real-time threads.
 //!
 //! The crate builds on every OS so `cargo test --workspace` runs on Linux; the
-//! Windows modules are `cfg(windows)` and the rest is platform independent.
+//! Windows modules are `cfg(windows)`. The driver's own control device
+//! (`\\.\BioAtmos`) joins in M3; `host` and `install` in M4.
+
+pub mod sal_format;
+
+#[cfg(windows)]
+pub mod devices;
+#[cfg(windows)]
+pub mod mmcss;
+#[cfg(windows)]
+pub mod output;
+#[cfg(windows)]
+pub mod qpc;
+#[cfg(windows)]
+pub mod sal;

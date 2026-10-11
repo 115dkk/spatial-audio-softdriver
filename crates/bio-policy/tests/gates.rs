@@ -163,6 +163,18 @@ fn crate_roots(dir: &Path) -> Vec<PathBuf> {
     roots
 }
 
+fn is_test_example_or_bench(crate_dir: &Path, root: &Path) -> bool {
+    root.strip_prefix(crate_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|first| {
+            matches!(
+                first.as_os_str().to_str(),
+                Some("tests" | "examples" | "benches")
+            )
+        })
+}
+
 fn load_budget() -> Budget {
     let path = repo_root().join("unsafe-budget.toml");
     let text =
@@ -369,13 +381,22 @@ fn every_crate_root_forbids_unsafe() {
     let mut violations = Vec::new();
 
     for krate in first_party_crates() {
-        let allowed = budget.budget.get(&krate.name).copied().unwrap_or(0);
+        let budget_for_crate = budget.budget.get(&krate.name).copied().unwrap_or(0);
         for root in crate_roots(&krate.dir) {
             let source = fs::read_to_string(&root)
                 .unwrap_or_else(|error| panic!("{}: {error}", root.display()));
             let code = strip_comments_and_literals(&source);
             let has_forbid = code.contains("#![forbid(unsafe_code)]");
             let has_deny = code.contains("#![deny(unsafe_code)]");
+            // Integration tests, examples and benches are crates of their own
+            // that never need the budget, so they forbid unsafe even in a
+            // budgeted crate; only the library, binaries and build script may
+            // carry `deny` instead.
+            let allowed = if is_test_example_or_bench(&krate.dir, &root) {
+                0
+            } else {
+                budget_for_crate
+            };
 
             if allowed == 0 && !has_forbid {
                 violations.push(format!(

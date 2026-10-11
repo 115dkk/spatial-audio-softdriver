@@ -1,0 +1,24 @@
+[package]
+name = "bio-live"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Development tool (ADR 0018): records the SAL ring to dump files and plays it
+# live through the engine. Windows only at run time; it builds everywhere so
+# the workspace checks stay uniform.
+
+[lints]
+workspace = true
+
+[dependencies]
+bio-abi.workspace = true
+bio-types.workspace = true
+bio-sys.workspace = true
+clap.workspace = true
+brir.workspace = true
+engine.workspace = true
+rtrb.workspace = true

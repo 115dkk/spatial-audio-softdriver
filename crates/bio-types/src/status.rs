@@ -32,10 +32,14 @@ pub struct EngineStatus {
     /// Objects in the latest scene block (beds count as objects).
     pub objects: u32,
     pub latency: LatencyStats,
-    /// Crossing-ring level in milliseconds of binaural signal.
+    /// Lowest crossing-ring level over the last control window, in
+    /// milliseconds of binaural signal: the margin the clock controller holds
+    /// at the configured target.
     pub ring_level_ms: f32,
     /// Times the output found the crossing ring empty.
     pub underruns: u64,
+    /// Times the output device's stream was restarted after it stalled.
+    pub output_restarts: u64,
     /// Bytes the driver reported lost to overruns.
     pub lost_bytes: u64,
     /// Current clock correction in ppm (trim or resampling ratio).
