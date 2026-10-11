@@ -27,7 +27,7 @@ pub use ports::{
     CaptureError, CaptureSource, Host, OutputError, OutputFormat, OutputOpener, OutputSink,
     TrimUnsupported,
 };
-pub use scene::{Object, Position, SceneBlock};
+pub use scene::{MAX_OBJECTS, Object, Position, SceneBlock};
 pub use status::{EngineFault, EngineStatus, LatencyStats};
 
 /// The scene sample rate every decoder produces unless the source says otherwise.

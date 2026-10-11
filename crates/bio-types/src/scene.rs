@@ -47,6 +47,11 @@ impl Position {
     }
 }
 
+/// Most objects one [`SceneBlock`] carries: MAT 2.1 has 11 fixed channels and
+/// 20 dynamic objects, TrueHD and DD+ JOC fewer. Decoders size their buffers
+/// and renderers their gain caches from this.
+pub const MAX_OBJECTS: usize = 64;
+
 /// One positioned signal of a [`SceneBlock`].
 #[derive(Clone, Copy, Debug)]
 pub struct Object<'a> {
@@ -78,6 +83,16 @@ pub struct SceneBlock<'a> {
     pub source_qpc: u64,
     pub objects: &'a [Object<'a>],
     pub lfe: Option<&'a [f32]>,
+}
+
+impl Object<'static> {
+    /// A silent placeholder, for filling fixed-size object arrays on the stack.
+    pub const SILENT: Self = Self {
+        signal: &[],
+        position: Position::FRONT,
+        gain: 0.0,
+        spread: 0.0,
+    };
 }
 
 impl SceneBlock<'_> {

@@ -13,3 +13,4 @@ workspace = true
 [dependencies]
 bio-types.workspace = true
 bitstream.workspace = true
+thiserror.workspace = true

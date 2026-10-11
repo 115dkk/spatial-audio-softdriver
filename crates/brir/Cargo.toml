@@ -13,3 +13,8 @@ workspace = true
 [dependencies]
 bio-types.workspace = true
 convolver.workspace = true
+thiserror.workspace = true
+hound.workspace = true
+serde.workspace = true
+toml.workspace = true
+rubato.workspace = true
