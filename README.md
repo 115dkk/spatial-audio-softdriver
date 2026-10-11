@@ -9,8 +9,8 @@
 | 단계 | 만드는 것 | 상태 |
 | --- | --- | --- |
 | M0 계약 | 저장소, `bio-types`, `bio-abi` 초안, 정책 게이트, CI와 릴리스 | 완료 (v0.1.0) |
-| M1 리플레이 | `bitstream`, `decode`(PCM·MAT·DD+), `render`, `brir`, `convolver`, `bio-replay render` | MAT 디코더와 블랙박스 골든만 남음(링 덤프 대기) |
-| M2 실시간 | `engine`, `bio-sys`(SAL 개발용 링, WASAPI 출력) | 예정 |
+| M1 리플레이 | `bitstream`, `decode`(PCM·MAT·DD+), `render`, `brir`, `convolver`, `bio-replay render` | v0.2.0. MAT 디코더와 블랙박스 골든만 남음(링 덤프 대기) |
+| M2 실시간 | `engine`, `bio-sys`(SAL 개발용 링, WASAPI 출력), `bio-live` | 실시간 경로는 개발 PC에서 덤프로 확인. SAL PC에서 듣는 시험과 지연 비교가 남음 |
 | M3 드라이버 | `bioatmos.sys`, ABI v1 동결 | 예정 |
 | M4 앱 | `supervisor`, Tauri 화면, `bio-setup`, Velopack | 예정 |
 | M5 서명·출시 | EV 인증서, 증명 서명 | 예정 |
@@ -34,6 +34,7 @@ crates/
   bio-policy  워크스페이스 게이트
 apps/
   bio-replay  덤프 리더 (inspect, M1부터 render)
+  bio-live    SAL 개발 PC용 녹화와 실시간 재생 (M2, 출하하지 않음)
   bio-setup   관리자 단발 도우미 (M4)
 ```
 
