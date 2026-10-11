@@ -17,4 +17,4 @@ realfft.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-assert_no_alloc = { workspace = true, default-features = false }
+assert_no_alloc.workspace = true
