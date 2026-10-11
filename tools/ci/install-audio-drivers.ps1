@@ -32,7 +32,7 @@ try {
     if ($LASTEXITCODE) { throw 'SAL clone failed' }
     git -C $sal checkout --quiet $revision
     if ($LASTEXITCODE) { throw 'SAL checkout failed' }
-    git -C $sal submodule update --init --depth 1 driver/windows-driver-samples
+    git -C $sal submodule update --init --recursive --depth 1 driver/windows-driver-samples
     if ($LASTEXITCODE) { throw 'SAL driver submodule checkout failed' }
     "SAL revision: $revision" | Set-Content "$evidence/sal-provenance.txt"
     Push-Location $sal
@@ -55,6 +55,9 @@ try {
                 # Error identifiers only; never expose SAL lines or snippets.
                 $codes = Select-String -Path "$env:RUNNER_TEMP/sal-build.log" -Pattern '(?:error|fatal error) ([A-Z]+\d+)' -AllMatches |
                     ForEach-Object { $_.Matches.Groups[1].Value } | Sort-Object -Unique
+                # Missing include names are dependency metadata, not code.
+                Select-String -Path "$env:RUNNER_TEMP/sal-build.log" -Pattern "fatal error C1083: ([^\r\n]+)" -AllMatches |
+                    ForEach-Object { $_.Matches.Groups[1].Value } | Set-Content "$evidence/missing-includes.txt"
                 throw "SAL build failed: $project; codes=$($codes -join ','); exit=$LASTEXITCODE"
             }
         }
@@ -63,4 +66,7 @@ try {
         Get-ChildItem driver -Recurse -File -Include *.sys,*.cat,*.inf,*.cer |
             Get-FileHash -Algorithm SHA256 | Select-Object Path,Hash | ConvertTo-Json > "$evidence/sal-package-hashes.json"
     } finally { Pop-Location }
+} catch {
+    $_.Exception.Message | Set-Content "$evidence/driver-failure.txt"
+    throw
 } finally { Stop-Transcript }
