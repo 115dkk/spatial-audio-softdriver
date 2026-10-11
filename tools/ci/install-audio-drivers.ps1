@@ -52,7 +52,7 @@ try {
         $solutionDir = "$sal/driver/windows-driver-samples/audio/sysvad/"
         $outputDir = "${solutionDir}x64/Release/"
         foreach ($project in 'EndpointsCommon/EndpointsCommon.vcxproj','Package/package.vcxproj') {
-            & $msbuild "driver/windows-driver-samples/audio/sysvad/$project" /m:1 /t:Build /p:Configuration=Release /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 "/p:SolutionDir=$solutionDir" "/p:OutDir=$outputDir" /p:SignMode=TestSign /v:quiet *> "$env:RUNNER_TEMP/sal-build.log"
+            & $msbuild "driver/windows-driver-samples/audio/sysvad/$project" /m:1 /t:Build /p:Configuration=Release /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 "/p:SolutionDir=$solutionDir" /p:SignMode=TestSign /v:quiet *> "$env:RUNNER_TEMP/sal-build.log"
             if ($LASTEXITCODE) {
                 # Error identifiers only; never expose SAL lines or snippets.
                 $codes = Select-String -Path "$env:RUNNER_TEMP/sal-build.log" -Pattern '(?:error|fatal error) ([A-Z]+\d+)' -AllMatches |
@@ -63,7 +63,7 @@ try {
                 throw "SAL build failed: $project; codes=$($codes -join ','); exit=$LASTEXITCODE"
             }
         }
-        Get-ChildItem driver -Recurse -File -Include *.sys,*.cat,*.inf,*.cer |
+        Get-ChildItem $outputDir -Recurse -File -Include *.sys,*.cat,*.inf,*.cer,*.dll |
             Get-FileHash -Algorithm SHA256 | Select-Object Path,Hash | ConvertTo-Json > "$evidence/sal-package-hashes.json"
         & pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; try { & ./tools/Install-SysvadCapture.ps1 } catch { $_.Exception.Message | Set-Content $env:SAL_ERROR_FILE; exit 1 }' *> "$evidence/sal-install.txt"
         if ($LASTEXITCODE) { if (Test-Path $env:SAL_ERROR_FILE) { Get-Content $env:SAL_ERROR_FILE }; throw "SAL install failed (exit $LASTEXITCODE)" }
