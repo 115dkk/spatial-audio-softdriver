@@ -29,9 +29,10 @@ impl MatDecoder {
         _epoch: u32,
         _out: &mut dyn FnMut(&SceneBlock<'_>),
     ) -> Result<(), DecodeError> {
-        Err(DecodeError::Unsupported(
-            "MAT 2.1 (the decoder is built from ring dumps, none recorded yet)".into(),
-        ))
+        Err(DecodeError::Unsupported {
+            codec: "MAT 2.1",
+            detail: "the decoder is built from ring dumps, none recorded yet",
+        })
     }
 
     pub fn reset(&mut self) {}

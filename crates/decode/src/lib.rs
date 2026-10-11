@@ -37,14 +37,30 @@ impl Default for DecodeConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Why an adapter refused input. Every variant is `Copy` and carries only
+/// static text, so returning one from a real-time push never allocates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
-    #[error("no decoder handles {0}")]
-    Unsupported(String),
+    /// The format-change record names a codec no adapter decodes.
+    #[error("no decoder handles {0:?}")]
+    UnsupportedCodec(bio_types::BitstreamCodec),
+    /// The stream is valid but uses something this adapter does not support.
+    #[error("unsupported {codec} stream: {detail}")]
+    Unsupported {
+        codec: &'static str,
+        detail: &'static str,
+    },
     #[error("the {codec} payload is corrupt: {detail}")]
-    Corrupt { codec: &'static str, detail: String },
-    #[error("no format selected yet")]
+    Corrupt {
+        codec: &'static str,
+        detail: &'static str,
+    },
+    #[error("data arrived before any format was selected")]
     NoFormat,
+    /// Data of the wrong kind for the selected route (PCM in a bitstream epoch
+    /// or the reverse).
+    #[error("{0}")]
+    WrongRoute(&'static str),
 }
 
 /// How the engine feeds the selected adapter.
@@ -101,7 +117,7 @@ impl Decoders {
                 C::Eac3 | C::Eac3Atmos => (Active::Ddp, Route::Bitstream),
                 other => {
                     self.active = Active::None;
-                    return Err(DecodeError::Unsupported(format!("{other:?}")));
+                    return Err(DecodeError::UnsupportedCodec(other));
                 }
             },
         };
@@ -119,9 +135,7 @@ impl Decoders {
         match self.active {
             Active::Pcm => self.pcm.push(bytes, qpc, self.epoch, out),
             Active::None => Err(DecodeError::NoFormat),
-            _ => Err(DecodeError::Unsupported(
-                "PCM data in a bitstream epoch".into(),
-            )),
+            _ => Err(DecodeError::WrongRoute("PCM data in a bitstream epoch")),
         }
     }
 
@@ -135,7 +149,7 @@ impl Decoders {
             Active::Mat => self.mat.push(burst, qpc, self.epoch, out),
             Active::Ddp => self.ddp.push(burst, qpc, self.epoch, out),
             Active::None => Err(DecodeError::NoFormat),
-            Active::Pcm => Err(DecodeError::Unsupported("a burst in a PCM epoch".into())),
+            Active::Pcm => Err(DecodeError::WrongRoute("a burst in a PCM epoch")),
         }
     }
 
