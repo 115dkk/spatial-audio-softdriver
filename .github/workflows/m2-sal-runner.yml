@@ -20,6 +20,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: m2-sal-runner
+          cache-on-failure: true
       - name: Prepare evidence directory
         run: New-Item -ItemType Directory -Force out/runner | Out-Null
       - name: Install VB-CABLE and build the SAL black box
@@ -46,8 +47,8 @@ jobs:
           Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in 'MEDIA','AudioEndpoint' } |
             Select-Object Name,PNPDeviceID,Status,ConfigManagerErrorCode | ConvertTo-Json -Depth 4 > out/runner/pnp.json
           Get-Service AudioEndpointBuilder,Audiosrv | Format-List * > out/runner/audio-services.txt
-          Get-ChildItem out/runner -Recurse -File | Get-FileHash -Algorithm SHA256 |
-            Select-Object Path,Hash | ConvertTo-Json > out/runner/sha256.json
+          $hashes = Get-ChildItem out/runner -Recurse -File | Where-Object Name -NE 'sha256.json' | Get-FileHash -Algorithm SHA256
+          $hashes | Select-Object Path,Hash | ConvertTo-Json > out/runner/sha256.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:

@@ -30,7 +30,7 @@ if (Test-Path "$evidence/sal.biodump") {
 }
 # The device smoke test accepts NotPresent for ordinary developer PCs. This
 # experiment requires actual SAL presence, regardless of that test's exit code.
-if (!(Select-String "$evidence/hardware-tests.txt" -SimpleMatch 'SAL open: success' -Quiet)) {
+if (!(Select-String -Path "$evidence/hardware-tests.txt" -Pattern 'SAL open: success' -SimpleMatch -Quiet)) {
     $failures.Add('SAL ring did not open')
 }
 $summary = @('## M2 SAL runner experiment', '', "Failed probes: $($failures -join '; ')", '',

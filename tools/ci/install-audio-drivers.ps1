@@ -32,15 +32,18 @@ try {
     if ($LASTEXITCODE) { throw 'SAL clone failed' }
     git -C $sal checkout --quiet $revision
     if ($LASTEXITCODE) { throw 'SAL checkout failed' }
+    git -C $sal submodule update --init --depth 1 driver/windows-driver-samples
+    if ($LASTEXITCODE) { throw 'SAL driver submodule checkout failed' }
     "SAL revision: $revision" | Set-Content "$evidence/sal-provenance.txt"
     Push-Location $sal
     try {
         # Commands published in upstream driver/README.md; logs remain private
         # because compiler diagnostics can contain implementation excerpts.
-        & pwsh -NoProfile -NonInteractive -File tools/Initialize-SpatialAudioLab.ps1 -Component Driver *> "$env:RUNNER_TEMP/sal-initialize.log"
-        if ($LASTEXITCODE) { throw "SAL initialize failed (exit $LASTEXITCODE)" }
-        & pwsh -NoProfile -NonInteractive -File tools/Install-WdkToolchain.ps1 *> "$env:RUNNER_TEMP/sal-toolchain.log"
-        if ($LASTEXITCODE) { throw "SAL toolchain failed (exit $LASTEXITCODE)" }
+        $env:SAL_ERROR_FILE = "$evidence/sal-error.txt"
+        & pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; try { & ./tools/Initialize-SpatialAudioLab.ps1 -Component Driver } catch { $_.Exception.Message | Set-Content $env:SAL_ERROR_FILE; exit 1 }' *> "$env:RUNNER_TEMP/sal-initialize.log"
+        if ($LASTEXITCODE) { if (Test-Path $env:SAL_ERROR_FILE) { Get-Content $env:SAL_ERROR_FILE }; throw "SAL initialize failed (exit $LASTEXITCODE)" }
+        & pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; try { & ./tools/Install-WdkToolchain.ps1 } catch { $_.Exception.Message | Set-Content $env:SAL_ERROR_FILE; exit 1 }' *> "$env:RUNNER_TEMP/sal-toolchain.log"
+        if ($LASTEXITCODE) { if (Test-Path $env:SAL_ERROR_FILE) { Get-Content $env:SAL_ERROR_FILE }; throw "SAL toolchain failed (exit $LASTEXITCODE)" }
         $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
         $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild/**/Bin/amd64/MSBuild.exe' | Select-Object -First 1
         foreach ($project in 'EndpointsCommon/EndpointsCommon.vcxproj','Package/package.vcxproj') {
