@@ -479,3 +479,54 @@ kind = "app"
 milestone = "M4"
 status = "planned"
 tests = []
+
+# ---- Upmix and plugin hosting (ADR 0020, 0021, 0022) ----
+# Not bound to the driver freeze. Milestone M4 marks the app they ship in.
+
+[[feature]]
+id = "upmix.stage"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "upmix stage between the decoder and scene trimming; bed channel tags, latency alignment, fallback signal and crossfades live inside the stage (extension design, candidate 10)"
+
+[[feature]]
+id = "upmix.first_party"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "Rust rewrite of the upmixer posted in dcinside speakers 580088, as a derivative work once its repository and licence are published (ADR 0020); runs in the engine process, separation inference on a worker thread"
+
+[[feature]]
+id = "hostvst.isolation"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "one bio-plughost process per plugin under a job object; shared-memory ring one block behind, the engine never waits; crash and hang restart with state restore (ADR 0021)"
+
+[[feature]]
+id = "hostvst.vst3"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "VST 3 adapter through the vst3 crate (bindings generated from the MIT-licensed SDK 3.8)"
+
+[[feature]]
+id = "hostvst.vst2"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "VST 2 adapter from a Rust translation of Xaymar's clean-room vst2sdk header (BSD-2-Clause), never the Steinberg SDK"
+
+[[feature]]
+id = "app.default_device_guard"
+kind = "app"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "bio-guard restores the three default device roles when the app exits abnormally (ADR 0023, proposed)"

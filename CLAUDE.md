@@ -1,11 +1,12 @@
 # 저장소 작업 규약
 
-바꾸기 전에 [`CONTEXT.md`](CONTEXT.md)의 용어와 불변식, 관련 [ADR](docs/adr)을 읽습니다. 설계 전체는 `docs/BIO Atmos 아키텍처.html`입니다.
+바꾸기 전에 [`CONTEXT.md`](CONTEXT.md)의 용어와 불변식, 관련 [ADR](docs/adr)을 읽습니다. 설계 전체는 `docs/BIO Atmos 아키텍처.html`이고, 드라이버 동결 전의 확장(업믹스, 플러그인 호스트, 시스템 소리)은 `docs/BIO Atmos 확장 설계.html`입니다.
 
 ## 지킬 것
 
-- unsafe는 `bio-sys`에만 둡니다. 새 크레이트 루트에는 `#![forbid(unsafe_code)]`를 걸고 Cargo.toml에 `[lints] workspace = true`를 둡니다. `unsafe-budget.toml`의 숫자를 올리려면 ADR이 먼저입니다.
-- Windows API 의존성(`windows`, `windows-sys`, `wasapi`)은 `bio-sys`만 가집니다. `engine` 이하는 Linux에서 빌드되고 테스트되어야 합니다.
+- unsafe는 격리 크레이트(`unsafe-budget.toml`에 오른 `-sys` 크레이트, 지금은 `bio-sys`)에만 둡니다. 격리 크레이트를 뺀 새 크레이트 루트에는 `#![forbid(unsafe_code)]`를 걸고 Cargo.toml에 `[lints] workspace = true`를 둡니다. 격리 크레이트는 `bio-sys`처럼 `#![deny(unsafe_code)]`와 자기 lint 표를 씁니다(ADR 0022). 숫자를 올리거나 격리 크레이트를 더하려면 ADR이 먼저입니다. `hostvst-sys`와 `upmix-sys`는 ADR 0022가 허용했고, 처음 만드는 PR에서 숫자와 게이트를 함께 정합니다.
+- Windows API 의존성(`windows`, `windows-sys`, `wasapi`)은 `bio-sys`만 가집니다(`hostvst-sys`가 생기면 그 크레이트도). `engine` 이하는 Linux에서 빌드되고 테스트되어야 합니다.
+- 외부 플러그인(VST 2, VST 3)은 엔진 프로세스에서 돌리지 않고 `bio-plughost`에서만 돌립니다(ADR 0021). hostvst 계열 크레이트는 `bio-*`에 의존하지 않습니다.
 - 기능을 더하면 `features.toml`에 등록하고, `implemented`로 표시할 때는 실제로 있는 테스트를 가리킵니다.
 - 실시간 스레드에서는 할당, 잠금, 파일 입출력을 하지 않습니다.
 - 클린룸(ADR 0005): SpatialAudioLab의 소스와 그 소스에서 나온 패치는 읽지 않고, 작업자에게도 넘기지 않습니다. 구축기 공유 zip의 `sal-cli-bio-game.patch`가 여기에 해당합니다.
