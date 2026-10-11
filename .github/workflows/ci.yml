@@ -1,14 +1,21 @@
 name: CI
 
-# Gates every pull request and every push to master (ADR 0002):
-#   lint    fmt, clippy -D warnings, the bio-policy gates (forbid unsafe,
-#           unsafe budget, feature registry, Windows code only in bio-sys) and
-#           the release gate's unit tests
-#   test    cargo test on Linux and Windows; on Windows also the generated
-#           driver header compiled as C89, C11 and C++17 by MSVC
-#   deny    cargo-deny: advisories, licenses, bans, sources
+# Gates every pull request and every push to master (ADR 0002). The repository
+# is public, so Actions minutes are not rationed: every job runs on every
+# event, without path filters.
+#
+#   lint      fmt, clippy -D warnings, the bio-policy gates (forbid unsafe,
+#             unsafe budget, feature registry, Windows code only in bio-sys) and
+#             the release gate's unit tests
+#   test      cargo test on Linux and Windows, debug and release; on Windows
+#             also the generated driver header compiled as C89, C11 and C++17
+#   docs      rustdoc with warnings denied (broken intra-doc links included)
+#   miri      the pure parsing crates under Miri
+#   fuzz      every cargo-fuzz target for two minutes
+#   coverage  llvm-cov line coverage, summarised on the run page
+#   deny      cargo-deny: advisories, licenses, bans, sources
 # The engine and everything below it build without Windows, which is why the
-# Linux leg can run the replay tests at all.
+# Linux legs can run the replay tests at all.
 
 on:
   pull_request:
@@ -57,13 +64,16 @@ jobs:
         run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
 
   test:
-    name: cargo test (${{ matrix.os }})
+    name: cargo test (${{ matrix.os }}, ${{ matrix.profile }})
     needs: lint
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        profile: [debug, release]
     runs-on: ${{ matrix.os }}
+    env:
+      PROFILE_FLAG: ${{ matrix.profile == 'release' && '--release' || '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -74,18 +84,135 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test
+          shared-key: test-${{ matrix.profile }}
 
       - name: cargo test --workspace
-        run: cargo test --workspace --all-targets --locked
+        shell: bash
+        run: cargo test --workspace --all-targets --locked $PROFILE_FLAG
 
       - name: cargo test --doc
+        if: matrix.profile == 'debug'
         run: cargo test --workspace --doc --locked
 
       - name: Driver header compiles as C89, C11 and C++17 (MSVC)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.profile == 'debug'
         shell: pwsh
         run: ./tools/check-c-header.ps1
+
+  docs:
+    name: rustdoc (deny warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs
+
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --document-private-items --locked
+
+  miri:
+    name: Miri (parsing crates)
+    runs-on: ubuntu-latest
+    env:
+      # proptest keeps its regression file on disk; Miri isolation would refuse it.
+      MIRIFLAGS: -Zmiri-disable-isolation
+      PROPTEST_CASES: "16"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly with Miri
+        run: |
+          rustup toolchain install nightly --profile minimal --component miri,rust-src
+          cargo +nightly miri setup
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri
+
+      - name: cargo miri test
+        run: cargo +nightly miri test --locked -p bio-types -p bio-abi --lib
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: bio-abi
+            target: records
+          - crate: bio-abi
+            target: dump
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+          workspaces: crates/${{ matrix.crate }}/fuzz
+
+      - name: cargo fuzz run (120 s)
+        working-directory: crates/${{ matrix.crate }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=120
+
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.crate }}-${{ matrix.target }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
+  coverage:
+    name: coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain with llvm-tools
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+
+      - name: Measure
+        run: |
+          cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+          {
+            echo "## Line coverage"
+            echo
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lcov
+          path: lcov.info
+          retention-days: 14
 
   deny:
     name: cargo-deny
