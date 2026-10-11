@@ -5,7 +5,7 @@
 //! * [`scene`]: the [`SceneBlock`] every decoder writes and the renderer reads.
 //! * [`layout`]: the directions of a BRIR set and the [`Layout`] they form.
 //! * [`feeds`]: one signal per direction, the renderer's output.
-//! * [`format`]: what a source writes to the virtual device.
+//! * [`format`](mod@format): what a source writes to the virtual device.
 //! * [`ports`]: the seams the engine is wired through ([`CaptureSource`],
 //!   [`OutputOpener`]/[`OutputSink`]) and the supervisor's [`Host`].
 //! * [`status`]: the engine state the control thread samples.
