@@ -20,3 +20,6 @@ brir.workspace = true
 engine.workspace = true
 sha2.workspace = true
 hound.workspace = true
+
+[dev-dependencies]
+bitstream.workspace = true

@@ -122,6 +122,7 @@ version = "0.1.0"
 dependencies = [
  "bio-abi",
  "bio-types",
+ "bitstream",
  "brir",
  "clap",
  "engine",
