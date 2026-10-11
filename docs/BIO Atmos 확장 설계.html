@@ -353,7 +353,7 @@ const ROAD = [
   { m: 'EV 구입과 ABI 동결', ev: true, items: ['M3가 끝날 때(ADR 0004). 이 뒤로 커널은 1년 동안만 고칠 수 있습니다'] },
   { m: 'M4 앱', items: ['후보 13 supervisor 엔진 세션', '모드 넘겨받기, 세 역할의 기본 장치와 공간음향 복원', '비정상 종료 때 기본 장치를 되돌리는 bio-guard(ADR 0023)', 'Tauri 화면'] },
   { m: 'M5 서명과 출시', items: ['증명 서명, Secure Boot를 켠 PC에서 설치', '베타: 출력은 독점이 기본(ADR 0023)'] },
-  { m: '업믹스와 ASIO 트랙 (동결과 무관, 지금부터 나란히)', later: true, items: ['streamring: XT StreamRing을 옮겨 Linux에서 시험', '후보 10 업믹스 단계, 베드 꼬리표, 지연 맞춤과 대체 신호', '후보 16 HostVST: hostvst-proto와 가짜 호스트 실패 시험부터(Linux), 그다음 VST 3, VST 2 어댑터', '후보 17 ASIO 입구: 라이선스 경로를 정한 뒤 XT 래퍼를 옮기고 가짜 ASIO 호스트로 시험', '퍼스트파티 업믹서 RIIR: 원작자 저장소와 라이선스가 나온 뒤(ADR 0020)'] },
+  { m: '업믹스와 ASIO 트랙 (동결과 무관, 지금부터 나란히)', later: true, items: ['streamring: XT StreamRing을 옮겨 Linux에서 시험', '후보 10 업믹스 단계, 베드 꼬리표, 지연 맞춤과 대체 신호', '후보 16 HostVST: hostvst-proto와 가짜 호스트 실패 시험부터(Linux), 그다음 VST 3, VST 2 어댑터', '후보 17 ASIO 입구: asio-sys(GPL)와 MIT 상태기계로 나눠 XT 래퍼를 옮기고 가짜 ASIO 호스트로 시험', '퍼스트파티 업믹서 RIIR: 원작자 저장소와 라이선스가 나온 뒤(ADR 0020)'] },
   { m: '동결 뒤에도 언제든', later: true, items: ['머리 추적 센서', '거리 기반 렌더', '후보 14 꼬리 작업 스레드'] },
 ];
 
@@ -379,7 +379,7 @@ function Changes() {
     ['A', '업믹서를 C++ 그대로 받지 않고, 원작자 저장소의 파생저작물로서 Rust로 다시 써 엔진 프로세스 안에서 돌립니다. unsafe가 꼭 필요하면 upmix-sys 크레이트에만 두고, 업믹서 자체는 같은 프로세스에 남습니다.', 'ADR 0020, 0022 · 업믹서 절 · 후보 10', 'upmix'],
     ['B', '업믹스 플러그인(VST 2, VST 3)을 받는 옵션을 따로 둡니다. SEH로는 플러그인 충돌을 막을 수 없다고 판단해 플러그인마다 호스트 프로세스를 두고, 호스트가 죽어도 앱과 드라이버와 소리가 이어지게 합니다. 이 부분은 HostVST 크레이트로 따로 낼 수 있게 짭니다.', 'ADR 0021, 0022 · 플러그인 호스트 절 · 후보 16', 'plughost'],
     ['C', '기본 장치를 따르는 소리는 시스템 소리까지 모두 받으므로 출력은 독점을 기본으로 합니다. 그 대가(BIO가 멈추면 무음, 믹스 전체에 같은 처리)를 다루려고 bio-guard, 음악 모드 한정, 동결 점검 두 항목을 더했습니다.', 'ADR 0023(제안) · 시스템 소리 절 · 동결 점검표', 'system'],
-    ['D', '입구를 셋으로 늘립니다. 드라이버는 렌더 엔드포인트를 둘 내고 기록에 엔드포인트 번호를 실으며(동결 대상), DAW는 BIO로 들어가는 ASIO 입구로 받습니다(동결과 무관). ASIO 입구는 XT의 래퍼를 저작권자 허락으로 옮기고, ASIO SDK 인터페이스의 라이선스 경로만 정하면 됩니다.', 'ADR 0024, 0025 · 입구 셋 절 · 후보 17', 'inlets'],
+    ['D', '입구를 셋으로 늘립니다. 드라이버는 렌더 엔드포인트를 둘 내고 기록에 엔드포인트 번호를 실으며(동결 대상), DAW는 BIO로 들어가는 ASIO 입구로 받습니다(동결과 무관). ASIO 입구는 XT의 래퍼를 저작권자 허락으로 옮기고, SDK에 닿는 asio-sys만 GPL로 둡니다.', 'ADR 0024, 0025 · 입구 셋 절 · 후보 17', 'inlets'],
   ];
   return html`<section class="block" id="changes">
     <div class="section-head"><h2>고친 점</h2><p>받은 초판에서 네 가지를 고쳤습니다. 결정은 ADR 0020~0025에 적었습니다.</p></div>
@@ -418,7 +418,7 @@ function Sources() {
     ['EqualizerAPO-XT vst/', '헤더와 PluginResidency.h의 주석만 읽었습니다. 호스팅 코드는 GPL이라 가져오지 않고, DllMain 지연(3~18초) 같은 경험만 요구로 받습니다.'],
     ['Microsoft 문서', '__fastfail(예외 처리기를 거치지 않는 종료), 장치 형식(공유 모드는 PCM만 섞고 비PCM은 독점만), 소프트웨어 볼륨(볼륨 노드가 없으면 APO가 볼륨을 건다).'],
     ['EqualizerAPO-XT asio/, runtime/ipc/StreamRing, asio-host-study.md', '사용자가 저작권자인 ASIO 래퍼입니다. 모든 파일 머리가 115dkk의 저작권이고, 옮겨 쓰도록 허락받았습니다(2026-10-12). ASIO SDK는 빌드 때 받는 별도 파일입니다.'],
-    ['ASIO SDK 이중 라이선스', 'SDK 2.3.4(2025-10-15)부터 Steinberg ASIO 라이선스와 GPLv3 중 하나를 고릅니다(XT 조사 문서의 SDK LICENSE.txt 인용, 2025-11 보도).'],
+    ['ASIO SDK 2.3.4 LICENSE.txt', 'SHA-256으로 고정한 SDK를 받아 원문을 확인했습니다. Steinberg ASIO 라이선스 또는 GPL Version 3이고, or later는 없습니다. README는 제품 이름에 ASIO를 넣는 것을 금합니다.'],
     ['microseh, rack', 'Rust에서 SEH를 쓰는 방법(C 스텁의 __try)과, Rust 플러그인 호스트 크레이트에 충돌 격리가 아직 없다는 것(rack 로드맵)을 확인했습니다.'],
   ];
   return html`<section class="block" id="sources">
@@ -573,14 +573,15 @@ function Inlets() {
     </table></div>
     <div class="cols2">
       <div class="panel kv">
-        <h3>라이선스</h3>
-        <p>XT 래퍼 코드는 모두 115dkk의 저작물이고 저작권자가 옮겨 쓰도록 허락했습니다. 옮긴 커밋에는 XT의 원본 파일과 커밋을 적습니다.</p>
-        <p>IASIO 인터페이스와 ASIO 타입은 Steinberg ASIO SDK에서 오며, 이 부분은 허락 범위 밖입니다. SDK 2.3.4(2025-10-15)부터 Steinberg ASIO 라이선스와 GPLv3 중 하나를 고릅니다. SDK 파일은 저장소에 넣지 않고 빌드 때 받아 SHA-256으로 고정합니다.</p>
+        <h3>라이선스 (정함)</h3>
+        <p>XT 래퍼 코드는 모두 115dkk의 저작물이고 저작권자가 옮겨 쓰도록 허락했습니다. IASIO 인터페이스와 ASIO 타입은 Steinberg ASIO SDK에서 오고, SDK의 GPL 선택지를 씁니다.</p>
+        <p>SDK에 닿는 부분에만, 되도록 좁게, SPDX로 GPL-3.0-or-later를 붙이고 나머지 파일은 MIT를 유지합니다. 릴리스하는 프로그램 전체는 GPL의 영향을 받습니다(2026-10-12 결정).</p>
+        <p>고정한 SDK의 LICENSE.txt는 'GPL Version 3'만 적고 'or later'를 주지 않습니다. 그래서 SDK 정의를 손으로 옮긴 파일이 생기면 그 파일만 GPL-3.0-only이고, bioasio.dll이 든 릴리스 전체는 GPLv3 조건입니다.</p>
       </div>
       <div class="panel kv">
-        <h3>정할 것</h3>
-        <p><b>GPLv3(권장):</b> SDK에서 온 정의를 담은 asio-sys와 bioasio.dll에 SDK의 GPL 조건을 적용합니다. BIO 앱은 공유 메모리로만 대화하므로 MIT로 둘 계획이지만, 프로세스를 나눴다는 사실만으로 확정되지는 않아 IPC 계약과 배포 구성을 검토한 뒤 확정합니다.</p>
-        <p><b>Steinberg 계약:</b> 서명하고 우리 코드는 MIT로 두되, SDK에서 온 부분에는 Steinberg의 조건을 따로 적용합니다. 어느 쪽이든 SDK 부분을 MIT로 다시 허가할 수는 없습니다.</p>
+        <h3>닿는 부분을 좁히는 방법</h3>
+        <p>SDK 타입, 상수, IASIO vtable, COM 글루는 asio-sys 하나에만 두고, asio-sys는 Rust 타입의 트레이트만 내놓습니다. bioasio.dll의 상태기계와 demand 계산은 그 트레이트를 구현하는 MIT 파일입니다.</p>
+        <p>SDK 정의는 빌드 때 받은 헤더에서 만드는 쪽을 먼저 시도하고, SDK 파일은 저장소에 넣지 않습니다. 드라이버(MS-PL)는 별개 프로그램으로 함께 배포하고, streamring과 HostVST는 MIT 그대로 따로 낼 수 있습니다.</p>
       </div>
     </div>
   </section>`;
@@ -1172,7 +1173,7 @@ const CANDS = [
     problem: 'DAW는 ASIO로 DAC의 드라이버를 직접 열어 BIO를 거치지 않고, BIO가 DAC를 독점으로 쥐고 있으면 둘이 부딪힙니다. DAW의 7.1.4 버스를 개인 BRIR로 모니터링할 수 없습니다.',
     solution: 'BIO로 들어가는 가상 ASIO 드라이버를 두고, BIO의 출력 스레드가 DAC 클럭으로 DAW를 끌어옵니다. DLL은 DAW 출력을 streamring에 싣기만 하고, 렌더와 컨볼루션은 BIO가 합니다.',
     wins: ['드리프트와 ASRC 없음', 'XT 래퍼를 저작권자 허락으로 옮김', '커널과 무관해 동결 대상 아님', 'streamring을 HostVST와 공용'],
-    adr: 'ADR 0025를 새로 썼습니다. ASIO SDK 인터페이스의 라이선스 경로(GPLv3 또는 Steinberg 계약)를 정해야 합니다.' },
+    adr: 'ADR 0025를 새로 썼고 ADR 0003을 고쳤습니다. SDK에 닿는 asio-sys만 GPL-3.0-or-later이고, bioasio.dll이 든 릴리스 전체는 GPLv3 조건입니다.' },
 ];
 
 function Candidate({ c }) {

@@ -555,4 +555,4 @@ kind = "app"
 milestone = "M4"
 status = "planned"
 tests = []
-note = "bioasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Licence route for the ASIO SDK interface still to choose"
+note = "bioasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Only asio-sys touches the ASIO SDK and carries GPL-3.0-or-later SPDX headers; releases that ship bioasio.dll are GPLv3 as a whole (ADR 0003, 0025)"

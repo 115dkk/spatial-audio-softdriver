@@ -63,4 +63,4 @@ master에 push할 때마다 `release.yml`이 출하 파일의 변경 여부를 �
 
 ## 라이선스
 
-사용자 모드는 [MIT](LICENSE)입니다. 드라이버(M3)는 SysVAD에서 출발한 MS-PL로 둡니다.
+사용자 모드의 소스는 [MIT](LICENSE)입니다. ASIO SDK에 닿는 `asio-sys`의 파일만 GPL-3.0-or-later이고, ASIO 입구(`bioasio.dll`)가 들어간 릴리스부터는 사용자 모드 프로그램 전체를 GPLv3 조건으로 냅니다([ADR 0025](docs/adr/0025-asio-entrance.md)). 드라이버(M3)는 SysVAD에서 출발한 MS-PL로 두고 별개 프로그램으로 함께 배포합니다.
