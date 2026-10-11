@@ -63,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let mut peak = [0.0_f32; 2];
         let mut energy = [0.0_f64; 2];
+        let mut active = [0_usize; 2];
         for (i, sample) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let sample = f32::from_le_bytes(*sample);
             if !sample.is_finite() {
@@ -70,16 +71,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             peak[i % 2] = peak[i % 2].max(sample.abs());
             energy[i % 2] += f64::from(sample).powi(2);
+            active[i % 2] += usize::from(sample.abs() >= 0.0001);
             writer.write_sample(sample)?;
         }
         writer.finalize()?;
         let frames = bytes.len() / 8;
         println!(
-            "captured {frames} frames; peak {peak:?}; RMS {:?}",
+            "captured {frames} frames; peak {peak:?}; active frames {active:?}; RMS {:?}",
             energy.map(|sum| (sum / frames.max(1) as f64).sqrt())
         );
-        if frames < 48_000 || peak.iter().any(|&p| p < 0.0001) {
-            return Err("VB-CABLE capture is empty or silent in an ear".into());
+        // A device-start click can have a large peak while the rest is silent.
+        // Require at least two seconds' worth of signal in each ear.
+        if frames < 48_000 || active.iter().any(|&count| count < 96_000) {
+            return Err("VB-CABLE capture lacks sustained signal in an ear".into());
         }
         Ok(())
     })();
