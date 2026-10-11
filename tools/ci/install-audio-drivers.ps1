@@ -1,3 +1,5 @@
+param([switch]$BuildOnly, [string]$PackagePath)
+
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
     throw 'Driver installation is restricted to a disposable GitHub-hosted runner.'
@@ -6,6 +8,7 @@ $evidence = Join-Path $env:GITHUB_WORKSPACE 'out/runner'
 Start-Transcript -Path "$evidence/install.txt"
 try {
     bcdedit /enum '{current}'
+    if (!$BuildOnly) {
     foreach ($service in 'AudioEndpointBuilder', 'Audiosrv') {
         Set-Service $service -StartupType Automatic
         Start-Service $service
@@ -23,6 +26,26 @@ try {
     Restart-Service Audiosrv -Force
     Get-CimInstance Win32_PnPEntity | Where-Object Name -Match 'CABLE' |
         Select-Object Name,Status,ConfigManagerErrorCode | Format-Table
+    }
+
+    if ($PackagePath) {
+        $PackagePath = (Resolve-Path $PackagePath).Path
+        Import-Certificate -FilePath "$PackagePath/package.cer" -CertStoreLocation Cert:/LocalMachine/Root | Out-Null
+        Import-Certificate -FilePath "$PackagePath/package.cer" -CertStoreLocation Cert:/LocalMachine/TrustedPublisher | Out-Null
+        & "$PackagePath/devcon.exe" install "$PackagePath/ComponentizedAudioSample.inf" 'Root\sysvad_ComponentizedAudioSample' *> "$evidence/sal-install.txt"
+        $installExit = $LASTEXITCODE
+        Get-Content "$evidence/sal-install.txt"
+        if ($installExit -notin 0,1) { throw "SAL install failed (devcon exit $installExit)" }
+        $parameters = 'HKLM:/SYSTEM/CurrentControlSet/Services/sysvad_componentizedaudiosample/Parameters'
+        New-Item $parameters -Force | Out-Null
+        New-ItemProperty $parameters -Name DoNotCreateDataFiles -Value 1 -PropertyType DWord -Force | Out-Null
+        pnputil /scan-devices
+        Restart-Service Audiosrv -Force
+        Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in 'MEDIA','AudioEndpoint' } |
+            Select-Object Name,Status,ConfigManagerErrorCode | ConvertTo-Json > "$evidence/installed-audio.json"
+        Copy-Item "$PackagePath/sal-provenance.txt","$PackagePath/sal-package-hashes.json" $evidence
+        return
+    }
 
     # SAL is an opaque, pinned build input (ADR 0005). Never print source,
     # patches, compiler snippets or package its implementation in artifacts.
@@ -78,10 +101,23 @@ try {
         }
         Get-ChildItem $outputDir -Recurse -File -Include *.sys,*.cat,*.inf,*.cer,*.dll |
             Get-FileHash -Algorithm SHA256 | Select-Object Path,Hash | ConvertTo-Json > "$evidence/sal-package-hashes.json"
+        if ($BuildOnly) {
+            $bundle = Join-Path $env:GITHUB_WORKSPACE 'out/sal-package'
+            New-Item -ItemType Directory -Force $bundle | Out-Null
+            Get-ChildItem "${outputDir}package" -File | Where-Object Extension -In '.sys','.cat','.inf','.dll' |
+                Copy-Item -Destination $bundle
+            Copy-Item "${outputDir}package.cer" $bundle
+            Copy-Item "${env:ProgramFiles(x86)}/Windows Kits/10/Tools/10.0.26100.0/x64/devcon.exe" $bundle
+            Copy-Item "$evidence/sal-provenance.txt","$evidence/sal-package-hashes.json" $bundle
+            return
+        }
         & pwsh -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; try { & ./tools/Install-SysvadCapture.ps1 } catch { $_.Exception.Message | Set-Content $env:SAL_ERROR_FILE; exit 1 }' *> "$evidence/sal-install.txt"
         if ($LASTEXITCODE) { if (Test-Path $env:SAL_ERROR_FILE) { Get-Content $env:SAL_ERROR_FILE }; throw "SAL install failed (exit $LASTEXITCODE)" }
     } finally { Pop-Location }
 } catch {
     $_.Exception.Message | Set-Content "$evidence/driver-failure.txt"
     throw
-} finally { Stop-Transcript }
+} finally {
+    Copy-Item "$env:windir/inf/setupapi.dev.log" "$evidence/setupapi.dev.log" -ErrorAction Continue
+    Stop-Transcript
+}

@@ -9,14 +9,42 @@ permissions:
   contents: read
 
 jobs:
-  audio:
+  sal-package:
     runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test-sign SAL with the installed WDK
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/runner | Out-Null
+          ./tools/ci/install-audio-drivers.ps1 -BuildOnly
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sal-test-package
+          path: out/sal-package/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sal-build-diagnostics
+          path: out/runner/
+          if-no-files-found: error
+          retention-days: 30
+  audio:
+    needs: sal-package
+    runs-on: windows-2025
     timeout-minutes: 45
     defaults:
       run:
         shell: pwsh
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: sal-test-package
+          path: ${{ runner.temp }}/sal-test-package
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: m2-sal-runner
@@ -33,7 +61,7 @@ jobs:
       - name: Install VB-CABLE and build the SAL black box
         id: drivers
         timeout-minutes: 25
-        run: ./tools/ci/install-audio-drivers.ps1
+        run: ./tools/ci/install-audio-drivers.ps1 -PackagePath "$env:RUNNER_TEMP/sal-test-package"
       - name: Preserve driver diagnostics before the BIO build
         if: always()
         uses: actions/upload-artifact@v7
@@ -67,7 +95,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: m2-sal-windows-2022-${{ github.run_attempt }}
+          name: m2-sal-windows-2025-${{ github.run_attempt }}
           path: out/runner/
           if-no-files-found: error
           retention-days: 30
