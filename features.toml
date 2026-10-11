@@ -457,6 +457,14 @@ status = "partial"
 tests = ["bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them"]
 note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace, so the whole live path ran on the dev PC; record and play from the SAL ring wait for the SAL PC"
 
+[[feature]]
+id = "ci.sal_runner"
+kind = "tool"
+milestone = "M2"
+status = "partial"
+tests = []
+note = "Opt-in GitHub-hosted Windows experiment: VB-CABLE, opaque pinned SAL driver build, synthetic PCM stimulus and retained diagnostic artifacts. Does not replace game/Apple Music listening or the latency baseline. See docs/experiments/m2-sal-runner.md."
+
 # ---- Driver and app (M3, M4) ----
 
 [[feature]]

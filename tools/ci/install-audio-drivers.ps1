@@ -1,0 +1,60 @@
+$ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
+    throw 'Driver installation is restricted to a disposable GitHub-hosted runner.'
+}
+$evidence = Join-Path $env:GITHUB_WORKSPACE 'out/runner'
+Start-Transcript -Path "$evidence/install.txt"
+try {
+    bcdedit /enum '{current}'
+    foreach ($service in 'AudioEndpointBuilder', 'Audiosrv') {
+        Set-Service $service -StartupType Automatic
+        Start-Service $service
+    }
+    $cable = Join-Path $env:RUNNER_TEMP 'vbcable'
+    $archive = "$cable.zip"
+    Invoke-WebRequest 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip' -OutFile $archive
+    $hash = (Get-FileHash $archive -Algorithm SHA256).Hash
+    if ($hash -ne 'B950E39F01AF1D04EA623C8F6D8EB9B6EA5C477C637295FABF20631C85116BFB') { throw 'VB-CABLE hash mismatch' }
+    Expand-Archive $archive $cable
+    $installer = Start-Process "$cable/VBCABLE_Setup_x64.exe" -ArgumentList '-i','-h' -PassThru -WindowStyle Hidden
+    if (!$installer.WaitForExit(120000)) { $installer.Kill(); throw 'VB-CABLE installer timed out' }
+    "VB-CABLE installer exit: $($installer.ExitCode)"
+    pnputil /scan-devices
+    Restart-Service Audiosrv -Force
+    Get-CimInstance Win32_PnPEntity | Where-Object Name -Match 'CABLE' |
+        Select-Object Name,Status,ConfigManagerErrorCode | Format-Table
+
+    # SAL is an opaque, pinned build input (ADR 0005). Never print source,
+    # patches, compiler snippets or package its implementation in artifacts.
+    $sal = Join-Path $env:RUNNER_TEMP 'sal-blackbox'
+    $revision = '5c689815680f3ea5b09fb35ea4dbe63a3dc5bfb7'
+    git clone --quiet https://github.com/barralutz/spatial-audio-lab.git $sal
+    if ($LASTEXITCODE) { throw 'SAL clone failed' }
+    git -C $sal checkout --quiet $revision
+    if ($LASTEXITCODE) { throw 'SAL checkout failed' }
+    "SAL revision: $revision" | Set-Content "$evidence/sal-provenance.txt"
+    Push-Location $sal
+    try {
+        # Commands published in upstream driver/README.md; logs remain private
+        # because compiler diagnostics can contain implementation excerpts.
+        & pwsh -NoProfile -NonInteractive -File tools/Initialize-SpatialAudioLab.ps1 -Component Driver *> "$env:RUNNER_TEMP/sal-initialize.log"
+        if ($LASTEXITCODE) { throw "SAL initialize failed (exit $LASTEXITCODE)" }
+        & pwsh -NoProfile -NonInteractive -File tools/Install-WdkToolchain.ps1 *> "$env:RUNNER_TEMP/sal-toolchain.log"
+        if ($LASTEXITCODE) { throw "SAL toolchain failed (exit $LASTEXITCODE)" }
+        $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+        $msbuild = & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild -find 'MSBuild/**/Bin/amd64/MSBuild.exe' | Select-Object -First 1
+        foreach ($project in 'EndpointsCommon/EndpointsCommon.vcxproj','Package/package.vcxproj') {
+            & $msbuild "driver/windows-driver-samples/audio/sysvad/$project" /m:1 /t:Build /p:Configuration=Release /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 /v:quiet *> "$env:RUNNER_TEMP/sal-build.log"
+            if ($LASTEXITCODE) {
+                # Error identifiers only; never expose SAL lines or snippets.
+                $codes = Select-String -Path "$env:RUNNER_TEMP/sal-build.log" -Pattern '(?:error|fatal error) ([A-Z]+\d+)' -AllMatches |
+                    ForEach-Object { $_.Matches.Groups[1].Value } | Sort-Object -Unique
+                throw "SAL build failed: $project; codes=$($codes -join ','); exit=$LASTEXITCODE"
+            }
+        }
+        & pwsh -NoProfile -NonInteractive -File tools/Install-SysvadCapture.ps1 *> "$evidence/sal-install.txt"
+        if ($LASTEXITCODE) { throw "SAL install failed (exit $LASTEXITCODE)" }
+        Get-ChildItem driver -Recurse -File -Include *.sys,*.cat,*.inf,*.cer |
+            Get-FileHash -Algorithm SHA256 | Select-Object Path,Hash | ConvertTo-Json > "$evidence/sal-package-hashes.json"
+    } finally { Pop-Location }
+} finally { Stop-Transcript }
