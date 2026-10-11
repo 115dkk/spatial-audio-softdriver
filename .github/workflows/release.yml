@@ -18,7 +18,9 @@ name: Release
 # Every job checks out release_sha, the commit the gate decided on (the bump
 # commit when it bumped), so a push that lands meanwhile cannot slip in. The
 # bump is pushed with the workflow token, which starts no workflow, so it does
-# not release itself.
+# not release itself. The build jobs restore and save no cache: whatever they
+# compile cannot reach a cache another workflow on master would trust
+# (CodeQL actions/cache-poisoning), and a release is rare enough to build cold.
 
 on:
   push:
@@ -44,6 +46,8 @@ env:
 jobs:
   gate:
     name: Release gate
+    # Releases come only from master; a dispatch on any other ref stops here.
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -82,10 +86,6 @@ jobs:
 
       - name: Install the pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-windows
 
       - name: Test (release mode)
         run: cargo test --workspace --release --locked
@@ -129,10 +129,6 @@ jobs:
 
       - name: Install the pinned toolchain (rust-toolchain.toml)
         run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-linux
 
       - name: Test (release mode)
         run: cargo test --workspace --release --locked
