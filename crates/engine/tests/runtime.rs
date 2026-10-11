@@ -74,7 +74,13 @@ struct RecordsCapture {
     next: usize,
     trim_supported: bool,
     gate: Option<Arc<AtomicBool>>,
+    /// Paces the records like a live source: at most `PACED_LEAD` records
+    /// ahead of the sink's periods. Without it every record arrives at once,
+    /// and the output's priming drops what lies beyond target + one block.
+    paced_by: Option<Arc<SinkState>>,
 }
+
+const PACED_LEAD: u64 = 4;
 
 impl CaptureSource for RecordsCapture {
     fn read(&mut self, buffer: &mut [u8], _wait: Duration) -> Result<usize, CaptureError> {
@@ -83,6 +89,12 @@ impl CaptureSource for RecordsCapture {
             .as_ref()
             .is_some_and(|gate| !gate.load(Ordering::Acquire))
         {
+            std::thread::yield_now();
+            return Ok(0);
+        }
+        if self.paced_by.as_ref().is_some_and(|state| {
+            self.next as u64 > state.periods.load(Ordering::Acquire) + PACED_LEAD
+        }) {
             std::thread::yield_now();
             return Ok(0);
         }
@@ -228,6 +240,7 @@ fn output_open_failure_is_returned_from_start() {
         next: 0,
         trim_supported: false,
         gate: None,
+        paced_by: None,
     };
     let mut output = opener(state, RATE);
     output.fail = true;
@@ -250,6 +263,7 @@ fn required_trim_rejects_an_unsupported_capture() {
         next: 0,
         trim_supported: false,
         gate: None,
+        paced_by: None,
     };
     assert!(matches!(
         start_with_clock(
@@ -270,6 +284,7 @@ fn format_and_needs_brir_events_reach_poll() {
         next: 0,
         trim_supported: false,
         gate: None,
+        paced_by: None,
     };
     let mut engine = start_with_clock(
         config(ClockPreference::Asrc),
@@ -309,6 +324,7 @@ fn prepared_swap_is_retired_through_poll() {
         next: 0,
         trim_supported: true,
         gate: Some(Arc::clone(&gate)),
+        paced_by: None,
     };
     let mut engine = start_with_clock(
         config(ClockPreference::Trim),
@@ -339,6 +355,7 @@ fn latency_uses_playback_qpc_and_source_qpc() {
         next: 0,
         trim_supported: true,
         gate: None,
+        paced_by: None,
     };
     let engine = start_with_clock(
         config(ClockPreference::Trim),
@@ -372,6 +389,7 @@ fn mute_changes_samples_by_at_most_one_ramp_increment() {
         next: 0,
         trim_supported: true,
         gate: None,
+        paced_by: Some(Arc::clone(&state)),
     };
     let engine = start_with_clock(
         config(ClockPreference::Trim),
@@ -417,6 +435,7 @@ fn asrc_converts_48_khz_to_44_1_khz_over_ten_seconds() {
         next: 0,
         trim_supported: false,
         gate: Some(Arc::clone(&gate)),
+        paced_by: None,
     };
     let engine = start_with_clock(
         EngineConfig {
@@ -452,6 +471,7 @@ fn stop_and_drop_join_threads_promptly() {
             next: 0,
             trim_supported: false,
             gate: None,
+            paced_by: None,
         };
         let engine = start_with_clock(
             config(ClockPreference::Asrc),
