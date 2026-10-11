@@ -1,14 +1,23 @@
 //! Port adapters that need no Windows.
 //!
 //! * [`DumpCapture`]: a [`CaptureSource`] over a dump's record stream.
-//! * [`WavOpener`] / `WavSink`: an output that writes a 32-bit float stereo
+//! * [`WavOpener`] / [`WavSink`]: an output that writes a 32-bit float stereo
 //!   WAV, reporting a synthetic playback QPC.
-//! * [`NullOpener`] / `NullSink`: an output that discards.
+//! * [`NullOpener`] / [`NullSink`]: an output that discards.
 
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bio_types::{CaptureError, CaptureSource, TrimUnsupported};
+use bio_types::{
+    CaptureError, CaptureSource, OutputError, OutputFormat, OutputOpener, OutputSink,
+    TrimUnsupported,
+};
+
+const RECORD_HEADER_BYTES: usize = size_of::<bio_abi::RecordHeader>();
+const RECORD_LENGTH_OFFSET: usize = std::mem::offset_of!(bio_abi::RecordHeader, len);
+const QPC_FREQUENCY: u64 = 10_000_000;
 
 /// Replays a dump's record stream, handing out whole records only.
 #[derive(Debug)]
@@ -28,9 +37,47 @@ impl DumpCapture {
 impl CaptureSource for DumpCapture {
     /// Copies as many whole records as fit in `buf`; `Err(Ended)` once the
     /// stream is exhausted. A record larger than `buf` is an error.
-    fn read(&mut self, buf: &mut [u8], wait: Duration) -> Result<usize, CaptureError> {
-        let _ = (buf, wait, &self.stream, self.offset);
-        todo!("M1: chain worker")
+    fn read(&mut self, buf: &mut [u8], _wait: Duration) -> Result<usize, CaptureError> {
+        if self.offset == self.stream.len() {
+            return Err(CaptureError::Ended);
+        }
+
+        let mut source = self.offset;
+        let mut written = 0;
+        while source < self.stream.len() {
+            let rest = &self.stream[source..];
+            if rest.len() < RECORD_HEADER_BYTES {
+                return Err(CaptureError::Io(format!(
+                    "record at offset {source} has a truncated header"
+                )));
+            }
+            let payload_len = u32::from_le_bytes(
+                rest[RECORD_LENGTH_OFFSET..RECORD_LENGTH_OFFSET + 4]
+                    .try_into()
+                    .expect("four bytes were sliced"),
+            ) as usize;
+            let size = bio_abi::record_size(payload_len);
+            if rest.len() < size {
+                return Err(CaptureError::Io(format!(
+                    "record at offset {source} needs {size} bytes, but only {} remain",
+                    rest.len()
+                )));
+            }
+            if size > buf.len() && written == 0 {
+                return Err(CaptureError::Io(format!(
+                    "a {size}-byte record does not fit the {}-byte capture buffer",
+                    buf.len()
+                )));
+            }
+            if written + size > buf.len() {
+                break;
+            }
+            buf[written..written + size].copy_from_slice(&rest[..size]);
+            written += size;
+            source += size;
+        }
+        self.offset = source;
+        Ok(written)
     }
 
     fn set_rate_trim(&mut self, _ppm: f64) -> Result<(), TrimUnsupported> {
@@ -47,9 +94,222 @@ pub struct WavOpener {
     pub period_frames: usize,
 }
 
+impl OutputOpener for WavOpener {
+    type Sink = WavSink;
+
+    fn open(self) -> Result<Self::Sink, OutputError> {
+        let writer = hound::WavWriter::create(
+            &self.path,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: self.rate,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .map_err(|error| OutputError::Io(format!("{}: {error}", self.path.display())))?;
+        Ok(WavSink {
+            writer: Some(writer),
+            format: OutputFormat {
+                rate: self.rate,
+                channels: 2,
+                period_frames: self.period_frames,
+            },
+            interleaved: vec![0.0; self.period_frames.saturating_mul(2)],
+            frames_written: 0,
+        })
+    }
+}
+
+/// A 32-bit float stereo WAV output sink.
+pub struct WavSink {
+    writer: Option<hound::WavWriter<BufWriter<File>>>,
+    format: OutputFormat,
+    interleaved: Vec<f32>,
+    frames_written: u64,
+}
+
+impl std::fmt::Debug for WavSink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WavSink")
+            .field("format", &self.format)
+            .field("frames_written", &self.frames_written)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WavSink {
+    /// Finalizes the RIFF header and reports any write error.
+    pub fn finish(mut self) -> Result<(), OutputError> {
+        self.finalize()
+    }
+
+    fn finalize(&mut self) -> Result<(), OutputError> {
+        if let Some(writer) = self.writer.take() {
+            writer
+                .finalize()
+                .map_err(|error| OutputError::Io(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+impl OutputSink for WavSink {
+    fn format(&self) -> OutputFormat {
+        self.format
+    }
+
+    fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError> {
+        let qpc = frames_to_qpc(self.frames_written, self.format.rate);
+        fill(&mut self.interleaved);
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| OutputError::Io("the WAV sink is already finalized".into()))?;
+        for &sample in &self.interleaved {
+            writer
+                .write_sample(sample)
+                .map_err(|error| OutputError::Io(error.to_string()))?;
+        }
+        self.frames_written = self
+            .frames_written
+            .saturating_add(self.format.period_frames as u64);
+        Ok(qpc)
+    }
+}
+
+impl Drop for WavSink {
+    fn drop(&mut self) {
+        let _ = self.finalize();
+    }
+}
+
 /// Opens a sink that discards everything, at `rate` with `period_frames`.
 #[derive(Debug, Clone, Copy)]
 pub struct NullOpener {
     pub rate: u32,
     pub period_frames: usize,
+}
+
+impl OutputOpener for NullOpener {
+    type Sink = NullSink;
+
+    fn open(self) -> Result<Self::Sink, OutputError> {
+        Ok(NullSink {
+            format: OutputFormat {
+                rate: self.rate,
+                channels: 2,
+                period_frames: self.period_frames,
+            },
+            interleaved: vec![0.0; self.period_frames.saturating_mul(2)],
+            frames_written: 0,
+        })
+    }
+}
+
+/// An output sink that invokes the producer and discards its samples.
+#[derive(Debug)]
+pub struct NullSink {
+    format: OutputFormat,
+    interleaved: Vec<f32>,
+    frames_written: u64,
+}
+
+impl OutputSink for NullSink {
+    fn format(&self) -> OutputFormat {
+        self.format
+    }
+
+    fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError> {
+        let qpc = frames_to_qpc(self.frames_written, self.format.rate);
+        fill(&mut self.interleaved);
+        self.frames_written = self
+            .frames_written
+            .saturating_add(self.format.period_frames as u64);
+        Ok(qpc)
+    }
+}
+
+fn frames_to_qpc(frames: u64, rate: u32) -> u64 {
+    if rate == 0 {
+        0
+    } else {
+        ((u128::from(frames) * u128::from(QPC_FREQUENCY)) / u128::from(rate)) as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime};
+
+    use bio_abi::RecordWriter;
+
+    use super::*;
+
+    #[test]
+    fn dump_capture_keeps_record_boundaries() {
+        let mut stream = vec![0; 512];
+        let mut writer = RecordWriter::new(&mut stream);
+        assert!(writer.data(1, 0, 0, &[1; 8]));
+        assert!(writer.data(1, 8, 1, &[2; 32]));
+        let len = writer.len();
+        stream.truncate(len);
+        let first_size = bio_abi::record_size(8);
+        let mut capture = DumpCapture::new(stream);
+        let mut buffer = vec![0; first_size];
+        assert_eq!(capture.read(&mut buffer, Duration::ZERO), Ok(first_size));
+        assert!(matches!(
+            capture.read(&mut buffer, Duration::ZERO),
+            Err(CaptureError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn dump_capture_reports_end_after_the_last_record() {
+        let mut stream = vec![0; 128];
+        let mut writer = RecordWriter::new(&mut stream);
+        assert!(writer.stream_start(1, 0));
+        let len = writer.len();
+        stream.truncate(len);
+        let mut capture = DumpCapture::new(stream);
+        let mut buffer = [0; 64];
+        assert_eq!(capture.read(&mut buffer, Duration::ZERO), Ok(len));
+        assert_eq!(
+            capture.read(&mut buffer, Duration::ZERO),
+            Err(CaptureError::Ended)
+        );
+    }
+
+    #[test]
+    fn wav_sink_writes_readable_float_stereo() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock follows the Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("engine-wav-sink-{unique}.wav"));
+        let mut sink = WavOpener {
+            path: path.clone(),
+            rate: 48_000,
+            period_frames: 4,
+        }
+        .open()
+        .unwrap();
+        let mut fill = |samples: &mut [f32]| {
+            for (index, sample) in samples.iter_mut().enumerate() {
+                *sample = index as f32 / 8.0;
+            }
+        };
+        assert_eq!(sink.next_period(&mut fill), Ok(0));
+        assert_eq!(sink.next_period(&mut fill), Ok(833));
+        sink.finish().unwrap();
+
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.spec().channels, 2);
+        assert_eq!(reader.spec().sample_rate, 48_000);
+        assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+        assert_eq!(reader.duration(), 8);
+        drop(reader);
+        std::fs::remove_file(path).unwrap();
+    }
 }

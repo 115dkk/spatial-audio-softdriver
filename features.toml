@@ -290,11 +290,37 @@ tests = [
 note = "42/44-track WAVs with channels.csv or ReaVerb_채널표.csv sidecars and reaverb/ folders; name aliases; Standard, Template21 and Room21 angle presets plus overrides (no angle was ever measured); a common truncation and fade for 6.5 s sets"
 
 [[feature]]
+id = "engine.chain"
+kind = "pipeline"
+milestone = "M1"
+status = "implemented"
+tests = [
+  "engine::partition_for_uses_the_largest_divisor_at_most_512",
+  "engine::scene_shape_matches_decoder_output",
+  "engine::limiter_never_exceeds_ceiling",
+  "engine::limiter_is_transparent_below_ceiling",
+  "engine::limiter_applies_output_gain",
+  "engine::pcm_dump_renders_pans_convolves_and_applies_gain",
+  "engine::ddp_burst_produces_a_nonzero_binaural_block",
+  "engine::overrun_and_discontinuity_reset_without_panicking",
+  "engine::needs_brir_is_emitted_once_for_repeated_rate_mismatch",
+  "engine::steady_state_pcm_push_records_does_not_allocate",
+  "engine::dump_capture_keeps_record_boundaries",
+  "engine::dump_capture_reports_end_after_the_last_record",
+  "engine::wav_sink_writes_readable_float_stereo",
+]
+note = "records to binaural blocks: deframe, decode, VBAP, convolve, gain, linked peak limiter without look-ahead. Each burst carries its record's QPC (the wire has no per-burst time)"
+
+[[feature]]
 id = "replay.render"
 kind = "tool"
 milestone = "M1"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "bio-replay::render_is_deterministic_and_inspect_still_works",
+  "bio-replay::missing_profile_fails_with_a_readable_message",
+]
+note = "bio-replay render prepares the BRIR for each format before its first record, so no block is dropped; output_sha256 covers the interleaved f32 samples"
 
 [[feature]]
 id = "golden.blackbox"
