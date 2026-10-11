@@ -14,7 +14,8 @@
 - `release.yml`은 master push마다 돕니다. 게이트(`.github/scripts/release_gate.py`)는 이렇게 정합니다.
   - 워크스페이스 버전에 태그가 아직 없으면 그 버전 그대로 릴리스합니다(첫 릴리스, 또는 손으로 올린 버전).
   - 태그가 있고 그 뒤로 출하 파일이 바뀌었으면 버전을 올립니다. 출하 파일을 건드린 커밋 중에 `feat` 제목이나 `BREAKING CHANGE`가 있으면 minor, 아니면 patch입니다. 1.0 전에는 호환을 깨는 변경도 minor로 올립니다.
-  - 출하 파일이 바뀌지 않았으면 릴리스하지 않습니다. 손으로 dispatch할 때 `force`를 주면 올려서 릴리스합니다.
+  - 출하 파일이 바뀌지 않았으면 릴리스하지 않습니다.
+- `release.yml`에는 손으로 dispatch하는 트리거가 없습니다. dispatch는 어느 브랜치의 코드든 이 워크플로 안에서 돌릴 수 있게 만들어 CodeQL이 캐시 오염 경로로 지적했고, 실패한 릴리스는 그 실행을 다시 돌리면 됩니다. 빌드 잡은 캐시도 쓰지 않습니다.
 - 출하 파일은 `crates/`, `apps/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `LICENSE`에서 테스트, 벤치, 퍼즈, 문서, `bio-policy`를 뺀 것입니다.
 - 버전을 올릴 때는 게이트가 `Cargo.toml`과 `Cargo.lock`의 워크스페이스 버전을 고쳐 `chore(release): v0.x.y`로 master에 커밋합니다(github-actions[bot]). 워크플로 토큰으로 한 push는 워크플로를 시작하지 않으므로 이 커밋이 다시 릴리스를 부르지 않습니다. 빌드와 태그는 이 커밋에서 만듭니다. 그래서 `Cargo.toml`의 버전은 언제나 마지막 릴리스와 같습니다.
 - 빌드 잡은 패키징 전에 release 모드로 전체 테스트를 돌립니다. 지금 내는 것은 개발 도구(`bio-replay`)의 Windows zip과 Linux tar.gz, `SHA256SUMS.txt`입니다. 앱은 M4부터 같은 워크플로에 더합니다.

@@ -9,7 +9,7 @@ name: Release
 #                  version if it has no tag yet; otherwise, when shipped files
 #                  changed since its tag, bump it (feat: minor, else patch),
 #                  commit the bump to master as github-actions[bot] and release
-#                  that. A dispatch with force bumps even without changes.
+#                  that.
 #   build-windows  tests in release mode, then the developer tools, zipped
 #   build-linux    the same for Linux (bio-replay runs in Linux CI)
 #   publish        SHA256SUMS.txt, notes from the commit subjects, and the
@@ -22,15 +22,12 @@ name: Release
 # compile cannot reach a cache another workflow on master would trust
 # (CodeQL actions/cache-poisoning), and a release is rare enough to build cold.
 
+# Push only. A manual dispatch would let any ref's code run in this workflow
+# (CodeQL actions/cache-poisoning); a failed release is retried by re-running
+# its run instead.
 on:
   push:
     branches: [master]
-  workflow_dispatch:
-    inputs:
-      force:
-        description: "Bump and release even when no shipped file changed"
-        type: boolean
-        default: false
 
 concurrency:
   group: release
@@ -46,7 +43,6 @@ env:
 jobs:
   gate:
     name: Release gate
-    # Releases come only from master; a dispatch on any other ref stops here.
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
@@ -65,14 +61,7 @@ jobs:
 
       - name: Decide (and bump on master)
         id: gate
-        env:
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
-        run: |
-          if [ "$FORCE" = "true" ]; then
-            python3 .github/scripts/release_gate.py --force
-          else
-            python3 .github/scripts/release_gate.py
-          fi
+        run: python3 .github/scripts/release_gate.py
 
   build-windows:
     name: Windows tools
