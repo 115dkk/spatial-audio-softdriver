@@ -62,19 +62,94 @@ pub enum SalError {
 
 /// Parses the header of one READ result.
 pub fn parse_header(buf: &[u8]) -> Result<SalHeader, SalError> {
-    let _ = buf;
-    todo!("M2: bio-sys worker")
+    if buf.len() < SAL_HEADER_LEN {
+        return Err(SalError::Truncated {
+            need: SAL_HEADER_LEN,
+            have: buf.len(),
+        });
+    }
+    let u16_at = |i| u16::from_le_bytes(buf[i..i + 2].try_into().expect("checked header"));
+    let u32_at = |i| u32::from_le_bytes(buf[i..i + 4].try_into().expect("checked header"));
+    let u64_at = |i| u64::from_le_bytes(buf[i..i + 8].try_into().expect("checked header"));
+    let header_bytes = u32_at(4);
+    let payload_bytes = u32_at(8);
+    if header_bytes < SAL_HEADER_LEN as u32
+        || u64::from(header_bytes) + u64::from(payload_bytes) > buf.len() as u64
+    {
+        return Err(SalError::BadLengths);
+    }
+    Ok(SalHeader {
+        version: u32_at(0),
+        header_bytes,
+        payload_bytes,
+        sequence: u64_at(16),
+        total_bytes: u64_at(24),
+        dropped_bytes: u64_at(32),
+        subformat: buf[40..56].try_into().expect("checked header"),
+        format_changes: u64_at(56),
+        rate: u32_at(64),
+        channel_mask: u32_at(68),
+        channels: u16_at(72),
+        bits: u16_at(74),
+        valid_bits: u16_at(76),
+        block_align: u16_at(78),
+    })
 }
 
 impl SalHeader {
     /// The WAVEFORMATEXTENSIBLE this header describes (allocates; called only
     /// when the format changes).
     pub fn wave_format(&self) -> Vec<u8> {
-        todo!("M2: bio-sys worker")
+        let (bytes, len) = self.wave_bytes();
+        bytes[..len].to_vec()
     }
 
     pub fn source_format(&self) -> Result<SourceFormat, SalError> {
-        todo!("M2: bio-sys worker")
+        self.validate_byte_rate()?;
+        let (bytes, len) = self.wave_bytes();
+        Ok(bio_abi::parse_wave_format(&bytes[..len])?)
+    }
+
+    fn validate_byte_rate(&self) -> Result<(), SalError> {
+        if self.block_align == 0 || self.rate.checked_mul(u32::from(self.block_align)).is_none() {
+            return Err(
+                bio_abi::WaveFormatError::Inconsistent("byte rate or block alignment").into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn wave_bytes(&self) -> ([u8; 52], usize) {
+        let mut b = [0; 52];
+        let iec = self.subformat[4..6] == [0xea, 0x0c];
+        b[0..2].copy_from_slice(&0xfffe_u16.to_le_bytes());
+        b[2..4].copy_from_slice(&self.channels.to_le_bytes());
+        b[4..8].copy_from_slice(&self.rate.to_le_bytes());
+        // The public conversion is infallible; source_format rejects overflow.
+        b[8..12].copy_from_slice(
+            &self
+                .rate
+                .wrapping_mul(u32::from(self.block_align))
+                .to_le_bytes(),
+        );
+        b[12..14].copy_from_slice(&self.block_align.to_le_bytes());
+        b[14..16].copy_from_slice(&self.bits.to_le_bytes());
+        b[16..18].copy_from_slice(&22_u16.to_le_bytes());
+        b[18..20].copy_from_slice(&self.valid_bits.to_le_bytes());
+        b[20..24].copy_from_slice(&self.channel_mask.to_le_bytes());
+        b[24..40].copy_from_slice(&self.subformat);
+        (b, if iec { 52 } else { 40 })
+    }
+
+    fn same_format(&self, other: &Self) -> bool {
+        self.subformat == other.subformat
+            && self.rate == other.rate
+            && self.channels == other.channels
+            && self.bits == other.bits
+            && self.channel_mask == other.channel_mask
+            && self.format_changes == other.format_changes
+            && self.valid_bits == other.valid_bits
+            && self.block_align == other.block_align
     }
 }
 
@@ -84,14 +159,15 @@ impl SalHeader {
 /// overrun record whenever `dropped_bytes` grows.
 #[derive(Debug, Default)]
 pub struct SalTranslator {
-    // Implementation detail: epoch, last format key, byte position, last
-    // dropped count, scratch for the WAVEFORMATEXTENSIBLE.
-    _private: (),
+    epoch: u32,
+    previous: Option<SalHeader>,
+    position: u64,
+    dropped: u64,
 }
 
 impl SalTranslator {
     pub fn new() -> Self {
-        todo!("M2: bio-sys worker")
+        Self::default()
     }
 
     /// Translates one READ result taken at `qpc`; returns the number of
@@ -102,7 +178,49 @@ impl SalTranslator {
         qpc: u64,
         out: &mut RecordWriter<'_>,
     ) -> Result<usize, SalError> {
-        let _ = (read, qpc, out);
-        todo!("M2: bio-sys worker")
+        let h = parse_header(read)?;
+        let changed = self.previous.is_none_or(|old| !old.same_format(&h));
+        let lost = h.dropped_bytes.saturating_sub(self.dropped);
+        let (wave, wave_len) = h.wave_bytes();
+        if changed {
+            h.source_format()?;
+        }
+        let needed = if changed {
+            bio_abi::record_size(0) + bio_abi::record_size(wave_len)
+        } else {
+            0
+        } + if lost > 0 { bio_abi::record_size(8) } else { 0 }
+            + if h.payload_bytes > 0 {
+                bio_abi::record_size(h.payload_bytes as usize)
+            } else {
+                0
+            };
+        // Capacity and format checks precede any output or state changes. A
+        // caller can retry an entire READ without duplicating earlier records.
+        if out.remaining() < needed {
+            return Err(SalError::BufferFull);
+        }
+        let mut count = 0;
+        if changed {
+            self.epoch = self.epoch.wrapping_add(1);
+            out.stream_start(self.epoch, qpc);
+            out.format_change(self.epoch, qpc, &wave[..wave_len]);
+            count += 2;
+        }
+        if lost > 0 {
+            out.overrun(self.position, qpc, lost);
+            self.position = self.position.saturating_add(lost);
+            count += 1;
+        }
+        if h.payload_bytes > 0 {
+            let start = h.header_bytes as usize;
+            let end = start + h.payload_bytes as usize;
+            out.data(self.epoch, self.position, qpc, &read[start..end]);
+            self.position = self.position.saturating_add(u64::from(h.payload_bytes));
+            count += 1;
+        }
+        self.previous = Some(h);
+        self.dropped = h.dropped_bytes;
+        Ok(count)
     }
 }

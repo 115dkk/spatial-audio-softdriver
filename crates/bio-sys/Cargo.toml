@@ -25,3 +25,10 @@ dbg_macro = "deny"
 bio-types.workspace = true
 bio-abi.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+wasapi.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true

@@ -19,3 +19,14 @@
 //! (`\\.\BioAtmos`) joins in M3; `host` and `install` in M4.
 
 pub mod sal_format;
+
+#[cfg(windows)]
+pub mod devices;
+#[cfg(windows)]
+pub mod mmcss;
+#[cfg(windows)]
+pub mod output;
+#[cfg(windows)]
+pub mod qpc;
+#[cfg(windows)]
+pub mod sal;
