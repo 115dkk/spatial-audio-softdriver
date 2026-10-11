@@ -1,0 +1,13 @@
+/target*
+**/*.rs.bk
+# Diagnostic recordings and rendered output stay out of the tree; test fixtures
+# live under tests/fixtures and are named explicitly.
+*.biodump
+/out/
+# cargo-fuzz working files
+**/fuzz/target/
+**/fuzz/corpus/
+**/fuzz/artifacts/
+**/fuzz/coverage/
+**/fuzz/Cargo.lock
+__pycache__/
