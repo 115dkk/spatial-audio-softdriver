@@ -1,0 +1,104 @@
+name: Probe Windows runner for SAL
+
+# Throwaway probe, never merged: can a GitHub-hosted Windows runner stand in
+# for the SpatialAudioLab test PC? SAL's driver is test-signed, so it needs
+# test signing (a boot option, so a reboot, and Secure Boot off), and the
+# runner needs a working Windows audio stack. This measures those facts. It
+# does not download or run SAL.
+
+on:
+  push:
+    branches: [probe/windows-runner-sal]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  facts:
+    name: facts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Machine, virtualisation, Secure Boot, code integrity
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-ComputerInfo -Property OsName, OsVersion, OsBuildNumber, CsManufacturer, CsModel, HyperVisorPresent | Format-List
+          "--- processor"
+          Get-CimInstance Win32_Processor | Format-List Name, VirtualizationFirmwareEnabled, SecondLevelAddressTranslationExtensions
+          "--- Secure Boot"
+          try { "Confirm-SecureBootUEFI: $(Confirm-SecureBootUEFI)" } catch { "Confirm-SecureBootUEFI failed: $($_.Exception.Message)" }
+          "--- Device Guard (VBS, HVCI)"
+          Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard |
+            Format-List VirtualizationBasedSecurityStatus, SecurityServicesConfigured, SecurityServicesRunning, CodeIntegrityPolicyEnforcementStatus
+          "--- boot entry"
+          bcdedit /enum '{current}'
+          "--- Hyper-V feature"
+          Get-WindowsFeature Hyper-V -ErrorAction SilentlyContinue | Format-List Name, InstallState
+
+      - name: Try to turn test signing on (takes effect only after a reboot)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          bcdedit /set '{current}' testsigning on
+          "bcdedit exit code: $LASTEXITCODE"
+          bcdedit /enum '{current}' | Select-String -Pattern 'testsigning|nointegritychecks'
+          "--- the running kernel's code integrity state (unchanged until a reboot)"
+          Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard |
+            Format-List CodeIntegrityPolicyEnforcementStatus
+
+      - name: Windows audio services and devices
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Get-Service Audiosrv, AudioEndpointBuilder | Format-Table Name, Status, StartType
+          try {
+            Set-Service AudioEndpointBuilder -StartupType Automatic
+            Set-Service Audiosrv -StartupType Automatic
+            Start-Service AudioEndpointBuilder, Audiosrv -ErrorAction Stop
+            "audio services started"
+          } catch { "starting the audio services failed: $($_.Exception.Message)" }
+          Get-Service Audiosrv, AudioEndpointBuilder | Format-Table Name, Status
+          "--- audio devices"
+          Get-PnpDevice -Class AudioEndpoint, MEDIA -ErrorAction SilentlyContinue | Format-Table Class, FriendlyName, Status
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        shell: pwsh
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - name: bio-sys device tests (endpoints, SAL presence, exclusive output)
+        continue-on-error: true
+        shell: pwsh
+        run: cargo test --locked --release -p bio-sys --test windows -- --ignored --nocapture --test-threads 1
+
+  reboot:
+    name: does a job survive a reboot (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Turn test signing on and reboot
+        shell: pwsh
+        run: |
+          bcdedit /set '{current}' testsigning on
+          "$(Get-Date -Format o) restarting the runner"
+          Restart-Computer -Force
+          Start-Sleep -Seconds 900
+          "still running 15 minutes after the restart request"
+
+      - name: After the reboot (runs only if the job came back)
+        if: always()
+        shell: pwsh
+        run: |
+          "$(Get-Date -Format o) job resumed"
+          bcdedit /enum '{current}' | Select-String testsigning
