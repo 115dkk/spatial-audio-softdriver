@@ -530,3 +530,29 @@ milestone = "M4"
 status = "planned"
 tests = []
 note = "bio-guard restores the three default device roles when the app exits abnormally (ADR 0023, proposed)"
+
+# ---- Entrances (ADR 0024, 0025) ----
+
+[[feature]]
+id = "abi.second_endpoint"
+kind = "abi"
+milestone = "M3"
+status = "planned"
+tests = []
+note = "two render endpoints with per-endpoint format masks; RecordHeader.reserved splits into endpoint u16 + reserved u16; per-endpoint epoch, position and stats (ADR 0024). Part of the frozen v1 contract"
+
+[[feature]]
+id = "ring.streamring"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "cross-process block ring ported from EqualizerAPO-XT StreamRing with its author's permission; shared by the plugin host and the ASIO entrance"
+
+[[feature]]
+id = "asio.entrance"
+kind = "app"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "bioasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Licence route for the ASIO SDK interface still to choose"
