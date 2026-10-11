@@ -12,4 +12,7 @@ pub mod adapters;
 pub mod chain;
 mod limiter;
 
-pub use chain::{BlockOut, Chain, ChainConfig, ChainEvent, PrepareError, Prepared, partition_for};
+pub use chain::{
+    BlockOut, Chain, ChainConfig, ChainError, ChainEvent, PrepareError, Prepared, partition_for,
+    scene_shape,
+};

@@ -122,15 +122,45 @@ tests = ["bio-replay::inspect_counts_records_and_names_each_epoch"]
 id = "bitstream.iec61937"
 kind = "pipeline"
 milestone = "M1"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "bitstream::ac3_eac3_mat_round_trip_even_and_odd_payloads",
+  "bitstream::framing_matches_wire_bytes_and_pd_units",
+  "bitstream::literal_wire_bursts_preserve_pc_and_round_up_bit_lengths",
+  "bitstream::garbage_padding_and_overlapping_sync_candidates_recover",
+  "bitstream::early_bursts_and_nonzero_padding_are_not_hidden_by_periods",
+  "bitstream::dts_subtypes_determine_expected_positions",
+  "bitstream::zero_pd_null_pause_and_codec_bursts_are_delivered",
+  "bitstream::partial_mat_exposes_only_the_received_codec_order_prefix",
+  "bitstream::reset_mid_burst_forgets_payload_sync_offsets_and_stats",
+  "bitstream::maximum_wire_pd_is_bounded_and_preserves_following_burst",
+  "bitstream::random_chunk_sizes_preserve_bursts_starts_and_stats",
+  "bitstream::arbitrary_input_is_chunk_invariant",
+  "bitstream::steady_state_push_partial_and_reset_do_not_allocate",
+]
+note = "Pd in bits for AC-3 and DTS I-III, in bytes for E-AC-3, MAT and DTS-HD (FFmpeg spdif sources). The 2021 Pe extension of IEC 61937-1 is not handled; verify against real ring dumps"
 
 [[feature]]
 id = "decode.pcm"
 kind = "pipeline"
 milestone = "M1"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "decode::int16_samples_are_signed_little_endian",
+  "decode::packed_int24_sign_extends",
+  "decode::int32_maximum_stays_below_one",
+  "decode::int24_in32_ignores_low_padding_bits",
+  "decode::float32_clamps_and_silences_nan",
+  "decode::default_masks_follow_documented_windows_order",
+  "decode::speaker_bits_cover_standard_positions_only",
+  "decode::seven_one_mask_routes_in_bit_order_and_separates_lfe",
+  "decode::configure_rejects_invalid_shapes_and_deselects_old_format",
+  "decode::partial_first_frame_keeps_its_first_byte_qpc",
+  "decode::reset_reconfigure_and_epoch_change_discard_remainders",
+  "decode::arbitrary_byte_chunking_preserves_blocks",
+  "decode::pcm_configure_push_reset_do_not_allocate",
+  "decode::emitted_scene_borrows_the_written_signals",
+]
 
 [[feature]]
 id = "decode.mat"
@@ -141,11 +171,32 @@ tests = []
 note = "clean room: the implementer never reads SpatialAudioLab sources; goldens come from black-box SAL output only"
 
 [[feature]]
+id = "decode.ddp"
+kind = "pipeline"
+milestone = "M1"
+status = "implemented"
+tests = [
+  "decode::ddp_six_channel_tones_have_expected_positions_and_timing",
+  "decode::ddp_reset_and_epoch_change_match_a_cold_decoder",
+  "decode::ddp_rejects_bad_access_units_without_emitting_and_recovers",
+  "decode::access_unit_groups_short_frames_and_matching_dependents",
+  "decode::bed_table_uses_left_positive_angles",
+  "decode::rejected_pushes_do_not_allocate_error_strings",
+]
+note = "bed channels and LFE from harletty-bridge eac3 (pinned commit); fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. The eac3 crate allocates per frame upstream"
+
+[[feature]]
 id = "decode.ddp_joc"
 kind = "pipeline"
 milestone = "M1"
-status = "planned"
-tests = []
+status = "partial"
+tests = [
+  "decode::oamd_axes_convert_to_scene_coordinates",
+  "decode::object_mapping_skips_oamd_beds_and_does_not_duplicate_downmix",
+  "decode::pure_bed_joc_uses_assignments_without_lfe_object",
+  "decode::unknown_object_position_is_not_silently_rendered_at_front",
+]
+note = "JOC objects are mapped from eac3's OAMD output, but no real Atmos sample has been decoded yet: ddp_joc_external_sample_has_positioned_objects is ignored until BIO_DDP_JOC_SAMPLE points at one, and the result is checked against Omniphony"
 
 [[feature]]
 id = "decode.truehd"
@@ -158,15 +209,40 @@ tests = []
 id = "render.vbap"
 kind = "pipeline"
 milestone = "M1"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "render::random_3d_gains_are_non_negative_and_unit_power",
+  "render::random_3d_gains_stay_unit_power_for_many_samples",
+  "render::seven_one_four_is_exact_on_every_measured_direction",
+  "render::dense_twenty_one_is_exact_on_every_measured_direction",
+  "render::centre_and_pure_vertical_positions_follow_layout_rules",
+  "render::ceiling_centre_uses_only_the_four_top_directions",
+  "render::virtual_nadir_keeps_unit_power_on_ear_level_directions",
+  "render::horizontal_five_one_uses_at_most_two_directions",
+  "render::near_horizontal_layout_projects_measured_elevations_to_azimuth",
+  "render::two_direction_arc_pans_between_endpoints",
+  "render::moving_object_ramps_across_the_block_boundary_and_reset_skips_it",
+  "render::returning_object_index_starts_without_a_ramp",
+  "render::lfe_route_and_object_gain_are_applied",
+  "render::degenerate_layout_and_bad_lfe_route_are_rejected",
+  "render::steady_state_render_of_thirty_one_objects_into_twenty_two_directions_does_not_allocate",
+]
+note = "spread is ignored; the hull is built by brute force (O(n^4)) when the panner is created"
 
 [[feature]]
 id = "convolver.partitioned"
 kind = "pipeline"
 milestone = "M1"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "convolver::partitioned_matches_direct_for_required_sizes_and_input_counts",
+  "convolver::random_partitioned_convolution_matches_direct",
+  "convolver::impulse_ir_passes_input_through",
+  "convolver::reset_clears_stream_history",
+  "convolver::filter_bank_validates_input",
+  "convolver::steady_state_process_does_not_allocate",
+]
+note = "uniform partitions only: 22 inputs x 24,000-tap IRs x 480-frame blocks measured about 0.5 ms per block in release; 6.5 s sets need truncation or non-uniform partitions"
 
 [[feature]]
 id = "brir.prepare"

@@ -4,10 +4,11 @@
 
 use std::sync::Arc;
 
-use bio_abi::Record;
-use bio_types::SourceFormat;
+use bio_abi::{AbiError, Record};
+use bio_types::{BitstreamCodec, SourceFormat};
 use brir::PreparedBrir;
 use convolver::Binauralizer;
+use decode::DecodeError;
 use render::Panner;
 
 /// Sizes fixed when the chain is built.
@@ -30,6 +31,27 @@ impl Default for ChainConfig {
 pub fn partition_for(block: usize) -> usize {
     let _ = block;
     todo!("M1: chain worker")
+}
+
+/// The scene rate and block length a format produces, which decide the BRIR
+/// rate and partition the control thread must prepare before data arrives:
+/// PCM at its own rate in 10 ms blocks, MAT at 48 kHz in 480-frame half
+/// bursts, DD+ at its encoded rate (48 kHz when unknown) in 1536-frame access
+/// units. `None` for formats no adapter decodes.
+pub fn scene_shape(format: &SourceFormat) -> Option<(u32, usize)> {
+    let _ = (format, BitstreamCodec::Mat21);
+    todo!("M1: chain worker")
+}
+
+/// A record or payload the chain could not use. The chain resets the affected
+/// stage and goes on. `Copy`-cheap for decode errors, so reporting one from the
+/// real-time thread does not allocate.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChainError {
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error(transparent)]
+    Record(#[from] AbiError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -80,8 +102,9 @@ pub enum ChainEvent<'a> {
         format: SourceFormat,
     },
     /// The prepared BRIR does not fit the scene (another rate, or a block that
-    /// is not a whole number of partitions). Blocks are dropped until
-    /// [`Chain::set_prepared`] supplies one that fits.
+    /// is not a whole number of partitions), or none is installed. Blocks are
+    /// dropped until [`Chain::set_prepared`] supplies one that fits. Emitted
+    /// once per change of (rate, block), not once per dropped block.
     NeedsBrir {
         rate: u32,
         block: usize,
@@ -89,9 +112,7 @@ pub enum ChainEvent<'a> {
     Overrun {
         lost_bytes: u64,
     },
-    /// A record or payload the chain could not use; the chain resets the
-    /// affected stage and goes on.
-    Error(String),
+    Error(ChainError),
 }
 
 #[derive(Debug)]
