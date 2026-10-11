@@ -242,6 +242,68 @@ fn seven_one_mask_routes_in_bit_order_and_separates_lfe() {
 }
 
 #[test]
+fn seven_one_four_pcm_preserves_height_channels_and_lfe_across_fragments() {
+    for (bits, kind) in [
+        (16, SampleType::Int),
+        (32, SampleType::Int),
+        (32, SampleType::Float),
+    ] {
+        let mut decoder = PcmDecoder::new(DecodeConfig::default());
+        decoder
+            .configure(PcmFormat {
+                channel_mask: 0x2d63f,
+                ..format(bits, bits, kind, 12)
+            })
+            .unwrap();
+        let mut input = Vec::new();
+        for _ in 0..480 {
+            for channel in 1..=12 {
+                match (bits, kind) {
+                    (16, _) => input.extend_from_slice(&((channel * 1024) as i16).to_le_bytes()),
+                    (32, SampleType::Int) => {
+                        input.extend_from_slice(&(channel * (1_i32 << 26)).to_le_bytes())
+                    }
+                    (32, SampleType::Float) => {
+                        input.extend_from_slice(&(channel as f32 / 32.0).to_le_bytes())
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        let mut seen = 0;
+        for chunk in input.chunks(137) {
+            decoder
+                .push(chunk, 9, 4, &mut |scene| {
+                    seen += 1;
+                    assert_eq!(
+                        (scene.objects.len(), scene.frames, scene.source_qpc),
+                        (11, 480, 9)
+                    );
+                    for (object, (channel, az, el)) in scene.objects.iter().zip([
+                        (1, 30.0, 0.0),
+                        (2, -30.0, 0.0),
+                        (3, 0.0, 0.0),
+                        (5, 150.0, 0.0),
+                        (6, -150.0, 0.0),
+                        (7, 90.0, 0.0),
+                        (8, -90.0, 0.0),
+                        (9, 45.0, 45.0),
+                        (10, -45.0, 45.0),
+                        (11, 135.0, 45.0),
+                        (12, -135.0, 45.0),
+                    ]) {
+                        assert_eq!(object.position, Position::from_angles(az, el));
+                        assert!(object.signal.iter().all(|&s| s == channel as f32 / 32.0));
+                    }
+                    assert_eq!(scene.lfe.unwrap(), &[0.125; 480]);
+                })
+                .unwrap();
+        }
+        assert_eq!(seen, 1);
+    }
+}
+
+#[test]
 fn configure_rejects_invalid_shapes_and_deselects_old_format() {
     let good = format(16, 16, SampleType::Int, 2);
     let mut decoder = PcmDecoder::new(DecodeConfig { max_frames: 480 });
@@ -252,6 +314,11 @@ fn configure_rejects_invalid_shapes_and_deselects_old_format() {
         },
         PcmFormat {
             channels: 9,
+            ..good
+        },
+        PcmFormat {
+            channels: 13,
+            channel_mask: 0x1fff,
             ..good
         },
         PcmFormat {

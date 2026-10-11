@@ -154,6 +154,7 @@ tests = [
   "decode::default_masks_follow_documented_windows_order",
   "decode::speaker_bits_cover_standard_positions_only",
   "decode::seven_one_mask_routes_in_bit_order_and_separates_lfe",
+  "decode::seven_one_four_pcm_preserves_height_channels_and_lfe_across_fragments",
   "decode::configure_rejects_invalid_shapes_and_deselects_old_format",
   "decode::partial_first_frame_keeps_its_first_byte_qpc",
   "decode::reset_reconfigure_and_epoch_change_discard_remainders",
