@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/115dkk/spatial-audio-softdriver"
+publish = false
+
+# Every crate opts in with `[lints] workspace = true`. bio-sys is the one crate
+# with handwritten `unsafe` (ADR 0002) and carries its own table instead, since
+# a workspace-level `forbid` cannot be relaxed per module.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+dbg_macro = "deny"
+
+[workspace.dependencies]
+bio-types = { path = "crates/bio-types" }
+bio-abi = { path = "crates/bio-abi" }
+bitstream = { path = "crates/bitstream" }
+decode = { path = "crates/decode" }
+render = { path = "crates/render" }
+convolver = { path = "crates/convolver" }
+brir = { path = "crates/brir" }
+engine = { path = "crates/engine" }
+supervisor = { path = "crates/supervisor" }
+bio-sys = { path = "crates/bio-sys" }
+
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
+toml = "1.1.8"
+zerocopy = { version = "0.8.62", features = ["derive"] }
+realfft = "3.5.0"
+hound = "3.5.1"
+clap = { version = "4.6.7", features = ["derive"] }
+sha2 = "0.11.0"
+proptest = "1.12.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
