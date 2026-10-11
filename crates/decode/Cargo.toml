@@ -13,3 +13,9 @@ workspace = true
 [dependencies]
 bio-types.workspace = true
 bitstream.workspace = true
+thiserror.workspace = true
+eac3.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+assert_no_alloc.workspace = true

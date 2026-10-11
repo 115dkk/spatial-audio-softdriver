@@ -12,3 +12,8 @@ workspace = true
 
 [dependencies]
 bio-types.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+assert_no_alloc.workspace = true

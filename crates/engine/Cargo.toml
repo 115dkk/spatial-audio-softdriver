@@ -17,3 +17,10 @@ decode.workspace = true
 render.workspace = true
 convolver.workspace = true
 brir.workspace = true
+thiserror.workspace = true
+hound.workspace = true
+bitstream.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+assert_no_alloc.workspace = true

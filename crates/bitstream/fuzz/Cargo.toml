@@ -1,0 +1,25 @@
+# cargo-fuzz targets for the IEC 61937 deframer (a workspace of its own; needs
+# nightly). Run with `cargo +nightly fuzz run deframer` from crates/bitstream.
+[package]
+name = "bitstream-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+bitstream = { path = ".." }
+
+[[bin]]
+name = "deframer"
+path = "fuzz_targets/deframer.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

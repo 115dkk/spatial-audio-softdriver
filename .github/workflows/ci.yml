@@ -9,6 +9,8 @@ name: CI
 #             the release gate's unit tests
 #   test      cargo test on Linux and Windows, debug and release; on Windows
 #             also the generated driver header compiled as C89, C11 and C++17
+#   replay    the replay fixtures rendered twice (hashes must match) and,
+#             on pull requests, against the base commit (reported, not failed)
 #   docs      rustdoc with warnings denied (broken intra-doc links included)
 #   miri      the pure parsing crates under Miri
 #   fuzz      every cargo-fuzz target for two minutes
@@ -99,6 +101,94 @@ jobs:
         shell: pwsh
         run: ./tools/check-c-header.ps1
 
+  replay:
+    name: replay determinism (${{ matrix.os }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: replay
+
+      - name: Generate the fixtures (apps/bio-replay/examples/replay_fixtures.rs)
+        shell: bash
+        run: cargo run --locked -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
+
+      - name: Render every dump twice with this commit; the hashes must match
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p bio-replay
+          bin=target/release/bio-replay
+          fx="$RUNNER_TEMP/fx"
+          {
+            echo "## Replay output (${{ matrix.os }})"
+            echo
+            echo "| dump | output_sha256 | blocks |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for d in pcm71 ddp51; do
+            for run in 1 2; do
+              "$bin" render "$fx/$d.biodump" --profile "$fx/profile.toml" \
+                --out "$RUNNER_TEMP/$d-$run.wav" --report "$RUNNER_TEMP/$d-$run.json"
+            done
+            a=$(jq -r .output_sha256 "$RUNNER_TEMP/$d-1.json")
+            b=$(jq -r .output_sha256 "$RUNNER_TEMP/$d-2.json")
+            test "$(jq '.errors | length' "$RUNNER_TEMP/$d-1.json")" = 0
+            if [ "$a" != "$b" ]; then echo "::error::$d renders differently on two runs: $a vs $b"; exit 1; fi
+            echo "| $d | \`$a\` | $(jq .blocks "$RUNNER_TEMP/$d-1.json") |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      # Output changes are allowed (a better renderer changes the bytes), so
+      # this step reports instead of failing; the summary says which dumps
+      # changed against the pull request's base commit.
+      - name: Compare with the base commit
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          fx="$RUNNER_TEMP/fx"
+          base="$RUNNER_TEMP/base"
+          git worktree add --detach "$base" "$BASE_SHA"
+          echo >> "$GITHUB_STEP_SUMMARY"
+          if ! (cd "$base" && cargo build --release -q -p bio-replay); then
+            echo "Base ${BASE_SHA:0:12} does not build bio-replay; nothing to compare." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          base_bin="$base/target/release/bio-replay"
+          if ! "$base_bin" render --help > /dev/null 2>&1; then
+            echo "Base ${BASE_SHA:0:12} has no render command; nothing to compare." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "| dump | against base ${BASE_SHA:0:12} |"
+            echo "| --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for d in pcm71 ddp51; do
+            head=$(jq -r .output_sha256 "$RUNNER_TEMP/$d-1.json")
+            if "$base_bin" render "$fx/$d.biodump" --profile "$fx/profile.toml" \
+                --out "$RUNNER_TEMP/$d-base.wav" --report "$RUNNER_TEMP/$d-base.json"; then
+              old=$(jq -r .output_sha256 "$RUNNER_TEMP/$d-base.json")
+              if [ "$old" = "$head" ]; then verdict="unchanged"; else verdict="**changed** (base \`$old\`)"; fi
+            else
+              verdict="base could not render it (input or profile format changed)"
+            fi
+            echo "| $d | $verdict |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
   docs:
     name: rustdoc (deny warnings)
     runs-on: ubuntu-latest
@@ -150,6 +240,12 @@ jobs:
             target: records
           - crate: bio-abi
             target: dump
+          - crate: bitstream
+            target: deframer
+          - crate: decode
+            target: pcm
+          - crate: decode
+            target: ddp
     steps:
       - uses: actions/checkout@v7
 

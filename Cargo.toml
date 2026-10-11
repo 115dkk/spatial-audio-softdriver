@@ -42,11 +42,18 @@ serde_json = "1.0.152"
 toml = "1.1.8"
 zerocopy = { version = "0.8.62", features = ["derive"] }
 realfft = "3.5.0"
+rubato = "5.0.1"
+rtrb = "0.4.0"
 hound = "3.5.1"
 clap = { version = "4.6.7", features = ["derive"] }
 sha2 = "0.11.0"
 proptest = "1.12.0"
+# default-features off: the default "disable_release" removes the checker from release builds,
+# and release-mode tests must check real-time paths too.
+assert_no_alloc = { version = "1.1.2", default-features = false }
+eac3 = { git = "https://github.com/harletty/harletty-bridge", rev = "639f0f10f5399755578158bfa598dcea6f60577d" }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
