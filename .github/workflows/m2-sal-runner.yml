@@ -22,7 +22,14 @@ jobs:
           shared-key: m2-sal-runner
           cache-on-failure: true
       - name: Prepare evidence directory
-        run: New-Item -ItemType Directory -Force out/runner | Out-Null
+        run: |
+          New-Item -ItemType Directory -Force out/runner | Out-Null
+          foreach ($script in Get-ChildItem tools/ci/*.ps1) {
+            $tokens = $null
+            $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors) { throw $parseErrors }
+          }
       - name: Install VB-CABLE and build the SAL black box
         id: drivers
         timeout-minutes: 25

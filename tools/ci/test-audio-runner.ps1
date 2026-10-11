@@ -47,7 +47,6 @@ if (Select-String -Path "$evidence/hardware-tests.txt" -Pattern 'SAL open: succe
         if (!$listener.WaitForExit(15000)) { $listener.Kill(); $failures.Add('VB-CABLE capture timed out') }
         elseif ($listener.ExitCode) { $failures.Add("VB-CABLE capture exit $($listener.ExitCode)") }
     } finally { if (!$listener.HasExited) { $listener.Kill() } }
-    }
     Check sal-live-inspect { & $replay inspect "$evidence/sal-live.biodump" }
     $captured = Get-Content "$evidence/sal-live-inspect.txt" -Raw | ConvertFrom-Json
     if ($captured.data_bytes -le 0 -or $captured.errors.Count) { $failures.Add('live SAL capture was empty or invalid') }

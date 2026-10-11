@@ -52,7 +52,7 @@ try {
         $solutionDir = "$sal/driver/windows-driver-samples/audio/sysvad/"
         $outputDir = "${solutionDir}x64/Release/"
         foreach ($project in 'EndpointsCommon/EndpointsCommon.vcxproj','Package/package.vcxproj') {
-            & $msbuild "driver/windows-driver-samples/audio/sysvad/$project" /m:1 /t:Build /p:Configuration=Release /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 "/p:SolutionDir=$solutionDir" /p:SignMode=TestSign /v:quiet *> "$env:RUNNER_TEMP/sal-build.log"
+            & $msbuild "driver/windows-driver-samples/audio/sysvad/$project" /m:1 /t:Build /p:Configuration=Release /p:Platform=x64 /p:TargetPlatformVersion=10.0.26100.0 "/p:SolutionDir=$solutionDir" /p:SignMode=Off /v:quiet *> "$env:RUNNER_TEMP/sal-build.log"
             if ($LASTEXITCODE) {
                 # Error identifiers only; never expose SAL lines or snippets.
                 $codes = Select-String -Path "$env:RUNNER_TEMP/sal-build.log" -Pattern '(?:error|fatal error) ([A-Z]+\d+)' -AllMatches |
@@ -60,8 +60,21 @@ try {
                 # Missing include names are dependency metadata, not code.
                 Select-String -Path "$env:RUNNER_TEMP/sal-build.log" -Pattern "fatal error C1083: ([^\r\n]+)" -AllMatches |
                     ForEach-Object { $_.Matches.Groups[1].Value } | Set-Content "$evidence/missing-includes.txt"
+                Select-String -Path "$env:RUNNER_TEMP/sal-build.log" -Pattern '(?:SignTool Error:|error(?: [A-Z]+\d+)?:) [^\r\n]+' -AllMatches |
+                    ForEach-Object { $_.Matches.Value } | Set-Content "$evidence/build-errors.txt"
                 throw "SAL build failed: $project; codes=$($codes -join ','); exit=$LASTEXITCODE"
             }
+        }
+        # Generate an ephemeral test certificate in the disposable runner and
+        # sign the catalogs explicitly: no Visual Studio user signing profile.
+        $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=BIO SAL runner experiment' -CertStoreLocation Cert:/LocalMachine/My
+        Export-Certificate -Cert $certificate -FilePath "${outputDir}package.cer" | Out-Null
+        $signtool = "${env:ProgramFiles(x86)}/Windows Kits/10/bin/10.0.26100.0/x64/signtool.exe"
+        $catalogs = @(Get-ChildItem $outputDir -Recurse -Filter *.cat)
+        if (!$catalogs.Count) { throw 'SAL build produced no catalogs' }
+        foreach ($catalog in $catalogs) {
+            & $signtool sign /fd SHA256 /sm /s My /sha1 $certificate.Thumbprint $catalog.FullName
+            if ($LASTEXITCODE) { throw "Test signing failed: $($catalog.Name)" }
         }
         Get-ChildItem $outputDir -Recurse -File -Include *.sys,*.cat,*.inf,*.cer,*.dll |
             Get-FileHash -Algorithm SHA256 | Select-Object Path,Hash | ConvertTo-Json > "$evidence/sal-package-hashes.json"
