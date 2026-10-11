@@ -1,0 +1,202 @@
+name: Release
+
+# Publishes a GitHub prerelease from every push to master that changes a
+# shipped file (ADR 0017). Until the app reaches users in M5 every release is a
+# prerelease and never takes the "latest" spot.
+#
+#   gate           .github/scripts/release_gate.py: tag v<workspace version>-pre.<height>
+#                  (height = commits reachable from the pushed commit), released
+#                  when shipped files changed since the newest v* tag or when a
+#                  dispatch asks for it with force
+#   build-windows  release build of the developer tools, zipped
+#   build-linux    the same for Linux (bio-replay runs in Linux CI)
+#   publish        SHA256SUMS.txt, notes from the commit subjects, and the
+#                  prerelease itself (assets replaced when the tag exists)
+#
+# Every job checks out release_sha, the commit the gate decided on, so a push
+# that lands while the workflow runs cannot slip into the release.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Release even when no shipped file changed"
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.gate.outputs.should_release }}
+      version: ${{ steps.gate.outputs.version }}
+      tag: ${{ steps.gate.outputs.tag }}
+      previous_tag: ${{ steps.gate.outputs.previous_tag }}
+      release_sha: ${{ steps.gate.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Decide
+        id: gate
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            python3 .github/scripts/release_gate.py --force
+          else
+            python3 .github/scripts/release_gate.py
+          fi
+
+  build-windows:
+    name: Windows tools
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.release_sha }}
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+
+      - name: Build
+        env:
+          BIO_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+        run: cargo build --release --locked -p bio-replay
+
+      - name: Package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reported = & target/release/bio-replay.exe --version
+          if ($reported -ne "bio-replay $env:VERSION") { throw "binary reports '$reported'" }
+          $stage = "bio-atmos-tools-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$stage" | Out-Null
+          Copy-Item target/release/bio-replay.exe, LICENSE, README.md "dist/$stage/"
+          Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip"
+          Remove-Item -Recurse -Force "dist/$stage"
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  build-linux:
+    name: Linux tools
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.release_sha }}
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux
+
+      - name: Build
+        env:
+          BIO_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+        run: cargo build --release --locked -p bio-replay
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          reported="$(target/release/bio-replay --version)"
+          test "$reported" = "bio-replay $VERSION" || { echo "binary reports '$reported'"; exit 1; }
+          stage="bio-atmos-tools-$VERSION-linux-x86_64"
+          mkdir -p "dist/$stage"
+          cp target/release/bio-replay LICENSE README.md "dist/$stage/"
+          tar -C dist -czf "dist/$stage.tar.gz" "$stage"
+          rm -rf "dist/$stage"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish the prerelease
+    needs: [gate, build-windows, build-linux]
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.gate.outputs.tag }}
+      VERSION: ${{ needs.gate.outputs.version }}
+      PREVIOUS: ${{ needs.gate.outputs.previous_tag }}
+      RELEASE_SHA: ${{ needs.gate.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.release_sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Checksums and notes
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          range="$RELEASE_SHA"
+          if [ -n "$PREVIOUS" ]; then range="$PREVIOUS..$RELEASE_SHA"; fi
+          {
+            echo "Prerelease built from ${RELEASE_SHA}. Developer tools only; the app arrives in M4."
+            echo
+            echo "## Changes"
+            git log --no-merges --pretty=format:'- %s' "$range"
+            echo
+          } > notes.md
+          cat notes.md
+
+      - name: Create or update the prerelease
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+            gh release edit "$TAG" --notes-file notes.md --prerelease
+          else
+            gh release create "$TAG" release/* --target "$RELEASE_SHA" \
+              --title "BIO Atmos $VERSION" --notes-file notes.md --prerelease --latest=false
+          fi
+          gh release view "$TAG" --json assets -q '.assets[].name'

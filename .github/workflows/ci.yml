@@ -1,0 +1,101 @@
+name: CI
+
+# Gates every pull request and every push to master (ADR 0002):
+#   lint    fmt, clippy -D warnings, the bio-policy gates (forbid unsafe,
+#           unsafe budget, feature registry, Windows code only in bio-sys) and
+#           the release gate's unit tests
+#   test    cargo test on Linux and Windows; on Windows also the generated
+#           driver header compiled as C89, C11 and C++17 by MSVC
+#   deny    cargo-deny: advisories, licenses, bans, sources
+# The engine and everything below it build without Windows, which is why the
+# Linux leg can run the replay tests at all.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  lint:
+    name: fmt + clippy + policy gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Policy gates (crates/bio-policy)
+        run: cargo test -p bio-policy --locked -- --nocapture
+
+      - name: Release gate unit tests
+        run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
+
+  test:
+    name: cargo test (${{ matrix.os }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-targets --locked
+
+      - name: cargo test --doc
+        run: cargo test --workspace --doc --locked
+
+      - name: Driver header compiles as C89, C11 and C++17 (MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/check-c-header.ps1
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny --all-features check
