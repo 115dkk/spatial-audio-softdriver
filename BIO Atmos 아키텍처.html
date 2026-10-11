@@ -1,0 +1,997 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>BIO Atmos 아키텍처</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* 레이아웃: 신호 흐름 회로도 같은 설계서. 본문은 한 단, 그래프와 표만 넓게.
+   색은 신뢰 수준을 뜻한다: 화면(보라) → safe Rust(초록) → unsafe(황토) → 커널(벽돌) → 외부(회청). */
+:root {
+  --bg: #F1F4F2;
+  --surface: #FFFFFF;
+  --ink: #16201D;
+  --muted: #56635E;
+  --rule: #D2DAD6;
+  --code-bg: #E7ECE9;
+  --signal: #0067B0;
+  --z-app: #6A55C9;
+  --z-safe: #2A7B50;
+  --z-unsafe: #A2670F;
+  --z-kernel: #B0392D;
+  --z-ext: #586672;
+  --z-app-bg: #ECEAF7;
+  --z-safe-bg: #E6F0EA;
+  --z-unsafe-bg: #F5EEDF;
+  --z-kernel-bg: #F5E7E4;
+  --z-ext-bg: #E9EDEF;
+  --font-body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "D2Coding", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --measure: 46rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0E1413; --surface: #161F1E; --ink: #E2E9E6; --muted: #9AA8A2; --rule: #2A3633; --code-bg: #1B2625;
+    --signal: #5DB5FF;
+    --z-app: #AB9EF1; --z-safe: #6BC594; --z-unsafe: #E3AE58; --z-kernel: #F08073; --z-ext: #A2AFBA;
+    --z-app-bg: #1A1929; --z-safe-bg: #132119; --z-unsafe-bg: #231C10; --z-kernel-bg: #281513; --z-ext-bg: #192024;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0E1413; --surface: #161F1E; --ink: #E2E9E6; --muted: #9AA8A2; --rule: #2A3633; --code-bg: #1B2625;
+  --signal: #5DB5FF;
+  --z-app: #AB9EF1; --z-safe: #6BC594; --z-unsafe: #E3AE58; --z-kernel: #F08073; --z-ext: #A2AFBA;
+  --z-app-bg: #1A1929; --z-safe-bg: #132119; --z-unsafe-bg: #231C10; --z-kernel-bg: #281513; --z-ext-bg: #192024;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.78;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+.page { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 72px; }
+.prose { max-width: var(--measure); }
+h1, h2, h3, h4 { text-wrap: balance; line-height: 1.3; margin: 0; }
+h1 { font-size: clamp(28px, 4.2vw, 40px); font-weight: 700; letter-spacing: -0.01em; }
+h2 { font-size: 23px; font-weight: 700; margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); }
+h3 { font-size: 17.5px; font-weight: 600; }
+h4 { font-size: 14px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; margin-top: 18px; }
+p { margin: 12px 0 0; }
+a { color: var(--signal); text-underline-offset: 2px; }
+code, pre, .mono { font-family: var(--font-mono); }
+:not(pre) > code { font-size: 0.88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre.code {
+  background: var(--code-bg); border-radius: 8px; padding: 12px 14px; margin: 10px 0 0;
+  font-size: 12.5px; line-height: 1.6; overflow-x: auto; white-space: pre;
+}
+.eyebrow { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.lede { font-size: 17.5px; line-height: 1.75; margin-top: 16px; }
+.note { font-size: 14px; color: var(--muted); border-left: 2px solid var(--rule); padding-left: 12px; margin-top: 18px; }
+ul, ol { padding-left: 1.3em; margin: 12px 0 0; }
+li + li { margin-top: 6px; }
+strong { font-weight: 600; }
+
+header.top { display: grid; gap: 4px; }
+.meta-row { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 18px; font-size: 13px; color: var(--muted); }
+.meta-row span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.dot.z-app { background: var(--z-app); } .dot.z-safe { background: var(--z-safe); }
+.dot.z-unsafe { background: var(--z-unsafe); } .dot.z-kernel { background: var(--z-kernel); } .dot.z-ext { background: var(--z-ext); }
+
+/* 그래프 */
+.graph-app { margin-top: 18px; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: center; justify-content: space-between; }
+.chips, .legend { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip, .legend-item {
+  font: 500 13px/1 var(--font-body); color: var(--ink); background: var(--surface);
+  border: 1px solid var(--rule); border-radius: 999px; padding: 8px 12px; cursor: pointer;
+}
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip:hover { border-color: var(--muted); }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; border-radius: 7px; padding: 6px 10px; }
+.legend-item[aria-pressed="false"] { opacity: 0.45; text-decoration: line-through; }
+.chip:focus-visible, .legend-item:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.legend-line { stroke: var(--muted); stroke-width: 2; }
+.legend-line.k-audio { stroke: var(--ink); stroke-width: 2.4; }
+.legend-line.k-control { stroke-dasharray: 5 4; }
+.legend-line.k-offline { stroke-dasharray: 1.5 3.5; stroke-linecap: round; }
+.graph-scroll {
+  margin-top: 14px; overflow-x: auto; background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 12px; padding: 6px;
+}
+svg.arch { display: block; width: 100%; min-width: 980px; height: auto; }
+.graph-hint { font-size: 13px; color: var(--muted); margin-top: 8px; }
+.band { stroke: none; }
+.band-app { fill: var(--z-app-bg); } .band-safe { fill: var(--z-safe-bg); } .band-unsafe { fill: var(--z-unsafe-bg); }
+.band-kernel { fill: var(--z-kernel-bg); } .band-ext { fill: var(--z-ext-bg); }
+.band-label { font: 600 12px var(--font-mono); letter-spacing: 0.02em; }
+.bl-app { fill: var(--z-app); } .bl-safe { fill: var(--z-safe); } .bl-unsafe { fill: var(--z-unsafe); }
+.bl-kernel { fill: var(--z-kernel); } .bl-ext { fill: var(--z-ext); }
+.edge-line { fill: none; stroke: var(--muted); stroke-width: 1.6; transition: opacity 0.2s; }
+.edge.k-audio .edge-line { stroke: var(--ink); stroke-width: 2.2; }
+.edge.k-control .edge-line { stroke-dasharray: 6 4; }
+.edge.k-offline .edge-line { stroke-dasharray: 1.5 4; stroke-linecap: round; }
+.edge.on .edge-line { stroke: var(--signal); stroke-width: 2.6; }
+.edge.on.k-audio .edge-line { stroke-width: 3; }
+.edge-flow { fill: none; stroke: var(--surface); stroke-width: 1.4; stroke-dasharray: 3 13; animation: flow 1.1s linear infinite; opacity: 0.85; }
+@keyframes flow { to { stroke-dashoffset: -16; } }
+@media (prefers-reduced-motion: reduce) { .edge-flow { animation: none; display: none; } }
+.edge.dim { opacity: 0.16; }
+.edge-label {
+  font: 500 10.5px var(--font-mono); fill: var(--muted);
+  paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round;
+}
+.edge.on .edge-label { fill: var(--signal); font-weight: 600; }
+.edge.dim .edge-label { opacity: 0; }
+.mk { stroke: none; }
+.mk-audio { fill: var(--ink); } .mk-control, .mk-offline { fill: var(--muted); } .mk-active { fill: var(--signal); }
+.gnode { cursor: pointer; outline: none; }
+.node-box { fill: var(--surface); stroke-width: 1.4; transition: stroke-width 0.15s; }
+.gnode.z-app .node-box { stroke: var(--z-app); } .gnode.z-safe .node-box { stroke: var(--z-safe); }
+.gnode.z-unsafe .node-box { stroke: var(--z-unsafe); } .gnode.z-kernel .node-box { stroke: var(--z-kernel); }
+.gnode.z-ext .node-box { stroke: var(--z-ext); }
+.gnode:hover .node-box { stroke-width: 2.4; }
+.gnode.sel .node-box { stroke-width: 3; stroke: var(--ink); }
+.gnode:focus-visible .node-box { stroke: var(--signal); stroke-width: 3; }
+.node-name { font: 600 12.5px var(--font-mono); fill: var(--ink); }
+.node-sub { font: 400 11px var(--font-body); fill: var(--muted); }
+.gnode.dim { opacity: 0.32; }
+.graph-panels { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 16px; margin-top: 18px; }
+@media (max-width: 860px) { .graph-panels { grid-template-columns: minmax(0, 1fr); } }
+.steps, .detail { background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 18px 20px 20px; min-width: 0; }
+.steps h3, .detail h3 { margin-top: 6px; }
+.steps ol { padding-left: 1.4em; }
+.steps li { font-size: 14.5px; }
+.detail-title { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); }
+.swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; flex: none; }
+.swatch.z-app { background: var(--z-app); } .swatch.z-safe { background: var(--z-safe); } .swatch.z-unsafe { background: var(--z-unsafe); }
+.swatch.z-kernel { background: var(--z-kernel); } .swatch.z-ext { background: var(--z-ext); }
+.detail-meta { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.detail p { font-size: 14.5px; }
+.facts { display: grid; grid-template-columns: 7.5em minmax(0, 1fr); gap: 8px 12px; margin: 16px 0 0; font-size: 14px; }
+.facts dt { color: var(--muted); font-weight: 500; }
+.facts dd { margin: 0; }
+@media (max-width: 520px) { .facts { grid-template-columns: minmax(0, 1fr); } .facts dd { margin-bottom: 6px; } }
+.graph-fallback { padding: 18px; color: var(--muted); }
+
+/* 용어 */
+.terms { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 0 36px; margin-top: 8px; }
+.terms dl { margin: 0; }
+.terms dt { font-weight: 600; margin-top: 16px; }
+.terms dt code { margin-left: 4px; }
+.terms dd { margin: 2px 0 0; font-size: 14.5px; color: var(--ink); }
+.terms h3 { margin-top: 24px; font-size: 15px; color: var(--muted); }
+
+/* 후보 카드 */
+.cands { display: grid; gap: 18px; margin-top: 22px; }
+.cand { background: var(--surface); border: 1px solid var(--rule); border-radius: 14px; padding: 20px 22px 22px; min-width: 0; }
+.cand header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.cand-no { font: 600 12px var(--font-mono); color: var(--muted); }
+.cand h3 { flex: 1 1 18rem; }
+.badge { font: 600 12px/1 var(--font-body); border-radius: 999px; padding: 6px 10px; border: 1.5px solid currentColor; white-space: nowrap; }
+.badge.strong { color: var(--z-safe); }
+.badge.explore { color: var(--z-unsafe); }
+.cand-files { font-size: 13.5px; color: var(--muted); margin-top: 8px; }
+.cand-body { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 22px; margin-top: 12px; }
+@media (max-width: 900px) { .cand-body { grid-template-columns: minmax(0, 1fr); } }
+.cand dl { margin: 0; }
+.cand dt { font-weight: 600; font-size: 14px; margin-top: 12px; }
+.cand dt:first-child { margin-top: 0; }
+.cand dd { margin: 3px 0 0; font-size: 14.5px; }
+.ba { display: grid; gap: 12px; align-content: start; }
+.ba figure { margin: 0; border-radius: 10px; padding: 12px; background: var(--bg); min-width: 0; }
+.ba figcaption { font: 600 11.5px var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.ba-after { outline: 1.5px solid var(--z-safe); outline-offset: -1.5px; }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 4px; }
+.flow + .flow { margin-top: 8px; }
+.n { font: 500 12px/1.3 var(--font-mono); padding: 5px 8px; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+.n.bad { border-color: var(--z-kernel); }
+.n.good { border-color: var(--z-safe); }
+.arr { font: 500 11px var(--font-mono); color: var(--muted); white-space: nowrap; }
+.proc { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px; border: 1.5px dashed var(--muted); border-radius: 9px; }
+.proc-label { flex-basis: 100%; font: 600 10.5px var(--font-mono); color: var(--muted); }
+.grp { display: inline-flex; align-items: center; gap: 4px; }
+.row-label { flex-basis: 100%; font: 600 11px var(--font-body); color: var(--muted); }
+
+/* 표 */
+.table-wrap { overflow-x: auto; margin-top: 14px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; font-size: 13px; color: var(--muted); background: var(--bg); }
+tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.total td { font-weight: 600; }
+.small { font-size: 13px; color: var(--muted); }
+
+/* 스레드 그림 */
+.fig { margin: 16px 0 0; overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); border-radius: 12px; padding: 8px; }
+.fig svg { display: block; width: 100%; min-width: 760px; height: auto; }
+.fig .dom-src { fill: var(--z-safe-bg); }
+.fig .dom-dac { fill: var(--z-ext-bg); }
+.fig .dom-label { font: 600 12px var(--font-mono); fill: var(--muted); }
+.fig .lane { fill: var(--surface); stroke: var(--rule); stroke-width: 1.2; }
+.fig .lane-k { fill: var(--surface); stroke: var(--z-kernel); stroke-width: 1.4; }
+.fig .lane-ctl { fill: var(--surface); stroke: var(--z-app); stroke-width: 1.4; }
+.fig .lane-title { font: 600 12px var(--font-body); fill: var(--ink); }
+.fig .lane-note { font: 400 11.5px var(--font-body); fill: var(--muted); }
+.fig .chipbox { fill: var(--bg); stroke: var(--z-safe); stroke-width: 1.2; }
+.fig .chipbox.out { stroke: var(--z-unsafe); }
+.fig .ring { fill: var(--surface); stroke: var(--signal); stroke-width: 2.2; }
+.fig .chiptext { font: 500 11.5px var(--font-mono); fill: var(--ink); }
+.fig .wire { fill: none; stroke: var(--ink); stroke-width: 1.8; }
+.fig .wire.ctl { stroke: var(--muted); stroke-dasharray: 5 4; stroke-width: 1.4; }
+.fig .wire.trim { stroke: var(--signal); stroke-dasharray: 5 4; stroke-width: 1.6; }
+.fig .wlabel { font: 500 10.5px var(--font-mono); fill: var(--muted); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; }
+.fig .wlabel.trim { fill: var(--signal); }
+.fig .ah { fill: var(--ink); } .fig .ah.ctl { fill: var(--muted); } .fig .ah.trim { fill: var(--signal); }
+
+.tree { font-size: 12.5px; }
+footer.sources { margin-top: 64px; padding-top: 18px; border-top: 1px solid var(--rule); font-size: 13.5px; color: var(--muted); }
+footer.sources ul { padding-left: 1.2em; }
+</style>
+
+<div class="page">
+  <header class="top">
+    <p class="eyebrow">설계서 초안 · 2026-10-11</p>
+    <h1>BIO Atmos 아키텍처</h1>
+    <p class="lede prose">게임과 Apple Music이 내보내는 Dolby Atmos를 가상 HDMI 장치로 받아, 개인 측정 BRIR로 헤드폰에 렌더링하는 Windows 앱의 구조를 정합니다. 스택은 이미 정했으므로 여기서는 모듈의 자리와 인터페이스, 시임(seam), 실시간 스레드와 클럭, 그리고 한 번 서명하면 다시 고칠 수 없는 드라이버의 계약을 다룹니다.</p>
+    <div class="meta-row" aria-label="색이 뜻하는 신뢰 수준">
+      <span><i class="dot z-app"></i>화면 · Tauri + TypeScript</span>
+      <span><i class="dot z-safe"></i>safe Rust</span>
+      <span><i class="dot z-unsafe"></i>unsafe Rust (bio-sys)</span>
+      <span><i class="dot z-kernel"></i>커널 드라이버</span>
+      <span><i class="dot z-ext"></i>Windows와 장치</span>
+    </div>
+    <p class="note prose">'BIO Atmos'는 작업용 이름입니다. 공개 제품명에 'Atmos'를 넣으면 상표 문제가 생길 수 있어 출시 전에 다시 정해야 합니다.</p>
+  </header>
+
+  <section id="summary">
+    <h2>한눈에</h2>
+    <div class="prose">
+      <p>이 설계는 결정 세 가지로 요약됩니다. 첫째, 커널 드라이버는 형식을 받아 바이트와 시각만 넘기는 '얼린 계약'입니다. EV 인증서를 한 번만 사므로 드라이버를 고칠 수 있는 기간은 인증서의 1년뿐이고, 그래서 커널에는 메커니즘만 두고 해석과 정책은 모두 사용자 모드로 뺍니다. 둘째, 게임의 MAT 2.1, Apple Music의 DD+ JOC, 플레이어의 TrueHD, 일반 앱의 PCM은 모두 '장면' 하나로 모입니다. 렌더러와 컨볼버는 하나씩만 있고, 소스가 무엇이었는지 모릅니다. 셋째, 가상 장치의 클럭과 출력 장치의 클럭이 만나는 지점을 양이 2채널 뒤에 둡니다. 클럭 보정은 22채널이 아니라 2채널에서 하거나, 드라이버 트림으로 아예 없앱니다.</p>
+      <p>unsafe는 <code>bio-sys</code> 크레이트 하나와 커널 드라이버에만 있습니다. 나머지 크레이트는 모두 <code>forbid(unsafe_code)</code>이고 Windows 없이 돌기 때문에, 드라이버 기록 덤프를 재생하는 방식으로 Linux CI에서 검증할 수 있습니다. 화면은 의도를 보내고 스냅샷을 그리기만 하며, 판단은 Rust의 <code>supervisor</code> 하나가 합니다.</p>
+      <p>구축기와 비교하면 프로세스 넷(수정한 SAL CLI, <code>game_bridge.py</code>, mpv, PowerShell 스크립트)이 앱 하나와 관리자 권한 도우미 하나로 줄고, 소스마다 따로 있던 렌더링이 하나로 합쳐집니다. 게임 소스의 지연은 버퍼를 더한 계산으로 약 32 ms에서 약 23 ms로 줄고, 실제 값은 앱이 직접 재서 보여 줍니다.</p>
+    </div>
+  </section>
+
+  <section id="graph">
+    <h2>전체 아키텍처</h2>
+    <p class="prose">가로 띠는 신뢰 수준입니다. 위로 갈수록 안전하고 고치기 쉬우며, 아래로 갈수록 실수의 대가가 큽니다. 오디오는 왼쪽 아래 소스에서 들어와 커널을 지나 왼쪽으로 올라간 뒤, safe Rust를 가로질러 오른쪽 아래 출력 장치로 나갑니다. 시나리오를 고르면 그 흐름에 쓰이는 모듈만 남고, 모듈을 누르면 인터페이스와 검증 방법이 그래프 아래에 나옵니다.</p>
+    <div id="arch-graph"><p class="graph-fallback">그래프를 불러오는 중입니다. 계속 이 문장이 보이면 React 스크립트를 받지 못한 것이니 페이지를 새로 고쳐 주세요.</p></div>
+  </section>
+
+  <section id="terms">
+    <h2>용어</h2>
+    <p class="prose">저장소를 만들면 <code>CONTEXT.md</code>로 옮길 목록입니다. 도메인 용어는 이 앱이 다루는 대상의 이름이고, 설계 용어는 모듈을 평가할 때 쓰는 말입니다. 이 문서의 모든 문장은 이 이름들만 씁니다.</p>
+    <div class="terms">
+      <div>
+        <h3>도메인 용어</h3>
+        <dl>
+          <dt>소스</dt><dd>가상 장치에 소리를 쓰는 쪽입니다. Windows 공간음향(게임), Apple Music, 동영상 플레이어, 일반 앱이 있습니다.</dd>
+          <dt>소스 형식</dt><dd>소스가 쓰는 데이터의 종류입니다. MAT 2.1(비압축 PCM 객체), DD+ JOC, TrueHD, PCM 등이 있습니다.</dd>
+          <dt>버스트</dt><dd>IEC 61937로 포장된 덩어리 하나입니다. 게임의 MAT 2.1은 20 ms마다 61,440바이트입니다.</dd>
+          <dt>기록<code>Record</code></dt><dd>드라이버가 링에 남기는 단위입니다. 데이터, 형식 변경, 시작, 정지, 넘침 다섯 종류가 있습니다.</dd>
+          <dt>에포크</dt><dd>형식이 바뀔 때마다 1씩 오르는 번호입니다. 디코더를 언제 다시 시작할지 정합니다.</dd>
+          <dt>장면<code>SceneBlock</code></dt><dd>한 블록 동안의 객체들(신호와 위치)과 LFE입니다. 베드 채널도 고정 위치 객체로 들어갑니다. 모든 디코더의 출력이자 렌더러의 유일한 입력입니다.</dd>
+          <dt>방향</dt><dd>BRIR이 측정된 스피커 위치 하나입니다. 이름, 방위각, 고도를 가집니다.</dd>
+          <dt>레이아웃<code>Layout</code></dt><dd>BRIR 세트가 가진 방향의 목록입니다. 렌더러는 이 방향들 사이로 패닝합니다.</dd>
+        </dl>
+      </div>
+      <div>
+        <dl>
+          <dt>피드<code>Feeds</code></dt><dd>방향 하나로 보내는 신호입니다. 렌더러는 방향 수만큼 피드를 냅니다.</dd>
+          <dt>양이 신호</dt><dd>피드마다 BRIR을 걸어 귀별로 더한 2채널입니다. 바이노럴 신호와 같은 말입니다.</dd>
+          <dt>클럭 도메인</dt><dd>가상 장치의 클럭(소스 쪽)과 출력 장치의 클럭(DAC 쪽)입니다. 둘은 수백 ppm까지 어긋납니다.</dd>
+          <dt>교차 링</dt><dd>두 클럭 도메인이 만나는 2채널 링입니다. 이 링의 수위가 지연과 클럭 보정의 기준입니다.</dd>
+          <dt>트림</dt><dd>드라이버의 가상 DMA 속도를 ppm 단위로 조정하는 일입니다. 소스의 생산 속도를 DAC에 맞춥니다.</dd>
+          <dt>프로필</dt><dd>BRIR 세트, 헤드폰 FIR, 출력 장치 선택자, 게인을 묶은 것입니다.</dd>
+          <dt>의도<code>Intent</code>와 스냅샷<code>Snapshot</code></dt><dd>화면이 Rust에 보내는 요청과, Rust가 화면에 돌려주는 상태 전체입니다.</dd>
+        </dl>
+        <h3>설계 용어</h3>
+        <dl>
+          <dt>모듈과 인터페이스</dt><dd>모듈은 인터페이스와 구현을 가진 모든 것입니다. 인터페이스는 호출하는 쪽이 알아야 하는 전부이고, 타입뿐 아니라 불변식, 순서, 오류, 성능 약속을 포함합니다.</dd>
+          <dt>깊이</dt><dd>인터페이스에 비해 뒤에 숨은 동작이 많을수록 깊습니다. 깊은 모듈은 호출하는 쪽에 레버리지를, 고치는 쪽에 지역성(변경과 지식이 한 곳에 모이는 성질)을 줍니다.</dd>
+          <dt>시임과 어댑터</dt><dd>시임은 그 자리를 고치지 않고 동작을 바꿀 수 있는 곳이고, 어댑터는 그 자리를 채우는 구체물입니다. 어댑터가 하나면 가상의 시임이고, 둘이면 진짜입니다.</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <section id="decided">
+    <h2>이미 정한 것</h2>
+    <div class="prose">
+      <p>지난 논의에서 정한 결정입니다. 이 문서는 이것들을 전제로 하고 다시 따지지 않습니다. 저장소를 만들 때 하나씩 ADR로 남깁니다.</p>
+      <ul>
+        <li><strong>셸과 권위:</strong> 화면은 Tauri 2와 TypeScript가 그리고, 상태와 판단은 모두 Rust가 가집니다.</li>
+        <li><strong>unsafe 격리:</strong> 손으로 쓰는 unsafe는 <code>bio-sys</code> 한 크레이트에만 두고, 다른 크레이트 루트에는 모두 <code>#![forbid(unsafe_code)]</code>를 겁니다. Impulcifer 3.x처럼 <code>unsafe-budget.toml</code>과 정책 테스트로 지킵니다.</li>
+        <li><strong>라이선스:</strong> 사용자 모드는 MIT로 내고, 드라이버는 SysVAD에서 출발한 MS-PL로 둡니다. 둘은 IOCTL로만 대화하는 별개 프로그램입니다.</li>
+        <li><strong>서명:</strong> EV 인증서(SSL.com 개인사업자, $359)를 한 번 사서 Microsoft 증명 서명을 받습니다. 드라이버는 최소로 만들어 얼립니다.</li>
+        <li><strong>클린룸:</strong> SpatialAudioLab에는 라이선스가 없으므로 구현자는 그 소스를 보지 않습니다. SAL과 Omniphony는 블랙박스로 돌려 얻은 출력만 골든으로 씁니다.</li>
+        <li><strong>컨볼버:</strong> EqualizerAPO-XT의 MultiConvolution(115dkk 작성)을 Rust와 MIT로 새로 씁니다. libHybridConv, FFTW, IrCache는 들이지 않습니다.</li>
+        <li><strong>디코더와 입출력:</strong> E-AC-3 JOC와 TrueHD는 harletty-bridge의 <code>eac3</code>·<code>truehd</code> 크레이트(Apache-2.0)를 쓰고, 출력은 <code>wasapi</code>, 리샘플링은 <code>rubato</code>, 실시간 링은 <code>rtrb</code>를 씁니다.</li>
+        <li><strong>원작자 동의:</strong> 구축기 작성자는 자기가 쓴 코드와 문서에 대해 MIT와 (L)(A)GPL 사용에 동의했습니다.</li>
+      </ul>
+      <p>아래 심화 후보는 이 문서가 새로 제안하는 결정입니다. 합의되면 같은 방식으로 ADR이 됩니다.</p>
+    </div>
+  </section>
+
+  <section id="candidates">
+    <h2>프로토타입에서 본 마찰과 심화 후보</h2>
+    <div class="prose">
+      <p>구축기 두 편이 만든 체인은 동작하는 프로토타입입니다. 그 구조를 모듈 관점에서 읽으면 마찰이 여덟 군데 보이고, 각각이 새 아키텍처의 결정 하나가 됩니다. '강력 추천'은 이 설계의 뼈대이고, '검토할 만함'은 시험서명 단계에서 측정해 정할 것입니다. 근거가 모자란 '추측' 등급은 이번에는 없습니다.</p>
+    </div>
+    <div class="cands">
+
+      <article class="cand" id="c1">
+        <header><span class="cand-no">후보 1</span><h3>프로세스 넷과 홉 셋을 엔진 하나로</h3><span class="badge strong">강력 추천</span></header>
+        <p class="cand-files">관련: SAL CLI <code>live-layout</code>(sal-cli-bio-game.patch), <code>game_bridge.py</code>, mpv BRIR 그래프, <code>sal-bio-21.ini</code>. 게임 쪽 파일은 공유 폴더에 없어 구축기 서술을 기준으로 했습니다.</p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>오디오가 SAL CLI에서 네임드 파이프, <code>game_bridge.py</code>에서 TCP, mpv를 거쳐 WASAPI로 갑니다. 홉마다 버퍼가 있어(브리지 10 ms, mpv 6 ms) 지연이 쌓이고, 채널 순서는 SAL ini, 브리지의 무음 TC 채널 삽입, mpv 필터 그래프 세 곳에서 말없이 맞춰져 있습니다. 방향 하나를 바꾸면 세 파일을 함께 고쳐야 합니다.</dd>
+            <dt>해결</dt>
+            <dd>캡처부터 출력까지 <code>engine</code> 하나가 소유하고, 모듈 사이로는 타입(Record, Burst, SceneBlock, Feeds)만 지나갑니다. 채널 순서는 <code>brir</code>가 BRIR 세트에서 레이아웃을 한 번 만들 때 정해지고, 다른 모듈은 그것을 받아 씁니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>채널 순서에 관한 지식이 <code>brir</code> 한 곳에 모입니다. 덤프 하나를 재생하는 테스트로 체인 전체를 검증할 수 있어, 프로세스 넷을 띄워 귀로 확인하던 일이 CI로 옮겨 갑니다. 홉 버퍼가 사라져 mpv의 6 ms와 분할 지연이 빠집니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow">
+                <span class="proc"><span class="proc-label">프로세스 1</span><span class="n bad">SAL CLI</span></span>
+                <span class="arr">pipe →</span>
+                <span class="proc"><span class="proc-label">프로세스 2</span><span class="n bad">game_bridge.py</span></span>
+                <span class="grp"><span class="arr">TCP →</span>
+                <span class="proc"><span class="proc-label">프로세스 3</span><span class="n bad">mpv + afir</span></span></span>
+                <span class="grp"><span class="arr">→</span><span class="n">WASAPI</span></span>
+              </div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow">
+                <span class="proc"><span class="proc-label">bio-atmos.exe 한 프로세스</span>
+                  <span class="n good">캡처</span><span class="arr">→</span><span class="n good">해체·디코드</span><span class="arr">→</span><span class="n good">렌더</span><span class="arr">→</span><span class="n good">컨볼루션</span><span class="arr">→</span><span class="n good">교차 링</span><span class="arr">→</span><span class="n good">출력</span>
+                </span>
+              </div>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="cand" id="c2">
+        <header><span class="cand-no">후보 2</span><h3>두 갈래의 소스를 '장면' 시임 하나로</h3><span class="badge strong">강력 추천</span></header>
+        <p class="cand-files">관련: <code>apple_bridge.py</code>와 Omniphony(VBAP), SAL CLI의 쌍대 패닝</p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>Apple Music 쪽은 Omniphony가 VBAP로, 게임 쪽은 SAL CLI가 쌍대 패닝으로 렌더링합니다. 같은 BRIR을 쓰면서도 패닝 방식이 둘이라 음상이 소스마다 다르고, 렌더링을 고치려면 두 곳을 고쳐야 합니다. 영화의 TrueHD를 실시간으로 받으려면 세 번째 갈래가 생깁니다.</dd>
+            <dt>해결</dt>
+            <dd>모든 디코더가 SceneBlock(위치가 붙은 신호들과 LFE)을 내고, 렌더러는 이것만 받습니다. 베드 채널도 고정 위치 객체로 바꿔 넣으므로 렌더러에게는 객체만 있습니다. 디코더는 MAT, DD+ JOC, TrueHD, PCM 네 어댑터가 됩니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>어댑터가 넷이니 진짜 시임입니다. 새 형식은 어댑터 하나로 끝나고 렌더러는 바뀌지 않으며, 렌더러를 고치면 모든 소스가 함께 좋아집니다. 디코더는 SceneBlock 비교로, 렌더러는 합성 장면으로 따로 테스트합니다. 삭제 시험을 하면 SceneBlock을 지우는 순간 디코더 넷이 모두 렌더러의 입력 모양을 알아야 하므로, 이 타입이 제 몫을 한다는 것이 드러납니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow"><span class="row-label">Apple Music</span><span class="n">apple_bridge.py</span><span class="arr">→</span><span class="n bad">Omniphony VBAP</span><span class="arr">→</span><span class="n">afir</span></div>
+              <div class="flow"><span class="row-label">게임</span><span class="n bad">SAL CLI 쌍대 패닝</span><span class="arr">→</span><span class="n">game_bridge.py</span><span class="arr">→</span><span class="n">afir</span></div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow"><span class="n">MAT</span><span class="n">DD+ JOC</span><span class="n">TrueHD</span><span class="n">PCM</span><span class="arr">SceneBlock →</span><span class="n good">render</span><span class="arr">Feeds →</span><span class="n good">convolver</span></div>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="cand" id="c3">
+        <header><span class="cand-no">후보 3</span><h3>클럭 교차를 양이 2채널 뒤로</h3><span class="badge strong">강력 추천</span></header>
+        <p class="cand-files">관련: <code>game_bridge.py</code>의 지터버퍼, PI 클럭 보정(±2000 ppm), 64탭 Kaiser 싱크</p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>가상 장치와 출력 장치는 서로 다른 클럭으로 돌기 때문에 보정이 반드시 필요합니다. 지금은 렌더링 전의 22채널을 Python에서 싱크 리샘플링하므로, GIL과 GC가 있는 런타임이 10 ms 지터버퍼 안쪽의 실시간 루프에 들어가 있습니다.</dd>
+            <dt>해결</dt>
+            <dd>해체부터 컨볼루션, 리미터까지를 소스 클럭 도메인에서 끝내고, 2채널 교차 링에서 DAC 클럭과 만나게 합니다. 보정은 2채널 ASRC(rubato)로 하거나, 드라이버에 트림을 보내 소스의 생산 속도를 DAC에 맞춰 리샘플링 자체를 없앱니다. 두 전략은 같은 수위 측정과 PI 제어기를 씁니다. 트림은 소스와 출력 장치의 명목 레이트가 같을 때만 쓰고, 다르면 ASRC가 변환까지 맡습니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>ASRC 연산이 22채널에서 2채널로 줄고, 지터와 드리프트에 관한 지식이 교차 링 한 곳에 모입니다. ASRC와 트림이라는 어댑터 둘이 있으니 진짜 시임이고, 가상 DAC를 ±2000 ppm 어긋나게 둔 시뮬레이션 하나로 두 전략을 함께 검증합니다. 출력 스레드가 하는 일은 링 읽기와 리샘플뿐이라 3 ms 주기 안에서 여유가 큽니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow"><span class="n">22ch</span><span class="arr">→</span><span class="n bad">ASRC 22ch · Python</span><span class="arr">→</span><span class="n">BRIR 22→2</span><span class="arr">→</span><span class="n">DAC</span></div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow"><span class="n">22ch</span><span class="arr">→</span><span class="n">BRIR 22→2</span><span class="arr">→</span><span class="n good">교차 링 2ch</span><span class="arr">→</span><span class="n good">ASRC 2ch 또는 트림</span><span class="arr">→</span><span class="n">DAC</span></div>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="cand" id="c4">
+        <header><span class="cand-no">후보 4</span><h3>드라이버를 얼린 계약으로</h3><span class="badge strong">강력 추천</span></header>
+        <p class="cand-files">관련: SAL 드라이버 패치(<code>hdmiwavtable.h</code>, <code>minwavert.cpp</code>, 구축기 서술), <code>\\.\DolbyDecoderMat</code>, <code>IOCTL_MAT_CAPTURE_READ</code></p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>구축기에서는 Apple Music을 받으려고 형식 표에 DD+를 더해 드라이버를 다시 빌드하고 서명했습니다. 시험서명이라 비용이 없었지만, 증명 서명은 EV가 유효할 때만 받을 수 있습니다. EV를 한 번만 사는 계획에서는 그 1년이 지나면 드라이버를 다시는 고칠 수 없습니다. 링 읽기에 관리자 권한이 필요하고, 형식 변경과 넘침을 알리는 수단이 없다는 것도 같은 이유로 지금 풀어야 합니다.</dd>
+            <dt>해결</dt>
+            <dd>커널은 메커니즘만 가집니다. 형식 표는 상위집합으로 컴파일해 두고 레지스트리 마스크로 켜고, 링은 버전과 길이를 가진 기록을 쌓고, READ는 조건까지 보류되며, 트림 IOCTL로 가상 DMA 속도를 바꿉니다. 일반 사용자가 열 수 있게 SDDL을 둡니다. 해석과 정책은 하나도 넣지 않고, 계약은 <code>bio-abi</code> 한 곳에서 정의해 C 헤더를 생성합니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>새 형식, 새 디코더, 지연 정책이 모두 앱 업데이트로 끝나고 재서명이 필요 없습니다. 커널 코드가 SysVAD의 HDMI 렌더 하나로 줄어 블루스크린을 낼 수 있는 코드도 줄어듭니다. 레이아웃이 한 곳에서 생성되므로 드라이버와 앱이 어긋나면 컴파일 단계에서 드러납니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow"><span class="n bad">형식 표 하드코딩</span><span class="arr">→</span><span class="n bad">고칠 때마다 재빌드·재서명</span><span class="n">관리자만 읽기</span><span class="n">형식 변경 신호 없음</span></div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow">
+                <span class="proc"><span class="proc-label">드라이버 v1 · 얼림</span><span class="n">형식 상위집합 + 마스크</span><span class="n">기록 링</span><span class="n">대기 READ</span><span class="n">트림</span></span>
+                <span class="arr">bio-abi ↔</span>
+                <span class="proc"><span class="proc-label">사용자 모드 · 언제든 갱신</span><span class="n good">해석</span><span class="n good">정책</span></span>
+              </div>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="cand" id="c5">
+        <header><span class="cand-no">후보 5</span><h3>설치와 설정을 상태기계 하나로</h3><span class="badge strong">강력 추천</span></header>
+        <p class="cand-files">관련: <code>Set-SpatialProvider-bio.ps1</code>, 관리자 PowerShell 창(<code>-NoExit</code>), 환경 변수 <code>BIO_SAL_PIPE</code>·<code>BIO_SAL_HALF</code>, 스크립트마다 있는 장치 이름 조회</p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>설정이 PowerShell 스크립트, 환경 변수, mpv 인자, 관리자 창에 흩어져 있습니다. 재부팅 뒤 Denon 엔드포인트 GUID가 바뀌는 문제는 이름 조회로 풀었지만, 그 처리가 실행 스크립트마다 따로 있습니다. '앱이 시키는 대로 하면 끝나는' 설치를 하려면 이 지식이 한 곳에 있어야 합니다.</dd>
+            <dt>해결</dt>
+            <dd><code>supervisor</code> 상태기계가 설치 단계, 장치 선택자, 프로필, 엔진 수명, 기본 장치 복원을 모두 쥡니다. OS 일은 Host 트레이트로만 시키고, 관리자 권한이 필요한 일은 <code>bio-setup</code> 단발 프로세스에만 둡니다. 화면은 Intent를 보내고 Snapshot을 그립니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>Fake Host로 마법사 전 단계, 장치 분리, 드라이버 없음, ID 변경을 Windows 없이 테스트합니다. 설치 모듈은 <code>bio-setup</code>에만 링크되므로, 앱 본체가 관리자 권한 없이 돈다는 사실이 링크 단계에서 보장됩니다. 드라이버가 얼어 있으니 앱 업데이트는 Velopack의 사용자 권한 갱신으로 끝납니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow"><span class="n bad">ps1 스크립트</span><span class="n bad">관리자 창</span><span class="n">환경 변수</span><span class="n">이름 조회 × 실행 스크립트 수</span></div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow"><span class="n">화면</span><span class="arr">Intent →</span><span class="n good">supervisor</span><span class="arr">Host →</span><span class="n">bio-sys</span></div>
+              <div class="flow"><span class="n good">supervisor</span><span class="arr">UAC 1회 →</span><span class="n">bio-setup</span></div>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="cand" id="c6">
+        <header><span class="cand-no">후보 6</span><h3>폴링을 드라이버 신호로</h3><span class="badge explore">검토할 만함</span></header>
+        <p class="cand-files">관련: SAL CLI의 <code>Sleep(1)</code> 루프와 <code>timeBeginPeriod(1)</code>, 반 버스트 조기 디코딩</p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>구축기는 반 버스트를 일찍 잡으려고 1 ms마다 링을 들여다보고, Windows 기본 타이머(15.6 ms)를 <code>timeBeginPeriod(1)</code>로 바꿨습니다. 시스템 전체의 타이머 해상도를 바꾸는 일이라 전력에 영향을 주고, 그래도 최대 1 ms를 기다립니다.</dd>
+            <dt>해결</dt>
+            <dd>READ를 보류해 두면 드라이버가 반 버스트 분량이 쌓이는 순간 완료합니다. 여기에 더해, 오디오 엔진이 WaveRT 버퍼를 쓴 순간을 알려 주는 쓰기 패킷 알림(<code>IMiniportWaveRTOutputStream::SetWritePacket</code>, Windows 10 이상)을 구현하면 가상 DMA 위치를 기다리지 않고 쓴 즉시 링으로 넘길 수 있습니다. Microsoft 문서에 따르면 이때도 위치와 알림은 명목 속도로 진행해야 하므로, 클럭 도메인은 그대로이고 데이터만 일찍 나옵니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>폴링과 타이머 해상도 변경이 사라집니다. 쓰기 패킷 알림까지 넣으면 반 버스트를 기다리는 10 ms의 상당 부분이 줄 수 있지만, 공간음향 엔진이 이 알림을 어떤 주기로 부르는지는 재 봐야 압니다. 드라이버가 얼기 전에 측정해 v1에 넣을지 정해야 한다는 점이 이 후보의 시한이고, 대가는 커널에 취소 안전 큐가 들어가 코드가 늘어난다는 것입니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow"><span class="n bad">Sleep(1) 루프</span><span class="arr">+</span><span class="n bad">timeBeginPeriod(1)</span><span class="arr">→</span><span class="n">링 읽기</span></div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow"><span class="n good">READ 보류</span><span class="arr">→</span><span class="n good">반 버스트 도착 시 완료</span></div>
+              <div class="flow"><span class="row-label">측정 후 결정</span><span class="n">SetWritePacket</span><span class="arr">→</span><span class="n">쓴 즉시 링으로</span></div>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="cand" id="c7">
+        <header><span class="cand-no">후보 7</span><h3>지연을 귀가 아니라 숫자로</h3><span class="badge explore">검토할 만함</span></header>
+        <p class="cand-files">관련: 구축기의 '지연을 줄인 방법' 표, <code>game-status.json</code>(<code>ring_avg_ms</code>, <code>resyncs</code>)</p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>구축기는 버퍼를 하나씩 줄이며 Denon 직접 재생과 귀로 비교했고, 절대 지연은 재지 않았습니다. 단계별 수치는 로그에 있지만 체인 전체의 값은 없습니다.</dd>
+            <dt>해결</dt>
+            <dd>드라이버 기록의 QPC(가상 DMA가 그 바이트를 지난 시각)를 블록과 함께 엔진 끝까지 싣고, 출력 장치의 재생 시각(QPC)과 빼서 블록마다 지연을 계산합니다. 상태 화면에는 p50과 p99를, 진단 녹화에는 분포 전체를 남깁니다. 소스 앱 내부의 지연(게임에서 공간음향 인코더까지)은 이 숫자에 들어가지 않습니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>프리셋과 버퍼 목표를 숫자로 정하고, 지연을 늘리는 변경을 리플레이와 실기 로그로 잡습니다. 사용자가 지연이 커졌다고 알려 오면 화면의 숫자 하나로 확인됩니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow"><span class="n bad">Denon 직접 재생과 귀로 A/B</span></div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow"><span class="n">기록 QPC</span><span class="arr">블록과 함께 →</span><span class="n">재생 QPC</span><span class="arr">→</span><span class="n good">p50 · p99</span></div>
+            </figure>
+          </div>
+        </div>
+      </article>
+
+      <article class="cand" id="c8">
+        <header><span class="cand-no">후보 8</span><h3>헤드폰 FIR, 빈 방향, LFE를 적재 시점으로</h3><span class="badge explore">검토할 만함</span></header>
+        <p class="cand-files">관련: mpv 그래프(22ch afir, 양이 합산, KOSS FIR, +36 dB, 리미터), 무음 TC 채널, LFE의 FC IR 차용</p>
+        <div class="cand-body">
+          <dl>
+            <dt>문제</dt>
+            <dd>헤드폰 보정이 실시간 그래프의 별도 단계이고, 측정 BRIR이 없는 천장 중앙은 무음 채널로 자리만 채우며, LFE는 FC의 양이 IR을 빌려 씁니다. 세 가지가 모두 실행 시 그래프 문자열 안에 흩어져 있습니다.</dd>
+            <dt>해결</dt>
+            <dd><code>brir::prepare</code>가 헤드폰 FIR을 각 BRIR에 미리 접습니다. 둘 다 선형 시불변이라 결과가 같습니다. 레이아웃에 없는 위치는 <code>render</code>의 VBAP가 이웃 방향에 나누므로 무음 채널이 필요 없고, LFE에 어떤 IR을 쓸지는 프로필의 정책으로 둡니다.</dd>
+            <dt>얻는 것</dt>
+            <dd>실시간 연산에서 FIR 단계 하나가 빠지고, BRIR 세트에 관한 지식이 <code>brir</code> 한 곳에 모입니다. 천장 중앙에 놓인 객체도 소리를 잃지 않습니다. 게인과 리미터의 순서(+36 dB 뒤 −1 dBFS 리미터)는 그대로 지켜야 하므로 엔진의 마지막 단계에 남깁니다.</dd>
+          </dl>
+          <div class="ba">
+            <figure><figcaption>지금</figcaption>
+              <div class="flow"><span class="n">BRIR 22→2</span><span class="arr">→</span><span class="n bad">KOSS FIR</span><span class="arr">→</span><span class="n">+36 dB</span><span class="arr">→</span><span class="n">리미터</span></div>
+              <div class="flow"><span class="n bad">TC 무음 채널</span><span class="n bad">LFE = FC IR</span></div>
+            </figure>
+            <figure class="ba-after"><figcaption>바꾼 뒤</figcaption>
+              <div class="flow"><span class="n good">brir::prepare</span><span class="arr">BRIR ∗ HP FIR →</span><span class="n">BRIR 22→2</span><span class="arr">→</span><span class="n">게인 · 리미터</span></div>
+            </figure>
+          </div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section id="modules">
+    <h2>크레이트와 의존 방향</h2>
+    <div class="prose">
+      <p>크레이트는 열하나, 앱은 셋입니다. 의존은 아래로만 흐르고, <code>bio-sys</code>는 앱 크레이트만 링크합니다. 그래서 <code>engine</code> 이하의 크레이트는 모두 Windows 없이 빌드되고 테스트됩니다. 공유 타입(SceneBlock, Layout, 포트 트레이트, Intent와 Snapshot)은 Impulcifer 3.x의 <code>impulcifer-types</code>처럼 <code>bio-types</code> 한 곳에 둡니다. 포트 트레이트를 여기 두는 이유는 <code>bio-sys</code>가 <code>engine</code>에 의존하지 않고도 그 트레이트를 구현할 수 있게 하려는 것입니다.</p>
+    </div>
+    <pre class="code tree">bio-atmos/
+├─ driver/              C++ · MS-PL · WDK     bioatmos.sys (SysVAD에서 HDMI 렌더 하나만 남김)
+├─ crates/
+│  ├─ bio-types/        SceneBlock, Layout, 포트 트레이트(CaptureSource, OutputSink, Host), Intent, Snapshot
+│  ├─ bio-abi/          드라이버 계약: IOCTL, #[repr(C)] 기록, 파서. cbindgen으로 C 헤더 생성
+│  ├─ bitstream/        IEC 61937 해체, 형식 판별
+│  ├─ decode/           MAT(클린룸) · DD+ JOC(eac3) · TrueHD(truehd) · PCM → SceneBlock
+│  ├─ render/           SceneBlock → 방향 피드 (VBAP, LFE)
+│  ├─ convolver/        피드 → 양이 신호 (주파수 영역 누적)     Copyright 2026 115dkk, MIT
+│  ├─ brir/             프로필 → PreparedBrir (레이아웃, 헤드폰 FIR 접기, 분할 스펙트럼)
+│  ├─ engine/           실시간 스레드, 교차 링, 클럭 전략, 지연 계측
+│  ├─ supervisor/       상태기계, 프로필 저장, 장치 선택자
+│  ├─ bio-sys/          unsafe 전부 (Windows 전용): ring, output, host, install
+│  └─ bio-policy/       게이트 테스트: forbid 검사, unsafe 예산, features.toml
+├─ apps/
+│  ├─ bio-atmos/        Tauri 2: src-tauri(배선) + ui/(TypeScript)
+│  ├─ bio-setup/        관리자 단발 도우미 (UAC 한 번)
+│  └─ bio-replay/       덤프 → WAV, CI 골든
+├─ features.toml        기능 등록부 (구현 표시에는 검증 테스트가 있어야 함)
+└─ unsafe-budget.toml   bio-sys만 0이 아님. 올리려면 ADR</pre>
+    <pre class="code tree">apps/bio-atmos ─┬─> supervisor ─┬─> engine ─┬─> bio-abi
+                │               │           ├─> decode ─┬─> bitstream
+                │               │           │           └─> eac3, truehd      (Apache-2.0)
+                │               │           ├─> render
+                │               │           └─> convolver ──> realfft
+                │               └─> brir ──> convolver, hound, rubato
+                ├─> bio-sys ──> bio-abi, bio-types, wasapi, windows   [Windows 전용, unsafe]
+                └─> tauri 2, tauri-plugin-*, velopack
+apps/bio-setup  ──> bio-sys (install 모듈만)
+apps/bio-replay ──> engine, bio-abi                                    (bio-sys 없음 → Linux CI)
+모든 크레이트    ──> bio-types</pre>
+
+    <h3 style="margin-top:28px">시임과 어댑터</h3>
+    <div class="prose"><p>어댑터가 둘 이상인 자리에만 트레이트를 둡니다. 어댑터가 하나뿐인 자리에 트레이트를 만들면 인터페이스만 늘고 얻는 것이 없으므로, 두 번째 어댑터가 실제로 생기는 날 올리면 됩니다.</p></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>시임</th><th>인터페이스 위치</th><th>어댑터</th><th>판정</th></tr></thead>
+        <tbody>
+          <tr><td><code>CaptureSource</code></td><td>bio-types</td><td>드라이버 링, SAL 링(개발용, 출시 빌드 제외), 덤프 파일</td><td>진짜 (셋)</td></tr>
+          <tr><td><code>OutputSink</code></td><td>bio-types</td><td>WASAPI, WAV 파일, 널</td><td>진짜 (셋)</td></tr>
+          <tr><td>디코더</td><td>decode (<code>AnyDecoder</code> 열거형)</td><td>MAT, DD+ JOC, TrueHD, PCM</td><td>진짜 (넷)</td></tr>
+          <tr><td><code>ClockStrategy</code></td><td>engine</td><td>2채널 ASRC, 드라이버 트림</td><td>진짜 (둘)</td></tr>
+          <tr><td><code>Host</code></td><td>bio-types</td><td>Windows(bio-sys), Fake</td><td>진짜 (둘)</td></tr>
+          <tr><td>패너</td><td>render</td><td>VBAP 하나</td><td>트레이트를 만들지 않음</td></tr>
+          <tr><td>컨볼버</td><td>convolver</td><td>균일 분할 하나 (비균일은 같은 타입 안에서)</td><td>트레이트를 만들지 않음</td></tr>
+          <tr><td>BRIR 준비</td><td>brir</td><td>함수 하나</td><td>트레이트를 만들지 않음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="interfaces">
+    <h2>핵심 인터페이스</h2>
+    <div class="prose">
+      <p>네 인터페이스가 이 설계의 시임입니다. 아래는 첫 초안이라 이름과 모양은 다음 논의에서 바뀔 수 있습니다. 각 인터페이스는 타입과 함께 순서, 오류, 성능에 관한 약속을 가집니다.</p>
+    </div>
+
+    <h3 style="margin-top:26px">드라이버 계약 · bio-abi</h3>
+    <pre class="code">// crates/bio-abi/src/lib.rs        #![forbid(unsafe_code)]
+pub const ABI_VERSION: u32 = 1;
+pub const DEVICE_PATH: &amp;str = r"\\.\BioAtmos";
+
+#[derive(FromBytes, IntoBytes, KnownLayout, Immutable)]   // zerocopy
+#[repr(C)]
+pub struct RecordHeader {
+    pub kind: u16,       // 1 Data, 2 FormatChange, 3 StreamStart, 4 StreamStop, 5 Overrun
+    pub flags: u16,
+    pub epoch: u32,      // FormatChange에서만 +1
+    pub byte_pos: u64,   // 스트림 시작부터의 누적 위치
+    pub qpc: u64,        // 마지막 바이트가 가상 DMA를 지난 시각
+    pub qpc_written: u64,// 쓰기 패킷 알림을 넣으면 '쓴 시각', 아니면 0
+    pub len: u32,        // 뒤따르는 페이로드 길이 (모르는 kind도 건너뛸 수 있게)
+    pub _reserved: u32,
+}
+
+pub enum Record&lt;'a&gt; {
+    Data { epoch: u32, pos: u64, qpc: u64, bytes: &amp;'a [u8] },
+    FormatChange { epoch: u32, format: SourceFormat },
+    StreamStart { epoch: u32, qpc: u64 },
+    StreamStop { epoch: u32, qpc: u64 },
+    Overrun { lost_bytes: u64 },
+}
+
+pub fn records(buf: &amp;[u8]) -&gt; impl Iterator&lt;Item = Result&lt;Record&lt;'_&gt;, AbiError&gt;&gt;;</pre>
+    <div class="prose">
+      <p>이 계약이 약속하는 것은 다음과 같습니다.</p>
+      <ul>
+        <li>기록은 항상 길이를 가지므로 사용자 모드는 모르는 종류를 건너뜁니다. 새 종류를 더해도 옛 앱이 깨지지 않습니다.</li>
+        <li>에포크는 형식 변경 기록에서만 오르고, 같은 에포크 안의 데이터는 모두 같은 형식입니다.</li>
+        <li>넘침이 생기면 커널은 기다리지 않고 덮어쓴 뒤 잃은 바이트 수를 넘침 기록으로 알립니다. 사용자 모드는 해당 디코더를 리셋하고 다음 동기에서 다시 시작합니다.</li>
+        <li>구조체의 크기와 오프셋은 Rust와 생성된 C 헤더 양쪽에서 컴파일 시점에 단언합니다.</li>
+      </ul>
+    </div>
+
+    <h3 style="margin-top:26px">장면 · bio-types::SceneBlock</h3>
+    <pre class="code">pub struct SceneBlock&lt;'a&gt; {
+    pub epoch: u32,
+    pub frames: usize,              // 소스가 정한 블록 길이 (MAT 반 버스트 480, DD+ 1536)
+    pub rate: u32,                  // 장면 레이트, 보통 48_000
+    pub source_qpc: u64,            // 지연 계측용, 첫 샘플의 도착 시각
+    pub objects: &amp;'a [Object&lt;'a&gt;],  // 베드 채널도 고정 위치 객체로 들어온다
+    pub lfe: Option&lt;&amp;'a [f32]&gt;,
+}
+
+pub struct Object&lt;'a&gt; {
+    pub signal: &amp;'a [f32],         // 길이 = frames
+    pub position: Position,         // 방 좌표, 각 축 정규화
+    pub gain: f32,
+    pub spread: f32,                // 크기·확산, 모르면 0
+}</pre>
+    <div class="prose">
+      <p>장면에 관한 약속은 이렇습니다.</p>
+      <ul>
+        <li>모든 신호는 길이가 같고 장면 레이트를 따릅니다. 출력 장치의 레이트는 교차 링 뒤에서만 의미가 있습니다.</li>
+        <li>슬라이스는 디코더가 시작할 때 잡아 둔 버퍼를 빌려주는 것이라 블록 사이에 할당이 없습니다.</li>
+        <li>블록 길이가 컨볼버의 분할 크기의 배수가 아니면 내부 FIFO가 생겨 최대 분할 크기만큼 지연이 붙습니다. 게임(MAT)은 분할을 반 버스트의 약수로 맞춰 이 지연을 없앱니다.</li>
+        <li>PCM 채널 마스크도 같은 방 좌표로 바꿔 넣으므로, 렌더러는 채널이라는 개념을 모릅니다.</li>
+      </ul>
+    </div>
+
+    <h3 style="margin-top:26px">엔진과 포트 · engine, bio-types</h3>
+    <pre class="code">pub fn start(cfg: EngineConfig, cap: impl CaptureSource, out: impl OutputSink)
+    -&gt; Result&lt;Engine, StartError&gt;;
+
+impl Engine {
+    pub fn apply(&amp;self, change: LiveChange) -&gt; Result&lt;(), Rejected&gt;; // 프로필 교체, 게인, 음소거
+    pub fn status(&amp;self) -&gt; EngineStatus;                          // 원자 변수만 읽음
+    pub fn stop(self) -&gt; StopReport;
+}
+
+pub trait CaptureSource: Send + 'static {
+    fn read(&amp;mut self, buf: &amp;mut [u8], wait: Duration) -&gt; Result&lt;usize, CaptureError&gt;;
+    fn set_rate_trim(&amp;mut self, ppm: f64) -&gt; Result&lt;(), TrimUnsupported&gt;;
+}
+
+pub trait OutputSink: Send + 'static {
+    /// 장치가 다음 주기를 원할 때까지 기다린 뒤 fill로 채운다. 그 주기의 재생 예정 QPC를 돌려준다.
+    fn next_period(&amp;mut self, fill: &amp;mut dyn FnMut(&amp;mut [f32])) -&gt; Result&lt;u64, OutputError&gt;;
+}</pre>
+    <div class="prose">
+      <p>엔진을 쓰는 쪽이 알아야 할 것은 이것뿐입니다.</p>
+      <ul>
+        <li><code>start</code>는 스레드 둘을 띄우고 곧바로 돌아옵니다. 시작 실패는 <code>StartError</code>로 즉시 오고, 그 뒤의 장치 오류는 <code>status</code>의 fault 필드로 옵니다.</li>
+        <li><code>apply</code>는 실시간 스레드에 포인터만 건넵니다. 파일 읽기와 FFT 같은 준비는 호출 전에 끝나 있어야 하고, 옛 자원은 제어 스레드에서 해제됩니다.</li>
+        <li><code>status</code>는 원자 변수만 읽으므로 몇 번을 불러도 실시간 스레드를 막지 않습니다.</li>
+        <li><code>CaptureSource::read</code>는 막힐 수 있는 유일한 호출이고 캡처 스레드에서만 부릅니다. <code>set_rate_trim</code>을 지원하지 않는 어댑터(덤프, SAL)는 엔진이 ASRC로 넘어갑니다.</li>
+      </ul>
+    </div>
+
+    <h3 style="margin-top:26px">supervisor와 화면 사이</h3>
+    <pre class="code">pub enum Intent {
+    BeginSetup, InstallDriver, ChooseOutput(DeviceSelector),
+    ImportBrir(PathBuf), ImportHeadphoneFir(PathBuf), SwitchProfile(ProfileId),
+    SetGain(f32), TestDirection(DirectionId), Enable, Disable, StartDiagnosticRecording, Quit,
+}
+
+pub struct Snapshot {
+    pub phase: Phase,                    // Setup(step) | Ready | Running | Idle | Faulted(reason)
+    pub engine: Option&lt;EngineStatus&gt;,    // 형식, 에포크, 객체 수, 지연 p50/p99, 링 수위, 끊김
+    pub outputs: Vec&lt;OutputDevice&gt;,
+    pub profile: ProfileSummary,
+}
+
+impl&lt;H: Host&gt; Supervisor&lt;H&gt; {
+    pub fn dispatch(&amp;mut self, intent: Intent) -&gt; Result&lt;(), UserError&gt;;
+    pub fn on_host(&amp;mut self, event: HostEvent);
+    pub fn snapshot(&amp;self) -&gt; Snapshot;
+}</pre>
+    <div class="prose">
+      <p>화면 쪽 계약은 세 가지입니다.</p>
+      <ul>
+        <li>화면이 보낼 수 있는 것은 Intent뿐이고, 받는 것은 Snapshot 전체입니다. 화면 쪽에 상태를 두지 않으므로 창을 다시 열어도 같은 그림이 나옵니다.</li>
+        <li><code>UserError</code>는 사용자에게 보일 문장과 다음 행동(다시 시도, 설정 열기 등)을 담습니다. 화면은 오류 코드를 해석하지 않습니다.</li>
+        <li>미터와 객체 위치는 Snapshot과 따로 30 Hz 이벤트로 보내, 상태 변경 이벤트가 미터에 묻히지 않게 합니다.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="threads">
+    <h2>실행 시 스레드와 클럭</h2>
+    <div class="prose">
+      <p>실행 중에는 커널 타이머 하나와 사용자 모드 스레드 셋이 돕니다. 두 실시간 스레드는 클럭 도메인이 서로 다르고, 2채널 교차 링에서만 만납니다.</p>
+    </div>
+    <div class="fig">
+      <svg viewBox="0 0 960 366" role="img" aria-label="스레드와 클럭 도메인. 왼쪽 소스 도메인에 커널 타이머와 캡처·DSP 스레드, 가운데 교차 링, 오른쪽 DAC 도메인에 출력 스레드, 아래에 제어 스레드.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+          <marker id="ah-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah ctl"/></marker>
+          <marker id="ah-trim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="ah trim"/></marker>
+        </defs>
+        <rect x="10" y="40" width="600" height="250" rx="12" class="dom-src"/>
+        <rect x="650" y="40" width="300" height="250" rx="12" class="dom-dac"/>
+        <text x="596" y="62" text-anchor="end" class="dom-label">소스 클럭 도메인 · 가상 장치</text>
+        <text x="936" y="62" text-anchor="end" class="dom-label">DAC 클럭 도메인</text>
+
+        <rect x="24" y="74" width="180" height="40" rx="7" class="lane-k"/>
+        <text x="114" y="99" text-anchor="middle" class="lane-title">가상 DMA 타이머 · 커널</text>
+        <rect x="240" y="74" width="130" height="40" rx="7" class="lane-k"/>
+        <text x="305" y="99" text-anchor="middle" class="lane-title">캡처 링</text>
+        <path d="M204,94 H236" class="wire" marker-end="url(#ah)"/>
+
+        <rect x="24" y="134" width="572" height="96" rx="9" class="lane"/>
+        <text x="36" y="154" class="lane-title">캡처·DSP 스레드</text>
+        <text x="146" y="154" class="lane-note">MMCSS Pro Audio · 할당과 잠금 없음 · 블록 10 ms</text>
+        <rect x="36" y="170" width="78" height="44" rx="6" class="chipbox"/><text x="75" y="196" text-anchor="middle" class="chiptext">READ</text>
+        <rect x="122" y="170" width="70" height="44" rx="6" class="chipbox"/><text x="157" y="196" text-anchor="middle" class="chiptext">기록</text>
+        <rect x="200" y="170" width="96" height="44" rx="6" class="chipbox"/><text x="248" y="196" text-anchor="middle" class="chiptext">해체·디코드</text>
+        <rect x="304" y="170" width="72" height="44" rx="6" class="chipbox"/><text x="340" y="196" text-anchor="middle" class="chiptext">패닝</text>
+        <rect x="384" y="170" width="92" height="44" rx="6" class="chipbox"/><text x="430" y="196" text-anchor="middle" class="chiptext">컨볼루션</text>
+        <rect x="484" y="170" width="100" height="44" rx="6" class="chipbox"/><text x="534" y="196" text-anchor="middle" class="chiptext">게인·리미터</text>
+        <path d="M290,114 C290,140 75,140 75,166" class="wire" marker-end="url(#ah)"/>
+        <text x="380" y="127" class="wlabel">READ는 반 버스트가 차면 완료</text>
+
+        <rect x="598" y="164" width="64" height="56" rx="8" class="ring"/>
+        <text x="630" y="188" text-anchor="middle" class="chiptext">교차 링</text>
+        <text x="630" y="206" text-anchor="middle" class="chiptext">2ch</text>
+        <path d="M584,192 H594" class="wire" marker-end="url(#ah)"/>
+
+        <rect x="668" y="134" width="270" height="96" rx="9" class="lane"/>
+        <text x="680" y="154" class="lane-title">출력 스레드</text>
+        <text x="756" y="154" class="lane-note">MMCSS · 주기 3 ms</text>
+        <rect x="680" y="170" width="120" height="44" rx="6" class="chipbox out"/><text x="740" y="196" text-anchor="middle" class="chiptext">ASRC 또는 통과</text>
+        <rect x="808" y="170" width="118" height="44" rx="6" class="chipbox out"/><text x="867" y="196" text-anchor="middle" class="chiptext">WASAPI 독점</text>
+        <path d="M662,192 H676" class="wire" marker-end="url(#ah)"/>
+        <rect x="808" y="248" width="118" height="30" rx="6" class="lane"/>
+        <text x="867" y="268" text-anchor="middle" class="chiptext">DAC → 헤드폰</text>
+        <path d="M867,214 V244" class="wire" marker-end="url(#ah)"/>
+
+        <path d="M740,134 V20 H180 V70" class="wire trim" marker-end="url(#ah-trim)"/>
+        <text x="460" y="15" text-anchor="middle" class="wlabel trim">트림 ppm (트림 전략일 때, 교차 링 수위로 계산)</text>
+
+        <rect x="10" y="304" width="940" height="52" rx="10" class="lane-ctl"/>
+        <text x="24" y="335" class="lane-title">제어 스레드</text>
+        <text x="96" y="335" class="lane-note">supervisor · brir::prepare · 장치 알림 · 30 Hz 상태 샘플</text>
+        <text x="936" y="335" text-anchor="end" class="lane-note">화면은 별도 WebView 프로세스</text>
+        <path d="M430,304 V234" class="wire ctl" marker-end="url(#ah-ctl)"/>
+        <text x="438" y="268" class="wlabel">PreparedBrir 포인터 교체</text>
+        <path d="M700,230 V300" class="wire ctl" marker-end="url(#ah-ctl)"/>
+        <text x="706" y="268" class="wlabel">상태 · 원자 변수</text>
+      </svg>
+    </div>
+    <div class="prose">
+      <p>무거운 일을 모두 캡처·DSP 스레드에 두는 데는 이유가 있습니다. 컨볼루션은 10 ms 블록 단위로 와서 그 블록 안에서 끝나면 되지만, 출력 스레드는 3 ms마다 반드시 돌아와야 하므로 하는 일이 적을수록 끊김이 줄어듭니다. 교차 링의 목표 수위는 도착 단위(게임은 10 ms)를 흡수할 만큼이어야 해서, 지터버퍼의 크기 자체는 구축기와 비슷하게 남습니다. 줄어드는 것은 홉 버퍼와 분할 지연입니다.</p>
+      <p>지연 목표는 형식에 따라 supervisor가 자동으로 고릅니다. MAT(게임)가 들어오면 교차 링 10 ms의 게임 프리셋을, DD+나 TrueHD(음악, 영화)가 들어오면 40 ms 이상의 여유 있는 프리셋을 씁니다. 사용자가 고를 일이 없습니다.</p>
+    </div>
+    <h3 style="margin-top:24px">지연 예산 · 게임(MAT)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>구간</th><th>구축기 최종</th><th>새 설계 (계산)</th><th>쓰기 패킷 알림까지 (측정 전)</th></tr></thead>
+        <tbody>
+          <tr><td>반 버스트 도착</td><td class="num">10 ms</td><td class="num">10 ms</td><td class="num">0~10 ms</td></tr>
+          <tr><td>링 읽기 대기</td><td class="num">최대 1 ms</td><td class="num">거의 0</td><td class="num">거의 0</td></tr>
+          <tr><td>지터버퍼 / 교차 링</td><td class="num">평균 9~10 ms</td><td class="num">약 10 ms</td><td class="num">약 10 ms</td></tr>
+          <tr><td>mpv 소프트 버퍼</td><td class="num">6 ms</td><td class="num">없음</td><td class="num">없음</td></tr>
+          <tr><td>BRIR 분할</td><td class="num">128 샘플 (2.7 ms)</td><td class="num">추가 없음</td><td class="num">추가 없음</td></tr>
+          <tr><td>WASAPI 독점 버퍼</td><td class="num">3 ms</td><td class="num">3 ms</td><td class="num">3 ms</td></tr>
+          <tr class="total"><td>합계 (근사)</td><td class="num">약 32 ms</td><td class="num">약 23 ms</td><td class="num">약 13~23 ms</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="small prose">모두 계측값이 아니라 구간별 버퍼를 더한 계산입니다. 처리 시간과 소스 앱 내부의 지연은 빠져 있고, 실제 값은 후보 7의 계측으로 확인합니다.</p>
+  </section>
+
+  <section id="driver">
+    <h2>드라이버 v1 계약</h2>
+    <div class="prose">
+      <p>증명 서명은 제출 시점에 EV가 유효해야 받을 수 있고, 한 번 서명된 드라이버는 EV가 만료된 뒤에도 계속 로드됩니다. 이 두 사실 때문에 드라이버를 고칠 수 있는 기간은 EV의 1년으로 정해집니다. 그래서 v1은 두 요구를 함께 맞춰야 합니다. 커널 코드는 최소여야 하고, 사용자 모드가 앞으로 커널에 바랄 만한 것은 처음부터 모두 들어 있어야 합니다. 이 설계는 '커널은 메커니즘, 사용자 모드는 정책'이라는 규칙으로 둘을 맞춥니다.</p>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>IOCTL</th><th>입력</th><th>출력</th><th>동작</th></tr></thead>
+        <tbody>
+          <tr><td><code>QUERY_INFO</code></td><td>없음</td><td>ABI 버전, 빌드, 링 크기, 컴파일된 형식, 켜진 형식, 기능 비트</td><td>즉시</td></tr>
+          <tr><td><code>READ</code></td><td>min_bytes, timeout_ms</td><td>기록 묶음</td><td>조건이 차거나 시간이 지날 때까지 보류. 취소 가능</td></tr>
+          <tr><td><code>SET_RATE_TRIM</code></td><td>ppm × 65536 (i32)</td><td>없음</td><td>±2000 ppm로 잘라 다음 타이머 틱부터 적용. 핸들이 닫히면 0</td></tr>
+          <tr><td><code>GET_STATS</code></td><td>없음</td><td>누적 바이트, 넘침, 최대 타이머 지연(µs), 열기 횟수</td><td>즉시</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>형식 (컴파일된 상위집합)</th><th>컨테이너</th><th>마스크 기본값</th><th>디코더</th></tr></thead>
+        <tbody>
+          <tr><td>PCM 2~8ch, 16/24/32비트, 44.1~192 kHz</td><td>WAVEFORMATEXTENSIBLE</td><td>켬</td><td>decode::pcm</td></tr>
+          <tr><td>MAT 2.0 · 2.1 (공간음향)</td><td>IEC 61937, HBR 속도(8ch/192 kHz)</td><td>켬</td><td>decode::mat (클린룸)</td></tr>
+          <tr><td>DD+ · DD+ Atmos</td><td>IEC 61937, 2ch/192 kHz</td><td>켬</td><td>decode::ddp (eac3)</td></tr>
+          <tr><td>AC-3</td><td>IEC 61937, 2ch/48 kHz</td><td>디코더 확인 후</td><td>eac3 크레이트가 AC-3도 다루는지 확인 필요</td></tr>
+          <tr><td>TrueHD</td><td>IEC 61937, HBR</td><td>디코더 준비 후</td><td>decode::truehd</td></tr>
+          <tr><td>DTS 계열</td><td>IEC 61937</td><td>끔</td><td>없음</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>디코더가 없는 형식을 켜 두면 앱이 그 형식으로 보내 소리가 나지 않으므로, 마스크 기본값은 지금 디코드할 수 있는 것만 켭니다. 표에 미리 넣어 두는 데는 비용이 없고, 나중에 디코더가 생기면 마스크만 바꾸면 됩니다. v1에 들어가는 메커니즘은 다음과 같습니다.</p>
+      <ul>
+        <li><strong>형식 상위집합과 마스크:</strong> 위 표 전체를 컴파일해 두고 서비스 Parameters 키의 DWORD 마스크로 켭니다. 마스크는 <code>bio-setup</code>만 쓰고, 장치를 재시작하면 반영됩니다.</li>
+        <li><strong>기록 링:</strong> 1 MiB NonPagedPoolNx에 다섯 종류의 기록을 쌓습니다. 모든 기록이 에포크, 누적 위치, QPC, 길이, 예약 필드를 가집니다.</li>
+        <li><strong>대기 READ:</strong> 조건(min_bytes, 또는 형식 변경·정지 기록 도착)까지 보류하는 취소 안전 큐를 둡니다.</li>
+        <li><strong>트림:</strong> 가상 DMA 속도를 ±2000 ppm 안에서 조정합니다. 핸들이 닫히면 0으로 돌아가므로 앱이 죽어도 엉뚱한 속도로 남지 않습니다.</li>
+        <li><strong>일반 사용자 접근과 단독 열기:</strong> SDDL로 SYSTEM, 관리자, 대화형 사용자에게 열고, 두 번째 핸들은 거절합니다. 구축기처럼 관리자 권한으로 브리지를 돌릴 필요가 없어집니다.</li>
+        <li><strong>쓰기 패킷 알림 (측정 후 결정):</strong> 후보 6입니다. 넣는다면 기록의 <code>qpc_written</code> 필드를 채웁니다.</li>
+      </ul>
+      <p>커널에 넣지 않는 것도 분명히 해 둡니다. IEC 61937 해석, MAT, 디코딩, 리샘플링은 물론이고, 어떤 형식을 켤지와 트림 값을 얼마로 할지 같은 정책도 모두 사용자 모드에 있습니다.</p>
+    </div>
+    <h3 style="margin-top:24px">서명 제출 전에 통과할 것</h3>
+    <div class="prose">
+      <p>EV 기간은 한정돼 있으므로, 제출 전에 다음을 모두 통과시킵니다.</p>
+      <ul>
+        <li>Driver Verifier(표준 검사와 DDI 준수 검사)를 켠 채 게임과 Apple Music을 각각 몇 시간씩 재생합니다.</li>
+        <li>IOCTL 퍼저로 잘못된 길이와 정렬, 동시 취소, 핸들 닫기 경쟁을 두드립니다.</li>
+        <li>메모리 무결성(HVCI)을 켠 PC에서 로드되는지 확인하고, 실행 가능한 풀은 쓰지 않습니다.</li>
+        <li>드라이버용 CodeQL 쿼리를 돌려 지적 사항을 없앱니다.</li>
+        <li>형식 협상 매트릭스를 채웁니다. 게임 공간음향, Apple Music, 비트스트림 플레이어, 일반 앱이 각각 기대한 형식으로 장치를 여는지 봅니다.</li>
+        <li>마지막으로 <code>bio-abi</code>의 레이아웃을 해시로 기록해 v1을 동결합니다.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="verification">
+    <h2>검증</h2>
+    <div class="prose">
+      <p>검증은 Impulcifer 3.x에서 쓰는 규칙을 그대로 가져오고, 실시간 오디오에 필요한 것을 더합니다.</p>
+      <ul>
+        <li><strong>덤프 재생 결정론:</strong> <code>bio-replay</code>는 같은 덤프에서 같은 바이트를 내야 하고, CI는 PR의 기준 커밋과 PR 쪽 출력을 SHA-256으로 비교합니다. Impulcifer의 BRIR 무결성 검사와 같은 방식입니다.</li>
+        <li><strong>블랙박스 골든:</strong> SAL(MAT)과 Omniphony(DD+ JOC)로 같은 구간을 렌더링한 결과를 허용 오차 골든으로 둡니다. 구현자는 SAL 소스를 보지 않습니다.</li>
+        <li><strong>퍼징:</strong> <code>bio-abi</code> 기록 파서, <code>bitstream</code>, 각 디코더 어댑터를 cargo-fuzz로 돌립니다. 입력이 소스 앱에서 오는 바이트이므로 여기가 메모리 안전의 최전선입니다.</li>
+        <li><strong>성질 테스트:</strong> 입력을 어디서 잘라도 <code>bitstream</code> 결과가 같은지, VBAP 게인의 제곱합이 1인지, 측정 방향 위의 객체가 그 방향 하나로만 가는지 확인합니다.</li>
+        <li><strong>실시간 규율:</strong> 디버그 빌드의 실시간 스레드에 <code>assert_no_alloc</code>을 씌워, 할당이 일어나면 즉시 멈춥니다. Rust 타입 시스템은 이것을 막아 주지 않으므로 테스트로 지킵니다.</li>
+        <li><strong>클럭 시뮬레이션:</strong> 가상 DAC를 ±2000 ppm 어긋나게 두고 교차 링 수위가 목표로 수렴하는지, 끊김이 없는지를 ASRC와 트림 두 전략 모두로 봅니다.</li>
+        <li><strong>상태기계:</strong> Fake Host로 마법사 전 단계, 출력 장치 분리, 재부팅 뒤 ID 변경, 드라이버 없음을 재현합니다.</li>
+        <li><strong>기능 게이트:</strong> <code>features.toml</code>에 없는 기능은 없는 것이고, 구현됐다고 표시한 기능에 검증 테스트가 없으면 <code>bio-policy</code>가 CI를 떨어뜨립니다.</li>
+        <li><strong>실기:</strong> 오버워치 2와 Apple Music을 몇 시간씩 재생하며 지연 p99와 resync 횟수를 기록합니다.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="milestones">
+    <h2>마일스톤</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>단계</th><th>만드는 것</th><th>끝나는 조건</th><th>드라이버</th></tr></thead>
+        <tbody>
+          <tr><td>M0 계약</td><td>저장소, bio-types, bio-abi 초안, 정책 게이트, CONTEXT.md, ADR</td><td>CI가 forbid·예산·기능 등록부를 검사</td><td>없음</td></tr>
+          <tr><td>M1 리플레이</td><td>bitstream, decode(PCM·MAT·DD+), render, brir, convolver, bio-replay</td><td>친구 덤프의 재생 결과가 블랙박스 골든과 허용 오차 안. Linux CI에서</td><td>없음</td></tr>
+          <tr><td>M2 실시간</td><td>engine, bio-sys(ring은 SAL 개발 어댑터, output)</td><td>시험서명 PC에서 게임과 Apple Music 청취, 지연 숫자가 구축기 이하</td><td>SAL (개발용)</td></tr>
+          <tr><td>M3 드라이버</td><td>bioatmos.sys, ABI v1, 쓰기 패킷 알림 측정</td><td>서명 전 검사 통과, ABI 동결</td><td>시험서명</td></tr>
+          <tr><td>M4 앱</td><td>supervisor, 화면, bio-setup, Velopack</td><td>새 PC에서 마법사만으로 설치와 청취</td><td>시험서명</td></tr>
+          <tr><td>M5 서명·출시</td><td>EV 구입, Partner Center 등록, 증명 제출</td><td>Secure Boot를 켠 PC에서 설치</td><td>증명 서명</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>EV는 M3가 끝날 때 삽니다. 인증서의 1년이 드라이버를 고칠 수 있는 기간이므로, 초기 사용자의 버그 보고를 받는 동안 그 기간이 열려 있어야 합니다. M0부터 M2까지는 EV도 우리 드라이버도 없이 진행할 수 있고, 스폰서 목표가 차는 속도와 개발 속도를 맞출 여유가 여기서 생깁니다.</p>
+    </div>
+  </section>
+
+  <section id="unknowns">
+    <h2>확인하지 못한 것</h2>
+    <div class="prose">
+      <p>아래는 이 설계가 기대고 있지만 아직 확인하지 못한 사실입니다. 대부분은 M2와 M3의 시험서명 환경에서 확인할 수 있습니다.</p>
+      <ul>
+        <li>SysVAD에서 새로 쓴 우리 드라이버가 형식 표만으로 Windows에 'Dolby Atmos for home theater'를 열어 주는지. SAL에서는 됐지만 SAL 코드를 볼 수 없으므로 독자 구현으로 다시 확인해야 합니다.</li>
+        <li>PortCls 드라이버에 별도 제어 장치를 붙이는 디스패치 처리의 세부. SAL이 <code>\\.\DolbyDecoderMat</code>으로 한 적은 있습니다.</li>
+        <li>SysVAD의 타이머 기반 위치에 트림을 넣었을 때 Windows 오디오 엔진이 받아들이는 범위.</li>
+        <li>공간음향 엔진이 쓰기 패킷 알림을 어떤 주기로 부르는지, SysVAD에 그 구현 예가 있는지.</li>
+        <li>공간음향 제공자를 프로그램으로 바꾸는 공개 방법. 구축기의 <code>Set-SpatialProvider-bio.ps1</code> 내용은 받지 못했습니다.</li>
+        <li>비공개 COM 인터페이스인 IPolicyConfig가 다음 Windows 기능 업데이트에서도 유지되는지.</li>
+        <li>harletty-bridge의 <code>eac3</code> 크레이트가 객체 신호와 위치를 어떤 모양으로 내주는지, 실시간으로 쓸 때 할당하는지, AC-3도 다루는지.</li>
+        <li>MAT 2.1 PCM의 하위 프레임 구조와, 반 버스트보다 더 잘게 일찍 디코딩할 수 있는지.</li>
+        <li>SSL.com eSigner로 Partner Center 등록과 증명 제출이 되는지. 결제 전에 문의해야 합니다.</li>
+        <li>증명 서명 드라이버와 커널 안티치트의 공존, 오버워치 2 밖의 게임, 몇 시간 연속 재생.</li>
+        <li>E-AC-3 JOC와 TrueHD 디코딩에 걸린 특허·라이선스 문제와 'Atmos' 상표 사용. 저는 변호사가 아니므로 공개 전에 전문가 확인이 필요합니다.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="start">
+    <h2>어디서부터 시작할까</h2>
+    <div class="prose">
+      <p>후보 2(장면 시임)와 덤프 재생부터 시작하길 권합니다. 이 둘은 EV도, 드라이버도, Windows도 없이 Linux에서 만들 수 있고, 다른 모든 모듈이 기대는 타입(Record, Burst, SceneBlock, Feeds)을 처음에 못 박습니다. 친구에게 MAT와 DD+ 링 덤프 몇 개, 그리고 같은 구간을 SAL과 Omniphony로 렌더링한 결과를 받아 두면 블랙박스 골든이 바로 생깁니다.</p>
+      <p>같은 시기에 후보 4의 드라이버 계약을 <code>bio-abi</code> 초안으로 써 두어야 합니다. 구현은 M3지만, 기록 형식이 정해져야 진단 녹화와 덤프의 형식이 정해지고, EV를 사는 시점이 이 계약을 동결하는 시점에 묶여 있기 때문입니다. 후보 6(쓰기 패킷 알림)도 동결 전에 재야 하므로 M2와 M3 사이에 넣습니다.</p>
+    </div>
+  </section>
+
+  <footer class="sources">
+    <p>근거</p>
+    <ul>
+      <li>친구의 구축기 두 편: Windows Apple Music Atmos 편, Windows 게임 Atmos 편 (2026-10-10, Google Drive 공유 폴더)</li>
+      <li><a href="https://github.com/barralutz/spatial-audio-lab" target="_blank" rel="noopener">SpatialAudioLab</a> · <a href="https://github.com/harletty/harletty-bridge" target="_blank" rel="noopener">harletty-bridge</a> · <a href="https://github.com/HEnquist/wasapi-rs" target="_blank" rel="noopener">wasapi-rs</a> · <a href="https://crates.io/crates/rubato" target="_blank" rel="noopener">rubato</a> · <a href="https://github.com/115dkk/EqualizerAPO-XT" target="_blank" rel="noopener">EqualizerAPO-XT</a></li>
+      <li><a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/portcls/nf-portcls-iminiportwavertoutputstream-setwritepacket" target="_blank" rel="noopener">Microsoft: IMiniportWaveRTOutputStream::SetWritePacket</a> · <a href="https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/wavert-miniport-driver" target="_blank" rel="noopener">WaveRT miniport driver</a> · <a href="https://learn.microsoft.com/en-ca/windows-hardware/drivers/dashboard/code-signing-reqs" target="_blank" rel="noopener">Driver code signing requirements</a></li>
+      <li>Impulcifer 3.x의 <code>docs/rust/ARCHITECTURE.md</code>, <code>unsafe-budget.toml</code>, <code>features.toml</code> (관례를 그대로 가져옴)</li>
+    </ul>
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script>
+(()=>{var A=[{id:"app",y:12,h:100,lx:300,label:"\uC571\uACFC \uD654\uBA74 \xB7 Tauri 2 + TypeScript"},{id:"safe",y:122,h:232,lx:300,label:"safe Rust \xB7 \uBAA8\uB4E0 \uD06C\uB808\uC774\uD2B8 forbid(unsafe_code) \xB7 MIT"},{id:"unsafe",y:364,h:100,lx:300,label:"unsafe Rust \xB7 bio-sys \uD558\uB098"},{id:"kernel",y:474,h:100,lx:500,label:"\uCEE4\uB110 \xB7 C++ \xB7 MS-PL \xB7 Microsoft \uC99D\uBA85 \uC11C\uBA85"},{id:"ext",y:584,h:110,lx:640,label:"Windows\uC640 \uC7A5\uCE58"}],f=136,m=54,n={c0:24,c1:178,c2:332,c3:486,c4:640,c5:794,ca:980,cb:1134},i={app:42,ctl:150,data:274,unsafe:394,kernel:504,ext:618},S=[{id:"replay",zone:"app",x:n.c0,y:i.app,name:"bio-replay",sub:"\uB364\uD504 \u2192 WAV",lang:"Rust \xB7 MIT \xB7 \uAC1C\uBC1C \uB3C4\uAD6C",unsafe:"\uC5C6\uC74C",role:"\uC9C4\uB2E8 \uB179\uD654\uB85C \uB0A8\uAE34 \uB4DC\uB77C\uC774\uBC84 \uAE30\uB85D \uB364\uD504\uB97C \uC77D\uC5B4 \uC2E4\uC2DC\uAC04 \uC571\uACFC \uB611\uAC19\uC740 \uCC98\uB9AC\uB97C \uAC70\uCE5C \uC591\uC774 WAV\uC640 \uBCF4\uACE0\uC11C JSON\uC744 \uB0C5\uB2C8\uB2E4. \uBC84\uADF8 \uB9AC\uD3EC\uD2B8\uB97C \uC7AC\uD604\uD558\uACE0 CI \uACE8\uB4E0\uC744 \uB9CC\uB4DC\uB294 \uB3C4\uAD6C\uC785\uB2C8\uB2E4. \uCE5C\uAD6C\uAC00 SAL\uB85C \uB5A0 \uB454 \uB9C1 \uB364\uD504\uB294 \uB370\uC774\uD130 \uBCC0\uD658\uAE30\uB85C \uC6B0\uB9AC \uAE30\uB85D \uD615\uC2DD\uC73C\uB85C \uBC14\uAFD4 \uC501\uB2C8\uB2E4.",iface:`bio-replay <dump.bin> --profile <profile.toml> --out out.wav
+  \u2192 out.wav, report.json (\uD615\uC2DD, \uC5D0\uD3EC\uD06C, \uAC1D\uCCB4 \uC218, \uC624\uB958)`,hides:"\uD30C\uC77C \uC5B4\uB311\uD130 \uB450 \uAC1C(CaptureSource\uB294 \uB364\uD504, OutputSink\uB294 WAV)\uC640 \uC624\uD504\uB77C\uC778 \uD074\uB7ED \uBAA8\uB4DC\uB97C \uC228\uAE41\uB2C8\uB2E4.",seam:"engine\uC758 CaptureSource\uC640 OutputSink\uC5D0 \uD30C\uC77C \uC5B4\uB311\uD130\uB97C \uAF42\uC2B5\uB2C8\uB2E4. bio-sys\uB97C \uB9C1\uD06C\uD558\uC9C0 \uC54A\uC73C\uBBC0\uB85C Linux\uC5D0\uC11C \uB3D5\uB2C8\uB2E4.",tests:"\uAC19\uC740 \uB364\uD504\uC5D0\uC11C \uAC19\uC740 \uBC14\uC774\uD2B8\uAC00 \uB098\uC640\uC57C \uD558\uBA70, CI\uAC00 \uAE30\uC900 \uCEE4\uBC0B\uC758 \uCD9C\uB825\uACFC SHA-256\uC73C\uB85C \uBE44\uAD50\uD569\uB2C8\uB2E4.",thread:"\uB2E8\uC77C \uC2A4\uB808\uB4DC, \uD074\uB7ED \uAD50\uCC28 \uC5C6\uC774 \uBE14\uB85D \uC21C\uC11C\uB300\uB85C \uCC98\uB9AC\uD569\uB2C8\uB2E4."},{id:"ui",zone:"app",x:n.c5,y:i.app,name:"\uD654\uBA74 (TS)",sub:"\uB9C8\uBC95\uC0AC \xB7 \uC0C1\uD0DC \xB7 \uD504\uB85C\uD544",lang:"TypeScript \xB7 MIT",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"\uCCAB \uC2E4\uD589 \uB9C8\uBC95\uC0AC, \uC0C1\uD0DC \uD654\uBA74(\uB4E4\uC5B4\uC624\uB294 \uD615\uC2DD, \uAC1D\uCCB4 \uC218, \uC9C0\uC5F0 p50/p99, \uAD50\uCC28 \uB9C1 \uC218\uC704, \uB04A\uAE40 \uD69F\uC218), \uD504\uB85C\uD544 \uD654\uBA74(BRIR \uC138\uD2B8, \uD5E4\uB4DC\uD3F0 FIR, \uAC8C\uC778, \uBC29\uD5A5\uBCC4 \uC2DC\uD5D8\uC74C), \uAC1D\uCCB4 \uC9C0\uB3C4\uB97C \uADF8\uB9BD\uB2C8\uB2E4. \uD310\uB2E8\uC740 \uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",iface:`invoke('dispatch', { intent })   // Intent \uD558\uB098\uB97C \uBCF4\uB0B8\uB2E4
+listen('snapshot', draw)          // \uC0C1\uD0DC\uAC00 \uBC14\uB014 \uB54C \uC804\uCCB4 \uC2A4\uB0C5\uC0F7
+listen('meters', drawMeters)      // 30 Hz \uBBF8\uD130\uC640 \uAC1D\uCCB4 \uC704\uCE58`,hides:"\uADF8\uB9AC\uAE30\uB9CC \uC228\uAE41\uB2C8\uB2E4. \uC0C1\uD0DC\uB294 \uC804\uBD80 Rust\uC5D0 \uC788\uC73C\uBBC0\uB85C \uD654\uBA74\uC744 \uC0C8\uB85C \uACE0\uCCD0\uB3C4 \uC783\uB294 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",seam:"Intent\uC640 Snapshot \uD0C0\uC785\uC740 bio-types\uC5D0\uC11C specta\uB85C \uC0DD\uC131\uD558\uBBC0\uB85C Rust\uC640 \uC5B4\uAE0B\uB0A0 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",tests:"\uD0C0\uC785 \uAC80\uC0AC\uC640 \uACC4\uC57D \uD14C\uC2A4\uD2B8(\uAC00\uC9DC \uC2A4\uB0C5\uC0F7\uC73C\uB85C \uAC01 \uD654\uBA74\uC774 \uADF8\uB824\uC9C0\uB294\uC9C0).",thread:"WebView2 \uD504\uB85C\uC138\uC2A4. \uCC3D\uC744 \uB2EB\uC73C\uBA74 WebView\uB97C \uD574\uC81C\uD558\uACE0 \uD2B8\uB808\uC774\uB9CC \uB0A8\uAE41\uB2C8\uB2E4."},{id:"shell",zone:"app",x:n.ca,y:i.app,name:"Tauri \uC178",sub:"\uBA85\uB839 1 \xB7 \uC774\uBCA4\uD2B8 2",lang:"Rust \xB7 MIT",unsafe:"\uC5C6\uC74C",role:"\uBA85\uB839 \uD558\uB098(dispatch)\uC640 \uC774\uBCA4\uD2B8 \uB450 \uAC1C(snapshot, meters)\uB97C \uBC30\uC120\uD558\uACE0, \uD2B8\uB808\uC774 \uBA54\uB274, \uB85C\uADF8\uC778 \uC2DC \uC790\uB3D9 \uC2DC\uC791, \uB2E8\uC77C \uC778\uC2A4\uD134\uC2A4, Velopack \uC5C5\uB370\uC774\uD2B8\uB97C \uB9E1\uC2B5\uB2C8\uB2E4. \uACB0\uC815\uC740 supervisor\uC5D0 \uB118\uAE41\uB2C8\uB2E4.",iface:`#[tauri::command]
+fn dispatch(intent: Intent, s: State<Sup>) -> Result<(), UserError>`,hides:"Tauri \uD50C\uB7EC\uADF8\uC778\uACFC \uCC3D \uC218\uBA85, \uC5C5\uB370\uC774\uD2B8 \uC801\uC6A9 \uC2DC\uC810\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"\uC178\uC744 \uC9C0\uC6CC\uB3C4 supervisor\uC758 \uC778\uD130\uD398\uC774\uC2A4\uB294 \uADF8\uB300\uB85C\uC774\uBBC0\uB85C, \uC178\uC740 \uC587\uC740 \uBC30\uC120\uC73C\uB85C \uB0A8\uAE41\uB2C8\uB2E4(\uC0AD\uC81C \uC2DC\uD5D8\uC5D0\uC11C \uBCF5\uC7A1\uB3C4\uAC00 \uC0AC\uB77C\uC9C0\uB294 \uCABD).",tests:"release \uBE4C\uB4DC\uC5D0 \uCF58\uC194 \uCC3D\uC774 \uC5C6\uB294\uC9C0, \uB2E8\uC77C \uC778\uC2A4\uD134\uC2A4\uAC00 \uB450 \uBC88\uC9F8 \uC2E4\uD589\uC744 \uB118\uACA8\uBC1B\uB294\uC9C0.",thread:"Tauri \uBA54\uC778 \uC2A4\uB808\uB4DC. \uC81C\uC5B4 \uC2A4\uB808\uB4DC\uC640\uB294 \uCC44\uB110\uB85C\uB9CC \uB300\uD654\uD569\uB2C8\uB2E4."},{id:"setup_app",zone:"app",x:n.cb,y:i.app,name:"bio-setup",sub:"\uAD00\uB9AC\uC790 \uB2E8\uBC1C \uB3C4\uC6B0\uBBF8",lang:"Rust \xB7 MIT",unsafe:"bio-sys::install\uC744 \uBD80\uB984",role:"\uAD00\uB9AC\uC790 \uAD8C\uD55C\uC774 \uD544\uC694\uD55C \uC77C\uB9CC \uD558\uB294 \uC791\uC740 \uC2E4\uD589 \uD30C\uC77C\uC785\uB2C8\uB2E4. \uB4DC\uB77C\uC774\uBC84 \uC124\uCE58\xB7\uC81C\uAC70, \uC7A5\uCE58 \uB178\uB4DC \uC0DD\uC131, \uD615\uC2DD \uB9C8\uC2A4\uD06C \uC4F0\uAE30, \uC7A5\uCE58 \uC7AC\uC2DC\uC791\uC744 \uC791\uC5C5 \uC774\uB984\uC73C\uB85C \uBC1B\uC544 \uACB0\uACFC\uB97C JSON\uC73C\uB85C \uB3CC\uB824\uC90D\uB2C8\uB2E4. \uC571 \uC5C5\uB370\uC774\uD2B8\uC5D0\uB294 \uAD00\uC5EC\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uB4DC\uB77C\uC774\uBC84\uAC00 \uC5BC\uC5B4 \uC788\uC73C\uBBC0\uB85C \uC5C5\uB370\uC774\uD2B8\uC5D0 \uAD00\uB9AC\uC790 \uAD8C\uD55C\uC774 \uD544\uC694 \uC5C6\uC2B5\uB2C8\uB2E4.",iface:`bio-setup install | uninstall | set-formats <mask> | restart-device | repair
+  \u2192 stdout: {"ok":true,"reboot":false}`,hides:"SetupAPI\uC640 \uB4DC\uB77C\uC774\uBC84 \uC800\uC7A5\uC18C, \uC7AC\uBD80\uD305 \uD544\uC694 \uC5EC\uBD80 \uD310\uB2E8\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"supervisor\uB294 Host \uD2B8\uB808\uC774\uD2B8\uB85C '\uAD00\uB9AC\uC790 \uC791\uC5C5 \uC2E4\uD589'\uB9CC \uC694\uCCAD\uD569\uB2C8\uB2E4. Fake Host\uB294 \uACB0\uACFC JSON\uB9CC \uD749\uB0B4 \uB0C5\uB2C8\uB2E4.",tests:"\uC791\uC5C5\uBCC4 \uC885\uB8CC \uCF54\uB4DC\uC640 JSON \uACC4\uC57D, \uC774\uBBF8 \uC124\uCE58\uB41C \uC0C1\uD0DC\uC5D0\uC11C install\uC774 \uC544\uBB34\uAC83\uB3C4 \uBC14\uAFB8\uC9C0 \uC54A\uB294\uC9C0.",thread:"\uB2E8\uBC1C \uD504\uB85C\uC138\uC2A4. UAC \uCC3D\uC740 \uCCAB \uC124\uCE58\uC640 \uBCF5\uAD6C \uB54C\uB9CC \uB739\uB2C8\uB2E4."},{id:"brir",zone:"safe",x:n.c5,y:i.ctl,name:"brir",sub:"BRIR \uC138\uD2B8 \uC900\uBE44",lang:"Rust \xB7 MIT",unsafe:"\uC5C6\uC74C (forbid)",role:"\uD504\uB85C\uD544\uC744 \uC2E4\uC2DC\uAC04 \uC2A4\uB808\uB4DC\uAC00 \uBC14\uB85C \uC4F8 \uC218 \uC788\uB294 PreparedBrir\uB85C \uBC14\uAFC9\uB2C8\uB2E4. Impulcifer \uCD9C\uB825(hesuvi.wav, \uC2A4\uD53C\uCEE4\uBCC4 WAV)\uC774\uB098 21\uBC29\uD5A5 \uC138\uD2B8\uB97C \uC77D\uACE0, \uBC29\uD5A5 \uC774\uB984\uC744 \uAC01\uB3C4\uB85C \uBC14\uAFD4 \uB808\uC774\uC544\uC6C3\uC744 \uB9CC\uB4E4\uACE0, \uD5E4\uB4DC\uD3F0 FIR\uC744 \uAC01 BRIR\uC5D0 \uBBF8\uB9AC \uC811\uACE0, \uC7A5\uBA74 \uC0D8\uD50C\uB808\uC774\uD2B8(\uBCF4\uD1B5 48 kHz)\uB85C \uB9AC\uC0D8\uD50C\uD558\uACE0, \uBD84\uD560 \uC2A4\uD399\uD2B8\uB7FC\uAE4C\uC9C0 \uACC4\uC0B0\uD569\uB2C8\uB2E4. \uCEE8\uBCFC\uB8E8\uC158\uC740 \uC18C\uC2A4 \uD074\uB7ED \uB3C4\uBA54\uC778\uC5D0\uC11C \uB3CC\uAE30 \uB54C\uBB38\uC5D0 \uCD9C\uB825 \uC7A5\uCE58\uC758 \uB808\uC774\uD2B8\uAC00 \uC544\uB2C8\uB77C \uC7A5\uBA74\uC758 \uB808\uC774\uD2B8\uC5D0 \uB9DE\uCDA5\uB2C8\uB2E4.",iface:`pub fn prepare(p: &Profile, rate: u32, block: usize)
+    -> Result<PreparedBrir, BrirError>
+// PreparedBrir = Layout + \uBC29\uD5A5\uBCC4\xB7\uADC0\uBCC4 \uBD84\uD560 \uC2A4\uD399\uD2B8\uB7FC + LFE \uC815\uCC45`,hides:"WAV \uC77D\uAE30(hound), \uC624\uD504\uB77C\uC778 \uB9AC\uC0D8\uD50C(rubato), FFT, \uC774\uB984\uACFC \uAC01\uB3C4 \uD45C, \uAC8C\uC778 \uC815\uADDC\uD654\uB97C \uC228\uAE41\uB2C8\uB2E4. \uD568\uC218 \uD558\uB098 \uB4A4\uC5D0 \uC77C\uC774 \uAC00\uC7A5 \uB9CE\uC774 \uBAB0\uB9B0 \uAE4A\uC740 \uBAA8\uB4C8\uC785\uB2C8\uB2E4.",seam:"\uC5B4\uB311\uD130\uAC00 \uD558\uB098\uBFD0\uC774\uB77C \uD2B8\uB808\uC774\uD2B8\uB97C \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",tests:"\uD5E4\uB4DC\uD3F0 FIR\uC744 \uC811\uAE30 \uC804\uD6C4\uC758 \uCD9C\uB825\uC774 \uD5C8\uC6A9 \uC624\uCC28 \uC548\uC5D0\uC11C \uAC19\uC740\uC9C0(\uC120\uD615\uC131), Impulcifer \uB370\uBAA8 \uB370\uC774\uD130\uB85C \uB808\uC774\uC544\uC6C3\uC774 \uB9DE\uB294\uC9C0.",thread:"\uC81C\uC5B4 \uC2A4\uB808\uB4DC\uC5D0\uC11C \uC2E4\uD589\uD569\uB2C8\uB2E4. \uC218\uBC31 ms\uAC00 \uAC78\uB824\uB3C4 \uC18C\uB9AC\uB294 \uB04A\uAE30\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."},{id:"supervisor",zone:"safe",x:n.ca,y:i.ctl,name:"supervisor",sub:"\uC0C1\uD0DC\uAE30\uACC4 \xB7 \uAD8C\uC704",lang:"Rust \xB7 MIT",unsafe:"\uC5C6\uC74C (forbid)",role:"\uC571\uC758 \uBAA8\uB4E0 \uD310\uB2E8\uC774 \uC5EC\uAE30 \uC788\uC2B5\uB2C8\uB2E4. \uC124\uCE58 \uB9C8\uBC95\uC0AC\uBD80\uD130 Ready, Running, Idle, Faulted\uAE4C\uC9C0\uC758 \uC0C1\uD0DC\uAE30\uACC4, \uD504\uB85C\uD544 \uC800\uC7A5(TOML), \uCD9C\uB825 \uC7A5\uCE58 \uC120\uD0DD\uC790(\uC774\uB984 \uD328\uD134\uACFC \uB9C8\uC9C0\uB9C9 ID), \uB4E4\uC5B4\uC624\uB294 \uD615\uC2DD\uC5D0 \uB530\uB978 \uC9C0\uC5F0 \uD504\uB9AC\uC14B \uC790\uB3D9 \uC120\uD0DD, \uC885\uB8CC \uC2DC \uAE30\uBCF8 \uC7A5\uCE58 \uBCF5\uC6D0\uC744 \uB9E1\uC2B5\uB2C8\uB2E4.",iface:`impl<H: Host> Supervisor<H> {
+  fn dispatch(&mut self, i: Intent) -> Result<(), UserError>;
+  fn on_host(&mut self, e: HostEvent);
+  fn snapshot(&self) -> Snapshot;
+}`,hides:"\uC124\uCE58 \uC21C\uC11C, \uC7AC\uBD80\uD305 \uB4A4 \uC7A5\uCE58 ID\uAC00 \uBC14\uB00C\uB294 \uBB38\uC81C, \uC5D4\uC9C4 \uC7AC\uC2DC\uC791 \uC870\uAC74, \uC624\uB958\uB97C \uC0AC\uC6A9\uC790 \uBB38\uC7A5\uC73C\uB85C \uBC14\uAFB8\uB294 \uC77C\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"Host \uD2B8\uB808\uC774\uD2B8\uC5D0 \uC5B4\uB311\uD130\uAC00 \uB458(Windows\uB294 bio-sys, \uD14C\uC2A4\uD2B8\uB294 Fake)\uC774\uB77C \uC9C4\uC9DC \uC2DC\uC784\uC785\uB2C8\uB2E4.",tests:"Fake Host\uB85C \uB9C8\uBC95\uC0AC \uC804 \uB2E8\uACC4, \uCD9C\uB825 \uC7A5\uCE58 \uBD84\uB9AC, \uB4DC\uB77C\uC774\uBC84 \uC5C6\uC74C, \uC7AC\uBD80\uD305 \uB4A4 ID \uBCC0\uACBD\uC744 \uC7AC\uD604\uD569\uB2C8\uB2E4.",thread:"\uC81C\uC5B4 \uC2A4\uB808\uB4DC. 30 Hz\uB85C \uC5D4\uC9C4 \uC0C1\uD0DC\uB97C \uC77D\uC5B4 \uBBF8\uD130 \uC774\uBCA4\uD2B8\uB97C \uB0C5\uB2C8\uB2E4."},{id:"abi",zone:"safe",x:n.c0,y:i.data,name:"bio-abi",sub:"\uB4DC\uB77C\uC774\uBC84 \uACC4\uC57D",lang:"Rust \xB7 MIT (C \uD5E4\uB354 \uC0DD\uC131)",unsafe:"\uC5C6\uC74C (zerocopy)",role:"\uB4DC\uB77C\uC774\uBC84\uC640 \uC0AC\uC6A9\uC790 \uBAA8\uB4DC \uC0AC\uC774\uC758 \uC720\uC77C\uD55C \uACC4\uC57D\uC785\uB2C8\uB2E4. IOCTL \uBC88\uD638, #[repr(C)] \uAD6C\uC870\uCCB4, \uAE30\uB85D \uD30C\uC11C\uB97C \uB2F4\uACE0, cbindgen\uC73C\uB85C C \uD5E4\uB354\uB97C \uB9CC\uB4E4\uC5B4 \uB4DC\uB77C\uC774\uBC84\uAC00 include\uD569\uB2C8\uB2E4. \uB808\uC774\uC544\uC6C3\uC758 \uC815\uBCF8\uC774 \uD55C \uACF3\uC5D0\uB9CC \uC788\uC2B5\uB2C8\uB2E4.",iface:`pub fn records(buf: &[u8])
+    -> impl Iterator<Item = Result<Record<'_>, AbiError>>
+// Record = Data | FormatChange | StreamStart | StreamStop | Overrun`,hides:"\uBC14\uC774\uD2B8 \uC815\uB82C, \uAE38\uC774 \uAC80\uC99D, \uBAA8\uB974\uB294 \uAE30\uB85D \uC885\uB958 \uAC74\uB108\uB6F0\uAE30\uB97C \uC228\uAE41\uB2C8\uB2E4. zerocopy \uB355\uBD84\uC5D0 \uD30C\uC2F1\uC5D0\uB3C4 unsafe\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",seam:"\uB4DC\uB77C\uC774\uBC84 \uCABD\uC740 \uC0DD\uC131\uB41C \uD5E4\uB354\uB97C \uC4F0\uACE0, \uC591\uCABD \uBAA8\uB450 \uD06C\uAE30\uC640 \uC624\uD504\uC14B\uC744 \uCEF4\uD30C\uC77C \uC2DC\uC810\uC5D0 \uB2E8\uC5B8\uD569\uB2C8\uB2E4.",tests:"cargo-fuzz\uB85C \uD30C\uC11C \uD37C\uC9D5, \uB808\uC774\uC544\uC6C3 \uACE0\uC815 \uD14C\uC2A4\uD2B8, \uBC84\uC804\uC774 \uB2E4\uB978 \uAE30\uB85D\uC744 \uB9CC\uB0AC\uC744 \uB54C\uC758 \uB3D9\uC791.",thread:"\uCEA1\uCC98 \uC2A4\uB808\uB4DC\uC5D0\uC11C \uD638\uCD9C\uB429\uB2C8\uB2E4. \uD560\uB2F9\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."},{id:"bitstream",zone:"safe",x:n.c1,y:i.data,name:"bitstream",sub:"IEC 61937 \uD574\uCCB4",lang:"Rust \xB7 MIT",unsafe:"\uC5C6\uC74C (forbid)",role:"16\uBE44\uD2B8 \uC6CC\uB4DC \uC21C\uC11C\uB97C \uBC14\uB85C\uC7A1\uACE0 \uD504\uB9AC\uC570\uBE14(72 F8 1F 4E)\uB85C \uB3D9\uAE30\uB97C \uC7A1\uC544, Pc \uB370\uC774\uD130 \uD615\uC2DD(AC-3, E-AC-3, MAT, TrueHD)\uACFC \uAE38\uC774\uC5D0 \uB530\uB77C \uBC84\uC2A4\uD2B8\uB97C \uAEBC\uB0C5\uB2C8\uB2E4. \uCCAD\uD06C \uACBD\uACC4\uC5D0 \uAC78\uCE5C \uBC84\uC2A4\uD2B8\uB97C \uC774\uC5B4 \uBD99\uC774\uB294 \uC0C1\uD0DC\uB97C \uAC00\uC9D1\uB2C8\uB2E4.",iface:`impl Deframer {
+  fn push(&mut self, bytes: &[u8], out: &mut impl FnMut(Burst<'_>));
+  fn reset(&mut self);
+}`,hides:"\uB3D9\uAE30 \uC783\uC74C\uACFC \uC7AC\uB3D9\uAE30, \uD328\uB529, \uBC14\uC774\uD2B8 \uC2A4\uC651\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"\uD615\uC2DD\uB9C8\uB2E4 \uB2E4\uB978 \uB514\uCF54\uB354 \uC55E\uC5D0 \uD558\uB098\uB9CC \uB461\uB2C8\uB2E4. PCM\uC740 \uC774 \uBAA8\uB4C8\uC744 \uAC74\uB108\uB701\uB2C8\uB2E4.",tests:"\uB364\uD504 \uACE8\uB4E0, \uD37C\uC9D5, \uADF8\uB9AC\uACE0 \uC785\uB825\uC744 \uC5B4\uB514\uC11C \uC798\uB77C \uB123\uC5B4\uB3C4 \uACB0\uACFC\uAC00 \uAC19\uB2E4\uB294 \uC131\uC9C8 \uD14C\uC2A4\uD2B8(proptest).",thread:"\uCEA1\uCC98 \uC2A4\uB808\uB4DC. \uD560\uB2F9\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."},{id:"decode",zone:"safe",x:n.c2,y:i.data,name:"decode",sub:"\uD615\uC2DD\uBCC4 \u2192 \uC7A5\uBA74",lang:"Rust \xB7 MIT (+ Apache-2.0 \uC758\uC874)",unsafe:"\uC5C6\uC74C (forbid)",role:"\uC18C\uC2A4 \uD615\uC2DD\uB9C8\uB2E4 \uC5B4\uB311\uD130\uAC00 \uD558\uB098\uC529 \uC788\uACE0, \uBAA8\uB450 SceneBlock\uC744 \uB0C5\uB2C8\uB2E4. MAT\uC740 \uD074\uB9B0\uB8F8 \uAD6C\uD604(\uACE0\uC815 11\uCC44\uB110\uACFC \uB3D9\uC801 \uAC1D\uCCB4 20\uAC1C, \uBC18 \uBC84\uC2A4\uD2B8 \uC870\uAE30 \uB514\uCF54\uB529), DD+ JOC\uB294 harletty-bridge\uC758 eac3 \uD06C\uB808\uC774\uD2B8, TrueHD\uB294 truehd \uD06C\uB808\uC774\uD2B8\uB97C \uAC10\uC309\uB2C8\uB2E4. PCM\uC740 \uCC44\uB110 \uB9C8\uC2A4\uD06C\uC758 \uD45C\uC900 \uC704\uCE58\uC5D0 \uAC1D\uCCB4\uB97C \uB193\uC2B5\uB2C8\uB2E4. \uD615\uC2DD \uBCC0\uACBD \uAE30\uB85D\uC758 \uC5D0\uD3EC\uD06C\uAC00 \uBC14\uB00C\uBA74 \uB514\uCF54\uB354\uB97C \uBC14\uAFB8\uACE0 \uB9AC\uC14B\uD569\uB2C8\uB2E4.",iface:`pub enum AnyDecoder { Mat(..), Ddp(..), TrueHd(..), Pcm(..) }
+impl AnyDecoder {
+  fn for_format(f: &SourceFormat) -> Self;
+  fn push(&mut self, unit: Unit<'_>, out: &mut SceneWriter) -> Result<(), DecodeError>;
+}`,hides:"\uCF54\uB371 \uC138\uBD80\uC640 \uAC1D\uCCB4 \uBA54\uD0C0\uB370\uC774\uD130 \uD574\uC11D, \uB514\uCF54\uB354 \uC9C0\uC5F0\uC744 \uC228\uAE41\uB2C8\uB2E4. \uB80C\uB354\uB7EC\uB294 \uC5B4\uB5A4 \uC18C\uC2A4\uC600\uB294\uC9C0 \uBAA8\uB985\uB2C8\uB2E4.",seam:"\uC5B4\uB311\uD130\uAC00 \uB137\uC774\uB77C \uC9C4\uC9DC \uC2DC\uC784\uC785\uB2C8\uB2E4. \uC2DC\uC791\uD560 \uB54C \uB137\uC744 \uBAA8\uB450 \uB9CC\uB4E4\uC5B4 \uB450\uC5B4 \uD615\uC2DD\uC774 \uBC14\uB00C\uC5B4\uB3C4 \uD560\uB2F9\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",tests:"SAL(MAT)\uACFC Omniphony(DD+ JOC)\uB97C \uBE14\uB799\uBC15\uC2A4\uB85C \uB3CC\uB9B0 \uACB0\uACFC\uB97C \uACE8\uB4E0\uC73C\uB85C \uBE44\uAD50\uD569\uB2C8\uB2E4. \uAD6C\uD604\uC790\uB294 SAL \uC18C\uC2A4\uB97C \uBCF4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",thread:"\uCEA1\uCC98 \uC2A4\uB808\uB4DC, \uC18C\uC2A4 \uD074\uB7ED \uB3C4\uBA54\uC778."},{id:"render",zone:"safe",x:n.c3,y:i.data,name:"render",sub:"\uC7A5\uBA74 \u2192 \uBC29\uD5A5 \uD53C\uB4DC",lang:"Rust \xB7 MIT",unsafe:"\uC5C6\uC74C (forbid)",role:"\uC7A5\uBA74\uC758 \uAC1D\uCCB4\uB97C BRIR \uB808\uC774\uC544\uC6C3\uC758 \uBC29\uD5A5\uB4E4 \uC0AC\uC774\uB85C VBAP \uD328\uB2DD\uD574 \uBC29\uD5A5 \uC218\uB9CC\uD07C \uD53C\uB4DC\uB97C \uB9CC\uB4ED\uB2C8\uB2E4. \uCE21\uC815\uB41C \uBC29\uD5A5\uB4E4\uC758 \uBCFC\uB85D \uAECD\uC9C8\uC744 \uC0BC\uAC01\uBD84\uD560\uD574 \uB450\uACE0, \uBE14\uB85D \uC548\uC5D0\uC11C \uAC8C\uC778\uC744 \uB7A8\uD504\uD558\uBA70, \uB808\uC774\uC544\uC6C3\uC5D0 \uC5C6\uB294 \uC704\uCE58(\uCC9C\uC7A5 \uC911\uC559 \uB4F1)\uB294 \uC774\uC6C3 \uBC29\uD5A5\uC5D0 \uB098\uB215\uB2C8\uB2E4. LFE\uB294 \uD504\uB85C\uD544\uC758 \uC815\uCC45\uC744 \uB530\uB985\uB2C8\uB2E4.",iface:`impl Panner {
+  fn new(layout: &Layout) -> Self;
+  fn render(&mut self, scene: &SceneBlock, feeds: &mut Feeds);
+}`,hides:"\uC0BC\uAC01\uBD84\uD560, \uAC8C\uC778 \uCE90\uC2DC, \uC9C0\uD37C \uC7A1\uC74C\uC744 \uB9C9\uB294 \uB7A8\uD504\uB97C \uC228\uAE41\uB2C8\uB2E4.",seam:"\uC5B4\uB311\uD130\uAC00 \uD558\uB098\uBFD0\uC774\uB77C \uD2B8\uB808\uC774\uD2B8\uB97C \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uC30D\uB300 \uD328\uB2DD\uACFC \uBE44\uAD50\uD558\uACE0 \uC2F6\uC73C\uBA74 \uD14C\uC2A4\uD2B8 \uC548\uC5D0\uC11C\uB9CC \uBE44\uAD50\uD569\uB2C8\uB2E4.",tests:"\uAC8C\uC778 \uC81C\uACF1\uD569\uC774 1(\uC5D0\uB108\uC9C0 \uBCF4\uC874), \uCE21\uC815 \uBC29\uD5A5 \uC704\uC758 \uAC1D\uCCB4\uB294 \uADF8 \uBC29\uD5A5 \uD558\uB098\uB85C\uB9CC, \uAD6C\uCD95\uAE30 \uC30D\uB300 \uD328\uB2DD\uACFC\uC758 \uCC28\uC774 \uAE30\uB85D.",thread:"\uCEA1\uCC98 \uC2A4\uB808\uB4DC, \uC18C\uC2A4 \uD074\uB7ED \uB3C4\uBA54\uC778."},{id:"convolver",zone:"safe",x:n.c4,y:i.data,name:"convolver",sub:"\uD53C\uB4DC \u2192 \uC591\uC774 \uC2E0\uD638",lang:"Rust \xB7 MIT \xB7 Copyright 2026 115dkk",unsafe:"\uC5C6\uC74C (forbid)",role:"EqualizerAPO-XT\uC758 MultiConvolution\uC744 Rust\uB85C \uC0C8\uB85C \uC4F4 \uAC83\uC785\uB2C8\uB2E4. \uC785\uB825\uB9C8\uB2E4 \uC815\uBC29\uD5A5 FFT\uB97C \uD55C \uBC88 \uD558\uACE0, \uADC0\uB9C8\uB2E4 \uC8FC\uD30C\uC218 \uC601\uC5ED\uC5D0\uC11C \uACF1\uC148 \uB204\uC801\uC744 \uD55C \uB4A4, \uBE14\uB85D\uB2F9 \uC5EDFFT\uB97C \uB450 \uBC88\uB9CC \uD569\uB2C8\uB2E4. \uBD84\uD560 \uD06C\uAE30\uB294 \uB3C4\uCC29 \uBE14\uB85D\uC5D0 \uB9DE\uCDB0 \uCD94\uAC00 \uC9C0\uC5F0\uC744 \uB9CC\uB4E4\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",iface:`impl Binauralizer {
+  fn new(set: &PreparedBrir, block: usize) -> Self;
+  fn process(&mut self, feeds: &Feeds, left: &mut [f32], right: &mut [f32]);
+}`,hides:"\uC8FC\uD30C\uC218 \uC601\uC5ED \uC9C0\uC5F0\uC120, \uC2A4\uD399\uD2B8\uB7FC \uB204\uC801, realfft \uACC4\uD68D\uC744 \uC228\uAE41\uB2C8\uB2E4. libHybridConv, FFTW, IrCache\uB294 \uD55C \uC904\uB3C4 \uB4E4\uC5B4\uC624\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",seam:"\uC5B4\uB311\uD130\uAC00 \uD558\uB098\uB77C \uD2B8\uB808\uC774\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uAE34 \uAF2C\uB9AC\uB97C \uC704\uD55C \uBE44\uADE0\uC77C \uBD84\uD560\uC740 \uAC19\uC740 \uC778\uD130\uD398\uC774\uC2A4 \uB4A4\uC5D0\uC11C \uB098\uC911\uC5D0 \uB123\uC2B5\uB2C8\uB2E4.",tests:"\uC9E7\uC740 IR\uC758 \uC9C1\uC811 \uCEE8\uBCFC\uB8E8\uC158\uACFC \uD5C8\uC6A9 \uC624\uCC28 \uBE44\uAD50, XT MultiConvolution \uCD9C\uB825\uACFC \uB300\uC870, \uC2E4\uC2DC\uAC04 \uC911 \uD560\uB2F9\uC774 \uC5C6\uB294\uC9C0(assert_no_alloc).",thread:"\uCEA1\uCC98 \uC2A4\uB808\uB4DC, \uC18C\uC2A4 \uD074\uB7ED \uB3C4\uBA54\uC778. 22\uC785\uB825 \uAE30\uC900 10 ms \uBE14\uB85D\uB9C8\uB2E4 \uC2E4\uD589\uB429\uB2C8\uB2E4."},{id:"engine",zone:"safe",x:n.c5,y:i.data,name:"engine",sub:"\uC2A4\uB808\uB4DC \xB7 \uD074\uB7ED \uAD50\uCC28",lang:"Rust \xB7 MIT",unsafe:"\uC5C6\uC74C (forbid)",role:"\uC2E4\uC2DC\uAC04 \uC2A4\uB808\uB4DC \uB458(\uCEA1\uCC98\xB7DSP, \uCD9C\uB825)\uACFC \uADF8 \uC0AC\uC774\uC758 2\uCC44\uB110 \uAD50\uCC28 \uB9C1\uC744 \uC18C\uC720\uD569\uB2C8\uB2E4. \uD074\uB7ED \uC804\uB7B5(ASRC \uB610\uB294 \uB4DC\uB77C\uC774\uBC84 \uD2B8\uB9BC)\uC73C\uB85C \uB450 \uB3C4\uBA54\uC778\uC744 \uB9DE\uCD94\uACE0, \uBE14\uB85D\uC5D0 \uC2E4\uB9B0 \uB3C4\uCC29 \uC2DC\uAC01\uACFC \uCD9C\uB825 \uC7A5\uCE58\uC758 \uC7AC\uC0DD \uC2DC\uAC01\uC73C\uB85C \uC9C0\uC5F0\uC744 \uC9C1\uC811 \uC7BD\uB2C8\uB2E4. \uAC8C\uC778\uACFC \uB9AC\uBBF8\uD130\uB3C4 \uC5EC\uAE30\uC11C \uAC81\uB2C8\uB2E4.",iface:`pub fn start(cfg: EngineConfig, cap: impl CaptureSource, out: impl OutputSink)
+    -> Result<Engine, StartError>;
+impl Engine {
+  fn apply(&self, c: LiveChange) -> Result<(), Rejected>;
+  fn status(&self) -> EngineStatus;   // \uC6D0\uC790 \uBCC0\uC218, \uC7A0\uAE08 \uC5C6\uC74C
+  fn stop(self) -> StopReport;
+}`,hides:"\uC2A4\uB808\uB4DC \uC0DD\uC131\uACFC MMCSS, SPSC \uB9C1(rtrb), PI \uC81C\uC5B4\uAE30, rubato, \uD504\uB85C\uD544 \uAD50\uCCB4 \uB54C\uC758 \uD3EC\uC778\uD130 \uBC14\uAFB8\uAE30\uC640 \uC9C0\uC5F0 \uD574\uC81C\uB97C \uC228\uAE41\uB2C8\uB2E4.",seam:"CaptureSource(\uB4DC\uB77C\uC774\uBC84, SAL \uAC1C\uBC1C\uC6A9, \uB364\uD504), OutputSink(WASAPI, WAV, \uB110), ClockStrategy(ASRC, \uD2B8\uB9BC) \uBAA8\uB450 \uC5B4\uB311\uD130\uAC00 \uB458 \uC774\uC0C1\uC785\uB2C8\uB2E4.",tests:"\uB364\uD504 \uC7AC\uC0DD \uACB0\uC815\uB860 \uD574\uC2DC, \uAC00\uC0C1 DAC\uB97C \xB12000 ppm \uC5B4\uAE0B\uB098\uAC8C \uB454 \uD074\uB7ED \uC2DC\uBBAC\uB808\uC774\uC158\uC5D0\uC11C \uB9C1 \uC218\uC704 \uC218\uB834, \uBD80\uD558\uB97C \uAC74 \uC7A5\uC2DC\uAC04 \uC2DC\uD5D8.",thread:"\uCEA1\uCC98\xB7DSP \uC2A4\uB808\uB4DC\uB294 \uC18C\uC2A4 \uB3C4\uBA54\uC778, \uCD9C\uB825 \uC2A4\uB808\uB4DC\uB294 DAC \uB3C4\uBA54\uC778. \uB458 \uB2E4 MMCSS Pro Audio\uC774\uACE0 \uD560\uB2F9\uACFC \uC7A0\uAE08\uC744 \uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."},{id:"sys_ring",zone:"unsafe",x:n.c0,y:i.unsafe,name:"bio-sys::ring",sub:"\uB9C1 \uC77D\uAE30 IOCTL",lang:"Rust \xB7 MIT \xB7 Windows \uC804\uC6A9",unsafe:"\uC788\uC74C (\uC608\uC0B0 \uC548)",role:"CreateFileW\uC640 DeviceIoControl\uC744 \uAC10\uC2F8 \uB4DC\uB77C\uC774\uBC84\uC758 \uC81C\uC5B4 \uC7A5\uCE58\uB97C \uC5FD\uB2C8\uB2E4. READ\uB294 \uACB9\uCE5C I/O\uB85C \uBCF4\uB0B4 \uC870\uAC74\uC774 \uCC28\uBA74 \uAE68\uC5B4\uB098\uACE0, \uBC1B\uC740 \uBC14\uC774\uD2B8\uB294 \uD574\uC11D\uD558\uC9C0 \uC54A\uACE0 \uADF8\uB300\uB85C \uB118\uAE41\uB2C8\uB2E4. \uD2B8\uB9BC \uAC12\uC744 SET_RATE_TRIM\uC73C\uB85C \uBCF4\uB0C5\uB2C8\uB2E4.",iface:`impl DriverRing {
+  fn open() -> Result<Self, OpenError>;
+  fn read(&mut self, buf: &mut [u8], wait: Duration) -> Result<usize, CaptureError>;
+  fn set_rate_trim(&mut self, ppm: f64) -> Result<(), CaptureError>;
+}`,hides:"\uD578\uB4E4 \uC218\uBA85, OVERLAPPED, \uCDE8\uC18C, \uC624\uB958 \uCF54\uB4DC \uBCC0\uD658\uC744 \uC228\uAE41\uB2C8\uB2E4. \uBC16\uC73C\uB85C\uB294 &mut [u8]\uB9CC \uB098\uAC11\uB2C8\uB2E4.",seam:"engine\uC758 CaptureSource\uB97C \uAD6C\uD604\uD558\uB294 Windows \uC5B4\uB311\uD130\uC785\uB2C8\uB2E4. \uAC1C\uBC1C \uC911\uC5D0\uB294 \uAC19\uC740 \uC790\uB9AC\uC5D0 SAL \uB9C1 \uC5B4\uB311\uD130\uB97C \uAF42\uC2B5\uB2C8\uB2E4(\uCD9C\uC2DC \uBE4C\uB4DC\uC5D0\uC11C \uBE60\uC9D0).",tests:"\uB4DC\uB77C\uC774\uBC84\uAC00 \uC5C6\uC744 \uB54C open\uC774 \uC0AC\uC6A9\uC790\uC5D0\uAC8C \uBCF4\uC77C \uC624\uB958\uB85C \uB05D\uB098\uB294\uC9C0, \uC2E4\uAE30 \uC2A4\uBAA8\uD06C.",thread:"\uCEA1\uCC98 \uC2A4\uB808\uB4DC\uC5D0\uC11C \uD638\uCD9C\uB429\uB2C8\uB2E4."},{id:"sys_out",zone:"unsafe",x:n.c5,y:i.unsafe,name:"bio-sys::output",sub:"WASAPI \uB3C5\uC810",lang:"Rust \xB7 MIT \xB7 Windows \uC804\uC6A9",unsafe:"\uC788\uC74C (\uC608\uC0B0 \uC548)",role:"wasapi \uD06C\uB808\uC774\uD2B8\uC758 \uC548\uC804\uD55C API\uB85C \uCD9C\uB825 \uC7A5\uCE58\uB97C \uB3C5\uC810 \uC774\uBCA4\uD2B8 \uAD6C\uB3D9\uC73C\uB85C \uC5F4\uACE0, \uC548 \uB418\uBA74 \uACF5\uC720 \uBAA8\uB4DC\uB85C \uC5FD\uB2C8\uB2E4. \uC2A4\uB808\uB4DC\uB97C MMCSS Pro Audio\uB85C \uC62C\uB9AC\uACE0, \uC8FC\uAE30\uB9C8\uB2E4 \uC7A5\uCE58\uC758 \uC7AC\uC0DD \uC2DC\uAC01(QPC)\uC744 \uC77D\uC5B4 \uC5D4\uC9C4\uC5D0 \uC90D\uB2C8\uB2E4.",iface:`impl WasapiOutput {
+  fn open(sel: &DeviceSelector, rate: u32) -> Result<Self, OutputError>;
+}
+impl OutputSink for WasapiOutput {
+  fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError>;
+}`,hides:"\uC7A5\uCE58 \uD615\uC2DD \uD611\uC0C1, \uCD5C\uC18C \uC8FC\uAE30, \uC7A5\uCE58 \uC0AC\uB77C\uC9D0, MMCSS \uB4F1\uB85D\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"OutputSink\uC758 Windows \uC5B4\uB311\uD130. CI\uC5D0\uC11C\uB294 WAV\uC640 \uB110 \uC5B4\uB311\uD130\uAC00 \uAC19\uC740 \uC790\uB9AC\uC5D0 \uB4E4\uC5B4\uAC11\uB2C8\uB2E4.",tests:"\uC2E4\uAE30\uC5D0\uC11C 3 ms \uC8FC\uAE30\uB85C \uC7A5\uC2DC\uAC04 \uB04A\uAE40 \uC5C6\uB294\uC9C0, \uC7A5\uCE58\uB97C \uBF51\uC558\uC744 \uB54C Faulted\uB85C \uAC00\uB294\uC9C0.",thread:"\uCD9C\uB825 \uC2A4\uB808\uB4DC, DAC \uD074\uB7ED \uB3C4\uBA54\uC778."},{id:"sys_host",zone:"unsafe",x:n.ca,y:i.unsafe,name:"bio-sys::host",sub:"\uAE30\uBCF8 \uC7A5\uCE58 \xB7 \uC54C\uB9BC",lang:"Rust \xB7 MIT \xB7 Windows \uC804\uC6A9",unsafe:"\uC788\uC74C (\uC608\uC0B0 \uC548)",role:"supervisor\uAC00 OS\uC5D0 \uBB3B\uACE0 \uC2DC\uD0A4\uB294 \uC77C\uC744 \uBAA8\uB450 \uB9E1\uC2B5\uB2C8\uB2E4. \uC7A5\uCE58 \uC5F4\uAC70\uC640 \uBCC0\uACBD \uC54C\uB9BC, \uC5D4\uB4DC\uD3EC\uC778\uD2B8 \uC774\uB984\uACFC \uD615\uC2DD, \uACF5\uAC04\uC74C\uD5A5 \uC0C1\uD0DC \uC77D\uAE30, \uAE30\uBCF8 \uCD9C\uB825 \uC7A5\uCE58 \uC804\uD658(\uBE44\uACF5\uAC1C COM\uC778 IPolicyConfig), \uAD00\uB9AC\uC790 \uAD8C\uD55C\uC73C\uB85C bio-setup \uC2E4\uD589.",iface:`impl Host for WindowsHost {
+  fn outputs(&self) -> Vec<OutputDevice>;
+  fn set_default_render(&self, id: &EndpointId) -> Result<(), HostError>;
+  fn run_elevated(&self, task: SetupTask) -> Result<SetupResult, HostError>;
+  // ...
+}`,hides:"COM \uCD08\uAE30\uD654, IMMNotificationClient, \uBE44\uACF5\uAC1C \uC778\uD130\uD398\uC774\uC2A4, UAC \uC2E4\uD589\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"Host \uD2B8\uB808\uC774\uD2B8\uC758 Windows \uC5B4\uB311\uD130. IPolicyConfig\uAC00 \uAE68\uC9C0\uBA74 \uC774 \uD30C\uC77C \uD558\uB098\uB9CC \uACE0\uCE69\uB2C8\uB2E4.",tests:"Windows CI\uC5D0\uC11C \uC5F4\uAC70\uC640 \uC18D\uC131 \uC77D\uAE30 \uC2A4\uBAA8\uD06C. \uAE30\uBCF8 \uC7A5\uCE58 \uC804\uD658\uC740 \uC2E4\uAE30\uC5D0\uC11C\uB9CC.",thread:"\uC81C\uC5B4 \uC2A4\uB808\uB4DC. \uC54C\uB9BC \uCF5C\uBC31\uC740 \uCC44\uB110\uB85C supervisor\uC5D0 \uB118\uAE41\uB2C8\uB2E4."},{id:"sys_install",zone:"unsafe",x:n.cb,y:i.unsafe,name:"bio-sys::install",sub:"\uD328\uD0A4\uC9C0 \xB7 \uC7A5\uCE58 \uB178\uB4DC",lang:"Rust \xB7 MIT \xB7 Windows \uC804\uC6A9",unsafe:"\uC788\uC74C (\uC608\uC0B0 \uC548)",role:"\uB4DC\uB77C\uC774\uBC84 \uD328\uD0A4\uC9C0\uB97C \uB4DC\uB77C\uC774\uBC84 \uC800\uC7A5\uC18C\uC5D0 \uB123\uACE0 \uB8E8\uD2B8 \uC5F4\uAC70 \uC7A5\uCE58 \uB178\uB4DC\uB97C \uB9CC\uB4E4\uAC70\uB098 \uC9C0\uC6C1\uB2C8\uB2E4. \uD615\uC2DD \uB9C8\uC2A4\uD06C\uB97C \uB808\uC9C0\uC2A4\uD2B8\uB9AC\uC5D0 \uC4F0\uACE0 \uC7A5\uCE58\uB97C \uC7AC\uC2DC\uC791\uD569\uB2C8\uB2E4. bio-setup\uC5D0\uB9CC \uB9C1\uD06C\uB429\uB2C8\uB2E4.",iface:`pub fn install(pkg: &Path) -> Result<InstallOutcome, InstallError>;
+pub fn set_format_mask(mask: FormatMask) -> Result<(), InstallError>;
+pub fn restart_device() -> Result<(), InstallError>;`,hides:"SetupAPI, CfgMgr, \uC7AC\uBD80\uD305 \uD544\uC694 \uD310\uB2E8\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"\uC571 \uBCF8\uCCB4\uC5D0\uB294 \uB4E4\uC5B4\uAC00\uC9C0 \uC54A\uC73C\uBBC0\uB85C, \uC571\uC774 \uAD00\uB9AC\uC790 \uAD8C\uD55C \uC5C6\uC774 \uB3C4\uB294 \uAC83\uC774 \uB9C1\uD06C \uB2E8\uACC4\uC5D0\uC11C \uBCF4\uC7A5\uB429\uB2C8\uB2E4.",tests:"\uAC00\uC0C1 \uBA38\uC2E0\uC5D0\uC11C \uC124\uCE58, \uC7AC\uC124\uCE58, \uC81C\uAC70, \uC7AC\uBD80\uD305 \uB4A4 \uC0C1\uD0DC.",thread:"bio-setup \uD504\uB85C\uC138\uC2A4 \uC548."},{id:"k_cdo",zone:"kernel",x:n.c0,y:i.kernel,name:"\uC81C\uC5B4 \uC7A5\uCE58",sub:"\\\\.\\BioAtmos",lang:"C++ \xB7 MS-PL",unsafe:"\uCEE4\uB110",role:"\uC0AC\uC6A9\uC790 \uBAA8\uB4DC\uAC00 \uC5EC\uB294 \uC720\uC77C\uD55C \uBB38\uC785\uB2C8\uB2E4. IOCTL \uB137(QUERY_INFO, READ, SET_RATE_TRIM, GET_STATS)\uB9CC \uBC1B\uACE0, SDDL\uB85C SYSTEM\xB7\uAD00\uB9AC\uC790\xB7\uB300\uD654\uD615 \uC0AC\uC6A9\uC790\uC5D0\uAC8C \uC5F4\uBA70, \uD578\uB4E4\uC740 \uD558\uB098\uB9CC \uD5C8\uC6A9\uD569\uB2C8\uB2E4. READ\uB294 \uC870\uAC74\uC774 \uCC30 \uB54C\uAE4C\uC9C0 \uBCF4\uB958\uB410\uB2E4\uAC00 \uC644\uB8CC\uB429\uB2C8\uB2E4. \uD578\uB4E4\uC774 \uB2EB\uD788\uBA74 \uD2B8\uB9BC\uC744 0\uC73C\uB85C \uB418\uB3CC\uB9BD\uB2C8\uB2E4.",iface:`IOCTL_BIO_QUERY_INFO   \u2192 AbiInfo
+IOCTL_BIO_READ         ReadRequest{min_bytes, timeout_ms} \u2192 \uAE30\uB85D \uBB36\uC74C
+IOCTL_BIO_SET_RATE_TRIM i32 (ppm \xD7 65536, \xB12000 ppm)
+IOCTL_BIO_GET_STATS    \u2192 BioStats`,hides:"IRP \uBCF4\uB958\uC640 \uCDE8\uC18C \uC548\uC804 \uD050, \uBC84\uD37C \uAE38\uC774 \uAC80\uC99D\uC744 \uC228\uAE41\uB2C8\uB2E4.",seam:"bio-abi\uC5D0\uC11C \uC0DD\uC131\uD55C \uD5E4\uB354\uB97C \uC501\uB2C8\uB2E4. \uB808\uC774\uC544\uC6C3\uC774 \uC5B4\uAE0B\uB098\uBA74 \uCEF4\uD30C\uC77C\uC774 \uC2E4\uD328\uD569\uB2C8\uB2E4.",tests:"IOCTL \uD37C\uC9D5(\uC798\uBABB\uB41C \uAE38\uC774, \uB3D9\uC2DC \uCDE8\uC18C, \uB2EB\uAE30 \uACBD\uC7C1)\uACFC Driver Verifier.",thread:"IRP \uCC98\uB9AC\uB294 PASSIVE, \uC644\uB8CC\uB294 \uB9C1 \uCABD DPC\uC5D0\uC11C."},{id:"k_ring",zone:"kernel",x:n.c1,y:i.kernel,name:"\uCEA1\uCC98 \uB9C1",sub:"\uAE30\uB85D \xB7 QPC",lang:"C++ \xB7 MS-PL",unsafe:"\uCEE4\uB110",role:"1 MiB NonPagedPoolNx \uC6D0\uD615 \uBC84\uD37C\uC5D0 \uAE30\uB85D\uC744 \uC313\uC2B5\uB2C8\uB2E4. \uAE30\uB85D\uC740 \uB370\uC774\uD130, \uD615\uC2DD \uBCC0\uACBD, \uC2DC\uC791, \uC815\uC9C0, \uB118\uCE68 \uB2E4\uC12F \uC885\uB958\uC774\uACE0, \uBAA8\uB450 \uC5D0\uD3EC\uD06C, \uB204\uC801 \uBC14\uC774\uD2B8 \uC704\uCE58, QPC, \uAE38\uC774\uB97C \uAC00\uC9D1\uB2C8\uB2E4. \uB290\uB9B0 \uB3C5\uC790\uB97C \uAE30\uB2E4\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uB118\uCE58\uBA74 \uC624\uB798\uB41C \uAC83\uC744 \uB36E\uACE0 \uB118\uCE68 \uAE30\uB85D\uC744 \uB0A8\uAE41\uB2C8\uB2E4.",iface:`ring.append(kind, epoch, bytes, qpc)   // DPC\uC5D0\uC11C
+ring.drain(dst, min_bytes)              // READ \uC644\uB8CC \uB54C`,hides:"\uC2A4\uD540\uB77D\uACFC \uAC10\uC2F8\uAE30(wrap) \uCC98\uB9AC\uB97C \uC228\uAE41\uB2C8\uB2E4. \uD574\uC11D\uC740 \uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",seam:"\uB9C1\uC740 \uBC14\uC774\uD2B8\uC640 \uC2DC\uAC01\uB9CC \uC555\uB2C8\uB2E4. \uD615\uC2DD \uD574\uC11D\uC744 \uB123\uC9C0 \uC54A\uB294 \uAC83\uC774 \uC774 \uBAA8\uB4C8\uC758 \uADDC\uCE59\uC785\uB2C8\uB2E4.",tests:"\uCEE4\uB110 \uBC16\uC5D0\uC11C \uAC19\uC740 \uB9C1 \uCF54\uB4DC\uB97C \uB2E8\uC704 \uC2DC\uD5D8\uD558\uB294 \uD558\uB124\uC2A4(\uC0AC\uC6A9\uC790 \uBAA8\uB4DC \uBE4C\uB4DC)\uC640 Verifier.",thread:"\uAC00\uC0C1 DMA \uD0C0\uC774\uBA38 DPC\uAC00 \uC501\uB2C8\uB2E4."},{id:"k_endpoint",zone:"kernel",x:n.c2,y:i.kernel,name:"\uAC00\uC0C1 HDMI",sub:"WaveRT \uC5D4\uB4DC\uD3EC\uC778\uD2B8",lang:"C++ \xB7 MS-PL (SysVAD \uCD9C\uBC1C)",unsafe:"\uCEE4\uB110",role:"Windows\uC640 \uC571\uC774 'Atmos\uB97C \uBC1B\uB294 \uB9AC\uC2DC\uBC84\uAC00 \uC5F0\uACB0\uB3FC \uC788\uB2E4'\uACE0 \uBBFF\uAC8C \uD558\uB294 \uC7A5\uCE58\uC785\uB2C8\uB2E4. SysVAD\uC5D0\uC11C HDMI \uB80C\uB354 \uC5D4\uB4DC\uD3EC\uC778\uD2B8 \uD558\uB098\uB9CC \uB0A8\uAE41\uB2C8\uB2E4. \uD615\uC2DD \uD45C\uC5D0\uB294 PCM, AC-3, DD+, DD+ Atmos, MAT, TrueHD, DTS\uB97C \uCEF4\uD30C\uC77C\uD574 \uB450\uACE0 \uB808\uC9C0\uC2A4\uD2B8\uB9AC \uB9C8\uC2A4\uD06C\uB85C \uCF20 \uAC83\uB9CC \uBC1B\uC2B5\uB2C8\uB2E4. \uAC00\uC0C1 DMA \uD0C0\uC774\uBA38\uAC00 \uBC14\uC774\uD2B8\uB97C \uB9C1\uC73C\uB85C \uC62E\uAE30\uBA70, \uD2B8\uB9BC \uAC12\uB9CC\uD07C \uBE60\uB974\uAC70\uB098 \uB290\uB9AC\uAC8C \uB3D5\uB2C8\uB2E4. \uC4F0\uAE30 \uD328\uD0B7 \uC54C\uB9BC(SetWritePacket)\uC744 \uAD6C\uD604\uD558\uBA74 \uC5D4\uC9C4\uC774 \uBC84\uD37C\uB97C \uC4F4 \uC989\uC2DC \uB9C1\uC73C\uB85C \uB118\uAE38 \uC218 \uC788\uC9C0\uB9CC, \uC704\uCE58\uC640 \uC54C\uB9BC\uC740 \uC5EC\uC804\uD788 \uBA85\uBAA9 \uC18D\uB3C4\uB85C \uC9C4\uD589\uD574\uC57C \uD569\uB2C8\uB2E4.",iface:`Windows \uCABD: KS \uD615\uC2DD \uD611\uC0C1, WaveRT \uBC84\uD37C\uC640 \uC704\uCE58
+\uB0B4\uBD80: timer_dpc() { advance(dt \xD7 rate \xD7 (1 + trim)); ring.append(...) }`,hides:"PortCls\uC640 WaveRT, \uD615\uC2DD \uD611\uC0C1, \uC704\uCE58 \uBCF4\uACE0\uB97C \uC228\uAE41\uB2C8\uB2E4.",seam:"\uD615\uC2DD \uC815\uCC45\uC740 \uB9C8\uC2A4\uD06C(\uB808\uC9C0\uC2A4\uD2B8\uB9AC)\uC5D0, \uC18D\uB3C4 \uC815\uCC45\uC740 \uD2B8\uB9BC(IOCTL)\uC5D0 \uC788\uC73C\uBBC0\uB85C \uCEE4\uB110\uC740 \uBA54\uCEE4\uB2C8\uC998\uB9CC \uAC00\uC9D1\uB2C8\uB2E4.",tests:"\uD615\uC2DD \uD611\uC0C1 \uB9E4\uD2B8\uB9AD\uC2A4(\uAC8C\uC784 \uACF5\uAC04\uC74C\uD5A5, Apple Music, \uD50C\uB808\uC774\uC5B4, \uC77C\uBC18 \uC571), HVCI \uCF20 \uB85C\uB4DC, Verifier \uC7A5\uC2DC\uAC04 \uC7AC\uC0DD.",thread:"\uAC00\uC0C1 \uC7A5\uCE58 \uD074\uB7ED = \uC18C\uC2A4 \uD074\uB7ED \uB3C4\uBA54\uC778\uC758 \uC2DC\uC791\uC810."},{id:"src_game",zone:"ext",x:n.c0,y:i.ext,name:"\uAC8C\uC784",sub:"\uACF5\uAC04\uC74C\uD5A5 \u2192 MAT 2.1",lang:"\uC678\uBD80",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"\uAC8C\uC784\uC740 \uAC1D\uCCB4\uB97C Windows \uACF5\uAC04\uC74C\uD5A5 API\uB85C \uB0B4\uACE0, 'Dolby Atmos for home theater'\uAC00 \uACE0\uC815 11\uCC44\uB110\uACFC \uB3D9\uC801 \uAC1D\uCCB4 20\uAC1C\uB97C \uBE44\uC555\uCD95 PCM\uC73C\uB85C MAT 2.1\uC5D0 \uBB36\uC2B5\uB2C8\uB2E4. 20 ms \uBC84\uC2A4\uD2B8(61,440 B)\uB97C 10 ms\uC529 \uBC18\uC73C\uB85C \uB098\uB220 \uC501\uB2C8\uB2E4. Dolby Access \uC571\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.",iface:`IEC 61937 MAT 2.1, HBR(8ch/192 kHz) \uC18D\uB3C4
+61,440 B / 20 ms = 3.07 MB/s`,hides:"\uC571\uC774 \uC190\uB308 \uC218 \uC5C6\uB294 Windows \uC2DC\uC2A4\uD15C \uAD6C\uC131 \uC694\uC18C\uC785\uB2C8\uB2E4.",seam:"\uD615\uC2DD\uC774 \uBC14\uB00C\uBA74 decode\uC758 MAT \uC5B4\uB311\uD130\uB9CC \uACE0\uCE69\uB2C8\uB2E4.",tests:"\uAD6C\uCD95\uAE30\uC5D0\uC11C \uC624\uBC84\uC6CC\uCE58 2\uB85C \uD655\uC778. \uB2E4\uB978 \uAC8C\uC784\uACFC \uC7A5\uC2DC\uAC04\uC740 \uBBF8\uD655\uC778.",thread:"Windows \uC624\uB514\uC624 \uC5D4\uC9C4 \uC8FC\uAE30(10 ms)."},{id:"src_apple",zone:"ext",x:n.c1,y:i.ext,name:"Apple Music",sub:"DD+ JOC \uB3C5\uC810",lang:"\uC678\uBD80",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"Windows\uC6A9 Apple Music\uC740 Atmos \uACE1\uC744 \uACF5\uAC04\uC74C\uD5A5\uC73C\uB85C \uBCF4\uB0B4\uC9C0 \uC54A\uACE0, \uB9AC\uC2DC\uBC84\uC5D0 \uBCF4\uB0B4\uB4EF DD+ JOC(768 kbps)\uB97C IEC 61937 2ch/192 kHz\uB85C \uD3EC\uC7A5\uD574 \uB3C5\uC810 \uBAA8\uB4DC\uB85C \uC501\uB2C8\uB2E4. \uAD6C\uCD95\uAE30 \uC2E4\uCE21\uC73C\uB85C \uC6D0\uBCF8 \uAC1D\uCCB4 15\uAC1C\uC640 LFE\uAC00 \uB4E4\uC5B4 \uC788\uC5C8\uC2B5\uB2C8\uB2E4.",iface:"IEC 61937, Pc = 0x15 (E-AC-3)",hides:"\uC7AC\uC0DD \uC5D4\uC9C4(AMPLibraryAgent.exe)\uC774 \uC7A5\uCE58 \uD615\uC2DD\uC744 \uACE0\uB985\uB2C8\uB2E4.",seam:"decode\uC758 DD+ \uC5B4\uB311\uD130.",tests:"\uAD6C\uCD95\uAE30\uC5D0\uC11C 7\uBD84 30\uCD08 \uB204\uB77D 0. \uBE44 Atmos \uACE1(PCM, AC-3)\uC740 \uBBF8\uD655\uC778.",thread:"\uC571\uC758 \uB3C5\uC810 \uC2A4\uD2B8\uB9BC."},{id:"src_player",zone:"ext",x:n.c2,y:i.ext,name:"\uB3D9\uC601\uC0C1 \uD50C\uB808\uC774\uC5B4",sub:"TrueHD \uBE44\uD2B8\uC2A4\uD2B8\uB9BC",lang:"\uC678\uBD80",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"\uBE44\uD2B8\uC2A4\uD2B8\uB9BC \uCD9C\uB825\uC744 \uCF20 \uD50C\uB808\uC774\uC5B4\uB294 TrueHD\uB97C MAT \uD504\uB808\uC784\uC5D0 \uC2E4\uC5B4 HBR(8ch/192 kHz)\uB85C \uB0B4\uBCF4\uB0C5\uB2C8\uB2E4. \uAD6C\uCD95\uAE30\uB294 \uC601\uD654\uB97C \uD30C\uC77C \uC7AC\uC0DD\uC73C\uB85C \uCC98\uB9AC\uD588\uC73C\uBBC0\uB85C, \uC2E4\uC2DC\uAC04 \uBE44\uD2B8\uC2A4\uD2B8\uB9BC\uC740 \uC774 \uC124\uACC4\uC5D0\uC11C \uC0C8\uB85C \uC5EC\uB294 \uC18C\uC2A4\uC785\uB2C8\uB2E4.",iface:"IEC 61937 HBR, TrueHD(MAT \uD504\uB808\uC784)",hides:"\uD50C\uB808\uC774\uC5B4\uBCC4 \uBE44\uD2B8\uC2A4\uD2B8\uB9BC \uC124\uC815.",seam:"decode\uC758 TrueHD \uC5B4\uB311\uD130.",tests:"\uBBF8\uD655\uC778. M2 \uC774\uD6C4 \uD655\uC778 \uB300\uC0C1.",thread:"\uC571\uC758 \uB3C5\uC810 \uC2A4\uD2B8\uB9BC."},{id:"src_apps",zone:"ext",x:n.c3,y:i.ext,name:"\uC77C\uBC18 \uC571",sub:"PCM",lang:"\uC678\uBD80",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"\uACF5\uAC04\uC74C\uD5A5\uC744 \uB044\uBA74 Windows \uC5D4\uC9C4\uC774 2~8\uCC44\uB110 PCM\uC744 \uC501\uB2C8\uB2E4. \uACF5\uAC04\uC74C\uD5A5\uC744 \uCF1C \uB450\uBA74 \uC77C\uBC18 \uC571\uC758 \uC18C\uB9AC\uB3C4 MAT \uC548\uC5D0 \uC11E\uC5EC \uB4E4\uC5B4\uC635\uB2C8\uB2E4.",iface:"WAVEFORMATEXTENSIBLE PCM, \uCC44\uB110 \uB9C8\uC2A4\uD06C",hides:"Windows \uBBF9\uC11C.",seam:"decode\uC758 PCM \uC5B4\uB311\uD130. bitstream\uC744 \uAC74\uB108\uB701\uB2C8\uB2E4.",tests:"\uB364\uD504 \uACE8\uB4E0.",thread:"Windows \uC624\uB514\uC624 \uC5D4\uC9C4 \uC8FC\uAE30."},{id:"dac",zone:"ext",x:n.c5,y:i.ext,name:"\uCD9C\uB825 \uC7A5\uCE58",sub:"Denon \xB7 DAC \u2192 \uD5E4\uB4DC\uD3F0",lang:"\uC678\uBD80",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"\uC591\uC774 2\uCC44\uB110 PCM\uC744 \uBC1B\uB294 \uC2E4\uC81C \uC7A5\uCE58\uC785\uB2C8\uB2E4. \uAD6C\uCD95\uAE30\uB294 Denon AVR-A1H(HDMI, Direct)\uC640 KSC75\uB97C \uC37C\uACE0, USB DAC\uB3C4 \uAC19\uC740 \uBC29\uC2DD\uC73C\uB85C \uC501\uB2C8\uB2E4. \uC774 \uC7A5\uCE58\uC758 \uD074\uB7ED\uC774 DAC \uD074\uB7ED \uB3C4\uBA54\uC778\uC785\uB2C8\uB2E4.",iface:"WASAPI \uB3C5\uC810, \uC7A5\uCE58 \uCD5C\uC18C \uC8FC\uAE30(\uAD6C\uCD95\uAE30 3 ms)",hides:"\uC7A5\uCE58 \uB0B4\uBD80 \uCC98\uB9AC.",seam:"\uCD9C\uB825 \uC7A5\uCE58 \uC120\uD0DD\uC790(\uC774\uB984 \uD328\uD134\uACFC \uB9C8\uC9C0\uB9C9 ID)\uB85C \uACE0\uB985\uB2C8\uB2E4. \uC7AC\uBD80\uD305 \uB4A4 ID\uAC00 \uBC14\uB00C\uC5B4\uB3C4 \uC774\uB984\uC73C\uB85C \uB2E4\uC2DC \uCC3E\uC2B5\uB2C8\uB2E4.",tests:"\uC2E4\uAE30.",thread:"DAC \uD074\uB7ED \uB3C4\uBA54\uC778."},{id:"win_audio",zone:"ext",x:n.ca,y:i.ext,name:"Windows \uC624\uB514\uC624",sub:"\uAE30\uBCF8 \uC7A5\uCE58 \xB7 \uACF5\uAC04\uC74C\uD5A5",lang:"\uC678\uBD80",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"\uAE30\uBCF8 \uCD9C\uB825 \uC7A5\uCE58\uC640 \uACF5\uAC04\uC74C\uD5A5 \uC81C\uACF5\uC790 \uC120\uD0DD\uC774 \uC5EC\uAE30 \uC788\uC2B5\uB2C8\uB2E4. \uC571\uC740 \uCF24 \uB54C \uAE30\uBCF8 \uC7A5\uCE58\uB97C \uAC00\uC0C1 \uC5D4\uB4DC\uD3EC\uC778\uD2B8\uB85C \uBC14\uAFB8\uACE0, \uB04C \uB54C \uB418\uB3CC\uB9BD\uB2C8\uB2E4. \uACF5\uAC04\uC74C\uD5A5 \uC81C\uACF5\uC790\uB97C \uD504\uB85C\uADF8\uB7A8\uC73C\uB85C \uBC14\uAFB8\uB294 \uACF5\uAC1C \uBC29\uBC95\uC740 \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC73C\uBBC0\uB85C, \uB9C8\uBC95\uC0AC\uAC00 \uC124\uC815 \uD654\uBA74\uC744 \uC5F4\uC5B4 \uC548\uB0B4\uD558\uACE0 \uACB0\uACFC\uB97C \uC77D\uC5B4 \uD655\uC778\uD569\uB2C8\uB2E4.",iface:"IPolicyConfig(\uBE44\uACF5\uAC1C), IMMDeviceEnumerator, \uC5D4\uB4DC\uD3EC\uC778\uD2B8 \uC18D\uC131",hides:"Windows \uC5C5\uB370\uC774\uD2B8\uC5D0 \uB530\uB77C \uBC14\uB014 \uC218 \uC788\uB294 \uBD80\uBD84.",seam:"bio-sys::host \uD558\uB098\uB9CC \uC774 \uC7A5\uCE58\uB97C \uC555\uB2C8\uB2E4.",tests:"\uC2E4\uAE30.",thread:"-"},{id:"pnp",zone:"ext",x:n.cb,y:i.ext,name:"PnP",sub:"\uB4DC\uB77C\uC774\uBC84 \uC800\uC7A5\uC18C",lang:"\uC678\uBD80",unsafe:"\uD574\uB2F9 \uC5C6\uC74C",role:"Microsoft \uC99D\uBA85 \uC11C\uBA85\uC744 \uBC1B\uC740 \uB4DC\uB77C\uC774\uBC84 \uD328\uD0A4\uC9C0(.inf, .sys, .cat)\uAC00 \uC124\uCE58\uB418\uB294 \uACF3\uC785\uB2C8\uB2E4. \uC7A5\uCE58 \uB178\uB4DC\uAC00 \uC0DD\uAE30\uBA74 PnP\uAC00 \uB4DC\uB77C\uC774\uBC84\uB97C \uC62C\uB9AC\uACE0 \uAC00\uC0C1 HDMI \uC5D4\uB4DC\uD3EC\uC778\uD2B8\uAC00 \uB098\uD0C0\uB0A9\uB2C8\uB2E4.",iface:".inf \xB7 .sys \xB7 .cat (\uC99D\uBA85 \uC11C\uBA85)",hides:"\uC11C\uBA85 \uAC80\uC99D, Secure Boot, HVCI.",seam:"bio-sys::install\uB9CC \uC774 \uB2E8\uACC4\uB97C \uB2E4\uB8F9\uB2C8\uB2E4.",tests:"Secure Boot\uB97C \uCF20 \uAE68\uB057\uD55C PC\uC5D0\uC11C \uC124\uCE58.",thread:"-"}],g=[{id:"e_game_ep",from:"src_game",to:"k_endpoint",fs:"t",ts:"b",tdx:-45,kind:"audio",label:"MAT 2.1",lt:.04,labelSide:"right"},{id:"e_apple_ep",from:"src_apple",to:"k_endpoint",fs:"t",ts:"b",tdx:-15,kind:"audio",label:"DD+ JOC",lt:.04,labelSide:"right"},{id:"e_player_ep",from:"src_player",to:"k_endpoint",fs:"t",ts:"b",tdx:15,kind:"audio",label:"TrueHD",lt:.04,labelSide:"left"},{id:"e_apps_ep",from:"src_apps",to:"k_endpoint",fs:"t",ts:"b",tdx:45,kind:"audio",label:"PCM",lt:.04,labelSide:"right"},{id:"e_ep_ring",from:"k_endpoint",to:"k_ring",fs:"l",ts:"r",kind:"audio",label:"\uBC14\uC774\uD2B8 + QPC",labelAbove:!0},{id:"e_ring_cdo",from:"k_ring",to:"k_cdo",fs:"l",ts:"r",kind:"audio",label:"\uAE30\uB85D",labelAbove:!0},{id:"e_cdo_sys",from:"k_cdo",to:"sys_ring",fs:"t",ts:"b",fdx:-26,tdx:-26,kind:"audio",label:"READ",labelSide:"left"},{id:"e_sys_abi",from:"sys_ring",to:"abi",fs:"t",ts:"b",kind:"audio",label:"&[u8]",labelSide:"right"},{id:"e_abi_bs",from:"abi",to:"bitstream",fs:"r",ts:"l",kind:"audio",label:"Record",labelAbove:!0},{id:"e_abi_dec",from:"abi",to:"decode",fs:"t",ts:"t",fdx:34,tdx:-34,kind:"audio",label:"PCM",k:70,lt:.5,labelAbove:!0},{id:"e_bs_dec",from:"bitstream",to:"decode",fs:"r",ts:"l",kind:"audio",label:"Burst",labelAbove:!0},{id:"e_dec_ren",from:"decode",to:"render",fs:"r",ts:"l",kind:"audio",label:"SceneBlock",labelAbove:!0},{id:"e_ren_conv",from:"render",to:"convolver",fs:"r",ts:"l",kind:"audio",label:"Feeds",labelAbove:!0},{id:"e_conv_eng",from:"convolver",to:"engine",fs:"r",ts:"l",kind:"audio",label:"2ch",labelAbove:!0},{id:"e_eng_out",from:"engine",to:"sys_out",fs:"b",ts:"t",fdx:20,tdx:20,kind:"audio",label:"2ch \xB7 DAC \uD074\uB7ED",labelSide:"right"},{id:"e_out_dac",from:"sys_out",to:"dac",fs:"b",ts:"t",fdx:20,tdx:20,kind:"audio",label:"WASAPI \uB3C5\uC810",labelSide:"right"},{id:"e_ui_shell",from:"ui",to:"shell",fs:"r",ts:"l",kind:"control",label:"Intent",bi:!0,labelAbove:!0},{id:"e_shell_sup",from:"shell",to:"supervisor",fs:"b",ts:"t",kind:"control",label:"dispatch",labelSide:"right"},{id:"e_sup_brir",from:"supervisor",to:"brir",fs:"l",ts:"r",kind:"control",label:"prepare",labelAbove:!0},{id:"e_brir_eng",from:"brir",to:"engine",fs:"b",ts:"t",kind:"control",label:"PreparedBrir",labelSide:"right"},{id:"e_sup_eng",from:"supervisor",to:"engine",fs:"b",ts:"r",fdx:-40,kind:"control",label:"start \xB7 apply",lt:.55,labelSide:"right"},{id:"e_sup_host",from:"supervisor",to:"sys_host",fs:"b",ts:"t",fdx:26,tdx:26,kind:"control",label:"Host",labelSide:"right"},{id:"e_host_win",from:"sys_host",to:"win_audio",fs:"b",ts:"t",kind:"control",label:"\uAE30\uBCF8 \uC7A5\uCE58",labelSide:"right"},{id:"e_sup_setup",from:"supervisor",to:"setup_app",fs:"r",ts:"b",tdx:-30,kind:"control",label:"UAC",lt:.45,labelSide:"right"},{id:"e_setup_inst",from:"setup_app",to:"sys_install",fs:"b",ts:"t",fdx:30,tdx:30,kind:"control",label:"\uC791\uC5C5",labelSide:"right",lt:.3},{id:"e_inst_pnp",from:"sys_install",to:"pnp",fs:"b",ts:"t",kind:"control",label:"\uD328\uD0A4\uC9C0",labelSide:"right"},{id:"e_pnp_ep",from:"pnp",to:"k_endpoint",fs:"t",ts:"r",fdx:-30,kind:"control",label:"\uC7A5\uCE58 \uC2DC\uC791",k:90,lt:.75},{id:"e_eng_sysring",from:"engine",to:"sys_ring",fs:"b",ts:"r",fdx:-40,kind:"control",label:"\uD2B8\uB9BC ppm",k:110,lt:.5},{id:"e_sysring_cdo",from:"sys_ring",to:"k_cdo",fs:"b",ts:"t",fdx:26,tdx:26,kind:"control",label:"TRIM",labelSide:"right"},{id:"e_cdo_ep",from:"k_cdo",to:"k_endpoint",fs:"b",ts:"b",fdx:30,tdx:-62,kind:"control",label:"",k:24,lt:.5},{id:"e_replay_abi",from:"replay",to:"abi",fs:"b",ts:"t",fdx:-34,tdx:-34,kind:"offline",label:"\uB364\uD504",labelSide:"right",lt:.3}],_=["e_ep_ring","e_ring_cdo","e_cdo_sys","e_sys_abi","e_dec_ren","e_ren_conv","e_conv_eng","e_eng_out","e_out_dac"],h=["e_abi_bs","e_bs_dec"],k=[{id:"game",label:"\uAC8C\uC784 \xB7 MAT 2.1",edges:["e_game_ep",..._,...h],steps:["\uAC8C\uC784\uC774 Windows \uACF5\uAC04\uC74C\uD5A5\uC5D0 \uAC1D\uCCB4\uB97C \uB118\uAE30\uBA74 'Dolby Atmos for home theater'\uAC00 MAT 2.1 \uBC84\uC2A4\uD2B8(20 ms)\uB97C 10 ms\uC529 \uBC18\uC73C\uB85C \uB098\uB220 \uAC00\uC0C1 HDMI \uC5D4\uB4DC\uD3EC\uC778\uD2B8\uC5D0 \uC501\uB2C8\uB2E4.","\uAC00\uC0C1 DMA \uD0C0\uC774\uBA38\uAC00 \uBC14\uC774\uD2B8\uB97C \uCEA1\uCC98 \uB9C1\uC73C\uB85C \uC62E\uAE30\uACE0, \uAE30\uB85D\uB9C8\uB2E4 \uC5D0\uD3EC\uD06C\uC640 QPC\uB97C \uBD99\uC785\uB2C8\uB2E4.","\uCEA1\uCC98 \uC2A4\uB808\uB4DC\uAC00 \uBCF4\uB0B4 \uB454 READ\uB294 \uBC18 \uBC84\uC2A4\uD2B8\uB9CC\uD07C \uC313\uC774\uB294 \uC21C\uAC04 \uC644\uB8CC\uB418\uC5B4 \uC2A4\uB808\uB4DC\uB97C \uAE68\uC6C1\uB2C8\uB2E4. Sleep \uD3F4\uB9C1\uACFC timeBeginPeriod\uAC00 \uD544\uC694 \uC5C6\uC2B5\uB2C8\uB2E4.","bio-abi\uAC00 \uAE30\uB85D\uC744 \uB098\uB204\uACE0, bitstream\uC774 IEC 61937 \uD3EC\uC7A5\uC744 \uBC97\uACA8 MAT \uBC84\uC2A4\uD2B8\uB97C \uAEBC\uB0C5\uB2C8\uB2E4.","decode\uC758 MAT \uC5B4\uB311\uD130\uAC00 \uBC18 \uBC84\uC2A4\uD2B8\uB85C \uACE0\uC815 11\uCC44\uB110\uACFC \uB3D9\uC801 \uAC1D\uCCB4 20\uAC1C\uB97C \uC7A5\uBA74\uC73C\uB85C \uB9CC\uB4ED\uB2C8\uB2E4. \uACE0\uC815 \uCC44\uB110\uB3C4 \uC704\uCE58\uAC00 \uBD99\uC740 \uAC1D\uCCB4\uB85C \uB4E4\uC5B4\uAC11\uB2C8\uB2E4.","render\uAC00 \uC7A5\uBA74\uC744 BRIR \uBC29\uD5A5 \uD53C\uB4DC\uB85C VBAP \uD328\uB2DD\uD558\uACE0, convolver\uAC00 \uD53C\uB4DC\uB97C \uC591\uC774 2\uCC44\uB110\uB85C \uD569\uCE69\uB2C8\uB2E4. \uAC8C\uC778\uACFC \uB9AC\uBBF8\uD130\uB97C \uC9C0\uB098 \uAD50\uCC28 \uB9C1\uC5D0 \uC501\uB2C8\uB2E4.","\uCD9C\uB825 \uC2A4\uB808\uB4DC\uAC00 DAC \uD074\uB7ED\uC5D0 \uB9DE\uCDB0 \uAD50\uCC28 \uB9C1\uC744 \uC77D\uACE0, ASRC(\uB610\uB294 \uB4DC\uB77C\uC774\uBC84 \uD2B8\uB9BC)\uB85C \uC18D\uB3C4\uB97C \uB9DE\uCDB0 WASAPI \uB3C5\uC810 3 ms \uBC84\uD37C\uC5D0 \uC501\uB2C8\uB2E4."]},{id:"apple",label:"Apple Music \xB7 DD+ JOC",edges:["e_apple_ep",..._,...h],steps:["Apple Music \uC7AC\uC0DD \uC5D4\uC9C4\uC774 DD+ JOC(768 kbps)\uB97C IEC 61937 2ch/192 kHz\uB85C \uD3EC\uC7A5\uD574 \uB3C5\uC810 \uBAA8\uB4DC\uB85C \uC501\uB2C8\uB2E4.","\uB9C1\uACFC READ\uB294 \uAC8C\uC784\uACFC \uAC19\uC2B5\uB2C8\uB2E4. \uB2E4\uB9CC supervisor\uAC00 \uD615\uC2DD\uC744 \uBCF4\uACE0 \uC74C\uC545 \uD504\uB9AC\uC14B\uC744 \uACE8\uB77C \uAD50\uCC28 \uB9C1 \uBAA9\uD45C\uB97C \uB109\uB109\uD558\uAC8C \uC7A1\uC2B5\uB2C8\uB2E4.","bitstream\uC774 Pc = 0x15(E-AC-3) \uBC84\uC2A4\uD2B8\uB97C \uAEBC\uB0C5\uB2C8\uB2E4.","decode\uC758 DD+ \uC5B4\uB311\uD130(eac3 \uD06C\uB808\uC774\uD2B8)\uAC00 JOC \uAC1D\uCCB4\uC640 \uC704\uCE58\uB97C \uC7A5\uBA74\uC73C\uB85C \uB9CC\uB4ED\uB2C8\uB2E4. \uAD6C\uCD95\uAE30 \uC2E4\uCE21\uC740 \uAC1D\uCCB4 15\uAC1C\uC640 LFE\uC600\uC2B5\uB2C8\uB2E4.","\uC774\uD6C4 render, convolver, \uAD50\uCC28 \uB9C1, \uCD9C\uB825\uC740 \uAC8C\uC784\uACFC \uAC19\uC740 \uBAA8\uB4C8\uC744 \uADF8\uB300\uB85C \uC9C0\uB0A9\uB2C8\uB2E4. \uB80C\uB354\uB7EC\uB294 \uC18C\uC2A4\uAC00 \uBB34\uC5C7\uC774\uC5C8\uB294\uC9C0 \uBAA8\uB985\uB2C8\uB2E4."]},{id:"player",label:"\uB3D9\uC601\uC0C1 \xB7 TrueHD",edges:["e_player_ep",..._,...h],steps:["\uBE44\uD2B8\uC2A4\uD2B8\uB9BC \uCD9C\uB825\uC744 \uCF20 \uD50C\uB808\uC774\uC5B4\uAC00 TrueHD\uB97C MAT \uD504\uB808\uC784\uC5D0 \uC2E4\uC5B4 HBR(8ch/192 kHz)\uB85C \uC501\uB2C8\uB2E4.","\uD615\uC2DD \uB9C8\uC2A4\uD06C\uC5D0\uC11C TrueHD\uAC00 \uCF1C\uC838 \uC788\uC5B4\uC57C \uC5D4\uB4DC\uD3EC\uC778\uD2B8\uAC00 \uC774 \uD615\uC2DD\uC744 \uBC1B\uC544 \uC90D\uB2C8\uB2E4. \uB514\uCF54\uB354\uAC00 \uC900\uBE44\uB418\uAE30 \uC804\uC5D0\uB294 \uB9C8\uC2A4\uD06C\uB97C \uAEBC \uB461\uB2C8\uB2E4.","bitstream\uC774 MAT \uD504\uB808\uC784\uC744 \uAEBC\uB0B4\uACE0, decode\uC758 TrueHD \uC5B4\uB311\uD130(truehd \uD06C\uB808\uC774\uD2B8)\uAC00 \uAC1D\uCCB4\uB97C \uC7A5\uBA74\uC73C\uB85C \uB9CC\uB4ED\uB2C8\uB2E4.","\uC774\uD6C4\uB294 \uAC19\uC740 \uB80C\uB354\uB7EC\uC640 \uCEE8\uBCFC\uBC84\uC785\uB2C8\uB2E4. \uC774 \uC18C\uC2A4\uB294 \uAD6C\uCD95\uAE30\uC5D0\uC11C \uC2E4\uC2DC\uAC04\uC73C\uB85C \uD655\uC778\uD55C \uC801\uC774 \uC5C6\uC5B4 M2 \uC774\uD6C4 \uD655\uC778 \uB300\uC0C1\uC785\uB2C8\uB2E4."]},{id:"pcm",label:"\uC77C\uBC18 \uC571 \xB7 PCM",edges:["e_apps_ep",..._,"e_abi_dec"],steps:["\uACF5\uAC04\uC74C\uD5A5\uC744 \uB044\uBA74 Windows \uC5D4\uC9C4\uC774 2~8\uCC44\uB110 PCM\uC744 \uC501\uB2C8\uB2E4. \uACF5\uAC04\uC74C\uD5A5\uC744 \uCF1C \uB450\uBA74 \uC77C\uBC18 \uC571 \uC18C\uB9AC\uB3C4 MAT \uC548\uC5D0 \uC11E\uC5EC \uB4E4\uC5B4\uC635\uB2C8\uB2E4.","\uD615\uC2DD \uBCC0\uACBD \uAE30\uB85D\uC774 PCM\uC744 \uC54C\uB9AC\uBA74 bitstream\uC744 \uAC74\uB108\uB6F0\uACE0 decode\uC758 PCM \uC5B4\uB311\uD130\uB85C \uBC14\uB85C \uAC11\uB2C8\uB2E4.","PCM \uC5B4\uB311\uD130\uB294 \uCC44\uB110 \uB9C8\uC2A4\uD06C\uC758 \uD45C\uC900 \uC704\uCE58(FL, FR, FC \uB4F1)\uC5D0 \uAC1D\uCCB4\uB97C \uB193\uC544 \uC7A5\uBA74\uC744 \uB9CC\uB4ED\uB2C8\uB2E4. \uADF8\uB798\uC11C \uC2A4\uD14C\uB808\uC624\uB3C4 \uAC19\uC740 \uB80C\uB354\uB7EC\uC640 BRIR\uC744 \uC9C0\uB0A9\uB2C8\uB2E4."]},{id:"setup",label:"\uCCAB \uC124\uCE58",edges:["e_ui_shell","e_shell_sup","e_sup_setup","e_setup_inst","e_inst_pnp","e_pnp_ep","e_sup_host","e_host_win"],steps:["\uC0AC\uC6A9\uC790\uAC00 Velopack \uC124\uCE58\uBCF8\uC744 \uBC1B\uC2B5\uB2C8\uB2E4. \uC0AC\uC6A9\uC790 \uAD8C\uD55C\uC73C\uB85C \uC124\uCE58\uB418\uBBC0\uB85C \uC774 \uB2E8\uACC4\uC5D0\uB294 UAC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.","\uCCAB \uC2E4\uD589 \uB9C8\uBC95\uC0AC\uAC00 Intent\uB97C \uBCF4\uB0B4\uACE0, supervisor\uAC00 Host\uB85C \uB4DC\uB77C\uC774\uBC84 \uC0C1\uD0DC\uB97C \uD655\uC778\uD569\uB2C8\uB2E4.","\uB4DC\uB77C\uC774\uBC84\uAC00 \uC5C6\uC73C\uBA74 supervisor\uAC00 bio-setup\uC744 \uAD00\uB9AC\uC790 \uAD8C\uD55C\uC73C\uB85C \uD55C \uBC88 \uC2E4\uD589\uD569\uB2C8\uB2E4. UAC \uCC3D\uC740 \uC5EC\uAE30\uC11C \uD55C \uBC88 \uB739\uB2C8\uB2E4.","bio-setup\uC774 \uC99D\uBA85 \uC11C\uBA85 \uD328\uD0A4\uC9C0\uB97C \uB4DC\uB77C\uC774\uBC84 \uC800\uC7A5\uC18C\uC5D0 \uB123\uACE0 \uB8E8\uD2B8 \uC7A5\uCE58 \uB178\uB4DC\uB97C \uB9CC\uB4E4\uACE0, \uD615\uC2DD \uB9C8\uC2A4\uD06C \uAE30\uBCF8\uAC12\uC744 \uC501\uB2C8\uB2E4.","PnP\uAC00 \uB4DC\uB77C\uC774\uBC84\uB97C \uC62C\uB9AC\uBA74 \uAC00\uC0C1 HDMI \uC5D4\uB4DC\uD3EC\uC778\uD2B8\uAC00 \uB098\uD0C0\uB098\uACE0, \uC7A5\uCE58 \uC54C\uB9BC\uC774 supervisor\uC5D0 \uB3C4\uCC29\uD569\uB2C8\uB2E4.","\uB9C8\uBC95\uC0AC\uB294 \uCD9C\uB825 \uC7A5\uCE58 \uC120\uD0DD, BRIR \uAC00\uC838\uC624\uAE30, \uBC29\uD5A5\uBCC4 \uC2DC\uD5D8\uC74C\uC73C\uB85C \uB118\uC5B4\uAC00\uACE0, \uB9C8\uC9C0\uB9C9\uC5D0 \uAE30\uBCF8 \uC7A5\uCE58\uB97C \uAC00\uC0C1 \uC5D4\uB4DC\uD3EC\uC778\uD2B8\uB85C \uBC14\uAFC9\uB2C8\uB2E4. \uACF5\uAC04\uC74C\uD5A5 \uC81C\uACF5\uC790\uB294 \uC124\uC815 \uD654\uBA74\uC744 \uC5F4\uC5B4 \uC548\uB0B4\uD55C \uB4A4 \uACB0\uACFC\uB97C \uC77D\uC5B4 \uD655\uC778\uD569\uB2C8\uB2E4."]},{id:"profile",label:"\uD504\uB85C\uD544 \uAD50\uCCB4",edges:["e_ui_shell","e_shell_sup","e_sup_brir","e_brir_eng","e_sup_eng"],steps:["\uD654\uBA74\uC5D0\uC11C \uD504\uB85C\uD544\uC744 \uACE0\uB974\uBA74 Intent \uD558\uB098\uAC00 supervisor\uB85C \uAC11\uB2C8\uB2E4.","supervisor\uAC00 \uC81C\uC5B4 \uC2A4\uB808\uB4DC\uC5D0\uC11C brir::prepare\uB97C \uB3CC\uB9BD\uB2C8\uB2E4. \uD30C\uC77C \uC77D\uAE30, \uD5E4\uB4DC\uD3F0 FIR \uC811\uAE30, \uB9AC\uC0D8\uD50C, \uBD84\uD560 \uC2A4\uD399\uD2B8\uB7FC \uACC4\uC0B0\uC774 \uBAA8\uB450 \uC5EC\uAE30\uC11C \uB05D\uB0A9\uB2C8\uB2E4.","\uC900\uBE44\uB41C PreparedBrir\uB97C engine.apply\uB85C \uB118\uAE30\uBA74 \uCEA1\uCC98 \uC2A4\uB808\uB4DC\uB294 \uB2E4\uC74C \uBE14\uB85D \uACBD\uACC4\uC5D0\uC11C \uD3EC\uC778\uD130\uB9CC \uBC14\uAFC9\uB2C8\uB2E4. \uC61B \uC138\uD2B8\uB294 \uC81C\uC5B4 \uC2A4\uB808\uB4DC\uB85C \uB3CC\uB824\uBCF4\uB0B4 \uAC70\uAE30\uC11C \uD574\uC81C\uD558\uBBC0\uB85C \uC2E4\uC2DC\uAC04 \uC2A4\uB808\uB4DC\uC5D0\uC11C\uB294 \uD560\uB2F9\uB3C4 \uD574\uC81C\uB3C4 \uC77C\uC5B4\uB098\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4."]},{id:"trim",label:"\uD074\uB7ED \uD2B8\uB9BC",edges:["e_eng_sysring","e_sysring_cdo","e_cdo_ep","e_eng_out","e_out_dac"],steps:["\uCD9C\uB825 \uC2A4\uB808\uB4DC\uAC00 \uC8FC\uAE30\uB9C8\uB2E4 \uAD50\uCC28 \uB9C1 \uC218\uC704\uB97C \uC7BD\uB2C8\uB2E4. \uB300\uAE30 \uC911\uC774 \uC544\uB2C8\uB77C \uBCF4\uB0B8 \uC8FC\uAE30\uB9C8\uB2E4 \uC7AC\uBBC0\uB85C \uC2DC\uAC04\uC5D0 \uACE0\uB974\uAC8C \uC0D8\uD50C\uB9C1\uB429\uB2C8\uB2E4(\uAD6C\uCD95\uAE30\uC5D0\uC11C resync\uB97C \uC5C6\uC564 \uC218\uC815\uACFC \uAC19\uC740 \uC6D0\uB9AC).","PI \uC81C\uC5B4\uAE30\uAC00 \uBAA9\uD45C \uC218\uC704\uC640\uC758 \uCC28\uC774\uB97C ppm \uBCF4\uC815\uB7C9\uC73C\uB85C \uBC14\uAFC9\uB2C8\uB2E4.","\uD2B8\uB9BC \uC804\uB7B5\uC774\uBA74 \uC774 \uAC12\uC774 bio-sys::ring\uC744 \uAC70\uCCD0 \uB4DC\uB77C\uC774\uBC84\uB85C \uAC00\uACE0, \uAC00\uC0C1 DMA \uD0C0\uC774\uBA38\uAC00 \uADF8\uB9CC\uD07C \uBE60\uB974\uAC70\uB098 \uB290\uB9AC\uAC8C \uB3D5\uB2C8\uB2E4. \uC18C\uC2A4\uB294 \uAC00\uC0C1 \uC7A5\uCE58\uC758 \uC18D\uB3C4\uC5D0 \uB9DE\uCDB0 \uC4F0\uBBC0\uB85C \uC0DD\uC0B0 \uC18D\uB3C4 \uC790\uCCB4\uAC00 DAC\uB97C \uB530\uB77C\uAC00\uACE0, \uB9AC\uC0D8\uD50C\uC774 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4.","ASRC \uC804\uB7B5\uC774\uBA74 \uAC19\uC740 \uBCF4\uC815\uB7C9\uC774 2\uCC44\uB110 \uB9AC\uC0D8\uD50C\uB7EC\uC758 \uBE44\uC728\uB85C \uAC11\uB2C8\uB2E4. \uB450 \uC804\uB7B5\uC740 \uCE21\uC815\uACFC \uC81C\uC5B4\uAE30\uB97C \uACF5\uC720\uD558\uACE0 \uCD9C\uB825\uB9CC \uB2E4\uB985\uB2C8\uB2E4."]},{id:"replay",label:"\uB364\uD504 \uC7AC\uC0DD",edges:["e_replay_abi",...h,"e_dec_ren","e_ren_conv","e_conv_eng"],steps:["\uC0C1\uD0DC \uD654\uBA74\uC5D0\uC11C \uC9C4\uB2E8 \uB179\uD654\uB97C \uCF1C\uBA74 READ\uAC00 \uBC1B\uC740 \uAE30\uB85D\uC744 \uADF8\uB300\uB85C \uD30C\uC77C\uC5D0 \uB0A8\uAE41\uB2C8\uB2E4.","bio-replay\uAC00 \uB364\uD504\uB97C \uD30C\uC77C \uC5B4\uB311\uD130\uB85C \uC77D\uC5B4, \uC2E4\uC2DC\uAC04 \uC571\uACFC \uAC19\uC740 bio-abi, bitstream, decode, render, convolver\uB97C \uC9C0\uB098\uAC8C \uD569\uB2C8\uB2E4.","\uD074\uB7ED \uAD50\uCC28\uB294 \uC624\uD504\uB77C\uC778 \uBAA8\uB4DC\uB77C \uACB0\uACFC\uAC00 \uACB0\uC815\uB860\uC801\uC774\uACE0, CI\uB294 \uAE30\uC900 \uCEE4\uBC0B\uC758 \uCD9C\uB825\uACFC SHA-256\uC73C\uB85C \uBE44\uAD50\uD569\uB2C8\uB2E4. bio-sys\uAC00 \uC5C6\uC73C\uBBC0\uB85C Linux\uC5D0\uC11C \uB3D5\uB2C8\uB2E4."]}];var{useState:C,useMemo:N,useCallback:H}=React,I=Object.fromEntries(S.map(t=>[t.id,t])),W=Object.fromEntries(A.map(t=>[t.id,t])),T=1290,B=704,v={audio:"\uC624\uB514\uC624 \uB370\uC774\uD130",control:"\uC81C\uC5B4",offline:"\uAC1C\uBC1C \uB3C4\uAD6C"};function E(t,l,o=0){let{x:c,y:a}=t;switch(l){case"t":return{x:c+f/2+o,y:a,nx:0,ny:-1};case"b":return{x:c+f/2+o,y:a+m,nx:0,ny:1};case"l":return{x:c,y:a+m/2+o,nx:-1,ny:0};default:return{x:c+f,y:a+m/2+o,nx:1,ny:0}}}function z(t){var M,R;let l=E(I[t.from],t.fs,t.fdx||0),o=E(I[t.to],t.ts,t.tdx||0),c=Math.hypot(o.x-l.x,o.y-l.y),a=(M=t.k)!=null?M:Math.max(16,Math.min(110,c*.42)),p={x:l.x+l.nx*a,y:l.y+l.ny*a},u={x:o.x+o.nx*a,y:o.y+o.ny*a},e=`M${l.x},${l.y} C${p.x},${p.y} ${u.x},${u.y} ${o.x},${o.y}`,r=(R=t.lt)!=null?R:.5,s=1-r,d=s**3*l.x+3*s*s*r*p.x+3*s*r*r*u.x+r**3*o.x,b=s**3*l.y+3*s*s*r*p.y+3*s*r*r*u.y+r**3*o.y,y=d,D=b+4,x="middle",w=(t.fs==="l"||t.fs==="r")&&(t.ts==="l"||t.ts==="r");return t.labelAbove?D=w?b-m/2-6:b-7:t.labelSide==="right"?(y=d+7,x="start"):t.labelSide==="left"&&(y=d-7,x="end"),{d:e,lx:y,ly:D,anchorText:x}}var P=Object.fromEntries(g.map(t=>[t.id,z(t)]));function F({scenario:t,selected:l,onSelect:o,kinds:c}){let a=N(()=>{if(!t)return null;let e=new Set(t.edges),r=new Set;return g.forEach(s=>{e.has(s.id)&&(r.add(s.from),r.add(s.to))}),{edges:e,nodes:r}},[t]),p=g.filter(e=>c[e.kind]),u=a?[...p.filter(e=>!a.edges.has(e.id)),...p.filter(e=>a.edges.has(e.id))]:p;return React.createElement("svg",{className:"arch",viewBox:`0 0 ${T} ${B}`,role:"img","aria-label":"BIO Atmos \uC804\uCCB4 \uC544\uD0A4\uD14D\uCC98. \uC2E0\uB8B0 \uC218\uC900\uBCC4 \uB760 \uB2E4\uC12F \uAC1C \uC704\uC5D0 \uBAA8\uB4C8 \uC2A4\uBB3C\uC5EC\uC12F \uAC1C\uC640 \uADF8 \uC0AC\uC774\uC758 \uC624\uB514\uC624\xB7\uC81C\uC5B4 \uD750\uB984."},React.createElement("defs",null,["audio","control","offline","active"].map(e=>React.createElement("marker",{key:e,id:`mk-${e}`,viewBox:"0 0 10 10",refX:"9",refY:"5",markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"},React.createElement("path",{d:"M0,0 L10,5 L0,10 z",className:`mk mk-${e}`})))),A.map(e=>React.createElement("g",{key:e.id},React.createElement("rect",{x:"8",y:e.y,width:T-16,height:e.h,rx:"12",className:`band band-${e.id}`}),React.createElement("text",{x:e.lx,y:e.y+17,className:`band-label bl-${e.id}`},e.label))),React.createElement("g",null,u.map(e=>{let r=P[e.id],s=a?a.edges.has(e.id):!0,d=a&&!s,b=a&&s?"active":e.kind;return React.createElement("g",{key:e.id,className:`edge k-${e.kind}${d?" dim":""}${a&&s?" on":""}`},React.createElement("path",{d:r.d,className:"edge-line",markerEnd:`url(#mk-${b})`,markerStart:e.bi?`url(#mk-${b})`:void 0}),a&&s&&e.kind==="audio"?React.createElement("path",{d:r.d,className:"edge-flow"}):null)})),React.createElement("g",null,u.filter(e=>e.label).map(e=>{let r=P[e.id],s=a?a.edges.has(e.id):!0,d=a&&!s;return React.createElement("g",{key:e.id,className:`edge k-${e.kind}${d?" dim":""}${a&&s?" on":""}`},React.createElement("text",{x:r.lx,y:r.ly,textAnchor:r.anchorText,className:"edge-label"},e.label))})),React.createElement("g",null,S.map(e=>{let r=a&&!a.nodes.has(e.id),s=l===e.id;return React.createElement("g",{key:e.id,transform:`translate(${e.x},${e.y})`,className:`gnode z-${e.zone}${r?" dim":""}${s?" sel":""}`,tabIndex:"0",role:"button","aria-pressed":s,"aria-label":`${e.name}, ${e.sub}`,onClick:()=>o(e.id),onKeyDown:d=>{(d.key==="Enter"||d.key===" ")&&(d.preventDefault(),o(e.id))}},React.createElement("rect",{width:f,height:m,rx:"7",className:"node-box"}),React.createElement("text",{x:f/2,y:"23",textAnchor:"middle",className:"node-name"},e.name),React.createElement("text",{x:f/2,y:"41",textAnchor:"middle",className:"node-sub"},e.sub))})))}function L({node:t}){let l=W[t.zone];return React.createElement("article",{className:"detail","aria-live":"polite"},React.createElement("p",{className:"eyebrow"},"\uBAA8\uB4C8"),React.createElement("h3",{className:"detail-title"},React.createElement("span",{className:`swatch z-${t.zone}`,"aria-hidden":"true"}),t.name),React.createElement("p",{className:"detail-meta"},l.label.split(" \xB7 ")[0]," \xB7 ",t.lang," \xB7 unsafe ",t.unsafe),React.createElement("p",null,t.role),React.createElement("h4",null,"\uC778\uD130\uD398\uC774\uC2A4"),React.createElement("pre",{className:"code"},React.createElement("code",null,t.iface)),React.createElement("dl",{className:"facts"},React.createElement("dt",null,"\uC228\uAE30\uB294 \uAC83"),React.createElement("dd",null,t.hides),React.createElement("dt",null,"\uC2DC\uC784\uACFC \uC5B4\uB311\uD130"),React.createElement("dd",null,t.seam),React.createElement("dt",null,"\uAC80\uC99D"),React.createElement("dd",null,t.tests),React.createElement("dt",null,"\uC2A4\uB808\uB4DC\uC640 \uD074\uB7ED"),React.createElement("dd",null,t.thread)))}function $({scenario:t}){return t?React.createElement("article",{className:"steps"},React.createElement("p",{className:"eyebrow"},"\uC2DC\uB098\uB9AC\uC624"),React.createElement("h3",null,t.label),React.createElement("ol",null,t.steps.map((l,o)=>React.createElement("li",{key:o},l)))):React.createElement("article",{className:"steps"},React.createElement("p",{className:"eyebrow"},"\uC2DC\uB098\uB9AC\uC624"),React.createElement("h3",null,"\uC804\uCCB4 \uBCF4\uAE30"),React.createElement("p",null,"\uBAA8\uB4E0 \uD750\uB984\uC744 \uD568\uAED8 \uBCF4\uACE0 \uC788\uC2B5\uB2C8\uB2E4. \uC704\uC5D0\uC11C \uC2DC\uB098\uB9AC\uC624\uB97C \uACE0\uB974\uBA74 \uADF8 \uD750\uB984\uC5D0 \uC4F0\uC774\uB294 \uBAA8\uB4C8\uACFC \uC5E3\uC9C0\uB9CC \uB0A8\uACE0, \uB2E8\uACC4\uAC00 \uC5EC\uAE30\uC5D0 \uB098\uC635\uB2C8\uB2E4."))}function V(){let[t,l]=C("game"),[o,c]=C("engine"),[a,p]=C({audio:!0,control:!0,offline:!0}),u=k.find(s=>s.id===t)||null,e=H(s=>c(s),[]),r=s=>p(d=>({...d,[s]:!d[s]}));return React.createElement("div",{className:"graph-app"},React.createElement("div",{className:"toolbar"},React.createElement("div",{className:"chips",role:"group","aria-label":"\uC2DC\uB098\uB9AC\uC624"},React.createElement("button",{type:"button",id:"sc-all",className:"chip","aria-pressed":!u,onClick:()=>l(null)},"\uC804\uCCB4"),k.map(s=>React.createElement("button",{type:"button",id:`sc-${s.id}`,key:s.id,className:"chip","aria-pressed":t===s.id,onClick:()=>l(s.id)},s.label))),React.createElement("div",{className:"legend",role:"group","aria-label":"\uC5E3\uC9C0 \uC885\uB958"},Object.keys(v).map(s=>React.createElement("button",{type:"button",id:`kind-${s}`,key:s,className:`legend-item lk-${s}`,"aria-pressed":a[s],onClick:()=>r(s)},React.createElement("svg",{width:"30",height:"10","aria-hidden":"true"},React.createElement("line",{x1:"1",y1:"5",x2:"29",y2:"5",className:`legend-line k-${s}`})),v[s])))),React.createElement("div",{className:"graph-scroll"},React.createElement(F,{scenario:u,selected:o,onSelect:e,kinds:a})),React.createElement("p",{className:"graph-hint"},"\uBAA8\uB4C8\uC744 \uB204\uB974\uBA74 \uC544\uB798\uC5D0 \uC778\uD130\uD398\uC774\uC2A4\uAC00 \uB098\uC635\uB2C8\uB2E4. \uC881\uC740 \uD654\uBA74\uC5D0\uC11C\uB294 \uADF8\uB798\uD504\uB97C \uC606\uC73C\uB85C \uBC00\uC5B4 \uBCF4\uC138\uC694."),React.createElement("div",{className:"graph-panels"},React.createElement($,{scenario:u}),React.createElement(L,{node:I[o]})))}var O=document.getElementById("arch-graph");O&&window.React&&window.ReactDOM&&ReactDOM.createRoot(O).render(React.createElement(V,null));})();
+
+</script>
+
+</body></html>
