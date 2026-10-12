@@ -195,10 +195,25 @@ jobs:
             Start-Service -Name $name
           }
 
+      # Diagnosis, while the endpoints stay NOTPRESENT: the driver's own trace
+      # of every KS request that reaches its filters, from before the device
+      # exists until the endpoint builder is done with it.
+      - name: Start the driver's KS request trace (tools/ci/ks-trace.ps1)
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Start
+
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
         id: install
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      # Stopped before the diagnostics below open the filters themselves.
+      - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
+        if: always() && steps.install.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          ./tools/ci/ks-trace.ps1 -Stop
 
       - name: What the audio stack made of the driver (tools/ci/audio-diagnostics.ps1)
         if: steps.install.outputs.loaded == 'true'
@@ -269,6 +284,8 @@ jobs:
           path: |
             ${{ runner.temp }}/driver-flow.json
             ${{ runner.temp }}/aeb-trace
+            ${{ runner.temp }}/bioatmos-ks.etl
+            ${{ runner.temp }}/bioatmos-ks.xml
           if-no-files-found: ignore
 
   codeql:

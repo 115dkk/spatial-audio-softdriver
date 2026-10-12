@@ -8,6 +8,7 @@
 #include "minwavert.h"
 #include "hdmitopo.h"
 #include "minipairs.h"
+#include "kstrace.h"
 
 static BioSettings Settings;
 static LONG AdapterPresent;
@@ -58,8 +59,9 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryP
     InitializeObjectAttributes(&attributes, registryPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, nullptr, nullptr);
     NTSTATUS status = ZwOpenKey(&ServiceKey, KEY_READ, &attributes);
     if (!NT_SUCCESS(status)) return status;
+    BioTraceRegister();
     status = PcInitializeAdapterDriver(driver, registryPath, AddDevice);
-    if (!NT_SUCCESS(status)) { ZwClose(ServiceKey); ServiceKey = nullptr; return status; }
+    if (!NT_SUCCESS(status)) { BioTraceUnregister(); ZwClose(ServiceKey); ServiceKey = nullptr; return status; }
     PortUnload = driver->DriverUnload;
     driver->DriverUnload = DriverUnload;
     for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major) {
@@ -79,12 +81,17 @@ static NTSTATUS BioDispatch(PDEVICE_OBJECT device, PIRP irp) {
     }
     if (major > IRP_MJ_MAXIMUM_FUNCTION || !PortDispatch[major])
         return BioComplete(irp, STATUS_INVALID_DEVICE_REQUEST);
-    return PortDispatch[major](device, irp);
+    BioIrpNote note;
+    BioTraceBefore(irp, &note);
+    NTSTATUS status = PortDispatch[major](device, irp);
+    BioTraceAfter(note, status);
+    return status;
 }
 static VOID DriverUnload(PDRIVER_OBJECT driver) {
     PAGED_CODE();
     if (ServiceKey) { ZwClose(ServiceKey); ServiceKey = nullptr; }
     if (PortUnload) PortUnload(driver);
+    BioTraceUnregister();
 }
 static NTSTATUS AddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo) {
     PAGED_CODE();
