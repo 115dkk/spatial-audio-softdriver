@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use bio_abi::{RecordWriter, wave_format_bytes};
 use bio_types::{
-    CaptureError, CaptureSource, Direction, Layout, OutputError, OutputFormat, OutputOpener,
-    OutputSink, PcmFormat, SampleType, SourceFormat, TrimUnsupported,
+    CaptureError, CaptureSource, Direction, EngineFault, Layout, OutputError, OutputFormat,
+    OutputOpener, OutputSink, PcmFormat, SampleType, SourceFormat, TrimUnsupported,
 };
 use brir::PreparedBrir;
 use convolver::FilterBank;
@@ -492,6 +492,40 @@ fn asrc_converts_48_khz_to_44_1_khz_over_ten_seconds() {
     let expected = 441_000_u64;
     let error = produced.abs_diff(expected) as f64 / expected as f64;
     assert!(error <= 0.001, "produced {produced}, expected {expected}");
+}
+
+#[test]
+fn an_output_failure_reports_why_the_sink_failed() {
+    // The test sink fails with Removed after its last period; the fault must
+    // carry that error rather than a fixed text. The closed gate keeps the
+    // source open, so the output does not end by draining first.
+    let state = SinkState::new(0);
+    state.max_periods.store(5, Ordering::Release);
+    let capture = RecordsCapture {
+        records: vec![format_record(RATE)],
+        next: 0,
+        trim_supported: false,
+        gate: Some(Arc::new(AtomicBool::new(false))),
+        paced_by: None,
+    };
+    let mut engine = start_with_clock(
+        config(ClockPreference::Asrc),
+        capture,
+        opener(Arc::clone(&state), RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+    wait_until(Duration::from_secs(5), || engine.status().fault.is_some());
+    let expected = EngineFault::OutputLost(OutputError::Removed.to_string());
+    assert_eq!(engine.status().fault, Some(expected.clone()));
+    assert!(
+        engine
+            .poll()
+            .iter()
+            .any(|event| *event == EngineEvent::Fault(expected.clone())),
+        "the fault event carries the same text"
+    );
+    let _ = engine.stop();
 }
 
 #[test]

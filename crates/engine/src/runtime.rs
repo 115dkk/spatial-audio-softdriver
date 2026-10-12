@@ -25,8 +25,8 @@
 //! [`Chain`]: crate::Chain
 
 use std::cell::RefCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -388,10 +388,10 @@ impl Engine {
         let capacity = self.capture_events.slots() + self.output_events.slots();
         let mut events = Vec::with_capacity(capacity);
         while let Ok(event) = self.capture_events.pop() {
-            events.push(event.into_public());
+            events.push(event.into_public(&self.shared));
         }
         while let Ok(event) = self.output_events.pop() {
-            events.push(event.into_public());
+            events.push(event.into_public(&self.shared));
         }
         events
     }
@@ -480,6 +480,9 @@ struct Shared {
     format_c: AtomicU64,
     epoch: AtomicU32,
     fault: AtomicU32,
+    /// Why the output sink failed, set once by the output thread as it stops.
+    /// The error was already formatted by the sink; the thread ends after it.
+    output_error: OnceLock<String>,
 }
 
 impl Shared {
@@ -510,7 +513,15 @@ impl Shared {
             format_c: AtomicU64::new(0),
             epoch: AtomicU32::new(0),
             fault: AtomicU32::new(FAULT_NONE),
+            output_error: OnceLock::new(),
         }
+    }
+
+    fn output_error(&self) -> String {
+        self.output_error
+            .get()
+            .cloned()
+            .unwrap_or_else(|| "output sink failed".into())
     }
 
     fn publish_format(&self, epoch: u32, format: SourceFormat) {
@@ -561,7 +572,7 @@ impl Shared {
             clock_ppm: f64::from_bits(self.clock_ppm_bits.load(Ordering::Acquire)),
             fault: match self.fault.load(Ordering::Acquire) {
                 FAULT_CAPTURE => Some(EngineFault::CaptureLost("capture source failed".into())),
-                FAULT_OUTPUT => Some(EngineFault::OutputLost("output sink failed".into())),
+                FAULT_OUTPUT => Some(EngineFault::OutputLost(self.output_error())),
                 FAULT_UNSUPPORTED => Some(EngineFault::UnsupportedFormat(
                     "source format is unsupported".into(),
                 )),
@@ -583,7 +594,7 @@ enum RtEvent {
 }
 
 impl RtEvent {
-    fn into_public(self) -> EngineEvent {
+    fn into_public(self, shared: &Shared) -> EngineEvent {
         match self {
             Self::FormatChanged { epoch, format } => EngineEvent::FormatChanged { epoch, format },
             Self::NeedsBrir { rate, block } => EngineEvent::NeedsBrir { rate, block },
@@ -591,9 +602,7 @@ impl RtEvent {
             Self::CaptureFault => {
                 EngineEvent::Fault(EngineFault::CaptureLost("capture source failed".into()))
             }
-            Self::OutputFault => {
-                EngineEvent::Fault(EngineFault::OutputLost("output sink failed".into()))
-            }
+            Self::OutputFault => EngineEvent::Fault(EngineFault::OutputLost(shared.output_error())),
             Self::UnsupportedFormat => EngineEvent::Fault(EngineFault::UnsupportedFormat(
                 "source format is unsupported".into(),
             )),
@@ -863,7 +872,8 @@ fn output_thread_main<O: OutputOpener>(
                 }
                 output.finish_period(qpc);
             }
-            Err(_) => {
+            Err(error) => {
+                let _ = shared.output_error.set(error.to_string());
                 shared.fault.store(FAULT_OUTPUT, Ordering::Release);
                 output.events.push(RtEvent::OutputFault);
                 break;
@@ -1195,7 +1205,8 @@ impl OutputState {
                 self.asrc.flush(buffer);
                 self.apply_mute(buffer);
             };
-            if sink.next_period(&mut fill).is_err() {
+            if let Err(error) = sink.next_period(&mut fill) {
+                let _ = self.shared.output_error.set(error.to_string());
                 self.shared.fault.store(FAULT_OUTPUT, Ordering::Release);
                 self.events.push(RtEvent::OutputFault);
                 break;
