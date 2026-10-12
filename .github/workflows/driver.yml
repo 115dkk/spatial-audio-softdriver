@@ -188,6 +188,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The driver suites name microsoft/cpp-queries@0.0.5, which init does
+      # not fetch on its own; the runner image caches a CodeQL bundle.
+      - name: Fetch the query pack the driver suites depend on
+        shell: pwsh
+        run: |
+          $codeql = Get-ChildItem -Path (Join-Path $env:RUNNER_TOOL_CACHE 'CodeQL') -Recurse -Filter codeql.exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+          if (-not $codeql) { throw 'no CodeQL bundle in the tool cache' }
+          & $codeql.FullName pack download microsoft/cpp-queries@0.0.5
+          if ($LASTEXITCODE -ne 0) { throw "codeql pack download failed ($LASTEXITCODE)" }
+
       - uses: github/codeql-action/init@v4
         with:
           languages: c-cpp

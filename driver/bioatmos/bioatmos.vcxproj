@@ -59,7 +59,11 @@
     <TargetName>bioatmos</TargetName>
     <OutDir>$(ProjectDir)..\..\target\driver-build\$(Configuration)\$(Platform)\</OutDir>
     <IntDir>$(ProjectDir)..\..\target\driver-build\obj\$(Configuration)\$(Platform)\</IntDir>
-    <RunCodeAnalysis>true</RunCodeAnalysis>
+    <!-- Code Analysis needs the WDK's PREfast plug-in (drivers.dll), which the
+         NuGet WDK ships for x64 and ARM64 hosts only and which the runner's
+         compiler would not load (C1250). Static analysis of the driver is the
+         CodeQL Windows driver suites in driver.yml, as for the WHCP static tools test. -->
+    <RunCodeAnalysis>false</RunCodeAnalysis>
     <SpectreMitigation>false</SpectreMitigation>
     <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
     <EnableInf2Cat>false</EnableInf2Cat>
@@ -78,9 +82,6 @@
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <TreatWarningAsError>true</TreatWarningAsError>
       <WarningLevel>Level4</WarningLevel>
-      <!-- The WDK NuGet package carries the PREfast plug-ins for x64 and ARM64
-           hosts only; without this the WDK targets pick its missing x86 ones. -->
-      <PREfastAdditionalPlugins>$(WDKBinRoot_x64)\WindowsPrefast.dll;$(WDKBinRoot_x64)\drivers.dll</PREfastAdditionalPlugins>
     </ClCompile>
     <Link>
       <AdditionalDependencies>portcls.lib;stdunk.lib;libcntpr.lib;ntstrsafe.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
