@@ -1,0 +1,200 @@
+name: Driver
+
+# The kernel driver (driver/, ADR 0027) on every pull request and push to
+# master. Hosted runners cannot boot into test-signing mode, so nothing here
+# loads bioatmos.sys; the jobs take it as far as a machine without test
+# signing can:
+#
+#   core       driver/core (the ring, READ gate, DMA clock and format checks
+#              that call no kernel API) built with clang and gcc under ASan
+#              and UBSan, its tests, libFuzzer for two minutes, and the record
+#              stream it writes parsed back by bio-abi
+#   core-msvc  the same core with MSVC and /fsanitize=address on Windows
+#   kcheck     every kernel source compiled by clang in MSVC mode against the
+#              WDK headers, x64 and ARM64, plus the clang static analyzer, as
+#              a contributor runs it on Linux (tools/kcheck.py)
+#   build      MSBuild with the NuGet WDK, Debug and Release for x64 and ARM64
+#              (/W4 /WX, code analysis), and InfVerif
+#   package    the Release x64 package test-signed (Inf2Cat, signtool) and
+#              installed: driver store, root device node, service and
+#              Parameters defaults; the kernel then refuses the test-signed
+#              image (problem code 52), which is the expected end
+#   codeql     the Windows driver CodeQL suites the hardware program requires
+#              (must-fix and recommended)
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: driver-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  core:
+    name: driver core (clang, gcc, sanitizers, fuzz)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: driver-core
+
+      - name: Build and test with clang and gcc (ASan, UBSan)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q > /dev/null
+          sudo apt-get install -y --no-install-recommends ninja-build libclang-rt-18-dev > /dev/null
+          for cc in "clang clang++" "gcc g++"; do
+            set -- $cc
+            cmake -S driver/core -B "$RUNNER_TEMP/core-$1" -G Ninja \
+              -DCMAKE_C_COMPILER="$1" -DCMAKE_CXX_COMPILER="$2" -DBIO_SANITIZE=ON
+            cmake --build "$RUNNER_TEMP/core-$1"
+            "$RUNNER_TEMP/core-$1/core_tests"
+            "$RUNNER_TEMP/core-$1/write_dump" "$RUNNER_TEMP/core-$1/core.biodump"
+          done
+
+      - name: The record stream the core writes parses back in bio-abi
+        env:
+          BIO_DRIVER_CORE_DUMP: ${{ runner.temp }}/core-clang/core.biodump
+        run: cargo test --locked -p bio-abi --test driver_core -- --nocapture
+
+      - name: libFuzzer on the ring and READ gate (120 s)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ring-artifacts"
+          "$RUNNER_TEMP/core-clang/ring_fuzz" -max_total_time=120 -print_final_stats=1 \
+            -artifact_prefix="$RUNNER_TEMP/ring-artifacts/"
+
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ring-fuzz-artifacts
+          path: ${{ runner.temp }}/ring-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
+  core-msvc:
+    name: driver core (MSVC, ASan)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: driver-core-msvc
+
+      # RelWithDebInfo: CMake's Debug flags carry /RTC1, which MSVC refuses
+      # together with /fsanitize=address.
+      - name: Build and test with MSVC (/W4 /WX, /fsanitize=address)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $build = Join-Path $env:RUNNER_TEMP 'core-msvc'
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && cmake -S driver/core -B `"$build`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBIO_SANITIZE=ON && cmake --build `"$build`""
+          if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+          # The ASan runtime DLL sits next to the compiler.
+          $cl = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && where cl" | Select-Object -First 1
+          $env:PATH = "$(Split-Path $cl);$env:PATH"
+          & "$build\core_tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw "core_tests failed ($LASTEXITCODE)" }
+          & "$build\write_dump.exe" "$build\core.biodump"
+          if ($LASTEXITCODE -ne 0) { throw "write_dump failed ($LASTEXITCODE)" }
+          "BIO_DRIVER_CORE_DUMP=$build\core.biodump" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: The record stream the MSVC build writes parses back in bio-abi
+        run: cargo test --locked -p bio-abi --test driver_core -- --nocapture
+
+  kcheck:
+    name: kernel sources on Linux (kcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/bio-kcheck
+          key: kcheck-${{ hashFiles('tools/kcheck.py') }}
+
+      - name: Compile and analyse every kernel source for x64 and ARM64
+        run: python3 tools/kcheck.py --analyze
+
+  build:
+    name: driver build (${{ matrix.configuration }}, ${{ matrix.platform }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+        platform: [x64, ARM64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build with the NuGet WDK, then InfVerif (tools/build-driver.ps1)
+        shell: pwsh
+        run: ./tools/build-driver.ps1 -Configuration ${{ matrix.configuration }} -Platform ${{ matrix.platform }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bioatmos-${{ matrix.configuration }}-${{ matrix.platform }}
+          path: target/driver/${{ matrix.configuration }}/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: driver package (test-signed install, x64)
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: bioatmos-Release-x64
+          path: ${{ runner.temp }}/package
+
+      - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
+        shell: pwsh
+        run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+  codeql:
+    name: CodeQL Windows driver suites
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          packs: microsoft/windows-drivers@1.10.0
+          queries: >-
+            microsoft/windows-drivers:windows-driver-suites/mustfix.qls,
+            microsoft/windows-drivers:windows-driver-suites/recommended.qls
+
+      - name: Build for the database (Release x64)
+        shell: pwsh
+        run: ./tools/build-driver.ps1 -Configuration Release -Platform x64
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: windows-driver
