@@ -4,13 +4,16 @@
 #pragma once
 #include "common.h"
 #include "kshelper.h"
-class CMiniportWaveRT final : public IMiniportWaveRT, public IMiniportAudioSignalProcessing {
+// Not mode-aware: no IMiniportAudioSignalProcessing. A mode-aware pin must
+// also tag every data range with a KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE
+// attribute list; announcing RAW without it left both endpoints NOTPRESENT.
+// No APO is installed, so the default mode passes the stream untouched.
+class CMiniportWaveRT final : public IMiniportWaveRT {
 public:
     CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint);
     ~CMiniportWaveRT();
     BIO_UNKNOWN_METHODS;
     IMP_IMiniportWaveRT;
-    STDMETHODIMP_(NTSTATUS) GetModes(ULONG pin, GUID* modes, ULONG* count) override;
     static NTSTATUS Property(PPCPROPERTY_REQUEST request);
     CAdapterCommon* Adapter() const { return adapter_; }
     USHORT Endpoint() const { return endpoint_; }
