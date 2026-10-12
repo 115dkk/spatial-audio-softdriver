@@ -16,8 +16,12 @@ static PDRIVER_DISPATCH PortDispatch[IRP_MJ_MAXIMUM_FUNCTION + 1];
 static HANDLE ServiceKey;
 extern "C" DRIVER_INITIALIZE DriverEntry;
 static DRIVER_ADD_DEVICE AddDevice;
-static DRIVER_DISPATCH BioDispatch;
-static DRIVER_DISPATCH PnpHandler;
+// BioDispatch takes every major function (the control device's and, passed
+// on, PortCls's); PnpHandler takes PnP.
+static _Dispatch_type_(IRP_MJ_CREATE) _Dispatch_type_(IRP_MJ_CLOSE) _Dispatch_type_(IRP_MJ_CLEANUP)
+    _Dispatch_type_(IRP_MJ_DEVICE_CONTROL) _Dispatch_type_(IRP_MJ_POWER) _Dispatch_type_(IRP_MJ_SYSTEM_CONTROL)
+    DRIVER_DISPATCH BioDispatch;
+static _Dispatch_type_(IRP_MJ_PNP) DRIVER_DISPATCH PnpHandler;
 static DRIVER_UNLOAD DriverUnload;
 static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources);
 
@@ -94,6 +98,8 @@ static NTSTATUS AddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo) {
         ObDereferenceObject(fdo); fdo = lower;
     }
     if (!fdo) return STATUS_SUCCESS; // START detects absent control state.
+    // PcAddAdapterDevice already cleared it; stated here for the driver rules.
+    fdo->Flags &= ~DO_DEVICE_INITIALIZING;
     auto extension = BioExtension(fdo);
     extension->Common = nullptr;
     extension->ControlDevice = nullptr;

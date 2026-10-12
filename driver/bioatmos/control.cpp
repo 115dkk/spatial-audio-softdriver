@@ -32,10 +32,14 @@ static void FinishRead(BioControlState* state, PIRP irp, NTSTATUS status, ULONG 
     IoReleaseRemoveLock(&state->RemoveLock, irp);
     BioComplete(irp, status, bytes);
 }
-static VOID CsqAcquire(PIO_CSQ queue, PKIRQL irql) {
+static IO_CSQ_ACQUIRE_LOCK CsqAcquire;
+static IO_CSQ_RELEASE_LOCK CsqRelease;
+_IRQL_raises_(DISPATCH_LEVEL)
+static VOID CsqAcquire(PIO_CSQ queue, _Out_ _At_(*irql, _IRQL_saves_) PKIRQL irql) {
     KeAcquireSpinLock(&StateFromQueue(queue)->Lock, irql);
 }
-static VOID CsqRelease(PIO_CSQ queue, KIRQL irql) {
+_IRQL_requires_(DISPATCH_LEVEL)
+static VOID CsqRelease(PIO_CSQ queue, _IRQL_restores_ KIRQL irql) {
     KeReleaseSpinLock(&StateFromQueue(queue)->Lock, irql);
 }
 // Under state->Lock. One shot at the READ's deadline, so no timer runs while
@@ -287,24 +291,32 @@ NTSTATUS BioControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
             case IOCTL_BIO_QUERY_INFO:
                 if (output < sizeof(BIO_ABI_INFO)) { status = STATUS_BUFFER_TOO_SMALL; break; }
                 {
-                    auto info = static_cast<BIO_ABI_INFO*>(buffer);
-                    RtlZeroMemory(info, sizeof(*info));
-                    info->abi_version = BIO_ABI_VERSION;
-                    info->struct_size = sizeof(*info);
-                    info->driver_version = 1u << 16;
-                    info->ring_bytes = BioRingBytes;
-                    info->compiled_formats = BioCompiledFormats;
-                    info->features = BIO_FEATURE_PENDING_READ | BIO_FEATURE_RATE_TRIM |
+                    // Filled on the stack and copied once: the output is the
+                    // METHOD_BUFFERED system buffer, never the caller's memory.
+                    BIO_ABI_INFO info = {};
+                    info.abi_version = BIO_ABI_VERSION;
+                    info.struct_size = sizeof(info);
+                    info.driver_version = 1u << 16;
+                    info.ring_bytes = BioRingBytes;
+                    info.compiled_formats = BioCompiledFormats;
+                    info.features = BIO_FEATURE_PENDING_READ | BIO_FEATURE_RATE_TRIM |
                         (state->Settings.WritePacket ? BIO_FEATURE_WRITE_PACKET : 0);
-                    info->qpc_frequency = state->Frequency;
-                    info->endpoint_count = state->Settings.EndpointCount;
-                    for (ULONG i = 0; i < info->endpoint_count; ++i) info->enabled_formats[i] = state->Settings.FormatMask[i];
-                    information = sizeof(*info);
+                    info.qpc_frequency = state->Frequency;
+                    info.endpoint_count = state->Settings.EndpointCount;
+                    for (ULONG i = 0; i < info.endpoint_count && i < BIO_MAX_ENDPOINTS; ++i)
+                        info.enabled_formats[i] = state->Settings.FormatMask[i];
+                    RtlCopyMemory(buffer, &info, sizeof(info));
+                    information = sizeof(info);
                 }
                 break;
             case IOCTL_BIO_GET_STATS:
                 if (output < sizeof(BIO_STATS)) status = STATUS_BUFFER_TOO_SMALL;
-                else { state->Ring.FillStats(static_cast<BIO_STATS*>(buffer), state->OpenCount, state->MaxLatenessUs); information = sizeof(BIO_STATS); }
+                else {
+                    BIO_STATS stats;
+                    state->Ring.FillStats(&stats, state->OpenCount, state->MaxLatenessUs);
+                    RtlCopyMemory(buffer, &stats, sizeof(stats));
+                    information = sizeof(stats);
+                }
                 break;
             case IOCTL_BIO_SET_RATE_TRIM:
                 if (input < sizeof(BIO_RATE_TRIM) || static_cast<BIO_RATE_TRIM*>(buffer)->reserved) status = STATUS_INVALID_PARAMETER;
