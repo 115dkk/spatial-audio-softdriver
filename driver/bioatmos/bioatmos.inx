@@ -38,6 +38,20 @@ BioAtmos.CopyFiles = 13
 Include   = ks.inf,wdmaudio.inf
 Needs     = KS.Registration,WDMAUDIO.Registration
 CopyFiles = BioAtmos.CopyFiles
+AddReg    = BioAtmos_Device.AddReg
+
+; The device's place in the WDM audio stack, as SysVAD's
+; ComponentizedAudioSample.inx gives it.
+[BioAtmos_Device.AddReg]
+HKR,,AssociatedFilters,,"wdmaud,swmidi,redbook"
+HKR,,Driver,,bioatmos.sys
+HKR,Drivers,SubClasses,,"wave,midi,mixer"
+HKR,Drivers\wave\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\midi\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\mixer\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\wave\wdmaud.drv,Description,,%BioAtmos.DeviceDesc%
+HKR,Drivers\midi\wdmaud.drv,Description,,%BioAtmos.DeviceDesc%
+HKR,Drivers\mixer\wdmaud.drv,Description,,%BioAtmos.DeviceDesc%
 
 [BioAtmos.CopyFiles]
 bioatmos.sys
@@ -114,6 +128,9 @@ AddReg = BioAtmos_Device.HW.AddReg
 [BioAtmos_Device.HW.AddReg]
 ; FILE_DEVICE_SOUND
 HKR,,DeviceType,0x00010001,0x0000001D
+; SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_RWX_RES_RWX, as SysVAD: the audio service
+; runs as LocalService and opens the KS filters.
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGWGX;;;RC)"
 
 [Strings]
 ; Non-localizable identifiers.
