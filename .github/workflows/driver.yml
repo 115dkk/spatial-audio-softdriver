@@ -190,6 +190,13 @@ jobs:
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
 
+      - name: What the audio stack made of the driver (tools/ci/audio-diagnostics.ps1)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          ./tools/ci/audio-diagnostics.ps1 -InstanceId 'ROOT\MEDIA\0000'
+
       - uses: actions/setup-python@v7
         if: steps.install.outputs.loaded == 'true'
         with:
@@ -203,6 +210,11 @@ jobs:
         run: |
           python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
           python tools/ci/driver_flow_check.py --summary (Join-Path $env:RUNNER_TEMP 'driver-flow.json')
+
+      - name: The audio stack after the flow check
+        if: failure() && steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/audio-diagnostics.ps1 -InstanceId 'ROOT\MEDIA\0000'
 
       - uses: actions/upload-artifact@v7
         if: always() && steps.install.outputs.loaded == 'true'
