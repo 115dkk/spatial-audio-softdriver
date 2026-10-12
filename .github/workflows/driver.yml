@@ -21,9 +21,10 @@ name: Driver
 #              plays a tone into each and reads the ring back
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
-#   sysvad-control  diagnosis only, while our endpoints stay NOTPRESENT on
-#              hosted runners: SysVAD itself built, test-signed and installed
-#              on windows-2025 as a control for the endpoint builder
+#   sysvad-build, sysvad-control  diagnosis only, while our endpoints stay
+#              NOTPRESENT on hosted runners: SysVAD itself built on
+#              windows-2022, then test-signed and installed on windows-2025
+#              as a control for the endpoint builder
 
 on:
   pull_request:
@@ -312,13 +313,14 @@ jobs:
   # SysVAD itself (the sample driver/bioatmos is reduced from, at the same
   # commit) built with the NuGet WDK, test-signed and installed, then seen
   # through the same tools. It targets Windows 11 22H2 and later (build 22621:
-  # its INF floor, and kernel routines Server 2022 lacks), so it runs on
-  # windows-2025 (build 26100), beside the windows-2025 leg of `package`. Its
-  # endpoints turning active there while ours stay NOTPRESENT would put the
-  # cause in our driver.
-  sysvad-control:
-    name: SysVAD on windows-2025 (control, diagnosis only)
-    runs-on: windows-2025
+  # its INF floor, and kernel routines Server 2022 lacks), so it is installed
+  # on windows-2025 (build 26100), beside the windows-2025 leg of `package`.
+  # Its endpoints turning active there while ours stay NOTPRESENT would put the
+  # cause in our driver. It is built on windows-2022: our WDK pin's build
+  # tasks need MSBuild 17, which windows-2025 (MSBuild 18) lacks.
+  sysvad-build:
+    name: SysVAD build (control, diagnosis only)
+    runs-on: windows-2022
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
@@ -358,6 +360,28 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for $project ($LASTEXITCODE)" }
           }
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sysvad-Release-x64
+          path: |
+            samples/audio/sysvad/TabletAudioSample/**/TabletAudioSample.sys
+            samples/audio/sysvad/TabletAudioSample/**/ComponentizedAudioSample.inf
+          if-no-files-found: error
+          retention-days: 3
+
+  sysvad-control:
+    name: SysVAD on windows-2025 (control, diagnosis only)
+    needs: sysvad-build
+    runs-on: windows-2025
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: sysvad-Release-x64
+          path: ${{ runner.temp }}/sysvad-build
+
       - name: Start the audio services
         shell: pwsh
         run: |
@@ -369,7 +393,7 @@ jobs:
       - name: Test-sign and install SysVAD (tools/ci/install-sysvad-control.ps1)
         id: sysvad
         shell: pwsh
-        run: ./tools/ci/install-sysvad-control.ps1 -Build samples/audio/sysvad/TabletAudioSample
+        run: ./tools/ci/install-sysvad-control.ps1 -Build (Join-Path $env:RUNNER_TEMP 'sysvad-build')
 
       - name: SysVAD's endpoints and KS filters through the same tools
         if: always() && steps.sysvad.outputs.instance != ''

@@ -16,15 +16,7 @@ $ErrorActionPreference = 'Stop'
 $HardwareId = 'Root\BioAtmos'
 $Service = 'bioatmos'
 
-function Find-KitTool([string] $Name, [string] $Arch) {
-    $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
-    $tool = Get-ChildItem -Path $root -Recurse -Filter $Name -ErrorAction SilentlyContinue |
-        Where-Object { $_.Directory.Name -eq $Arch } |
-        Sort-Object { $_.Directory.Parent.Name } -Descending |
-        Select-Object -First 1
-    if (-not $tool) { throw "$Name ($Arch) not found under $root" }
-    $tool.FullName
-}
+. (Join-Path $PSScriptRoot 'kit-tools.ps1')
 
 function Invoke-Checked([string] $FilePath, [string[]] $Arguments) {
     Write-Host "> $FilePath $($Arguments -join ' ')"
