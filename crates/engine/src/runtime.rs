@@ -998,13 +998,16 @@ impl OutputState {
                 &mut buffer[..frames * 2],
                 &mut self.stream_frame,
             ),
-            ClockMode::Asrc | ClockMode::PendingAuto => self.asrc.render(
-                &mut self.audio,
-                &mut buffer[..frames * 2],
-                scene_rate,
-                self.device_rate,
-                &mut self.stream_frame,
-            ),
+            ClockMode::Asrc | ClockMode::PendingAuto => {
+                self.asrc.ending = self.shared.capture_done.load(Ordering::Acquire);
+                self.asrc.render(
+                    &mut self.audio,
+                    &mut buffer[..frames * 2],
+                    scene_rate,
+                    self.device_rate,
+                    &mut self.stream_frame,
+                )
+            }
         };
         self.period_source_frames = produced.source_frames;
         self.period_had_audio = produced.output_frames != 0;
@@ -1263,6 +1266,10 @@ struct AsrcClock {
     scene_rate: u32,
     device_rate: u32,
     period_output_frames: usize,
+    /// The source has ended: a last take shorter than the resampler asks for
+    /// is completed with silence instead of waiting for frames that will not
+    /// come.
+    ending: bool,
 }
 
 impl AsrcClock {
@@ -1293,6 +1300,7 @@ impl AsrcClock {
             scene_rate: 0,
             device_rate,
             period_output_frames: period_frames,
+            ending: false,
         }
     }
 
@@ -1406,15 +1414,26 @@ impl ClockStrategy for AsrcClock {
             };
         };
         let input_frames = resampler.input_frames_next();
-        if input_frames > MAX_ASRC_INPUT_FRAMES || audio.slots() < input_frames * 2 {
+        let available = audio.slots() / 2;
+        // Before the end the whole take must be there; at the end the frames
+        // left over go out followed by silence, so the ring drains.
+        let short = available < input_frames && (!self.ending || available == 0);
+        if input_frames > MAX_ASRC_INPUT_FRAMES || short {
             return Rendered {
                 source_frames: 0,
                 output_frames: 0,
             };
         }
+        let real = available.min(input_frames);
         for frame in 0..input_frames {
-            let left = audio.pop().expect("availability was checked");
-            let right = audio.pop().expect("availability was checked");
+            let (left, right) = if frame < real {
+                (
+                    audio.pop().expect("availability was checked"),
+                    audio.pop().expect("availability was checked"),
+                )
+            } else {
+                (0.0, 0.0)
+            };
             let _ = self.input.write_sample(0, frame, &left);
             let _ = self.input.write_sample(1, frame, &right);
         }
@@ -1434,6 +1453,7 @@ impl ClockStrategy for AsrcClock {
             };
         };
         let output_frames = output_frames_capacity.min(produced);
+        let consumed = consumed.min(real);
         *stream_frame = stream_frame.saturating_add(consumed as u64);
         Rendered {
             source_frames: consumed,
@@ -1870,6 +1890,69 @@ mod tests {
             output.finish_period(index as u64 * 200_000);
         }
         (shared.underruns.load(Ordering::Acquire), played)
+    }
+
+    #[test]
+    fn the_end_of_a_source_drains_without_underruns() {
+        // DD+ blocks against a 10 ms shared period: when the source ends, the
+        // frames left in the ring are fewer than the ASRC's next take. They
+        // must still go out, the ring must drain, and no period after the end
+        // may count as an underrun.
+        let rate = 48_000;
+        let (block, period) = (1_536, 480);
+        let shared = Arc::new(Shared::new());
+        shared.scene_rate.store(rate, Ordering::Release);
+        shared
+            .clock_mode
+            .store(ClockMode::Asrc.as_u32(), Ordering::Release);
+        shared.capture_started.store(true, Ordering::Release);
+        let (mut audio_in, audio) = RingBuffer::<f32>::new(80 * 48 * 2);
+        let (mut timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
+        let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
+        let mut output = OutputState::new(
+            audio,
+            timing,
+            rate,
+            period,
+            10.0,
+            DEFAULT_QPC_FREQUENCY,
+            events,
+            Arc::clone(&shared),
+        );
+        let mut buffer = vec![0.0; period * 2];
+        let (mut arriving, mut stream_frame) = (0, 0_u64);
+        for index in 0..103 {
+            arriving += period;
+            while arriving >= block {
+                arriving -= block;
+                for _ in 0..block * 2 {
+                    audio_in.push(0.25).expect("the ring has room");
+                }
+                let _ = timing_in.push(TimingMarker {
+                    stream_frame,
+                    frames: block as u32,
+                    source_qpc: 0,
+                    rate,
+                });
+                stream_frame += block as u64;
+            }
+            output.fill(&mut buffer);
+            output.finish_period(index as u64 * 100_000);
+        }
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
+        assert!(
+            output.audio.slots() > 0,
+            "the ring holds the last frames when the source ends"
+        );
+        shared.capture_done.store(true, Ordering::Release);
+        let mut periods = 0;
+        while !output.drained() {
+            periods += 1;
+            assert!(periods <= 20, "the ring did not drain");
+            output.fill(&mut buffer);
+            output.finish_period(0);
+        }
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
     }
 
     #[test]

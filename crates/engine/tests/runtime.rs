@@ -451,7 +451,10 @@ fn asrc_converts_48_khz_to_44_1_khz_over_ten_seconds() {
     let state = SinkState::new(0);
     state.max_periods.store(1_000, Ordering::Release);
     let mut records = vec![format_record(RATE)];
-    for block in 0..1_000_u64 {
+    // A paced source a little longer than the ten seconds measured: an
+    // unpaced one is dropped by the full ring within the first second, and
+    // the output ends once the source has ended and the ring has drained.
+    for block in 0..1_100_u64 {
         records.push(data_record(block * BLOCK as u64, 0.25));
     }
     let capture = RecordsCapture {
@@ -459,7 +462,10 @@ fn asrc_converts_48_khz_to_44_1_khz_over_ten_seconds() {
         next: 0,
         trim_supported: false,
         gate: Some(Arc::clone(&gate)),
-        paced_by: None,
+        paced_by: Some(Pacing {
+            state: Arc::clone(&state),
+            lead: 8,
+        }),
     };
     let engine = start_with_clock(
         EngineConfig {
@@ -476,9 +482,11 @@ fn asrc_converts_48_khz_to_44_1_khz_over_ten_seconds() {
     .unwrap();
     engine.apply(LiveChange::Prepared(prepared(RATE))).unwrap();
     gate.store(true, Ordering::Release);
-    wait_until(Duration::from_secs(8), || {
+    // Paced, the thousand periods take about ten seconds.
+    wait_until(Duration::from_secs(30), || {
         state.periods.load(Ordering::Acquire) >= 1_000
     });
+    assert_eq!(engine.status().underruns, 0);
     let _ = engine.stop();
     let produced = state.frames.load(Ordering::Acquire);
     let expected = 441_000_u64;
