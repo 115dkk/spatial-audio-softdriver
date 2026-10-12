@@ -69,7 +69,7 @@
 
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)..\core;$(ProjectDir)..\..\crates\bio-abi\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\kcrt;$(ProjectDir);$(ProjectDir)..\core;$(ProjectDir)..\..\crates\bio-abi\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <CompileAs>CompileAsCpp</CompileAs>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ExceptionHandling>false</ExceptionHandling>
@@ -78,6 +78,9 @@
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <TreatWarningAsError>true</TreatWarningAsError>
       <WarningLevel>Level4</WarningLevel>
+      <!-- The WDK NuGet package carries the PREfast plug-ins for x64 and ARM64
+           hosts only; without this the WDK targets pick its missing x86 ones. -->
+      <PREfastAdditionalPlugins>$(WDKBinRoot_x64)\WindowsPrefast.dll;$(WDKBinRoot_x64)\drivers.dll</PREfastAdditionalPlugins>
     </ClCompile>
     <Link>
       <AdditionalDependencies>portcls.lib;stdunk.lib;libcntpr.lib;ntstrsafe.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>

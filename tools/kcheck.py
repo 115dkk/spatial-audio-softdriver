@@ -172,10 +172,12 @@ def main():
     args = parser.parse_args()
 
     driver = REPO / "driver" / "bioatmos"
-    sources = args.sources or sorted(driver.glob("*.cpp"))
+    core = REPO / "driver" / "core"
+    sources = args.sources or sorted(driver.glob("*.cpp")) + sorted(core.glob("*.cpp"))
     if not sources:
         raise SystemExit("kcheck: no driver sources found")
-    extra = [driver, REPO / "driver" / "core", REPO / "crates" / "bio-abi" / "include"]
+    # driver/kcrt first, as in the vcxproj: the kernel build has no user-mode CRT.
+    extra = [REPO / "driver" / "kcrt", driver, core, REPO / "crates" / "bio-abi" / "include"]
     roots = headers([REPO / "driver"])
 
     failed = 0

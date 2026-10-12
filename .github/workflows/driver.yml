@@ -192,10 +192,11 @@ jobs:
         with:
           languages: c-cpp
           build-mode: manual
-          packs: microsoft/windows-drivers@1.10.0
-          queries: >-
-            microsoft/windows-drivers:windows-driver-suites/mustfix.qls,
-            microsoft/windows-drivers:windows-driver-suites/recommended.qls
+          # scope/pack@version:path runs one suite from a pack; `queries`
+          # takes only local paths and repositories.
+          packs: >-
+            microsoft/windows-drivers@1.10.0:windows-driver-suites/mustfix.qls,
+            microsoft/windows-drivers@1.10.0:windows-driver-suites/recommended.qls
 
       - name: Build for the database (Release x64)
         shell: pwsh
