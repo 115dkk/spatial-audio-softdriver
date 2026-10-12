@@ -59,9 +59,18 @@ NTSTATUS CMiniportTopologyHdmi::Property(PPCPROPERTY_REQUEST request) {
         sink->ProductId = 1;
         sink->AudioLatency = 0;
         sink->HDCPCapable = FALSE; sink->AICapable = TRUE;
-        const WCHAR name[] = L"BIO HDMI render";
-        sink->SinkDescriptionLength = RTL_NUMBER_OF(name) - 1;
-        RtlCopyMemory(sink->SinkDescription, name, sizeof(name));
+        // The endpoint builder names an HDMI endpoint after its sink, so each
+        // endpoint carries its own name (the INF's Endpoint0Name and
+        // Endpoint1Name); with one shared name the two were indistinguishable.
+        static const WCHAR primary[] = L"BIO Atmos Virtual HDMI";
+        static const WCHAR second[] = L"BIO Atmos Virtual HDMI 2";
+        auto miniport = static_cast<CMiniportTopologyHdmi*>(reinterpret_cast<IMiniportTopology*>(request->MajorTarget));
+        const bool isSecond = miniport->endpoint_ == BIO_ENDPOINT_SECOND;
+        const WCHAR* name = isSecond ? second : primary;
+        const ULONG bytes = isSecond ? sizeof(second) : sizeof(primary);
+        static_assert(sizeof(second) <= sizeof(sink->SinkDescription), "sink name fits");
+        sink->SinkDescriptionLength = static_cast<UCHAR>(bytes / sizeof(WCHAR) - 1);
+        RtlCopyMemory(sink->SinkDescription, name, bytes);
         return STATUS_SUCCESS;
     }
     ULONG itemBytes;
