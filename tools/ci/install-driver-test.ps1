@@ -1,9 +1,12 @@
 # Test-signs the driver package and installs it on a GitHub-hosted Windows
-# runner, as far as a machine without test-signing mode allows (ADR 0027):
-# catalog, signatures, driver store, root device node, service and its
-# Parameters defaults. The kernel then refuses the test-signed image, so the
-# device must end with problem code 52 (CM_PROB_UNSIGNED_DRIVER); any other
-# outcome fails. CI only; the certificate is made here and thrown away.
+# runner (ADR 0027): catalog, signatures, driver store, root device node,
+# service and its Parameters defaults. ADR 0027 expected the kernel to refuse
+# the test-signed image (problem code 52, CM_PROB_UNSIGNED_DRIVER); the first
+# run showed the runner's kernel loading it, so either outcome passes here and
+# the step output `loaded` says which. When it loads, the job goes on to play
+# through both endpoints and read the records back (driver_flow_check.py).
+# Any other problem code fails. CI only; the certificate is made here and
+# thrown away.
 param(
     # Folder with bioatmos.sys and bioatmos.inf (the build job's artifact).
     [Parameter(Mandatory)] [string] $Package
@@ -70,7 +73,17 @@ $problem = (Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPK
 $driver = (Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath').Data
 Write-Host "device $($device.InstanceId): status $($device.Status), problem $problem, driver $driver"
 if (-not $driver) { throw 'the device has no driver from our package' }
-if ($problem -ne 52) { throw "expected problem code 52 (unsigned image refused by the kernel), got $problem" }
+# What lets a test-signed image load: test signing or integrity checks off in
+# the boot entry, or neither (then the result below is worth a note in ADR 0027).
+$boot = (bcdedit /enum '{current}' | Select-String -Pattern 'testsigning|nointegritychecks|bootdebug|debug ') -join '; '
+Write-Host "boot entry: $(if ($boot) { $boot } else { 'no testsigning or nointegritychecks entry' })"
+$serviceState = (Get-CimInstance Win32_SystemDriver -Filter "Name='$Service'").State
+Write-Host "service $Service state: $serviceState"
+$loaded = switch ($problem) {
+    0 { if ($serviceState -ne 'Running') { throw "problem code 0 but the service is $serviceState" }; $true }
+    52 { $false }
+    default { throw "the device ended with problem code $problem (0 = loaded, 52 = image refused)" }
+}
 
 $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$Service"
 $image = (Get-ItemProperty $serviceKey).ImagePath
@@ -97,8 +110,9 @@ Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value @"
 | Inf2Cat, signtool sign and verify | ok |
 | driver store (pnputil) | ok |
 | root device $HardwareId | $($device.InstanceId), driver $driver |
-| kernel load without test signing | refused, problem code $problem (expected 52) |
+| kernel load | $(if ($loaded) { "loaded (service $serviceState)" } else { 'refused, problem code 52' }); boot entry: $(if ($boot) { $boot } else { 'default' }) |
 | service ImagePath | $image |
 | Parameters | SecondEndpoint=$($parameters.SecondEndpoint), FormatMask0=0x$('{0:X}' -f $parameters.FormatMask0) ($($kinds.FormatMask0)), FormatMask1=0x$('{0:X}' -f $parameters.FormatMask1), WritePacket=$($parameters.WritePacket) |
 "@
-Write-Host 'driver package installed as far as this runner allows'
+if ($env:GITHUB_OUTPUT) { Add-Content -Path $env:GITHUB_OUTPUT -Value "loaded=$($loaded.ToString().ToLower())" }
+Write-Host "driver package installed; kernel load: $(if ($loaded) { 'yes' } else { 'refused (52)' })"

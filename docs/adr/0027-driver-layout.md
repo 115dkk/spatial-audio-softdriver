@@ -57,11 +57,11 @@ SysVAD에는 `SetWritePacket` 경로가 있습니다. 동결 뒤에는 더할 �
 - x64와 ARM64, Debug와 Release 빌드. `/W4 /WX`와 코드 분석(`/analyze`, 드라이버 규칙)을 켭니다.
 - `InfVerif /w`, 시험 인증서로 `Inf2Cat`과 `signtool` 서명 및 검증.
 - CodeQL의 Windows 드라이버 질의 묶음(WHCP 필수 규칙).
-- 패키지 설치 시험: 시험 인증서를 신뢰 저장소에 넣고 `pnputil /add-driver`로 드라이버 저장소에 넣은 뒤 루트 장치를 만듭니다. 시험서명 모드가 아니므로 커널 로드는 문제 코드 52로 멈추는 것이 정상이고, 그 앞까지(INF 섹션, 서비스, `Parameters` 기본값, 장치 노드)를 확인합니다.
+- 패키지 설치 시험: 시험 인증서를 신뢰 저장소에 넣고 `pnputil /add-driver`로 드라이버 저장소에 넣은 뒤 루트 장치를 만듭니다. 처음에는 시험서명 모드가 아니므로 커널 로드가 문제 코드 52로 멈출 것이라 보고 그 앞까지(INF 섹션, 서비스, `Parameters` 기본값, 장치 노드)만 확인하려 했습니다. 첫 실행에서 Windows Server 2022 러너의 커널은 시험서명 이미지를 그대로 올렸습니다(문제 코드 0, 서비스 실행 중). 그래서 두 결과를 모두 받아들이고, 로드되면 두 엔드포인트에 서로 다른 톤을 동시에 재생하며 `\\.\BioAtmos`에서 기록을 읽어 엔드포인트마다 형식 변경과 시작, 바이트 연속, DMA 속도, 내용을 확인합니다(`tools/ci/driver_flow_check.py`). 부팅 항목의 testsigning 상태를 로그에 남깁니다.
 - 코어 시험(MSVC, clang, gcc, ASan, UBSan), libFuzzer, `bio-abi` 교차 검사.
 
 ## 결과
 
-- 커널에 올려야만 알 수 있는 것(Dolby Atmos for home theater가 열리는지, 트림을 오디오 엔진이 받아들이는 범위, 쓰기 패킷 주기, Driver Verifier, HVCI 로드, IOCTL 퍼저)은 여전히 시험서명 PC에서 확인합니다. CI는 그 앞까지를 맡습니다.
+- 커널에 올려야만 알 수 있는 것 가운데 러너에서 되는 것(링을 지나는 소리, 두 엔드포인트의 동시 재생, DMA 속도)은 CI가 맡습니다. Dolby Atmos for home theater가 열리는지, 트림을 오디오 엔진이 받아들이는 범위, 쓰기 패킷 주기, HVCI 로드는 여전히 시험서명 PC에서 확인합니다. Driver Verifier와 IOCTL 퍼저를 러너에서 돌리는 일은 다음 PR에서 합니다.
 - 코어와 커널 감싸개의 경계가 생기므로, 링과 READ의 결함은 사용자 모드에서 재현됩니다.
 - 커널 코드는 SysVAD에서 쓰지 않는 장치를 뺀 만큼 줄어듭니다.
