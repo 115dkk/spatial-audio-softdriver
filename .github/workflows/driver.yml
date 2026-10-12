@@ -14,8 +14,8 @@ name: Driver
 #   build      MSBuild with the NuGet WDK, Debug and Release for x64 and ARM64
 #              (/W4 /WX, code analysis), and InfVerif
 #   package    the Release x64 package test-signed (Inf2Cat, signtool) and
-#              installed on a windows-2022 runner, whose boot entry has test
-#              signing on: driver store, root device node, service and
+#              installed on windows-2022 and windows-2025 runners, whose boot
+#              entries have test signing on: driver store, root device node, service and
 #              Parameters defaults. The driver loads, the audio stack must
 #              build both render endpoints, and tools/ci/driver_flow_check.py
 #              plays a tone into each and reads the ring back
@@ -23,7 +23,7 @@ name: Driver
 #              (must-fix and recommended)
 #   sysvad-control  diagnosis only, while our endpoints stay NOTPRESENT on
 #              hosted runners: SysVAD itself built, test-signed and installed
-#              on the same image as a control for the endpoint builder
+#              on windows-2025 as a control for the endpoint builder
 
 on:
   pull_request:
@@ -167,9 +167,15 @@ jobs:
           retention-days: 14
 
   package:
-    name: driver package (test-signed install, x64)
+    name: driver package (test-signed install, x64, ${{ matrix.os }})
     needs: build
-    runs-on: windows-2022
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Server 2025 shares its audio stack with Windows 11 24H2, where the
+        # driver ships; Server 2022 is the older floor.
+        os: [windows-2022, windows-2025]
     steps:
       - uses: actions/checkout@v7
 
@@ -258,7 +264,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always() && steps.install.outputs.loaded == 'true'
         with:
-          name: driver-flow
+          name: driver-flow-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/driver-flow.json
             ${{ runner.temp }}/aeb-trace
@@ -304,12 +310,15 @@ jobs:
 
   # Diagnosis only, while our endpoints stay NOTPRESENT on hosted runners:
   # SysVAD itself (the sample driver/bioatmos is reduced from, at the same
-  # commit) built with the NuGet WDK, test-signed and installed on the same
-  # image, then seen through the same tools. Its endpoints turning active
-  # would put the cause in our driver; staying NOTPRESENT, in the runner.
+  # commit) built with the NuGet WDK, test-signed and installed, then seen
+  # through the same tools. It targets Windows 11 22H2 and later (build 22621:
+  # its INF floor, and kernel routines Server 2022 lacks), so it runs on
+  # windows-2025 (build 26100), beside the windows-2025 leg of `package`. Its
+  # endpoints turning active there while ours stay NOTPRESENT would put the
+  # cause in our driver.
   sysvad-control:
-    name: SysVAD on the same runner image (control, diagnosis only)
-    runs-on: windows-2022
+    name: SysVAD on windows-2025 (control, diagnosis only)
+    runs-on: windows-2025
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
@@ -324,7 +333,7 @@ jobs:
       # The samples pin a WDK NuGet whose build tasks need MSBuild 18; the
       # runner has 17. Our driver's WDK pin and MSBuild switches
       # (tools/build-driver.ps1) build SysVAD the same way they build ours.
-      - name: Build SysVAD TabletAudioSample (Release x64, KMDF 1.31) with our NuGet WDK
+      - name: Build SysVAD TabletAudioSample (Release x64) with our NuGet WDK
         shell: pwsh
         working-directory: samples
         run: |
@@ -341,13 +350,9 @@ jobs:
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
           $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
-          # Built at the WDK's latest NTDDI it imported a routine Server 2022
-          # lacks (0xC0000263 at load). Our driver pins Windows 10 2004 the
-          # same way (driver/bioatmos/bioatmos.vcxproj); cl.exe appends _CL_.
-          $env:_CL_ = '/DNTDDI_VERSION=0x0A000008'
           foreach ($project in 'EndpointsCommon\EndpointsCommon.vcxproj', 'TabletAudioSample\TabletAudioSample.vcxproj') {
             & $msbuild "audio\sysvad\$project" /restore:false /p:Configuration=Release /p:Platform=x64 `
-              /p:KMDF_VERSION_MINOR=31 /p:RunCodeAnalysis=false /p:SignMode=Off /p:EnableInf2Cat=false `
+              /p:RunCodeAnalysis=false /p:SignMode=Off /p:EnableInf2Cat=false `
               /p:SkipPackageVerification=true /p:ApiValidator_Enable=false "/p:InfDateStamp=$(Get-Date -Format 'MM/dd/yyyy')" `
               /nologo /verbosity:minimal
             if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for $project ($LASTEXITCODE)" }
