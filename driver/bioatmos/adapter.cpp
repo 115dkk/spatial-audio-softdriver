@@ -17,10 +17,13 @@ static PDRIVER_DISPATCH PortDispatch[IRP_MJ_MAXIMUM_FUNCTION + 1];
 static HANDLE ServiceKey;
 extern "C" DRIVER_INITIALIZE DriverEntry;
 static DRIVER_ADD_DEVICE AddDevice;
-// BioDispatch takes every major function (the control device's and, passed
-// on, PortCls's); PnpHandler takes PnP.
+// BioDispatch takes the control device's major functions and passes PortCls's
+// on (PcInitializeAdapterDriver and KS set these); PnpHandler takes PnP. Each
+// major is assigned by name so the dispatch annotations cover every slot.
 static _Dispatch_type_(IRP_MJ_CREATE) _Dispatch_type_(IRP_MJ_CLOSE) _Dispatch_type_(IRP_MJ_CLEANUP)
-    _Dispatch_type_(IRP_MJ_DEVICE_CONTROL) _Dispatch_type_(IRP_MJ_POWER) _Dispatch_type_(IRP_MJ_SYSTEM_CONTROL)
+    _Dispatch_type_(IRP_MJ_DEVICE_CONTROL) _Dispatch_type_(IRP_MJ_READ) _Dispatch_type_(IRP_MJ_WRITE)
+    _Dispatch_type_(IRP_MJ_FLUSH_BUFFERS) _Dispatch_type_(IRP_MJ_QUERY_SECURITY) _Dispatch_type_(IRP_MJ_SET_SECURITY)
+    _Dispatch_type_(IRP_MJ_POWER) _Dispatch_type_(IRP_MJ_SYSTEM_CONTROL)
     DRIVER_DISPATCH BioDispatch;
 static _Dispatch_type_(IRP_MJ_PNP) DRIVER_DISPATCH PnpHandler;
 static DRIVER_UNLOAD DriverUnload;
@@ -64,10 +67,18 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryP
     if (!NT_SUCCESS(status)) { BioTraceUnregister(); ZwClose(ServiceKey); ServiceKey = nullptr; return status; }
     PortUnload = driver->DriverUnload;
     driver->DriverUnload = DriverUnload;
-    for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major) {
-        PortDispatch[major] = driver->MajorFunction[major];
-        driver->MajorFunction[major] = BioDispatch;
-    }
+    for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major) PortDispatch[major] = driver->MajorFunction[major];
+    driver->MajorFunction[IRP_MJ_CREATE] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_CLOSE] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_CLEANUP] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_READ] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_WRITE] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_FLUSH_BUFFERS] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_QUERY_SECURITY] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_SET_SECURITY] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_POWER] = BioDispatch;
+    driver->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = BioDispatch;
     driver->MajorFunction[IRP_MJ_PNP] = PnpHandler;
     return STATUS_SUCCESS;
 }

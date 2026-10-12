@@ -4,9 +4,9 @@
 #pragma once
 #include "common.h"
 #include "kshelper.h"
-// The host pin announces RAW, as SysVAD's HDMI host pin does (no attribute
-// lists on its data ranges either): no APO runs, so the stream reaches the
-// ring untouched.
+// The host pin announces RAW, as SysVAD's HDMI host pin does, and so every
+// host data range carries the signal-processing-mode attribute list: no APO
+// runs, so the stream reaches the ring untouched.
 class CMiniportWaveRT final : public IMiniportWaveRT, public IMiniportAudioSignalProcessing {
 public:
     CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint);
@@ -23,12 +23,12 @@ private:
     CAdapterCommon* adapter_;
     USHORT endpoint_;
     PCFILTER_DESCRIPTOR descriptor_{};
-    PCPIN_DESCRIPTOR pins_[3]{};
+    PCPIN_DESCRIPTOR pins_[2]{};
     KSDATARANGE_AUDIO ranges_[BioFormatCount]{};
-    PKSDATARANGE rangePointers_[BioFormatCount]{};
-    PKSDATARANGE loopbackPointers_[BioFormatCount]{};
+    // Each range followed by its attribute list (KSDATARANGE_ATTRIBUTES).
+    PKSDATARANGE rangePointers_[2 * BioFormatCount]{};
     KSDATARANGE bridges_[BioFormatCount]{};
     PKSDATARANGE bridgePointers_[BioFormatCount]{};
     PCNODE_DESCRIPTOR node_{};
-    PCCONNECTION_DESCRIPTOR connections_[3]{};
+    PCCONNECTION_DESCRIPTOR connections_[2]{};
 };

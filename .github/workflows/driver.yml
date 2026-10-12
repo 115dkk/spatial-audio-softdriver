@@ -263,6 +263,11 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Start the KS request trace for the flow check (tools/ci/ks-trace.ps1)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Start -Label flow
+
       # Both endpoints at once, each with its own tone, read back from the
       # ring: records, byte continuity, DMA rate and content per endpoint.
       - name: Play through both endpoints and read the ring (tools/ci/driver_flow_check.py)
@@ -271,6 +276,11 @@ jobs:
         run: |
           python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
           python tools/ci/driver_flow_check.py --summary (Join-Path $env:RUNNER_TEMP 'driver-flow.json')
+
+      - name: What the audio engine asked our filters during the flow check (tools/ci/ks-trace.ps1)
+        if: always() && steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Stop -Label flow
 
       - name: The audio stack after the flow check
         if: failure() && steps.install.outputs.loaded == 'true'
@@ -284,8 +294,8 @@ jobs:
           path: |
             ${{ runner.temp }}/driver-flow.json
             ${{ runner.temp }}/aeb-trace
-            ${{ runner.temp }}/bioatmos-ks.etl
-            ${{ runner.temp }}/bioatmos-ks.xml
+            ${{ runner.temp }}/bioatmos-ks-*.etl
+            ${{ runner.temp }}/bioatmos-ks-*.xml
           if-no-files-found: ignore
 
   codeql:

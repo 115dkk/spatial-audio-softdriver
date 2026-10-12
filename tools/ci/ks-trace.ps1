@@ -8,12 +8,14 @@
 # fails; CI only.
 param(
     [switch] $Start,
-    [switch] $Stop
+    [switch] $Stop,
+    # Names the session and its files, so one job can keep several traces.
+    [string] $Label = 'install'
 )
 $ErrorActionPreference = 'Continue'
 $Provider = '{a63636ab-03aa-4a58-9dcd-86c273eb95fd}'
-$Session = 'BioAtmosKs'
-$etl = Join-Path $env:RUNNER_TEMP 'bioatmos-ks.etl'
+$Session = "BioAtmosKs-$Label"
+$etl = Join-Path $env:RUNNER_TEMP "bioatmos-ks-$Label.etl"
 
 if ($Start) {
     Remove-Item -LiteralPath $etl -ErrorAction SilentlyContinue
@@ -24,7 +26,7 @@ if (-not $Stop) { Write-Host 'ks-trace.ps1: pass -Start or -Stop'; exit 0 }
 
 & logman.exe stop $Session -ets 2>&1 | Write-Host
 if (-not (Test-Path -LiteralPath $etl)) { Write-Host "no trace file at $etl"; exit 0 }
-$xml = Join-Path $env:RUNNER_TEMP 'bioatmos-ks.xml'
+$xml = Join-Path $env:RUNNER_TEMP "bioatmos-ks-$Label.xml"
 & tracerpt.exe $etl -o $xml -of XML -y 2>&1 | Select-Object -Last 3 | Write-Host
 
 # Process names, with the services each svchost carries.
@@ -79,7 +81,8 @@ function Range([byte[]] $b, [int] $at) {
         $tag = [BitConverter]::ToUInt16($b, $at + 64); $ch = [BitConverter]::ToUInt16($b, $at + 66)
         $tail = " tag=0x$('{0:x4}' -f $tag) ch=$ch rate=$(U32 $b ($at + 68)) align=$([BitConverter]::ToUInt16($b, $at + 76)) bits=$([BitConverter]::ToUInt16($b, $at + 78))"
     }
-    "size=$size sub=$sub spec=$spec$tail"
+    $flags = U32 $b ($at + 4)
+    "size=$size flags=0x$('{0:x}' -f $flags) sub=$sub spec=$spec$tail"
 }
 
 $doc = [xml](Get-Content -Raw -LiteralPath $xml)
@@ -100,13 +103,14 @@ foreach ($event in $doc.Events.Event) {
         $name = Bytes $data.Name
         $text = Name $name
         $file = $data.File
-        if ($text -like '\{146F1A80-4791-11D0-A5D6-28DB04C10000}*') {
+        # A pin create's name is KSSTRING_Pin, a backslash, then binary.
+        $pinName = $text.IndexOf('{146F1A80-4791-11D0-A5D6-28DB04C10000}', [StringComparison]::OrdinalIgnoreCase)
+        if ($pinName -ge 0) {
             $parent = $files[$data.Related]
-            # KSPIN_CONNECT after the 39-character name (and a separator, if
-            # one follows): Interface, Medium, PinId, PinToHandle, Priority;
-            # then the data format.
-            $connect = 78
-            if ($name.Length -gt 79 -and $name[78] -eq 0x5c -and $name[79] -eq 0) { $connect = 80 }
+            # KSPIN_CONNECT after the 38-character GUID and its backslash:
+            # Interface, Medium, PinId, PinToHandle, Priority; then the data
+            # format.
+            $connect = 2 * ($pinName + 39)
             $pin = U32 $name ($connect + 48)
             $files[$file] = "$parent/pin$pin"
             $lines.Add("$time $who CREATE pin $pin of $parent ($(Range $name ($connect + 72))) -> $status")
@@ -141,7 +145,7 @@ foreach ($event in $doc.Events.Event) {
     if ($raw++ -lt 3) { Write-Host "undecoded event: $($_.Exception.Message) $($event.OuterXml)" }
   }
 }
-Write-Host "::group::KS requests to our filters ($($lines.Count) events)"
+Write-Host "::group::KS requests to our filters, $Label ($($lines.Count) events)"
 $lines | ForEach-Object { Write-Host $_ }
 Write-Host '::endgroup::'
 exit 0

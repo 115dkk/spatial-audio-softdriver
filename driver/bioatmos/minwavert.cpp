@@ -8,20 +8,29 @@ static PCPROPERTY_ITEM WaveProperties[] = {
     {&KSPROPSETID_Pin, KSPROPERTY_PIN_PROPOSEDATAFORMAT, KSPROPERTY_TYPE_SET | KSPROPERTY_TYPE_BASICSUPPORT, CMiniportWaveRT::Property},
 };
 DEFINE_PCAUTOMATION_TABLE_PROP(WaveAutomation, WaveProperties);
+// The optional signal-processing-mode attribute every host data range lists,
+// as SysVAD's HDMI ranges do: a pin that announces modes is opened with a
+// mode attribute after the format, and KS matches an attributed format only
+// against a range that lists the attribute. With bare ranges every pin the
+// audio service tried to create failed with STATUS_NO_MATCH (driver KS trace).
+static KSATTRIBUTE ModeAttribute = {sizeof(KSATTRIBUTE), 0, BioGuid(STATICGUIDOF(KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE))};
+static PKSATTRIBUTE ModeAttributes[] = {&ModeAttribute};
+static KSATTRIBUTE_LIST ModeAttributeList = {RTL_NUMBER_OF(ModeAttributes), ModeAttributes};
 CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : adapter_(adapter), endpoint_(endpoint) {
     adapter_->AddRef();
-    ULONG count = 0, loopbacks = 0;
+    ULONG count = 0;
     for (const auto& format : BioFormats) if (format.Bit & Mask()) {
         auto& range = ranges_[count];
         range.DataRange.FormatSize = sizeof(range);
+        range.DataRange.Flags = KSDATARANGE_ATTRIBUTES;
         range.DataRange.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
         range.DataRange.SubFormat = format.Subtype;
         range.DataRange.Specifier = KSDATAFORMAT_SPECIFIER_WAVEFORMATEX;
         range.MaximumChannels = format.Channels;
         range.MinimumBitsPerSample = range.MaximumBitsPerSample = 16;
         range.MinimumSampleFrequency = range.MaximumSampleFrequency = format.Rate;
-        rangePointers_[count] = &range.DataRange;
-        if (format.Bit == BIO_FORMAT_PCM) loopbackPointers_[loopbacks++] = &range.DataRange;
+        rangePointers_[2 * count] = &range.DataRange;
+        rangePointers_[2 * count + 1] = reinterpret_cast<PKSDATARANGE>(&ModeAttributeList);
         auto& bridge = bridges_[count];
         bridge.FormatSize = sizeof(bridge);
         bridge.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
@@ -29,14 +38,9 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
         bridge.Specifier = KSDATAFORMAT_SPECIFIER_NONE;
         bridgePointers_[count++] = &bridge;
     }
-    // Two instances, as every render pin the endpoint builder finishes on the
-    // hosted runners offers (SysVAD's HDMI pin and VB-CABLE's: 2; SysVAD's
-    // speaker pins: 3 and 6); ours at 1 stayed NOTPRESENT. One stream per
-    // endpoint still holds: CAdapterCommon::RegisterStream refuses a second
-    // with STATUS_DEVICE_BUSY.
-    pins_[0].MaxGlobalInstanceCount = 2;
-    pins_[0].MaxFilterInstanceCount = 2;
-    pins_[0].KsPinDescriptor.DataRangesCount = count;
+    pins_[0].MaxGlobalInstanceCount = 1;
+    pins_[0].MaxFilterInstanceCount = 1;
+    pins_[0].KsPinDescriptor.DataRangesCount = 2 * count;
     pins_[0].KsPinDescriptor.DataRanges = rangePointers_;
     pins_[0].KsPinDescriptor.DataFlow = KSPIN_DATAFLOW_IN;
     pins_[0].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_SINK;
@@ -46,22 +50,12 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
     pins_[1].KsPinDescriptor.DataFlow = KSPIN_DATAFLOW_OUT;
     pins_[1].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_NONE;
     pins_[1].KsPinDescriptor.Category = &KSCATEGORY_AUDIO;
-    // A loopback pin, as SysVAD's HDMI wave filter has: PCM only, taps the
-    // mix after the SUM node. It takes no stream yet (NewStream).
-    pins_[2].MaxGlobalInstanceCount = 1;
-    pins_[2].MaxFilterInstanceCount = 1;
-    pins_[2].KsPinDescriptor.DataRangesCount = loopbacks;
-    pins_[2].KsPinDescriptor.DataRanges = loopbackPointers_;
-    pins_[2].KsPinDescriptor.DataFlow = KSPIN_DATAFLOW_OUT;
-    pins_[2].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_SINK;
-    pins_[2].KsPinDescriptor.Category = &KSNODETYPE_AUDIO_LOOPBACK;
     // Host pin -> SUM node -> bridge pin, as SysVAD's HDMI wave filter starts
     // its chain: with the host pin wired straight to the bridge pin the
     // endpoint builder found no path to it and left the endpoints NOTPRESENT.
     node_.Type = &KSNODETYPE_SUM;
     connections_[0] = {PCFILTER_NODE, BioWaveHostPin, 0, KSNODEPIN_STANDARD_IN};
     connections_[1] = {0, KSNODEPIN_STANDARD_OUT, PCFILTER_NODE, BioWaveBridgePin};
-    connections_[2] = {0, KSNODEPIN_STANDARD_OUT, PCFILTER_NODE, BioWaveLoopbackPin};
     descriptor_.AutomationTable = &WaveAutomation;
     descriptor_.PinSize = sizeof(PCPIN_DESCRIPTOR);
     descriptor_.PinCount = RTL_NUMBER_OF(pins_);
@@ -99,7 +93,6 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::GetDeviceDescription(PDEVICE_DESCRIPTIO
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::NewStream(PMINIPORTWAVERTSTREAM* output, PPORTWAVERTSTREAM port, ULONG pin, BOOLEAN capture, PKSDATAFORMAT format) {
     PAGED_CODE();
     *output = nullptr;
-    if (pin == BioWaveLoopbackPin) return STATUS_NOT_SUPPORTED;
     if (pin != BioWaveHostPin || capture) return STATUS_INVALID_PARAMETER;
     const WAVEFORMATEX* wave;
     NTSTATUS status = BioValidateFormat(Mask(), format, &wave);
@@ -114,9 +107,7 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::NewStream(PMINIPORTWAVERTSTREAM* output
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::DataRangeIntersection(ULONG pin, PKSDATARANGE range, PKSDATARANGE matching, ULONG size, PVOID output, PULONG required) {
     *required = 0;
     if (pin == BioWaveBridgePin) return BioBridgeIntersection(range, matching, size, output, required);
-    // The loopback pin's ranges are the host pin's PCM ranges, so the same
-    // search answers it with PCM only.
-    if (pin != BioWaveHostPin && pin != BioWaveLoopbackPin) return STATUS_NO_MATCH;
+    if (pin != BioWaveHostPin) return STATUS_NO_MATCH;
     for (const auto& entry : BioFormats) if ((Mask() & entry.Bit) && BioRangeAccepts(range, entry) && BioRangeAccepts(matching, entry)) {
         *required = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
         if (!size) return STATUS_BUFFER_OVERFLOW;
