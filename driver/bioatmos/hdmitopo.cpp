@@ -69,6 +69,15 @@ NTSTATUS CMiniportTopologyHdmi::Property(PPCPROPERTY_REQUEST request) {
     auto list = static_cast<PKSMULTIPLE_ITEM>(request->Value);
     list->Size = sizeof(*list) + itemBytes; list->Count = 1;
     if (id == KSPROPERTY_JACK_DESCRIPTION) RtlCopyMemory(list + 1, &BioHdmiJack, itemBytes);
-    else RtlZeroMemory(list + 1, itemBytes); // Permanently connected virtual jack, no presence hardware.
+    else {
+        // The virtual jack is always plugged in, and says so: presence detection
+        // makes IsConnected = TRUE mean "connected" rather than "unknown". With
+        // JackCapabilities 0 the endpoint builder left both endpoints NOTPRESENT
+        // although every KS query on the path answered correctly; SysVAD's HDMI
+        // jack sets the same bit.
+        auto jack = reinterpret_cast<PKSJACK_DESCRIPTION2>(list + 1);
+        RtlZeroMemory(jack, itemBytes);
+        jack->JackCapabilities = JACKDESC2_PRESENCE_DETECT_CAPABILITY;
+    }
     return STATUS_SUCCESS;
 }
