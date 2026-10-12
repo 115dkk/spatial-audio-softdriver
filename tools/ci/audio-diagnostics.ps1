@@ -1,7 +1,8 @@
 # Prints what the Windows audio stack made of an installed audio driver: its
 # KS device interfaces, the MMDevices render and capture endpoints with their
-# states, the audio services and their recent events (ADR 0027). Never fails;
-# CI only.
+# states, the audio services and their recent events, and the answers its KS
+# filters give to the questions the endpoint builder asks (tools/ci/KsProbe.cs)
+# (ADR 0027). Never fails; CI only.
 param(
     # Instance id of the driver's device node, e.g. ROOT\MEDIA\0000.
     [string] $InstanceId = ''
@@ -91,3 +92,23 @@ foreach ($log in 'Microsoft-Windows-Audio/Operational', 'Microsoft-Windows-Kerne
         }
 }
 Write-Host '::endgroup::'
+
+if ($InstanceId) {
+    # Pins, data ranges, intersections, physical connections and jacks, then
+    # one pin created and closed. A KS request that never completes would hang
+    # the step, so each part runs in its own job with a time limit.
+    $source = Join-Path $PSScriptRoot 'KsProbe.cs'
+    $fragment = ($InstanceId -replace '\\', '#').ToLowerInvariant()
+    foreach ($method in 'Run', 'TryCreatePin') {
+        Write-Host "::group::KS filters: KsProbe.$method"
+        $job = Start-Job -ArgumentList $source, $fragment, $method -ScriptBlock {
+            param($source, $fragment, $method)
+            Add-Type -TypeDefinition (Get-Content -Raw $source)
+            [KsProbe]::$method($fragment)
+        }
+        if (Wait-Job $job -Timeout 120) { Receive-Job $job -ErrorAction Continue | ForEach-Object { Write-Host $_ } }
+        else { Write-Host "KsProbe.$method did not finish in 120 s" }
+        Remove-Job $job -Force
+        Write-Host '::endgroup::'
+    }
+}
