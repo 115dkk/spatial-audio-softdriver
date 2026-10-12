@@ -208,12 +208,21 @@ jobs:
       # Diagnosis only, after the check above failed. A restarted endpoint
       # builder enumerates every interface at once, so endpoints that turn
       # active here point at the order in which the interfaces arrived.
-      - name: Endpoint states after restarting the endpoint builder
+      # Then endpoint 0 alone offers PCM only (FormatMask0 = PCM) across a
+      # device restart: if it turns active while endpoint 1, still offering
+      # the IEC 61937 ranges, does not, the bitstream ranges on the host pin
+      # are what the builder cannot get past.
+      - name: Endpoint states after restarting the endpoint builder, then with PCM only on endpoint 0
         if: failure() && steps.endpoints.outcome == 'failure'
         shell: pwsh
         run: |
           Restart-Service -Name AudioEndpointBuilder -Force
           Start-Service -Name Audiosrv
+          Start-Sleep -Seconds 15
+          ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
+          $parameters = 'HKLM:\SYSTEM\CurrentControlSet\Services\bioatmos\Parameters'
+          Set-ItemProperty -Path $parameters -Name FormatMask0 -Type QWord -Value 1
+          pnputil /restart-device 'ROOT\MEDIA\0000'
           Start-Sleep -Seconds 15
           ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
 
