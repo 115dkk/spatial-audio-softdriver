@@ -13,14 +13,18 @@ use std::fmt::Write as _;
 use std::mem::{offset_of, size_of};
 use std::path::Path;
 
-use bio_abi::{AbiInfo, BioStats, DumpHeader, OverrunPayload, RateTrim, ReadRequest, RecordHeader};
+use bio_abi::{
+    AbiInfo, BioStats, DumpHeader, EndpointStats, OverrunPayload, RateTrim, ReadRequest,
+    RecordHeader,
+};
 
-const RENAMES: [(&str, &str); 7] = [
+const RENAMES: [(&str, &str); 8] = [
     ("RecordHeader", "BIO_RECORD_HEADER"),
     ("OverrunPayload", "BIO_OVERRUN_PAYLOAD"),
     ("ReadRequest", "BIO_READ_REQUEST"),
     ("RateTrim", "BIO_RATE_TRIM"),
     ("AbiInfo", "BIO_ABI_INFO"),
+    ("EndpointStats", "BIO_ENDPOINT_STATS"),
     ("BioStats", "BIO_STATS"),
     ("DumpHeader", "BIO_DUMP_HEADER"),
 ];
@@ -73,6 +77,7 @@ fn layout_trailer() -> String {
             qpc,
             qpc_written,
             len,
+            endpoint,
             reserved
         ]
     );
@@ -89,10 +94,18 @@ fn layout_trailer() -> String {
             driver_version,
             ring_bytes,
             compiled_formats,
-            enabled_formats,
             features,
-            qpc_frequency
+            qpc_frequency,
+            endpoint_count,
+            reserved,
+            enabled_formats
         ]
+    );
+    assert_layout!(
+        t,
+        EndpointStats,
+        "BIO_ENDPOINT_STATS",
+        [total_bytes, overruns, lost_bytes, epoch, state]
     );
     assert_layout!(
         t,
@@ -101,18 +114,23 @@ fn layout_trailer() -> String {
         [
             struct_size,
             open_count,
-            total_bytes,
-            overruns,
-            lost_bytes,
             max_timer_lateness_us,
-            reserved
+            reserved,
+            endpoints
         ]
     );
     assert_layout!(
         t,
         DumpHeader,
         "BIO_DUMP_HEADER",
-        [magic, abi_version, header_size, qpc_frequency, reserved]
+        [
+            magic,
+            abi_version,
+            header_size,
+            qpc_frequency,
+            format_version,
+            reserved
+        ]
     );
     t
 }

@@ -537,9 +537,28 @@ note = "bio-guard restores the three default device roles when the app exits abn
 id = "abi.second_endpoint"
 kind = "abi"
 milestone = "M3"
+status = "partial"
+tests = [
+  "bio-abi::endpoint_numbers_are_distinct_and_in_range",
+  "bio-abi::writer_defaults_to_primary_and_preserves_mixed_endpoint_order",
+  "bio-abi::old_zero_reserved_bytes_are_the_primary_endpoint",
+  "bio-abi::errors_report_the_endpoint_when_a_header_is_available",
+  "bio-abi::arbitrary_endpoint_kind_length_sequences_round_trip",
+  "bio-abi::old_dump_format_is_primary_and_newer_format_is_rejected",
+  "bio-abi::a_format_repeat_keeps_the_epoch_and_carries_its_flag",
+  "bio-abi::c_header_matches_the_rust_layout",
+  "engine::other_endpoint_records_are_skipped_without_affecting_primary_output",
+  "bio-replay::default_render_ignores_second_endpoint_records",
+]
+note = "the contract, parser, dump format and C header carry endpoint numbers, and a single Chain filters one endpoint; per-endpoint engine chains, the common-rate scene mixer (engine.two_endpoints), and the driver are not implemented"
+
+[[feature]]
+id = "engine.two_endpoints"
+kind = "pipeline"
+milestone = "M3"
 status = "planned"
 tests = []
-note = "two render endpoints with per-endpoint format masks; RecordHeader.reserved splits into endpoint u16 + reserved u16; per-endpoint epoch, position and stats (ADR 0024). Part of the frozen v1 contract"
+note = "per-endpoint deframer, decoder and epoch state and the 10 ms common-rate scene mixer of ADR 0024; one trim controller after mixing"
 
 [[feature]]
 id = "ring.streamring"
