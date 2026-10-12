@@ -28,8 +28,13 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
         bridge.Specifier = KSDATAFORMAT_SPECIFIER_NONE;
         bridgePointers_[count++] = &bridge;
     }
-    pins_[0].MaxGlobalInstanceCount = 1;
-    pins_[0].MaxFilterInstanceCount = 1;
+    // Two instances, as every render pin the endpoint builder finishes on the
+    // hosted runners offers (SysVAD's HDMI pin and VB-CABLE's: 2; SysVAD's
+    // speaker pins: 3 and 6); ours at 1 stayed NOTPRESENT. One stream per
+    // endpoint still holds: CAdapterCommon::RegisterStream refuses a second
+    // with STATUS_DEVICE_BUSY.
+    pins_[0].MaxGlobalInstanceCount = 2;
+    pins_[0].MaxFilterInstanceCount = 2;
     pins_[0].KsPinDescriptor.DataRangesCount = count;
     pins_[0].KsPinDescriptor.DataRanges = rangePointers_;
     pins_[0].KsPinDescriptor.DataFlow = KSPIN_DATAFLOW_IN;
