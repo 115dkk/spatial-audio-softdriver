@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bio_abi::{ENDPOINT_SECOND, RecordWriter, dump_header_bytes, wave_format_bytes};
@@ -10,14 +11,19 @@ use serde_json::Value;
 
 struct TempDir(PathBuf);
 
+static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
 impl TempDir {
     fn new() -> Self {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock follows Unix epoch")
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("bio-replay-render-{}-{unique}", std::process::id()));
+        let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "bio-replay-render-{}-{unique}-{sequence}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
