@@ -100,6 +100,11 @@ Invoke-Native -FilePath $msbuild -ArgumentList @(
     "/p:InfDateStamp=$stampDate",
     '/p:SignMode=Off',
     '/p:EnableInf2Cat=false',
+    # The WDK targets look for InfVerif.dll and ApiValidator.exe under the x86
+    # tool folder, which the NuGet WDK does not ship (x64 and ARM64 only). Both
+    # run below from the x64 folder instead, where their output is visible.
+    '/p:SkipPackageVerification=true',
+    '/p:ApiValidator_Enable=false',
     '/verbosity:minimal'
 )
 
@@ -134,6 +139,26 @@ if (-not $infverif) {
 }
 
 Invoke-Native -FilePath $infverif.FullName -ArgumentList @('/w', '/v', (Join-Path $buildDirectory 'bioatmos.inf'))
+
+# ApiValidator: the driver may call only the DDIs of the Universal target
+# platform (the vcxproj's DriverTargetPlatform).
+$apiValidator = Get-ChildItem -LiteralPath $packagesDirectory -Filter 'apivalidator.exe' -File -Recurse |
+    Where-Object { $_.FullName -match "Microsoft\.Windows\.WDK\.[^\\/]+[\\/]c[\\/]bin[\\/][^\\/]+[\\/]$hostToolArchitecture[\\/]apivalidator\.exe$" } |
+    Sort-Object FullName | Select-Object -First 1
+$ddiFolder = if ($Platform -eq 'ARM64') { 'arm64' } else { 'x64' }
+$universalDdis = Get-ChildItem -LiteralPath $packagesDirectory -Filter 'UniversalDDIs.xml' -File -Recurse |
+    Where-Object { $_.Directory.Name -eq $ddiFolder -and $_.FullName -match 'universalDDIs' } |
+    Sort-Object FullName | Select-Object -First 1
+if (-not $apiValidator -or -not $universalDdis) {
+    throw "ApiValidator ($hostToolArchitecture) or UniversalDDIs.xml ($ddiFolder) was not found beneath $packagesDirectory"
+}
+$moduleWhiteList = Join-Path $universalDdis.DirectoryName 'ModuleWhiteList.xml'
+& $apiValidator.FullName "-DriverPackagePath:$(Join-Path $buildDirectory 'bioatmos.sys')" `
+    "-SupportedApiXmlFiles:$($universalDdis.FullName)" "-ModuleWhiteListXmlFiles:$moduleWhiteList" `
+    "-ApiExtractorExePath:$($apiValidator.DirectoryName)"
+if ($LASTEXITCODE -ne 0) {
+    throw "ApiValidator: the driver is not Universal (exit $LASTEXITCODE)"
+}
 
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
 foreach ($artifact in $artifacts) {
