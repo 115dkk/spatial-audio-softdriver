@@ -19,11 +19,7 @@ CMiniportTopologyHdmi::CMiniportTopologyHdmi(CAdapterCommon* adapter, USHORT end
         pins_[i].KsPinDescriptor.DataRanges = pointers_;
         pins_[i].KsPinDescriptor.DataFlow = i ? KSPIN_DATAFLOW_OUT : KSPIN_DATAFLOW_IN;
         pins_[i].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_NONE;
-        // EXPERIMENT, to be reverted: endpoint 1's jack as a speaker, endpoint 0
-        // stays HDMI, to see whether the HDMI form factor is what keeps both
-        // endpoints NOTPRESENT on a runner without a display.
-        const GUID* jack = endpoint_ == BIO_ENDPOINT_SECOND ? &KSNODETYPE_SPEAKER : &KSNODETYPE_HDMI_INTERFACE;
-        pins_[i].KsPinDescriptor.Category = i ? jack : &KSCATEGORY_AUDIO;
+        pins_[i].KsPinDescriptor.Category = i ? &KSNODETYPE_HDMI_INTERFACE : &KSCATEGORY_AUDIO;
     }
     connection_ = {PCFILTER_NODE, BioTopologyBridgePin, PCFILTER_NODE, BioTopologyJackPin};
     descriptor_.AutomationTable = &HdmiAutomation;
