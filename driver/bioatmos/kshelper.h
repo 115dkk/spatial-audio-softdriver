@@ -6,5 +6,6 @@
 NTSTATUS BioPropertySize(PPCPROPERTY_REQUEST request, ULONG size);
 NTSTATUS BioBasicSupport(PPCPROPERTY_REQUEST request, ULONG access, ULONG type = VT_ILLEGAL);
 void BioBuildFormat(const BioFormatEntry& entry, PKSDATAFORMAT_WAVEFORMATEXTENSIBLE output);
+bool BioFormatTypeAllowed(ULONGLONG mask, const KSDATAFORMAT* data);
 NTSTATUS BioValidateFormat(ULONGLONG mask, PKSDATAFORMAT data, const WAVEFORMATEX** wave);
 bool BioRangeAccepts(PKSDATARANGE range, const BioFormatEntry& format);

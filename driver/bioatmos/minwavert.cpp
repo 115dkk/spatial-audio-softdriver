@@ -152,6 +152,12 @@ NTSTATUS CMiniportWaveRT::Property(PPCPROPERTY_REQUEST request) {
     if (request->ValueSize < sizeof(KSDATAFORMAT)) return STATUS_INVALID_PARAMETER;
     auto data = static_cast<PKSDATAFORMAT>(request->Value);
     if (data->FormatSize > request->ValueSize) return STATUS_INVALID_PARAMETER;
+    // The endpoint builder's question "does this pin take PCM (AC3, WMA Pro)
+    // at all?" comes as a bare KSDATAFORMAT. The full-format check answered
+    // STATUS_NO_MATCH to PCM, and the builder left both endpoints NOTPRESENT
+    // (driver KS trace, tools/ci/ks-trace.ps1).
+    if (data->FormatSize == sizeof(KSDATAFORMAT))
+        return BioFormatTypeAllowed(miniport->Mask(), data) ? STATUS_SUCCESS : STATUS_NO_MATCH;
     const WAVEFORMATEX* wave;
     return BioValidateFormat(miniport->Mask(), data, &wave);
 }

@@ -54,6 +54,16 @@ void BioBuildFormat(const BioFormatEntry& entry, PKSDATAFORMAT_WAVEFORMATEXTENSI
     // found no usable host pin while ours left it 0.
     output->DataFormat.SampleSize = wave.Format.nBlockAlign;
 }
+// A bare KSDATAFORMAT, with no WAVEFORMATEX after it, asks whether the pin
+// takes that format type at all: the endpoint builder proposes PCM, AC3 and
+// WMA Pro this way on a render pin before it lists the endpoint's formats.
+bool BioFormatTypeAllowed(ULONGLONG mask, const KSDATAFORMAT* data) {
+    if (!IsEqualGUIDAligned(data->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) ||
+        !IsEqualGUIDAligned(data->Specifier, KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)) return false;
+    for (const auto& entry : BioFormats)
+        if ((entry.Bit & mask) && IsEqualGUIDAligned(entry.Subtype, data->SubFormat)) return true;
+    return false;
+}
 NTSTATUS BioValidateFormat(ULONGLONG mask, PKSDATAFORMAT data, const WAVEFORMATEX** wave) {
     if (!data || data->FormatSize < sizeof(KSDATAFORMAT) + sizeof(WAVEFORMATEX) ||
         !IsEqualGUIDAligned(data->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) ||
