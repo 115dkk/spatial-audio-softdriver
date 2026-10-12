@@ -341,6 +341,10 @@ jobs:
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
           $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
+          # Built at the WDK's latest NTDDI it imported a routine Server 2022
+          # lacks (0xC0000263 at load). Our driver pins Windows 10 2004 the
+          # same way (driver/bioatmos/bioatmos.vcxproj); cl.exe appends _CL_.
+          $env:_CL_ = '/DNTDDI_VERSION=0x0A000008'
           foreach ($project in 'EndpointsCommon\EndpointsCommon.vcxproj', 'TabletAudioSample\TabletAudioSample.vcxproj') {
             & $msbuild "audio\sysvad\$project" /restore:false /p:Configuration=Release /p:Platform=x64 `
               /p:KMDF_VERSION_MINOR=31 /p:RunCodeAnalysis=false /p:SignMode=Off /p:EnableInf2Cat=false `
