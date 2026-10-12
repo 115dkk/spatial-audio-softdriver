@@ -15,15 +15,25 @@ $categories = [ordered]@{
     KSCATEGORY_TOPOLOGY = '{DDA54A40-1E4C-11D1-A050-405705C10000}'
 }
 Write-Host '::group::KS device interfaces'
+# Interface keys hold '#' and '?': read them with -LiteralPath, never as a
+# wildcard pattern.
 $needle = ($InstanceId -replace '\\', '#')
 foreach ($name in $categories.Keys) {
     $root = "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceClasses\$($categories[$name])"
-    Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object { -not $needle -or $_.PSChildName -like "*$needle*" } | ForEach-Object {
-        foreach ($reference in Get-ChildItem $_.PSPath -ErrorAction SilentlyContinue) {
-            $linked = (Get-ItemProperty (Join-Path $reference.PSPath 'Control') -ErrorAction SilentlyContinue).Linked
-            Write-Host "$name $($_.PSChildName) $($reference.PSChildName) linked=$linked"
+    foreach ($interface in Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue) {
+        if ($needle -and $interface.PSChildName -notlike "*$needle*") { continue }
+        foreach ($reference in Get-ChildItem -LiteralPath $interface.PSPath -ErrorAction SilentlyContinue) {
+            if ($reference.PSChildName -notlike '#*') { continue }
+            $control = Join-Path $reference.PSPath 'Control'
+            $linked = (Get-ItemProperty -LiteralPath $control -ErrorAction SilentlyContinue).Linked
+            Write-Host "$name $($reference.PSChildName) linked=$linked"
         }
     }
+}
+if ($InstanceId) {
+    & pnputil.exe /enum-devices /instanceid $InstanceId /interfaces /stack 2>&1 | Write-Host
+    $problem = (Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName DEVPKEY_Device_ProblemCode -ErrorAction SilentlyContinue).Data
+    Write-Host "device $InstanceId problem code now: $problem"
 }
 Write-Host '::endgroup::'
 
@@ -58,8 +68,12 @@ Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since } -Error
     Where-Object { $_.ProviderName -match 'Audio|Kernel-PnP|bioatmos|Service Control Manager' } |
     Select-Object -First 40 |
     ForEach-Object { Write-Host "$($_.TimeCreated.ToString('HH:mm:ss')) $($_.ProviderName) $($_.Id): $($_.Message -replace '\s+', ' ')" }
-foreach ($log in 'Microsoft-Windows-Audio/Operational', 'Microsoft-Windows-Audio/PlaybackManager') {
-    Get-WinEvent -LogName $log -MaxEvents 20 -ErrorAction SilentlyContinue |
-        ForEach-Object { Write-Host "$($_.TimeCreated.ToString('HH:mm:ss')) $log $($_.Id): $($_.Message -replace '\s+', ' ')" }
+foreach ($log in 'Microsoft-Windows-Audio/Operational', 'Microsoft-Windows-Kernel-PnP/Configuration') {
+    Get-WinEvent -LogName $log -MaxEvents 40 -ErrorAction SilentlyContinue |
+        Where-Object { $_.TimeCreated -ge $since } | Sort-Object TimeCreated |
+        ForEach-Object {
+            $values = ($_.Properties | ForEach-Object { "$($_.Value)" }) -join ' | '
+            Write-Host "$($_.TimeCreated.ToString('HH:mm:ss.fff')) $log $($_.Id): $($_.Message -replace '\s+', ' ') [$values]"
+        }
 }
 Write-Host '::endgroup::'
