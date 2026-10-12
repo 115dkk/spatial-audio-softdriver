@@ -22,3 +22,4 @@ clap.workspace = true
 brir.workspace = true
 engine.workspace = true
 rtrb.workspace = true
+serde_json.workspace = true

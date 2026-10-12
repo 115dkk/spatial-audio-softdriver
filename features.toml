@@ -454,8 +454,12 @@ id = "live.tool"
 kind = "tool"
 milestone = "M2"
 status = "partial"
-tests = ["bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them"]
-note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace, so the whole live path ran on the dev PC; record and play from the SAL ring wait for the SAL PC"
+tests = [
+  "bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them",
+  "bio-live::paced_dump_loops_with_continuous_positions_and_times",
+  "bio-live::looping_needs_two_data_records",
+]
+note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace (--loop repeats it, --report writes the run's figures), so the whole live path runs on the dev PC and, through a virtual cable, on the Windows CI runners (ADR 0026); record and play from the SAL ring wait for the SAL PC"
 
 # ---- Driver and app (M3, M4) ----
 
