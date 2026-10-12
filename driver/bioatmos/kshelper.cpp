@@ -49,6 +49,10 @@ void BioBuildFormat(const BioFormatEntry& entry, PKSDATAFORMAT_WAVEFORMATEXTENSI
     wave.Samples.wValidBitsPerSample = 16;
     wave.dwChannelMask = entry.ChannelMask;
     wave.SubFormat = entry.Subtype;
+    // A fixed-size sample: 0 here means a variable sample size. PortCls's own
+    // intersection handler sets the frame size, and the endpoint builder
+    // found no usable host pin while ours left it 0.
+    output->DataFormat.SampleSize = wave.Format.nBlockAlign;
 }
 NTSTATUS BioValidateFormat(ULONGLONG mask, PKSDATAFORMAT data, const WAVEFORMATEX** wave) {
     if (!data || data->FormatSize < sizeof(KSDATAFORMAT) + sizeof(WAVEFORMATEX) ||
