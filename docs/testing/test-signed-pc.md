@@ -258,8 +258,8 @@ py .\driver_flow_check.py --summary driver-flow-basic.json
 
 **합격 기준**
 - "Dolby Atmos for home theater"가 목록에 있고 켤 수 있음
-- 켠 뒤 재생 중의 형식이 `MAT 2.0` 또는 `MAT 2.1`(IEC 61937, 8채널 192 kHz 컨테이너)
-- 불연속(`discontinuities`)과 넘침(`overruns`)이 0
+- 켠 뒤 재생 중의 형식(`formats[].name`)이 `IEC 61937 MAT 2.0` 또는 `IEC 61937 MAT 2.1` (8채널 192 kHz 컨테이너)
+- 그 엔드포인트의 `byte_pos_discontinuities`, `overrun_records`, `lost_bytes`가 모두 0
 
 목록에 없으면 그 자체가 중요한 결과입니다. 스크린샷과 `collect.ps1` 결과를 보내 주십시오.
 
@@ -278,11 +278,18 @@ py .\driver_flow_check.py --summary driver-flow-basic.json
    AC-3, E-AC-3, TrueHD(MAT), DTS, DTS-HD MA, DTS:X 가운데 가진 파일로 합니다.
 
 **합격 기준**
-- 요약의 형식 이름이 재생한 코덱과 맞음
-  - E-AC-3 → `E-AC-3`
-  - TrueHD → `MAT`
-  - DTS-HD MA → `DTS-HD`
-- 불연속과 넘침이 0
+- 요약의 형식 이름(`formats[].name`)이 재생한 코덱과 맞음
+
+  | 재생한 코덱 | 형식 이름 |
+  | --- | --- |
+  | AC-3 | `IEC 61937 AC-3` |
+  | E-AC-3 | `IEC 61937 E-AC-3` (Atmos 표시가 있으면 `IEC 61937 E-AC-3 Atmos`) |
+  | TrueHD | `IEC 61937 TrueHD` |
+  | DTS | `IEC 61937 DTS` |
+  | DTS-HD MA | `IEC 61937 DTS-HD` |
+  | DTS:X | `IEC 61937 DTS:X E1`, `E2`, 또는 `IEC 61937 DTS-HD` |
+
+- `byte_pos_discontinuities`, `overrun_records`, `lost_bytes`가 0
 
 재생기가 그 형식을 열지 못하고 PCM으로 떨어지면, 그 형식과 재생기 쪽 메시지를 적어 주십시오.
 
@@ -305,7 +312,7 @@ py .\driver_flow_check.py --summary driver-flow-basic.json
    ```
 
    PCM 스테레오 재생(일반 음악)으로도 한 번 더 합니다: `--out writepacket-pcm.biodump`.
-3. 요약의 `qpc_written` 간격(최소, 중앙값, p99, 최대, ms)을 적습니다.
+3. 요약의 `qpc_written_intervals`(`min_ms`, `median_ms`, `p99_ms`, `max_ms`)를 적습니다.
 4. 되돌립니다:
 
    ```powershell
@@ -315,7 +322,7 @@ py .\driver_flow_check.py --summary driver-flow-basic.json
 
 **합격 기준**
 - 이 단계는 측정입니다. 숫자를 그대로 보내 주십시오.
-- `qpc_written`이 모두 0이면 엔진이 쓰기 패킷 경로를 쓰지 않은 것입니다. 그것도 결과입니다.
+- `qpc_written_intervals`가 `null`이면 엔진이 쓰기 패킷 경로를 쓰지 않은 것입니다. 그것도 결과입니다.
 
 ## 6. 수명 경계
 
