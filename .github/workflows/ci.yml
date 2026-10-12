@@ -271,7 +271,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --quiet -r tools/ci/requirements.txt sounddevice==0.5.3
+          python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
           fx="$RUNNER_TEMP/fx"
           {
             echo "## Loopback (${{ matrix.os }})"

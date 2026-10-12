@@ -411,10 +411,25 @@ mod platform {
         }
     }
 
+    impl PacedDump {
+        /// With `--loop`, goes back to the first data record once the last
+        /// one has been handed out, one pass later in time and position.
+        fn wrap(&mut self) {
+            if let Some(span) = self.repeat
+                && self.offset == span.end
+            {
+                self.offset = span.start;
+                self.qpc_shift += span.qpc;
+                self.pos_shift += span.bytes;
+            }
+        }
+    }
+
     impl CaptureSource for PacedDump {
         fn read(&mut self, buf: &mut [u8], wait: Duration) -> Result<usize, CaptureError> {
             let deadline = qpc::now() + (wait.as_secs_f64() * self.frequency as f64) as u64;
             loop {
+                self.wrap();
                 if self.offset == self.stream.len() {
                     self.ended.store(true, Ordering::Release);
                     return Err(CaptureError::Ended);
@@ -422,13 +437,7 @@ mod platform {
                 let now = qpc::now();
                 let mut written = 0;
                 while self.offset < self.stream.len() {
-                    if let Some(span) = self.repeat
-                        && self.offset == span.end
-                    {
-                        self.offset = span.start;
-                        self.qpc_shift += span.qpc;
-                        self.pos_shift += span.bytes;
-                    }
+                    self.wrap();
                     let (size, kind, pos, _, dump_qpc) = record_at(&self.stream, self.offset);
                     let dump_qpc = dump_qpc + self.qpc_shift;
                     let (dump0, local0) = *self.origin.get_or_insert((dump_qpc, now));
@@ -827,6 +836,27 @@ mod platform {
                 previous = at;
             }
             // The stop record after the span never plays while looping.
+            assert!(!ended.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn a_dump_that_ends_on_data_keeps_looping() {
+            // The fixtures end on their last data record, with no stop.
+            let mut dump = dump_header_bytes(10_000_000);
+            let mut buf = vec![0_u8; 4096];
+            let mut writer = RecordWriter::new(&mut buf);
+            assert!(writer.data(1, 0, 100_000, &[1; 16]));
+            assert!(writer.data(1, 16, 200_000, &[2; 16]));
+            let len = writer.len();
+            dump.extend_from_slice(&buf[..len]);
+            let ended = Arc::new(AtomicBool::new(false));
+            let mut paced = PacedDump::new(&dump, ended.clone(), true).unwrap();
+            let mut out = vec![0_u8; 4096];
+            for pos in [0, 16, 32, 48, 64] {
+                let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
+                assert_eq!(n, bio_abi::record_size(16));
+                assert_eq!(record_pos(&out), pos);
+            }
             assert!(!ended.load(Ordering::Acquire));
         }
 

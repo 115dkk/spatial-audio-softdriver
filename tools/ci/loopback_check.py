@@ -20,7 +20,6 @@ import argparse
 import json
 import subprocess
 import sys
-import threading
 import time
 
 import numpy as np
@@ -29,15 +28,6 @@ from scipy.signal import correlate, resample_poly
 
 WINDOW_S = 0.05
 SEARCH = 64  # samples either side of the running offset
-
-
-def find_device(sd, name, kind):
-    for index, device in enumerate(sd.query_devices()):
-        host = sd.query_hostapis(device["hostapi"])["name"]
-        channels = device["max_input_channels" if kind == "input" else "max_output_channels"]
-        if name.lower() in device["name"].lower() and "WASAPI" in host and channels >= 2:
-            return index, device
-    raise SystemExit(f"no WASAPI {kind} device named like {name!r}: {sd.query_devices()}")
 
 
 def ncc(a, b):
@@ -111,28 +101,16 @@ def main():
     parser.add_argument("--summary", required=True)
     args = parser.parse_args()
 
-    import sounddevice as sd  # Windows CI only; compare() needs no audio device
+    # Windows CI only; compare() needs no audio device. soundcard talks to
+    # WASAPI directly (shared mode with format conversion), where PortAudio's
+    # WASAPI host refused VB-CABLE's capture endpoint.
+    import soundcard as sc
 
     reference, ref_rate = sf.read(args.reference, dtype="float32", always_2d=True)
-    index, device = find_device(sd, args.capture, "input")
-    rate = int(device["default_samplerate"])
-    print(f"capturing {device['name']} at {rate} Hz", flush=True)
+    microphone = sc.get_microphone(args.capture)
+    rate = 48_000
+    print(f"capturing {microphone.name} at {rate} Hz", flush=True)
 
-    chunks = []
-    lock = threading.Lock()
-
-    def on_audio(indata, frames, time_info, status):
-        with lock:
-            chunks.append(indata.copy())
-
-    stream = sd.InputStream(
-        device=index,
-        channels=2,
-        samplerate=rate,
-        dtype="float32",
-        callback=on_audio,
-        extra_settings=sd.WasapiSettings(exclusive=False),
-    )
     command = [
         args.bio_live, "play",
         "--from-dump", args.dump,
@@ -141,19 +119,26 @@ def main():
     ]
     if args.mode == "shared":
         command.append("--shared")
-    with stream:
-        time.sleep(0.5)
-        live = subprocess.run(command, capture_output=True, text=True, timeout=120)
-        time.sleep(0.5)
-    print(live.stderr, flush=True)
+    chunks = []
+    with microphone.recorder(samplerate=rate, channels=2, blocksize=rate // 100) as recorder:
+        chunks.append(recorder.record(numframes=rate // 2))
+        live = subprocess.Popen(command, stderr=subprocess.PIPE, text=True)
+        started = time.monotonic()
+        while live.poll() is None:
+            if time.monotonic() - started > 120:
+                live.kill()
+                raise SystemExit("bio-live did not stop within 120 s")
+            chunks.append(recorder.record(numframes=rate // 20))
+        chunks.append(recorder.record(numframes=rate // 2))
+    stderr = live.stderr.read() if live.stderr else ""
+    print(stderr, flush=True)
     if live.returncode != 0:
         raise SystemExit(f"bio-live exited with {live.returncode}")
 
-    with lock:
-        captured = np.concatenate(chunks) if chunks else np.zeros((0, 2), np.float32)
+    captured = np.concatenate(chunks).astype(np.float32)
     summary = compare(reference, ref_rate, captured, rate, args.min_correlation)
     summary["mode"] = args.mode
-    summary["bio_live"] = live.stderr.strip().splitlines()[-1:] if live.stderr else []
+    summary["bio_live"] = stderr.strip().splitlines()[-1:]
     with open(args.summary, "w", encoding="utf-8") as out:
         json.dump(summary, out, indent=2)
     print(json.dumps(summary, indent=2))

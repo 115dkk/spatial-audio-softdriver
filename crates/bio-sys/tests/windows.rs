@@ -162,6 +162,39 @@ fn exclusive_sink_recovers_its_cadence_after_a_missed_deadline() {
     );
 }
 
+/// Diagnostic for endpoints whose events cannot keep a short exclusive
+/// period (WaveCyclic drivers such as VB-CABLE signal at their own timer's
+/// rate): prints the rate the sink achieves at each period. It asserts only
+/// that every period opens and plays; the cadence numbers decide whether the
+/// sink needs to move to a longer period on its own.
+#[test]
+#[ignore = "requires a render endpoint; plays about 5 s of silence in exclusive mode"]
+fn exclusive_cadence_at_each_period() {
+    for period_ms in [0_u64, 5, 10, 20, 40] {
+        let mut sink = WasapiOpener {
+            endpoint: None,
+            rate: 48_000,
+            exclusive: true,
+            period: (period_ms > 0).then(|| std::time::Duration::from_millis(period_ms)),
+        }
+        .open()
+        .unwrap();
+        let format = sink.format();
+        let started = qpc::now();
+        let mut frames = 0_usize;
+        while frames < format.rate as usize {
+            sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+            frames += format.period_frames;
+        }
+        let seconds = (qpc::now() - started) as f64 / qpc::frequency() as f64;
+        println!(
+            "period request {period_ms} ms: {sink:?}, {:.0} frames/s, {} restarts",
+            frames as f64 / seconds,
+            sink.restarts()
+        );
+    }
+}
+
 #[test]
 fn qpc_ticks_increase_and_frequency_is_nonzero() {
     assert!(qpc::frequency() > 0);
