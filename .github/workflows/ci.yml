@@ -253,15 +253,20 @@ jobs:
       # VB-CABLE's exclusive-mode events advance on the system timer, one per
       # 15.6 ms tick whatever the period; a 1 ms tick lets it keep the periods
       # the engine asks for, as hardware does (ADR 0026).
-      - name: Crash dumps on; system timer held at 1 ms (tools/ci/crash-dumps.ps1, timer-resolution.ps1)
+      - name: Crash dumps on; system timer held at 1 ms; MMCSS running (tools/ci/crash-dumps.ps1, timer-resolution.ps1)
         shell: pwsh
         run: |
           ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps')
           ./tools/ci/timer-resolution.ps1
-          # What MMCSS gives the real-time threads on this SKU.
+          # MMCSS boosts the real-time threads. The Server images leave it
+          # stopped (manual start) until the first registration starts it,
+          # which lands in the first second of a run; desktops run it already.
           Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' |
             Select-Object SystemResponsiveness, NetworkThrottlingIndex | Format-List
-          Get-Service -Name MMCSS -ErrorAction SilentlyContinue | Select-Object Status, StartType | Format-List
+          Start-Service -Name MMCSS
+          $mmcss = Get-Service -Name MMCSS
+          Write-Host "MMCSS $($mmcss.Status) ($($mmcss.StartType))"
+          if ($mmcss.Status -ne 'Running') { throw "MMCSS is $($mmcss.Status)" }
 
       - name: Build bio-live and bio-replay; write the fixtures
         id: build
