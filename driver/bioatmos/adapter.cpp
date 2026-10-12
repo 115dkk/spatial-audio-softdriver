@@ -12,9 +12,11 @@
 static BioSettings Settings;
 static LONG AdapterPresent;
 static PDRIVER_UNLOAD PortUnload;
+static PDRIVER_DISPATCH PortDispatch[IRP_MJ_MAXIMUM_FUNCTION + 1];
 static HANDLE ServiceKey;
 extern "C" DRIVER_INITIALIZE DriverEntry;
 static DRIVER_ADD_DEVICE AddDevice;
+static DRIVER_DISPATCH BioDispatch;
 static DRIVER_DISPATCH PnpHandler;
 static DRIVER_UNLOAD DriverUnload;
 static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources);
@@ -56,12 +58,24 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryP
     if (!NT_SUCCESS(status)) { ZwClose(ServiceKey); ServiceKey = nullptr; return status; }
     PortUnload = driver->DriverUnload;
     driver->DriverUnload = DriverUnload;
-    driver->MajorFunction[IRP_MJ_CREATE] = BioControlDispatch;
-    driver->MajorFunction[IRP_MJ_CLOSE] = BioControlDispatch;
-    driver->MajorFunction[IRP_MJ_CLEANUP] = BioControlDispatch;
-    driver->MajorFunction[IRP_MJ_DEVICE_CONTROL] = BioControlDispatch;
+    for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major) {
+        PortDispatch[major] = driver->MajorFunction[major];
+        driver->MajorFunction[major] = BioDispatch;
+    }
     driver->MajorFunction[IRP_MJ_PNP] = PnpHandler;
     return STATUS_SUCCESS;
+}
+static NTSTATUS BioDispatch(PDEVICE_OBJECT device, PIRP irp) {
+    const UCHAR major = IoGetCurrentIrpStackLocation(irp)->MajorFunction;
+    if (device->DeviceType == FILE_DEVICE_UNKNOWN) {
+        if (major == IRP_MJ_CREATE || major == IRP_MJ_CLOSE || major == IRP_MJ_CLEANUP ||
+            major == IRP_MJ_DEVICE_CONTROL)
+            return BioControlDispatch(device, irp);
+        return BioComplete(irp, STATUS_INVALID_DEVICE_REQUEST);
+    }
+    if (major > IRP_MJ_MAXIMUM_FUNCTION || !PortDispatch[major])
+        return BioComplete(irp, STATUS_INVALID_DEVICE_REQUEST);
+    return PortDispatch[major](device, irp);
 }
 static VOID DriverUnload(PDRIVER_OBJECT driver) {
     PAGED_CODE();
@@ -144,5 +158,5 @@ static NTSTATUS PnpHandler(PDEVICE_OBJECT device, PIRP irp) {
             InterlockedExchange(&AdapterPresent, 0);
         }
     }
-    return PcDispatchIrp(device, irp);
+    return PortDispatch[IRP_MJ_PNP](device, irp);
 }

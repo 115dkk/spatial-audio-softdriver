@@ -27,6 +27,8 @@ public:
     void StreamState(USHORT ep, ULONGLONG qpc, bool running);
 private:
     static VOID TimerTick(PEX_TIMER timer, PVOID context);
+    // Called with streamLock_ held.
+    void SyncTimer(ULONGLONG qpc);
     LONG references_ = 1;
     PDEVICE_OBJECT control_;
     BioControlState* state_;
@@ -35,7 +37,8 @@ private:
     PEX_TIMER timer_ = nullptr;
     CMiniportWaveRTStream* streams_[BIO_MAX_ENDPOINTS] = {};
     bool active_ = false;
-    ULONG running_ = 0;  // streams in KSSTATE_RUN; the DMA timer runs while > 0
+    ULONG running_ = 0;  // streams in KSSTATE_RUN
+    bool timerArmed_ = false;
     DEVICE_POWER_STATE power_ = PowerDeviceD0;
     ULONGLONG lastTick_ = 0;
 };

@@ -119,9 +119,26 @@ struct ReadGate {
     static uint64_t Deadline(uint64_t now_qpc, uint64_t qpc_frequency, uint32_t timeout_ms);
 };
 
-// Virtual DMA position with the rate trim (ADR 0011, 0027). Exact integer
-// arithmetic: no floating point in the kernel. Carries the remainder so the
-// long-run rate is exact.
+// Portable unsigned 128-bit arithmetic. These operations use only uint64_t so
+// the same core builds for x64 and ARM64 MSVC kernel targets.
+struct U128 {
+    uint64_t high;
+    uint64_t low;
+};
+U128 U128Multiply(uint64_t a, uint64_t b);
+U128 U128Add(U128 a, U128 b);
+int U128Compare(U128 a, U128 b);
+U128 U128Subtract(U128 a, U128 b);
+U128 U128Divide(U128 numerator, U128 denominator, U128* remainder);
+
+// ceil(a * b / c). Division by zero and a quotient wider than uint64_t
+// saturate to UINT64_MAX.
+uint64_t MulDivCeil(uint64_t a, uint64_t b, uint64_t c);
+
+// Virtual DMA position with the rate trim (ADR 0011, 0027). Exact unsigned
+// 128-bit rational arithmetic, without floating point or compiler-specific
+// integer types. The rational and block-alignment remainders carry across
+// calls and trim changes, so elapsed time is not discarded.
 class DmaClock {
 public:
     void Start(uint64_t qpc_now, uint64_t qpc_frequency, uint32_t bytes_per_second,
@@ -137,7 +154,7 @@ private:
     uint64_t last_qpc_ = 0;
     uint64_t qpc_frequency_ = 0;
     uint64_t bytes_per_second_ = 0;
-    uint64_t remainder_ = 0;
+    U128 remainder_{};
     uint64_t unaligned_bytes_ = 0;
     uint32_t block_align_ = 1;
     int32_t trim_ = 0;

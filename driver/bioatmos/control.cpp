@@ -44,12 +44,13 @@ static void ArmDeadline(BioControlState* state, ULONGLONG deadline) {
     if (!state->DeadlineTimer || deadline == MAXULONGLONG) return;
     ULONGLONG now = BioQpc();
     ULONGLONG left = deadline > now ? deadline - now : 0;
-    // A minute at most per shot keeps the 100 ns arithmetic in range; the
-    // tick arms the rest.
-    if (left > state->Frequency * 60) left = state->Frequency * 60;
     // Rounded up: firing before the QPC deadline would leave the READ waiting.
-    LONGLONG due = static_cast<LONGLONG>((left * 10000000 + state->Frequency - 1) / state->Frequency);
-    ExSetTimer(state->DeadlineTimer, -(due > 0 ? due : 1), 0, nullptr);
+    // Clamp the converted duration, not Frequency * 60, so neither product can
+    // overflow even with a pathological performance-counter frequency.
+    ULONGLONG due = bio::MulDivCeil(left, 10000000, state->Frequency);
+    constexpr ULONGLONG oneMinute = 600000000;
+    if (due > oneMinute) due = oneMinute;
+    ExSetTimer(state->DeadlineTimer, -static_cast<LONGLONG>(due > 0 ? due : 1), 0, nullptr);
 }
 static NTSTATUS CsqInsert(PIO_CSQ queue, PIRP irp, PVOID) {
     auto state = StateFromQueue(queue);
@@ -212,7 +213,6 @@ static void CleanFile(BioControlState* state, BioFileContext* file) {
         FinishRead(state, pending, STATUS_CANCELLED);
 }
 NTSTATUS BioControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
-    if (device->DeviceType != FILE_DEVICE_UNKNOWN) return PcDispatchIrp(device, irp);
     auto state = BioControl(device);
     auto stack = IoGetCurrentIrpStackLocation(irp);
     if (!stack->FileObject) return BioComplete(irp, STATUS_INVALID_PARAMETER);
@@ -237,9 +237,10 @@ NTSTATUS BioControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
     ULONG_PTR information = 0;
     KIRQL irql;
     if (stack->MajorFunction == IRP_MJ_CREATE) {
-        file = static_cast<BioFileContext*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*file), BioPoolTag));
-        if (!file) status = STATUS_INSUFFICIENT_RESOURCES;
-        else {
+        if (stack->FileObject->FileName.Length != 0) status = STATUS_OBJECT_NAME_NOT_FOUND;
+        else file = static_cast<BioFileContext*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*file), BioPoolTag));
+        if (NT_SUCCESS(status) && !file) status = STATUS_INSUFFICIENT_RESOURCES;
+        else if (file) {
             KeAcquireSpinLock(&state->Lock, &irql);
             if (state->Removed) status = STATUS_DELETE_PENDING;
             else if (state->OpenCount) status = STATUS_SHARING_VIOLATION;

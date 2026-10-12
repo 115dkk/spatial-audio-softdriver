@@ -361,7 +361,128 @@ void ClockRules() {
     }
     CHECK(total == 192000000);
     CHECK(clock.Advance(1) == 0);
+
+    // Audit regression: the former 64-bit product overflow returned zero and
+    // permanently discarded this interval.
+    clock.Start(0, 10000000, 176400, 4);
+    CHECK(clock.SetTrim(1) == 1);
+    CHECK(clock.Advance(1000001) == 17640);
+    clock.Start(0, (UINT64_C(1) << 48U) + 1U, 192000, 4);
+    CHECK(clock.Advance((UINT64_C(1) << 48U) + 1U) == 0);
 }
+
+#if defined(__SIZEOF_INT128__)
+__extension__ typedef unsigned __int128 NativeU128;
+
+uint64_t Random64(uint64_t* state) {
+    uint64_t value = *state;
+    value ^= value << 13U;
+    value ^= value >> 7U;
+    value ^= value << 17U;
+    *state = value;
+    return value;
+}
+
+NativeU128 Native(bio::U128 value) {
+    return (static_cast<NativeU128>(value.high) << 64U) | value.low;
+}
+
+void U128Rules() {
+    uint64_t random = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t i = 0; i < 10000U; ++i) {
+        const uint64_t a = Random64(&random);
+        const uint64_t b = Random64(&random);
+        CHECK(Native(bio::U128Multiply(a, b)) ==
+              static_cast<NativeU128>(a) * static_cast<NativeU128>(b));
+        bio::U128 numerator{Random64(&random), Random64(&random)};
+        bio::U128 denominator{Random64(&random), Random64(&random)};
+        if (denominator.high == 0 && denominator.low == 0) denominator.low = 1;
+        bio::U128 remainder{};
+        const bio::U128 quotient = bio::U128Divide(numerator, denominator, &remainder);
+        CHECK(Native(quotient) == Native(numerator) / Native(denominator));
+        CHECK(Native(remainder) == Native(numerator) % Native(denominator));
+    }
+}
+
+uint64_t ReferenceMulDivCeil(uint64_t a, uint64_t b, uint64_t c) {
+    if (c == 0) return UINT64_MAX;
+    const NativeU128 product = static_cast<NativeU128>(a) * b;
+    NativeU128 quotient = product / c;
+    if (product % c != 0) ++quotient;
+    return quotient > UINT64_MAX ? UINT64_MAX : static_cast<uint64_t>(quotient);
+}
+
+void MulDivRules() {
+    const uint64_t values[] = {0, 1, 2, UINT64_MAX - 1U, UINT64_MAX};
+    for (uint64_t a : values) for (uint64_t b : values) for (uint64_t c : values)
+        CHECK(bio::MulDivCeil(a, b, c) == ReferenceMulDivCeil(a, b, c));
+    uint64_t random = UINT64_C(0xd1b54a32d192ed03);
+    for (uint32_t i = 0; i < 10000U; ++i) {
+        const uint64_t a = Random64(&random);
+        const uint64_t b = Random64(&random);
+        const uint64_t c = Random64(&random);
+        CHECK(bio::MulDivCeil(a, b, c) == ReferenceMulDivCeil(a, b, c));
+    }
+}
+
+void RandomClockRules() {
+    const uint64_t frequencies[] = {10000000, 24000000, 3000000000, UINT64_C(1) << 48U};
+    const uint32_t rates[] = {1, 192000, 176400, 3072000, UINT32_MAX};
+    const uint32_t aligns[] = {1, 4, 8, 32};
+    const int32_t trims[] = {-BIO_TRIM_LIMIT_PPM * 65536, 0, 1,
+                             BIO_TRIM_LIMIT_PPM * 65536};
+    constexpr uint64_t trimDenominator = UINT64_C(1000000) * 65536U;
+    uint64_t random = UINT64_C(0x94d049bb133111eb);
+    for (uint32_t scenario = 0; scenario < 80U; ++scenario) {
+        const uint64_t frequency = frequencies[scenario % 4U];
+        const uint32_t rate = rates[(scenario / 4U) % 5U];
+        const uint32_t align = aligns[(scenario / 20U) % 4U];
+        bio::DmaClock clock;
+        clock.Start(0, frequency, rate, align);
+        uint64_t now = 0;
+        uint64_t returned = 0;
+        uint64_t referenceReturned = 0;
+        uint64_t referenceUnaligned = 0;
+        NativeU128 remainder = 0;
+        const NativeU128 denominator = static_cast<NativeU128>(frequency) * trimDenominator;
+        for (uint32_t call = 0; call < 64U; ++call) {
+            int32_t trim = trims[(call + scenario) % 4U];
+            if ((call & 7U) == 7U) {
+                const uint32_t span = static_cast<uint32_t>(BIO_TRIM_LIMIT_PPM * 2 + 1);
+                trim = static_cast<int32_t>(Random64(&random) % span) * 65536 -
+                       BIO_TRIM_LIMIT_PPM * 65536;
+            }
+            CHECK(clock.SetTrim(trim) == trim);
+            uint64_t ticks;
+            switch (call & 7U) {
+                case 0: ticks = 0; break;
+                case 1: ticks = 1; break;
+                case 2: ticks = frequency; break;
+                case 3: ticks = frequency * 3U + 1U; break;
+                default: ticks = Random64(&random) % (frequency * 5U + 1U); break;
+            }
+            now += ticks;
+            returned += clock.Advance(now);
+            const uint64_t rateNumerator = trim >= 0
+                ? trimDenominator + static_cast<uint32_t>(trim)
+                : trimDenominator - static_cast<uint32_t>(-static_cast<int64_t>(trim));
+            const NativeU128 numerator = static_cast<NativeU128>(ticks) * rate * rateNumerator + remainder;
+            const uint64_t bytes = static_cast<uint64_t>(numerator / denominator);
+            remainder = numerator % denominator;
+            referenceUnaligned += bytes;
+            const uint64_t aligned = (referenceUnaligned / align) * align;
+            referenceUnaligned -= aligned;
+            referenceReturned += aligned;
+            CHECK(returned == referenceReturned);
+        }
+        CHECK(referenceUnaligned < align);
+    }
+}
+#else
+void U128Rules() {}
+void MulDivRules() {}
+void RandomClockRules() {}
+#endif
 
 void Formats() {
     uint8_t wave[52];
@@ -404,6 +525,9 @@ int main() {
     ReadRules();
     PayloadAndReadLimits();
     ClockRules();
+    U128Rules();
+    MulDivRules();
+    RandomClockRules();
     Formats();
     if (failures != 0) {
         fprintf(stderr, "%d checks failed\n", failures);

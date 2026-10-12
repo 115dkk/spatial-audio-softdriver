@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(bio_core STATIC bio_ring.cpp bio_read.cpp bio_clock.cpp bio_format.cpp)
+add_library(bio_core STATIC bio_ring.cpp bio_read.cpp bio_clock.cpp bio_u128.cpp bio_format.cpp)
 target_include_directories(bio_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../../crates/bio-abi/include)
@@ -52,4 +52,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(ring_fuzz PRIVATE ${BIO_WARNINGS} -fsanitize=fuzzer,address,undefined
         -fno-omit-frame-pointer)
     target_link_options(ring_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    add_executable(clock_fuzz fuzz/clock_fuzz.cpp)
+    target_link_libraries(clock_fuzz PRIVATE bio_core)
+    target_compile_options(clock_fuzz PRIVATE ${BIO_WARNINGS} -fsanitize=fuzzer,address,undefined
+        -fno-omit-frame-pointer)
+    target_link_options(clock_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
 endif()

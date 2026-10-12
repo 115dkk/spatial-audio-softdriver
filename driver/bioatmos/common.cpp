@@ -37,7 +37,9 @@ void CAdapterCommon::Stop() {
         for (auto stream : streams_) if (stream) stream->AdapterStop(qpc);
     }
     active_ = false;
-    PEX_TIMER timer = timer_; timer_ = nullptr;
+    SyncTimer(BioQpc());
+    PEX_TIMER timer = timer_;
+    timer_ = nullptr;
     Unlock(irql);
     if (timer) ExDeleteTimer(timer, TRUE, TRUE, nullptr);
     if (wasActive) BioStopControl(state_);
@@ -75,17 +77,22 @@ void CAdapterCommon::Format(USHORT ep, ULONGLONG qpc, const WAVEFORMATEX* format
     if (active_ && state_->Started) state_->Ring.FormatChange(ep, qpc, format, sizeof(WAVEFORMATEX) + format->cbSize);
     KeReleaseSpinLock(&state_->Lock, irql);
 }
-void CAdapterCommon::StreamState(USHORT ep, ULONGLONG qpc, bool running) {
-    // Every entry to and exit from KSSTATE_RUN comes here, so the count stays
-    // balanced; the 1 ms timer runs only while something plays.
-    if (running) {
-        if (running_++ == 0 && timer_) {
-            lastTick_ = qpc;
-            ExSetTimer(timer_, -10000, 10000, nullptr);
-        }
-    } else if (running_ && --running_ == 0 && timer_) {
+void CAdapterCommon::SyncTimer(ULONGLONG qpc) {
+    const bool shouldRun = timer_ && active_ && power_ == PowerDeviceD0 && running_ > 0;
+    if (shouldRun && !timerArmed_) {
+        lastTick_ = qpc;
+        ExSetTimer(timer_, -10000, 10000, nullptr);
+        timerArmed_ = true;
+    } else if (!shouldRun && timerArmed_) {
         ExCancelTimer(timer_, nullptr);
+        timerArmed_ = false;
     }
+}
+void CAdapterCommon::StreamState(USHORT ep, ULONGLONG qpc, bool running) {
+    // Every entry to and exit from KSSTATE_RUN comes here, so the count stays balanced.
+    if (running) ++running_;
+    else if (running_) --running_;
+    SyncTimer(qpc);
     KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
     if (active_ && state_->Started) {
         if (running) state_->Ring.StreamStart(ep, qpc);
@@ -121,7 +128,7 @@ STDMETHODIMP_(void) CAdapterCommon::PowerChangeState(POWER_STATE state) {
     if (state.DeviceState == PowerDeviceD0 && power_ != PowerDeviceD0)
         for (auto stream : streams_) if (stream) stream->PowerResume(qpc);
     power_ = state.DeviceState;
-    lastTick_ = qpc;
+    SyncTimer(qpc);
     Unlock(irql);
     BioPumpRead(state_);
 }

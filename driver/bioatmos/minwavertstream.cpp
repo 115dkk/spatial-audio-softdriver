@@ -103,6 +103,10 @@ NTSTATUS CMiniportWaveRTStream::Allocate(ULONG notifications, ULONG requested, P
     PHYSICAL_ADDRESS high; high.QuadPart = MAXLONGLONG;
     PMDL allocated = port_->AllocatePagesForMdl(high, requested);
     if (!allocated) return STATUS_INSUFFICIENT_RESOURCES;
+    if (MmGetMdlByteCount(allocated) < requested) {
+        port_->FreePagesFromMdl(allocated);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
     auto buffer = static_cast<BYTE*>(port_->MapAllocatedPages(allocated, MmCached));
     if (!buffer) { port_->FreePagesFromMdl(allocated); return STATUS_INSUFFICIENT_RESOURCES; }
     Packet* packets = nullptr;
