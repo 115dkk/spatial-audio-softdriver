@@ -125,7 +125,9 @@ pub fn parse_wave_format(b: &[u8]) -> Result<SourceFormat, WaveFormatError> {
                     let codec = match id {
                         0x0000_000a => BitstreamCodec::Eac3,
                         0x0000_010a => BitstreamCodec::Eac3Atmos,
-                        0x0000_000b => BitstreamCodec::DtsHd,
+                        // DTS:X E1 (0x10b) and E2 (0x30b) are DTS-HD streams
+                        // carrying DTS:X; the decoder reads which from the stream.
+                        0x0000_000b | 0x0000_010b | 0x0000_030b => BitstreamCodec::DtsHd,
                         0x0000_000c => BitstreamCodec::TrueHd,
                         0x0000_010c => BitstreamCodec::Mat20,
                         // MAT21_PROFILE4 (0x70c) is the same container.
@@ -309,6 +311,26 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn subtype_aliases_parse_as_their_container() {
+        let mat21 = all_formats()
+            .into_iter()
+            .find(|f| matches!(f, SourceFormat::Bitstream(b) if b.codec == BitstreamCodec::Mat21))
+            .unwrap();
+        for (id, codec) in [
+            (0x070c_u32, BitstreamCodec::Mat21),
+            (0x010b, BitstreamCodec::DtsHd),
+            (0x030b, BitstreamCodec::DtsHd),
+        ] {
+            let mut b = wave_format_bytes(&mat21);
+            b[24..28].copy_from_slice(&id.to_le_bytes());
+            let Ok(SourceFormat::Bitstream(parsed)) = parse_wave_format(&b) else {
+                panic!("{id:#x} does not parse");
+            };
+            assert_eq!(parsed.codec, codec, "{id:#x}");
+        }
     }
 
     #[test]
