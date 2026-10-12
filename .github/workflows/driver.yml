@@ -321,10 +321,14 @@ jobs:
           path: samples
           sparse-checkout: audio/sysvad
 
-      - name: Build SysVAD TabletAudioSample (Release x64, KMDF 1.31) with the NuGet WDK
+      # The samples pin a WDK NuGet whose build tasks need MSBuild 18; the
+      # runner has 17. Our driver's WDK pin and MSBuild switches
+      # (tools/build-driver.ps1) build SysVAD the same way they build ours.
+      - name: Build SysVAD TabletAudioSample (Release x64, KMDF 1.31) with our NuGet WDK
         shell: pwsh
         working-directory: samples
         run: |
+          Copy-Item ../driver/packages.config, ../driver/Directory.Build.props . -Force
           $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
           if (-not $nuget) {
             $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
@@ -333,9 +337,15 @@ jobs:
           & $nuget restore packages.config -PackagesDirectory packages -NonInteractive
           if ($LASTEXITCODE -ne 0) { throw "nuget restore failed ($LASTEXITCODE)" }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          $vs = (& $vswhere -latest -products * -requires Microsoft.Component.MSBuild Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
+          $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
           foreach ($project in 'EndpointsCommon\EndpointsCommon.vcxproj', 'TabletAudioSample\TabletAudioSample.vcxproj') {
-            & $msbuild "audio\sysvad\$project" /p:Configuration=Release /p:Platform=x64 /p:KMDF_VERSION_MINOR=31 /p:RunCodeAnalysis=false /nologo /v:minimal
+            & $msbuild "audio\sysvad\$project" /restore:false /p:Configuration=Release /p:Platform=x64 `
+              /p:KMDF_VERSION_MINOR=31 /p:RunCodeAnalysis=false /p:SignMode=Off /p:EnableInf2Cat=false `
+              /p:SkipPackageVerification=true /p:ApiValidator_Enable=false "/p:InfDateStamp=$(Get-Date -Format 'MM/dd/yyyy')" `
+              /nologo /verbosity:minimal
             if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for $project ($LASTEXITCODE)" }
           }
 
