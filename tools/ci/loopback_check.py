@@ -1,6 +1,7 @@
 """End-to-end check of the live path on a CI runner with VB-CABLE.
 
-Plays a dump with bio-live into "CABLE Input" while recording "CABLE Output",
+Plays a dump with bio-live into VB-CABLE's render endpoint ("Speakers (VB-Audio
+Virtual Cable)") while recording its capture endpoint ("CABLE Output"),
 then compares the recording with bio-replay's offline render of the same dump.
 The live path resamples (ASRC against the cable's clock), so the comparison is
 windowed: every 50 ms window of the reference must find itself in the
@@ -103,7 +104,7 @@ def main():
     parser.add_argument("--profile", required=True)
     parser.add_argument("--reference", required=True)
     parser.add_argument("--mode", choices=["exclusive", "shared"], required=True)
-    parser.add_argument("--render", default="CABLE Input")
+    parser.add_argument("--render", default="VB-Audio Virtual Cable")
     parser.add_argument("--capture", default="CABLE Output")
     parser.add_argument("--min-correlation", type=float, default=0.95)
     parser.add_argument("--min-matched", type=float, default=0.9)

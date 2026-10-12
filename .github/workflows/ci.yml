@@ -221,9 +221,9 @@ jobs:
           done
 
   # GitHub's Windows images have no sound device. VB-CABLE gives one render
-  # endpoint ("CABLE Input") whose signal comes back on a capture endpoint
-  # ("CABLE Output"), so the live path can be heard by the job itself
-  # (ADR 0026).
+  # endpoint ("Speakers (VB-Audio Virtual Cable)") whose signal comes back on a
+  # capture endpoint ("CABLE Output"), so the live path can be heard by the
+  # job itself (ADR 0026).
   audio:
     name: live audio (${{ matrix.os }}, VB-CABLE)
     needs: lint
@@ -248,6 +248,7 @@ jobs:
         run: ./tools/ci/install-virtual-cable.ps1
 
       - name: Build bio-live and bio-replay; write the fixtures
+        id: build
         shell: bash
         run: |
           set -euo pipefail
@@ -258,11 +259,15 @@ jobs:
       - name: Device tests bio-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
         run: cargo test --locked --release -p bio-sys --test windows -- --ignored --test-threads=1 --nocapture
 
+      # The stages below run even when an earlier one failed, so one CI round
+      # reports on all of them; the job still fails.
       - uses: actions/setup-python@v7
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         with:
           python-version: "3.13"
 
       - name: Loopback (live output recorded back against the offline render)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -291,6 +296,7 @@ jobs:
           exit $status
 
       - name: Soaks (exclusive 5 min, shared 2 min, exclusive 2 min under CPU load, 1 min under full page heap)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         run: |
           $fx = Join-Path $env:RUNNER_TEMP 'fx'

@@ -1,6 +1,6 @@
 # Plays a fixture dump through the live path for minutes and fails on any
 # fault, device restart, lost byte or underrun while the source streams.
-# CI only (ci.yml, audio): the render endpoint is VB-CABLE's "CABLE Input".
+# CI only (ci.yml, audio): the render endpoint is VB-CABLE's "Speakers (VB-Audio Virtual Cable)".
 #
 #   ./tools/ci/soak.ps1 -BioLive target/release/bio-live.exe -Fixtures $fx `
 #       -Name exclusive -Minutes 5 [-Shared] [-CpuLoad] [-PageHeap]
@@ -44,7 +44,7 @@ try {
     }
 
     $arguments = @('play', '--from-dump', $dumpPath, '--profile', $profilePath,
-        '--output', 'CABLE Input', '--loop', '--seconds', $seconds, '--report', $report)
+        '--output', 'VB-Audio Virtual Cable', '--loop', '--seconds', $seconds, '--report', $report)
     if ($Shared) { $arguments += '--shared' }
     Write-Host "bio-live $($arguments -join ' ')"
     & $BioLive @arguments 2>&1 | Tee-Object -FilePath $log

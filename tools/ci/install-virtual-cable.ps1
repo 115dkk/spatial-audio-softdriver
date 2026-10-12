@@ -1,6 +1,6 @@
 # Installs VB-CABLE on a GitHub-hosted Windows runner so the WASAPI paths have
-# a real render endpoint ("CABLE Input") and a loopback capture of it
-# ("CABLE Output"). CI only; nothing here ships.
+# a real render endpoint ("Speakers (VB-Audio Virtual Cable)") and a loopback
+# capture of it ("CABLE Output"). CI only; nothing here ships.
 #
 # VB-CABLE is donationware by Vincent Burel (www.vb-cable.com). Its licence
 # allows using and copying the package as is; we download the unmodified

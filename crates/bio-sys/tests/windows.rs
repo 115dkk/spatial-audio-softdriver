@@ -80,6 +80,7 @@ fn assert_real_time_cadence(exclusive: bool) {
     }
     .open()
     .unwrap();
+    println!("exclusive requested: {exclusive}; opened {sink:?}");
     let format = sink.format();
     for _ in 0..20 {
         sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
