@@ -11,3 +11,4 @@
 **/fuzz/coverage/
 **/fuzz/Cargo.lock
 __pycache__/
+driver/packages/

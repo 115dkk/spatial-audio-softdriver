@@ -26,6 +26,16 @@ cargo test --workspace
 cargo deny check
 ```
 
+## 드라이버 (M3)
+
+`driver/`는 MS-PL이고 구조는 ADR 0027입니다. SysVAD에서 가져온 파일의 머리에는 원본 경로와 커밋을 적고, `driver/core/`는 커널 API를 부르지 않고 할당하지 않습니다. 드라이버를 고치면 커밋 전에 아래를 Linux에서 돌립니다. MSBuild, InfVerif, CodeQL, 시험서명 설치는 `driver.yml`이 Windows 러너에서 합니다.
+
+```sh
+python3 tools/kcheck.py --analyze
+cmake -S driver/core -B target/core -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DBIO_SANITIZE=ON
+cmake --build target/core && target/core/core_tests
+```
+
 ## 화면 (M4)
 
 - 화면 폰트는 UAC 원격 승인기와 같은 IBM Plex Sans KR(400, 500, 600, 700)입니다. 파일과 라이선스는 `E:\Windows_UAC_Remote_Controller\ui\public\fonts\ibm-plex-sans-kr\`에 있고, 그 저장소의 `tools/ui-fonts.mjs`처럼 SHA-256으로 고정해 들입니다.

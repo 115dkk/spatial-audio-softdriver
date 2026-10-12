@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: MS-PL
+// Copyright (c) Microsoft Corporation. All Rights Reserved.
+// Reduced from audio/sysvad/common.cpp at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
+#include "common.h"
+#include "minwavertstream.h"
+const GUID BioAdapterInterface = {0x534664d2,0x3ca6,0x4fbd,{0x84,0x75,0x3a,0x0b,0x41,0xb9,0x4c,0x11}};
+CAdapterCommon::CAdapterCommon(PDEVICE_OBJECT control) : control_(control), state_(BioControl(control)) {
+    settings_ = state_->Settings;
+    ObReferenceObject(control_);
+    KeInitializeSpinLock(&streamLock_);
+}
+CAdapterCommon::~CAdapterCommon() { Stop(); ObDereferenceObject(control_); }
+STDMETHODIMP CAdapterCommon::QueryInterface(REFIID iid, PVOID* object) {
+    if (!object) return STATUS_INVALID_PARAMETER;
+    *object = nullptr;
+    if (IsEqualGUIDAligned(iid, IID_IUnknown) || IsEqualGUIDAligned(iid, IID_IAdapterPowerManagement) ||
+        IsEqualGUIDAligned(iid, BioAdapterInterface)) *object = static_cast<IAdapterPowerManagement*>(this);
+    else return STATUS_NOINTERFACE;
+    AddRef(); return STATUS_SUCCESS;
+}
+NTSTATUS CAdapterCommon::Start() {
+    PAGED_CODE();
+    NTSTATUS status = BioStartControl(state_);
+    if (!NT_SUCCESS(status)) return status;
+    timer_ = ExAllocateTimer(TimerTick, this, EX_TIMER_HIGH_RESOLUTION);
+    if (!timer_) { BioStopControl(state_); return STATUS_INSUFFICIENT_RESOURCES; }
+    // The DMA timer starts with the first stream in RUN (StreamState).
+    active_ = true;
+    return STATUS_SUCCESS;
+}
+void CAdapterCommon::Stop() {
+    PAGED_CODE();
+    KIRQL irql; Lock(&irql);
+    bool wasActive = active_;
+    if (wasActive) {
+        ULONGLONG qpc = BioQpc();
+        for (auto stream : streams_) if (stream) stream->AdapterStop(qpc);
+    }
+    active_ = false;
+    PEX_TIMER timer = timer_; timer_ = nullptr;
+    Unlock(irql);
+    if (timer) ExDeleteTimer(timer, TRUE, TRUE, nullptr);
+    if (wasActive) BioStopControl(state_);
+}
+NTSTATUS CAdapterCommon::RegisterStream(USHORT endpoint, CMiniportWaveRTStream* stream) {
+    KIRQL irql; Lock(&irql);
+    NTSTATUS status = STATUS_SUCCESS;
+    if (!active_) status = STATUS_DEVICE_NOT_READY;
+    else if (streams_[endpoint]) status = STATUS_DEVICE_BUSY;
+    else streams_[endpoint] = stream;
+    Unlock(irql); return status;
+}
+void CAdapterCommon::UnregisterStream(USHORT endpoint, CMiniportWaveRTStream* stream) {
+    KIRQL irql; Lock(&irql);
+    if (streams_[endpoint] == stream) streams_[endpoint] = nullptr;
+    Unlock(irql);
+}
+LONG CAdapterCommon::Trim() {
+    KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
+    LONG trim = state_->Trim;
+    KeReleaseSpinLock(&state_->Lock, irql); return trim;
+}
+void CAdapterCommon::SourceGap(USHORT ep, ULONGLONG qpc, ULONGLONG bytes) {
+    KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
+    if (active_ && state_->Started) state_->Ring.SourceGap(ep, qpc, bytes);
+    KeReleaseSpinLock(&state_->Lock, irql);
+}
+void CAdapterCommon::Data(USHORT ep, ULONGLONG qpc, ULONGLONG written, const BYTE* a, ULONG an, const BYTE* b, ULONG bn) {
+    KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
+    if (active_ && state_->Started) state_->Ring.Data(ep, qpc, written, a, an, b, bn);
+    KeReleaseSpinLock(&state_->Lock, irql);
+}
+void CAdapterCommon::Format(USHORT ep, ULONGLONG qpc, const WAVEFORMATEX* format) {
+    KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
+    if (active_ && state_->Started) state_->Ring.FormatChange(ep, qpc, format, sizeof(WAVEFORMATEX) + format->cbSize);
+    KeReleaseSpinLock(&state_->Lock, irql);
+}
+void CAdapterCommon::StreamState(USHORT ep, ULONGLONG qpc, bool running) {
+    // Every entry to and exit from KSSTATE_RUN comes here, so the count stays
+    // balanced; the 1 ms timer runs only while something plays.
+    if (running) {
+        if (running_++ == 0 && timer_) {
+            lastTick_ = qpc;
+            ExSetTimer(timer_, -10000, 10000, nullptr);
+        }
+    } else if (running_ && --running_ == 0 && timer_) {
+        ExCancelTimer(timer_, nullptr);
+    }
+    KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
+    if (active_ && state_->Started) {
+        if (running) state_->Ring.StreamStart(ep, qpc);
+        else state_->Ring.StreamStop(ep, qpc);
+    }
+    KeReleaseSpinLock(&state_->Lock, irql);
+}
+VOID CAdapterCommon::TimerTick(PEX_TIMER, PVOID context) {
+    auto adapter = static_cast<CAdapterCommon*>(context);
+    KIRQL irql; adapter->Lock(&irql);
+    ULONGLONG qpc = BioQpc();
+    if (adapter->Active()) {
+        auto state = adapter->state_;
+        ULONGLONG elapsed = qpc - adapter->lastTick_;
+        ULONGLONG expected = state->Frequency / 1000;
+        if (elapsed > expected) {
+            ULONGLONG late = (elapsed - expected) * 1000000 / state->Frequency;
+            KIRQL stateIrql; KeAcquireSpinLock(&state->Lock, &stateIrql);
+            ULONG value = static_cast<ULONG>(late > MAXULONG ? MAXULONG : late);
+            if (value > state->MaxLatenessUs) state->MaxLatenessUs = value;
+            KeReleaseSpinLock(&state->Lock, stateIrql);
+        }
+        for (auto stream : adapter->streams_) if (stream) stream->UpdatePosition(qpc);
+    }
+    adapter->lastTick_ = qpc;
+    adapter->Unlock(irql);
+    BioPumpRead(adapter->state_);
+}
+STDMETHODIMP_(void) CAdapterCommon::PowerChangeState(POWER_STATE state) {
+    KIRQL irql; Lock(&irql);
+    ULONGLONG qpc = BioQpc();
+    if (Active()) for (auto stream : streams_) if (stream) stream->UpdatePosition(qpc);
+    if (state.DeviceState == PowerDeviceD0 && power_ != PowerDeviceD0)
+        for (auto stream : streams_) if (stream) stream->PowerResume(qpc);
+    power_ = state.DeviceState;
+    lastTick_ = qpc;
+    Unlock(irql);
+    BioPumpRead(state_);
+}
+STDMETHODIMP_(NTSTATUS) CAdapterCommon::QueryPowerChangeState(POWER_STATE state) {
+    return state.DeviceState >= PowerDeviceD0 && state.DeviceState <= PowerDeviceD3 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+}
+STDMETHODIMP_(NTSTATUS) CAdapterCommon::QueryDeviceCapabilities(PDEVICE_CAPABILITIES caps) {
+    if (!caps || caps->Size < sizeof(*caps)) return STATUS_INVALID_PARAMETER;
+    caps->DeviceD1 = FALSE; caps->DeviceD2 = FALSE;
+    for (ULONG i = 0; i < PowerSystemMaximum; ++i)
+        caps->DeviceState[i] = i == PowerSystemWorking ? PowerDeviceD0 : PowerDeviceD3;
+    return STATUS_SUCCESS;
+}
