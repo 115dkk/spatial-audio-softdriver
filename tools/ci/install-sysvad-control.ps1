@@ -2,10 +2,10 @@
 # driver is reduced from, ADR 0027) on a GitHub-hosted runner, as a control for
 # the endpoint builder: if SysVAD's render endpoints turn active where ours stay
 # NOTPRESENT, the difference is in our driver; if they do not, it is the runner.
-# The keyword detector DLL and the DRM signature attributes are left out of its
-# INF; nothing else changes. Writes the device's instance id to the step output
-# `instance`. Diagnosis only; CI only; the certificate is made here and thrown
-# away.
+# Its INF loses the keyword detector DLL and the DRM signature attributes, and
+# its OS floor drops from build 22621 to 19041; nothing else changes. Writes the
+# device's instance id to the step output `instance`. Diagnosis only; CI only;
+# the certificate is made here and thrown away.
 param(
     # Folder searched for TabletAudioSample.sys and ComponentizedAudioSample.inf.
     [Parameter(Mandatory)] [string] $Build
@@ -44,7 +44,9 @@ $lines = foreach ($line in Get-Content -LiteralPath $inf.FullName) {
     if ($line -match '^\s*\[(.+)\]') { $section = $Matches[1] }
     if ($section -like 'SignatureAttributes*') { continue }
     if ($line -match '(?i)keyworddetectorcontosoadapter\.dll') { continue }
-    $line -replace '(?i),\s*KEYWORDDETECTORCONTOSOADAPTER\.(CopyList|AddReg)', ''
+    # The sample's models need Windows 11 22H2 (build 22621); the runner is
+    # Server 2022 (20348). Our INF's floor, 19041, lets it match.
+    $line -replace '(?i),\s*KEYWORDDETECTORCONTOSOADAPTER\.(CopyList|AddReg)', '' -replace '\.10\.0\.\.\.22621', '.10.0...19041'
 }
 $lines | Set-Content -LiteralPath (Join-Path $work 'sysvad.inf') -Encoding unicode
 
