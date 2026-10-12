@@ -357,10 +357,11 @@ tests = [
   "engine::asrc_converts_48_khz_to_44_1_khz_over_ten_seconds",
   "engine::clock_holds_the_trough_without_chasing_the_block_sawtooth",
   "engine::clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim",
-  "engine::clock_with_a_period_as_long_as_a_block_stays_bounded",
+  "engine::clock_with_a_long_period_stays_bounded",
+  "engine::a_period_longer_than_a_block_plays_after_priming",
   "engine::pi_controller_clamps_and_integrates",
 ]
-note = "rubato Async sinc on the binaural pair. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
+note = "rubato Async sinc on the binaural pair. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun. Priming keeps target plus the larger of a block and the period's take (the ASRC's includes its filter lookahead before the first render); keeping only target + block left a 20 ms exclusive period short on every first render, so it never played (found by the VB-CABLE soak, ADR 0026)"
 
 [[feature]]
 id = "engine.clock_trim"
