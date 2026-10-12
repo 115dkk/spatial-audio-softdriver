@@ -81,6 +81,20 @@ class CompareTest(unittest.TestCase):
         self.assertGreaterEqual(summary["matched"], 0.9, summary)
         self.assertLessEqual(len(summary["missed"]), 2, summary)
 
+    def test_a_nearly_periodic_signal_aligns_under_clock_drift(self):
+        # Tones whose whole-signal correlation smears out once the copy runs
+        # 600 ppm off: the plain argmax over every lag fell inside the leading
+        # silence. The onset guess and a short anchor keep it at the copy.
+        t = np.arange(2 * RATE) / RATE
+        left = 0.2 * np.sin(2 * np.pi * 440 * t) + 0.1 * np.sin(2 * np.pi * 1250 * t)
+        right = 0.2 * np.sin(2 * np.pi * 660 * t) + 0.1 * np.sin(2 * np.pi * 3300 * t)
+        reference = np.stack([left, right], axis=1).astype(np.float32)
+        for ppm in (-600, 600):
+            captured = through_the_cable(reference, 0.65, ppm, 0.002, 8).astype(np.float32)
+            summary = compare(reference, RATE, captured, RATE, 0.95)
+            self.assertAlmostEqual(summary["offset_s"], 0.65, delta=0.002, msg=summary)
+            self.assertGreaterEqual(summary["matched"], 0.95, summary)
+
 
 class BinaryFromstring(unittest.TestCase):
     def test_reads_a_capture_buffer_as_a_writable_copy(self):

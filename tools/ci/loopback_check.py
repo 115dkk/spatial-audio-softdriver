@@ -33,6 +33,7 @@ from scipy.signal import correlate, resample_poly
 WINDOW_S = 0.05
 SEARCH = 64  # samples either side of the running offset
 RESYNC_S = 0.05  # either side, for a window that misses at the running offset
+ANCHOR_S = 0.25  # of the reference's start, correlated to refine the alignment
 
 
 _numpy_fromstring = np.fromstring
@@ -57,6 +58,21 @@ def ncc(a, b):
     return float((a * b).sum() / denominator) if denominator > 0 else 0.0
 
 
+def envelope(mono, hop):
+    """RMS of each whole `hop` of samples."""
+    n = len(mono) // hop
+    return np.sqrt((mono[:n * hop].reshape(n, hop) ** 2).mean(axis=1))
+
+
+def first_sound(mono, rate):
+    """First sample of the first 10 ms whose RMS is above -50 dBFS, or None."""
+    hop = rate // 100
+    for start in range(0, len(mono) - hop, hop):
+        if np.sqrt((mono[start:start + hop] ** 2).mean()) > 10 ** (-50 / 20):
+            return start
+    return None
+
+
 def compare(reference, ref_rate, captured, rate, min_correlation):
     """Windowed match of `reference` inside `captured` (both frames x 2)."""
     if ref_rate != rate:
@@ -71,21 +87,31 @@ def compare(reference, ref_rate, captured, rate, min_correlation):
         "missed": [],
         "captured_peak": float(np.abs(captured).max(initial=0.0)),
     }
-    # Coarse alignment of the whole signals, on the mono sum.
+    # Coarse alignment on the mono sums, in two steps. The 10 ms RMS envelopes
+    # find where the reference's sound lies in the recording; a clock drift, a
+    # nearly periodic signal or a short hole hardly moves that. The first
+    # ANCHOR_S of the reference then refines it within one envelope step either
+    # side. Correlating the whole waveforms instead failed once the live clock
+    # drifted: the fixtures are nearly periodic, the peak smeared out, and at
+    # -609 ppm the argmax fell inside the recording's leading silence (0.003 s
+    # against sound at 0.67 s).
     ref_mono = reference.sum(axis=1)
     cap_mono = captured.sum(axis=1)
     if len(cap_mono) < len(ref_mono) or not np.any(cap_mono):
         return summary
-    lags = correlate(cap_mono, ref_mono, mode="valid", method="fft")
-    offset = int(np.argmax(lags))
-    # Where the reference starts in the recording, and where the recording
-    # first carries sound (10 ms RMS above -50 dBFS): a gap between the two
-    # is audio that never reached the capture.
-    summary["offset_s"] = round(offset / rate, 4)
     hop = rate // 100
-    loud = np.flatnonzero([np.sqrt((cap_mono[i:i + hop] ** 2).mean()) > 10 ** (-50 / 20)
-                           for i in range(0, len(cap_mono) - hop, hop)])
-    summary["first_sound_s"] = round(loud[0] * hop / rate, 4) if loud.size else None
+    ref_env, cap_env = envelope(ref_mono, hop), envelope(cap_mono, hop)
+    coarse = int(np.argmax(correlate(cap_env, ref_env, mode="valid", method="fft"))) * hop
+    anchor = ref_mono[:int(ANCHOR_S * rate)]
+    lo = max(0, coarse - 2 * hop)
+    hi = min(len(cap_mono), coarse + 2 * hop + len(anchor))
+    offset = lo + int(np.argmax(correlate(cap_mono[lo:hi], anchor, mode="valid", method="fft")))
+    cap_onset = first_sound(cap_mono, rate)
+    # Where the reference starts in the recording, and where the recording
+    # first carries sound: a gap between the two is audio that never reached
+    # the capture.
+    summary["offset_s"] = round(offset / rate, 4)
+    summary["first_sound_s"] = round(cap_onset / rate, 4) if cap_onset is not None else None
 
     window = int(WINDOW_S * rate)
     resync = int(RESYNC_S * rate)
