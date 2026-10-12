@@ -785,14 +785,18 @@ mod platform {
             assert_eq!(n, bio_abi::record_size(0), "only the stream start is due");
             assert!(record_qpc(&out) >= before);
 
-            let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
-            assert_eq!(n, bio_abi::record_size(16));
-            let first = record_qpc(&out);
-            assert!(first - before >= frequency * 9 / 1000, "released early");
-            let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
-            assert_eq!(n, bio_abi::record_size(16));
-            let second = record_qpc(&out);
-            assert!(second - first >= frequency * 9 / 1000, "released early");
+            // A record is stamped when it is released, never before it is due
+            // (counted from the first read, which is after `before`). A late
+            // release delays only its own stamp, so each one is checked
+            // against its due time rather than against the one before it.
+            for due_ms in [10, 20] {
+                let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
+                assert_eq!(n, bio_abi::record_size(16));
+                assert!(
+                    record_qpc(&out) - before >= due(frequency, due_ms),
+                    "released before {due_ms} ms"
+                );
+            }
             assert_eq!(out[HEADER_BYTES], 2);
 
             assert!(!ended.load(Ordering::Acquire));
@@ -801,6 +805,12 @@ mod platform {
                 Err(CaptureError::Ended)
             );
             assert!(ended.load(Ordering::Acquire));
+        }
+
+        /// QPC ticks from the origin to a record due `ms` later, rounded down
+        /// as the pacing does.
+        fn due(frequency: u64, ms: u64) -> u64 {
+            frequency * ms / 1000
         }
 
         fn record_pos(bytes: &[u8]) -> u64 {
@@ -830,19 +840,21 @@ mod platform {
                 paced.read(&mut out, Duration::ZERO).unwrap(),
                 bio_abi::record_size(0)
             );
-            let mut previous = before;
-            for (pass, payload, pos) in [(0, 1, 0), (0, 2, 16), (1, 1, 32), (1, 2, 48), (2, 1, 64)]
-            {
+            for (pass, payload, pos, due_ms) in [
+                (0, 1, 0, 10),
+                (0, 2, 16, 20),
+                (1, 1, 32, 30),
+                (1, 2, 48, 40),
+                (2, 1, 64, 50),
+            ] {
                 let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
                 assert_eq!(n, bio_abi::record_size(16), "pass {pass}");
                 assert_eq!(out[HEADER_BYTES], payload, "pass {pass}");
                 assert_eq!(record_pos(&out), pos, "pass {pass}");
-                let at = record_qpc(&out);
                 assert!(
-                    at - previous >= frequency * 9 / 1000,
-                    "released early in pass {pass}"
+                    record_qpc(&out) - before >= due(frequency, due_ms),
+                    "released before {due_ms} ms in pass {pass}"
                 );
-                previous = at;
             }
             // The stop record after the span never plays while looping.
             assert!(!ended.load(Ordering::Acquire));
