@@ -46,18 +46,28 @@ M3는 우리 드라이버를 만들고 ABI v1을 동결합니다. 동결한 뒤�
 
 SysVAD에는 `SetWritePacket` 경로가 있습니다. 동결 뒤에는 더할 수 없으므로 구현해 넣되 `Parameters`의 `WritePacket` DWORD(기본 0)로 켭니다. 켜면 `qpc_written`을 채우고 `FEATURE_WRITE_PACKET`을 알립니다. 쓸지는 ADR 0014대로 시험서명 PC에서 공간음향 엔진의 호출 주기를 재고 정합니다.
 
+### 엔드포인트 빌더와 오디오 서비스에 하는 답
+
+호스트 러너에서 두 엔드포인트가 NOTPRESENT로 남거나 재생이 `AUDCLNT_E_UNSUPPORTED_FORMAT`로 멈춘 원인은 모두 KS 응답 하나였고, 드라이버의 KS 요청 추적(`driver/bioatmos/kstrace.cpp`, `tools/ci/ks-trace.ps1`)으로 찾았습니다. 아래는 지킵니다.
+
+- 호스트 핀의 `KSPROPERTY_PIN_PROPOSEDATAFORMAT` SET에 `WAVEFORMATEX` 없이 `KSDATAFORMAT`(64바이트)만 오면 "이 형식 종류를 받는가"로 읽어, 형식 마스크에 그 서브포맷이 있으면 성공, 없으면 `STATUS_NO_MATCH`로 답합니다. 엔드포인트 빌더는 PCM, AC-3, WMA Pro를 이렇게 묻고, 셋 모두 거절당하면 엔드포인트를 NOTPRESENT로 둡니다.
+- 호스트 핀은 신호 처리 모드 RAW 하나를 알리고(`IMiniportAudioSignalProcessing::GetModes`), 데이터 범위마다 `KSDATARANGE_ATTRIBUTES`와 `KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE` 속성 목록을 답니다. 오디오 서비스는 모드 속성을 단 형식으로 핀을 열고, KS는 그런 형식을 속성을 나열한 범위에만 맞춥니다.
+- 잭이 아닌 핀에 잭 속성을, 스트림을 받지 않는 핀에 형식 제안을 물으면 `STATUS_INVALID_DEVICE_REQUEST`(지원하지 않음)로 답합니다.
+- HDMI 엔드포인트의 이름은 잭의 싱크 설명(`KSJACK_SINK_INFORMATION.SinkDescription`)에서 옵니다. 엔드포인트마다 다른 이름을 돌려주고, INF의 이름과 같게 둡니다.
+
 ### Linux에서 하는 검사
 
 `tools/kcheck.py`는 Microsoft가 NuGet으로 내는 WDK와 Windows SDK 패키지(SHA-256으로 고정)의 헤더를 받아, clang의 MSVC 모드로 드라이버의 모든 소스를 x64와 ARM64로 컴파일 검사하고 clang 정적 분석기를 돌립니다. Windows의 파일 이름은 대소문자를 가리지 않으므로 헤더가 쓰는 철자마다 심볼릭 링크를 둡니다. 링크하지 않으므로 빌드가 아니라 형식과 문법 검사이고, 진짜 빌드는 Windows CI가 합니다. 드라이버를 고친 사람이 컨테이너 안에서 CI 전에 돌리는 것이 목적입니다.
 
 ### CI에서 하는 검사
 
-호스트 러너(windows-2022, WDK 10.0.26100)에서 다음을 모두 돌립니다.
+호스트 러너(windows-2022, WDK 10.0.26100)에서 다음을 모두 돌립니다. 패키지 설치 시험은 Windows 11 24H2와 오디오 스택을 같이 쓰는 windows-2025에서도 돌립니다.
 
 - x64와 ARM64, Debug와 Release 빌드. `/W4 /WX`와 코드 분석(`/analyze`, 드라이버 규칙)을 켭니다.
 - `InfVerif /w`, 시험 인증서로 `Inf2Cat`과 `signtool` 서명 및 검증.
 - CodeQL의 Windows 드라이버 질의 묶음(WHCP 필수 규칙).
-- 패키지 설치 시험: 시험 인증서를 신뢰 저장소에 넣고 `pnputil /add-driver`로 드라이버 저장소에 넣은 뒤 루트 장치를 만듭니다. 처음에는 시험서명 모드가 아니므로 커널 로드가 문제 코드 52로 멈출 것이라 보고 그 앞까지(INF 섹션, 서비스, `Parameters` 기본값, 장치 노드)만 확인하려 했습니다. 첫 실행에서 Windows Server 2022 러너의 커널은 시험서명 이미지를 그대로 올렸습니다(문제 코드 0, 서비스 실행 중). 그래서 두 결과를 모두 받아들이고, 로드되면 두 엔드포인트에 서로 다른 톤을 동시에 재생하며 `\\.\BioAtmos`에서 기록을 읽어 엔드포인트마다 형식 변경과 시작, 바이트 연속, DMA 속도, 내용을 확인합니다(`tools/ci/driver_flow_check.py`). 부팅 항목의 testsigning 상태를 로그에 남깁니다.
+- 패키지 설치 시험: 시험 인증서를 신뢰 저장소에 넣고 `pnputil /add-driver`로 드라이버 저장소에 넣은 뒤 루트 장치를 만듭니다. 처음에는 시험서명 모드가 아니므로 커널 로드가 문제 코드 52로 멈출 것이라 보고 그 앞까지(INF 섹션, 서비스, `Parameters` 기본값, 장치 노드)만 확인하려 했습니다. 첫 실행에서 Windows Server 2022 러너의 커널은 시험서명 이미지를 그대로 올렸습니다(문제 코드 0, 서비스 실행 중). 그래서 두 결과를 모두 받아들이고, 로드되면 두 엔드포인트에 서로 다른 톤을 동시에 재생하며 `\\.\BioAtmos`에서 기록을 읽어 엔드포인트마다 형식 변경과 시작, 바이트 연속, DMA 속도, 내용을 확인합니다(`tools/ci/driver_flow_check.py`). 부팅 항목의 testsigning 상태를 로그에 남깁니다. 두 렌더 엔드포인트는 서비스를 다시 시작하지 않고 장치가 도착한 대로 활성이어야 합니다. 설치와 재생 동안 드라이버가 받은 KS 요청을 추적해 로그에 풀어 둡니다.
+- 대조군: 같은 커밋의 SysVAD를 windows-2025에 시험서명 설치하고 같은 도구로 봅니다(`continue-on-error`). 우리 엔드포인트가 다시 활성이 되지 않으면 러너 이미지의 변화인지 우리 드라이버의 회귀인지를 가립니다.
 - 코어 시험(MSVC, clang, gcc, ASan, UBSan), libFuzzer, `bio-abi` 교차 검사.
 
 ## 결과

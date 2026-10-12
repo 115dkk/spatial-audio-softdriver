@@ -21,10 +21,10 @@ name: Driver
 #              plays a tone into each and reads the ring back
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
-#   sysvad-build, sysvad-control  diagnosis only, while our endpoints stay
-#              NOTPRESENT on hosted runners: SysVAD itself built on
+#   sysvad-build, sysvad-control  diagnosis only: SysVAD itself built on
 #              windows-2022, then test-signed and installed on windows-2025
-#              as a control for the endpoint builder
+#              as a control for the endpoint builder, so a runner image
+#              change can be told from a regression in our driver
 
 on:
   pull_request:
@@ -195,9 +195,12 @@ jobs:
             Start-Service -Name $name
           }
 
-      # Diagnosis, while the endpoints stay NOTPRESENT: the driver's own trace
-      # of every KS request that reaches its filters, from before the device
-      # exists until the endpoint builder is done with it.
+      # Diagnosis: the driver's own trace of every KS request that reaches its
+      # filters, from before the device exists until the endpoint builder is
+      # done with it. It found why the endpoints stayed NOTPRESENT (a bare
+      # KSDATAFORMAT proposal) and why the audio service could not open a pin
+      # (a mode with no attribute list on the ranges); a regression prints the
+      # same conversation.
       - name: Start the driver's KS request trace (tools/ci/ks-trace.ps1)
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start
@@ -336,15 +339,15 @@ jobs:
         with:
           category: windows-driver
 
-  # Diagnosis only, while our endpoints stay NOTPRESENT on hosted runners:
-  # SysVAD itself (the sample driver/bioatmos is reduced from, at the same
-  # commit) built with the NuGet WDK, test-signed and installed, then seen
-  # through the same tools. It targets Windows 11 22H2 and later (build 22621:
-  # its INF floor, and kernel routines Server 2022 lacks), so it is installed
-  # on windows-2025 (build 26100), beside the windows-2025 leg of `package`.
-  # Its endpoints turning active there while ours stay NOTPRESENT would put the
-  # cause in our driver. It is built on windows-2022: our WDK pin's build
-  # tasks need MSBuild 17, which windows-2025 (MSBuild 18) lacks.
+  # Diagnosis only: SysVAD itself (the sample driver/bioatmos is reduced from,
+  # at the same commit) built with the NuGet WDK, test-signed and installed,
+  # then seen through the same tools. It targets Windows 11 22H2 and later
+  # (build 22621: its INF floor, and kernel routines Server 2022 lacks), so it
+  # is installed on windows-2025 (build 26100), beside the windows-2025 leg of
+  # `package`. If our endpoints stop turning active, its endpoints turning
+  # active on the same image put the cause in our driver, and its KS answers
+  # are there to set beside ours. It is built on windows-2022: our WDK pin's
+  # build tasks need MSBuild 17, which windows-2025 (MSBuild 18) lacks.
   sysvad-build:
     name: SysVAD build (control, diagnosis only)
     runs-on: windows-2022

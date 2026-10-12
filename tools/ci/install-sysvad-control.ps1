@@ -1,7 +1,7 @@
 # Test-signs and installs a SysVAD TabletAudioSample build (the sample our
 # driver is reduced from, ADR 0027) on a GitHub-hosted runner, as a control for
-# the endpoint builder: if SysVAD's render endpoints turn active where ours stay
-# NOTPRESENT, the difference is in our driver; if they do not, it is the runner.
+# the endpoint builder: if SysVAD's render endpoints turn active where ours do
+# not, the difference is in our driver; if they do not, it is the runner.
 # Its INF loses the keyword detector DLL and the DRM signature attributes;
 # nothing else changes. SysVAD needs build 22621 or later (windows-2025).
 # Writes the device's instance id to the step output `instance`. Diagnosis
