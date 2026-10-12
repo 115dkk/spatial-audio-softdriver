@@ -208,11 +208,10 @@ jobs:
       # Diagnosis only, after the check above failed. A restarted endpoint
       # builder enumerates every interface at once, so endpoints that turn
       # active here point at the order in which the interfaces arrived.
-      # Then endpoint 0 alone offers PCM only (FormatMask0 = PCM) across a
-      # device restart: if it turns active while endpoint 1, still offering
-      # the IEC 61937 ranges, does not, the bitstream ranges on the host pin
-      # are what the builder cannot get past.
-      - name: Endpoint states after restarting the endpoint builder, then with PCM only on endpoint 0
+      # Then the device restarts under an ETW session with every provider the
+      # endpoint builder's process registered, so its own account of the
+      # endpoints is printed (tools/ci/aeb-trace.ps1).
+      - name: Endpoint states after restarting the endpoint builder, then the builder's trace of a device restart
         if: failure() && steps.endpoints.outcome == 'failure'
         shell: pwsh
         run: |
@@ -220,10 +219,7 @@ jobs:
           Start-Service -Name Audiosrv
           Start-Sleep -Seconds 15
           ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
-          $parameters = 'HKLM:\SYSTEM\CurrentControlSet\Services\bioatmos\Parameters'
-          Set-ItemProperty -Path $parameters -Name FormatMask0 -Type QWord -Value 1
-          pnputil /restart-device 'ROOT\MEDIA\0000'
-          Start-Sleep -Seconds 15
+          ./tools/ci/aeb-trace.ps1 -InstanceId 'ROOT\MEDIA\0000'
           ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
 
       # Diagnosis only: VB-CABLE, whose endpoints do become active on this
@@ -260,7 +256,9 @@ jobs:
         if: always() && steps.install.outputs.loaded == 'true'
         with:
           name: driver-flow
-          path: ${{ runner.temp }}/driver-flow.json
+          path: |
+            ${{ runner.temp }}/driver-flow.json
+            ${{ runner.temp }}/aeb-trace
           if-no-files-found: ignore
 
   codeql:
