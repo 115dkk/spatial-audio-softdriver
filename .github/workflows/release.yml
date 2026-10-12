@@ -12,6 +12,11 @@ name: Release
 #                  that.
 #   build-windows  tests in release mode, then the developer tools, zipped
 #   build-linux    the same for Linux (bio-replay runs in Linux CI)
+#   driver-kit     the kernel driver (Release x64) test-signed into the kit a
+#                  tester installs on a test-signing PC
+#                  (tools/ci/driver-test-kit.ps1; the certificate's private key
+#                  never leaves the runner). driver.yml installs, uses and
+#                  uninstalls the same kit on every pull request
 #   publish        SHA256SUMS.txt, notes from the commit subjects, and the
 #                  release itself (assets replaced when the tag exists)
 #
@@ -148,9 +153,36 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  driver-kit:
+    name: Driver test kit (x64, test-signed)
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.release_sha }}
+
+      - name: Build the driver (Release x64) with the NuGet WDK, then InfVerif
+        shell: pwsh
+        run: ./tools/build-driver.ps1 -Configuration Release -Platform x64
+
+      - name: Test-sign and package the kit (tools/ci/driver-test-kit.ps1)
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: ./tools/ci/driver-test-kit.ps1 -Package target/driver/Release/x64 -Version $env:VERSION -OutDir dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: driver-kit
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish the release
-    needs: [gate, build-windows, build-linux]
+    needs: [gate, build-windows, build-linux, driver-kit]
     if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -181,6 +213,8 @@ jobs:
           if [ -n "$PREVIOUS" ]; then range="$PREVIOUS..$RELEASE_SHA"; fi
           {
             echo "Built from ${RELEASE_SHA}. Developer tools only; the app arrives in M4."
+            echo
+            echo "시험서명 PC에서 드라이버를 시험하려면 \`bio-atmos-driver-test-${VERSION}-x64.zip\`을 받아 그 안의 README.md([docs/testing/test-signed-pc.md](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_SHA}/docs/testing/test-signed-pc.md))를 따르십시오."
             echo
             echo "## Changes"
             git log --no-merges --pretty=format:'- %s' "$range" | grep -v '^- chore(release): ' || true

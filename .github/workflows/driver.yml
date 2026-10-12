@@ -13,12 +13,15 @@ name: Driver
 #              a contributor runs it on Linux (tools/kcheck.py)
 #   build      MSBuild with the NuGet WDK, Debug and Release for x64 and ARM64
 #              (/W4 /WX, code analysis), and InfVerif
-#   package    the Release x64 package test-signed (Inf2Cat, signtool) and
-#              installed on windows-2022 and windows-2025 runners, whose boot
-#              entries have test signing on: driver store, root device node, service and
-#              Parameters defaults. The driver loads, the audio stack must
-#              build both render endpoints, and tools/ci/driver_flow_check.py
-#              plays a tone into each and reads the ring back
+#   package    the Release x64 driver test kit a release ships
+#              (tools/ci/driver-test-kit.ps1: test-signed, its certificate's
+#              private key thrown away) installed on windows-2022 and
+#              windows-2025 runners by the kit's own install.ps1: driver store,
+#              root device node, service and Parameters defaults. The driver
+#              loads, the audio stack must build both render endpoints,
+#              tools/ci/driver_flow_check.py plays a tone into each and reads
+#              the ring back, and the kit's collect.ps1 and uninstall.ps1 run
+#              as a tester would run them
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
 #   sysvad-build, sysvad-control  diagnosis only: SysVAD itself built on
@@ -205,6 +208,8 @@ jobs:
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start
 
+      # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
+      # by the tester's own install.ps1.
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
         id: install
         shell: pwsh
@@ -290,6 +295,21 @@ jobs:
         shell: pwsh
         run: ./tools/ci/audio-diagnostics.ps1 -InstanceId 'ROOT\MEDIA\0000'
 
+      # What a tester sends back: the kit's own collector, run here so a
+      # change that breaks it fails the pull request, not the tester.
+      - name: The report a tester would send (tools/testkit/collect.ps1)
+        id: report
+        if: always() && steps.install.outputs.kit != ''
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'report'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          & (Join-Path '${{ steps.install.outputs.kit }}' 'collect.ps1') -OutDir $out
+          if ($LASTEXITCODE -ne 0) { throw "collect.ps1 exited $LASTEXITCODE" }
+          $zip = Get-ChildItem $out -Filter 'bio-atmos-test-report-*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'collect.ps1 wrote no report zip' }
+          Write-Host "report: $($zip.Name), $($zip.Length) bytes"
+
       - uses: actions/upload-artifact@v7
         if: always() && steps.install.outputs.loaded == 'true'
         with:
@@ -299,7 +319,17 @@ jobs:
             ${{ runner.temp }}/aeb-trace
             ${{ runner.temp }}/bioatmos-ks-*.etl
             ${{ runner.temp }}/bioatmos-ks-*.xml
+            ${{ runner.temp }}/report/*.zip
           if-no-files-found: ignore
+
+      # Last: the tester's uninstaller must leave no device, driver package,
+      # service or test certificate behind.
+      - name: Uninstall as a tester would (tools/testkit/uninstall.ps1)
+        if: always() && steps.install.outputs.kit != ''
+        shell: pwsh
+        run: |
+          & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
+          if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
 
   codeql:
     name: CodeQL Windows driver suites

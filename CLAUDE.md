@@ -29,7 +29,7 @@ cargo deny check
 
 ## 드라이버 (M3)
 
-`driver/`는 MS-PL이고 구조는 ADR 0027입니다. SysVAD에서 가져온 파일의 머리에는 원본 경로와 커밋을 적고, `driver/core/`는 커널 API를 부르지 않고 할당하지 않습니다. 드라이버를 고치면 커밋 전에 아래를 Linux에서 돌립니다. MSBuild, InfVerif, CodeQL, 시험서명 설치는 `driver.yml`이 Windows 러너에서 합니다.
+`driver/`는 MS-PL이고 구조는 ADR 0027입니다. SysVAD에서 가져온 파일의 머리에는 원본 경로와 커밋을 적고, `driver/core/`는 커널 API를 부르지 않고 할당하지 않습니다. 릴리스는 시험서명한 드라이버 시험 묶음(`tools/ci/driver-test-kit.ps1`, `tools/testkit/`)을 싣고, 시험서명 PC에서 시험하는 분은 [`docs/testing/test-signed-pc.md`](docs/testing/test-signed-pc.md)를 따릅니다. 드라이버, 묶음, 시험 도구의 동작이나 출력이 바뀌면 그 문서의 명령과 합격 기준도 함께 고칩니다. 드라이버를 고치면 커밋 전에 아래를 Linux에서 돌립니다. MSBuild, InfVerif, CodeQL, 시험서명 설치는 `driver.yml`이 Windows 러너에서 합니다.
 
 ```sh
 python3 tools/kcheck.py --analyze

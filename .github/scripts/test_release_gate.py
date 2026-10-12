@@ -13,6 +13,14 @@ class ShipsTest(unittest.TestCase):
             "Cargo.lock",
             "rust-toolchain.toml",
             "crates/bio-abi/include/bioatmos_abi.h",
+            "driver/bioatmos/minwavert.cpp",
+            "driver/bioatmos/bioatmos.inf",
+            "driver/core/bio_ring.cpp",
+            "tools/build-driver.ps1",
+            "tools/testkit/install.ps1",
+            "tools/ci/driver-test-kit.ps1",
+            "tools/ci/ring_record.py",
+            "docs/testing/test-signed-pc.md",
         ]:
             self.assertTrue(g.ships(path), path)
 
@@ -28,6 +36,12 @@ class ShipsTest(unittest.TestCase):
             "docs/adr/0001-shell.md",
             ".github/workflows/ci.yml",
             "CONTEXT.md",
+            "driver/README.md",
+            "driver/core/tests/core_tests.cpp",
+            "driver/core/fuzz/ring_fuzz.cpp",
+            "tools/ci/soak.ps1",
+            "tools/ci/test_ring_record.py",
+            "docs/testing/other.md",
             "",
         ]:
             self.assertFalse(g.ships(path), path)
