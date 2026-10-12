@@ -297,21 +297,26 @@ jobs:
           {
             echo "## Loopback (${{ matrix.os }})"
             echo
-            echo "| dump | mode | windows | matched | resyncs | median | worst | underruns while streaming | restarts |"
-            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            echo "| dump | mode | windows | matched | resyncs | median | worst | underruns while streaming | restarts | reference at | first sound |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
           status=0
           for d in pcm71 ddp51; do
             target/release/bio-replay.exe render "$fx/$d.biodump" --profile "$fx/profile.toml" \
               --out "$RUNNER_TEMP/$d-ref.wav" --report "$RUNNER_TEMP/$d-ref.json"
-            for mode in exclusive shared; do
-              s="$RUNNER_TEMP/loopback-$d-$mode.json"
+            # shared-warm keeps the endpoint running with a silent shared
+            # stream, as other apps do on a desktop; shared starts it cold.
+            for run in exclusive shared shared-warm; do
+              mode=${run%-warm}
+              warm=()
+              if [ "$run" = shared-warm ]; then warm=(--warm); fi
+              s="$RUNNER_TEMP/loopback-$d-$run.json"
               python tools/ci/loopback_check.py --bio-live target/release/bio-live.exe \
                 --dump "$fx/$d.biodump" --profile "$fx/profile.toml" \
-                --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" --period-ms 20 --summary "$s" \
-                --report "$RUNNER_TEMP/loopback-$d-$mode-report.json" || status=1
+                --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" "${warm[@]}" --period-ms 20 --summary "$s" \
+                --report "$RUNNER_TEMP/loopback-$d-$run-report.json" || status=1
               if [ -f "$s" ]; then
-                jq -r --arg d "$d" '"| \($d) | \(.mode) | \(.windows) | \(.matched) | \(.resyncs) | \(.median_correlation) | \(.worst_correlation) | \(.underruns_while_streaming) | \(.output_restarts) |"' "$s" >> "$GITHUB_STEP_SUMMARY"
+                jq -r --arg d "$d" '"| \($d) | \(.mode) | \(.windows) | \(.matched) | \(.resyncs) | \(.median_correlation) | \(.worst_correlation) | \(.underruns_while_streaming) | \(.output_restarts) | \(.offset_s) s | \(.first_sound_s) s |"' "$s" >> "$GITHUB_STEP_SUMMARY"
               fi
             done
           done

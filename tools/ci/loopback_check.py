@@ -78,6 +78,14 @@ def compare(reference, ref_rate, captured, rate, min_correlation):
         return summary
     lags = correlate(cap_mono, ref_mono, mode="valid", method="fft")
     offset = int(np.argmax(lags))
+    # Where the reference starts in the recording, and where the recording
+    # first carries sound (10 ms RMS above -50 dBFS): a gap between the two
+    # is audio that never reached the capture.
+    summary["offset_s"] = round(offset / rate, 4)
+    hop = rate // 100
+    loud = np.flatnonzero([np.sqrt((cap_mono[i:i + hop] ** 2).mean()) > 10 ** (-50 / 20)
+                           for i in range(0, len(cap_mono) - hop, hop)])
+    summary["first_sound_s"] = round(loud[0] * hop / rate, 4) if loud.size else None
 
     window = int(WINDOW_S * rate)
     resync = int(RESYNC_S * rate)
@@ -128,6 +136,8 @@ def compare(reference, ref_rate, captured, rate, min_correlation):
 
 
 def main():
+    if sys.argv[1:2] == ["--keep-alive"]:
+        return keep_alive(sys.argv[2])
     parser = argparse.ArgumentParser()
     parser.add_argument("--bio-live", required=True)
     parser.add_argument("--dump", required=True)
@@ -141,6 +151,8 @@ def main():
     parser.add_argument("--min-matched", type=float, default=0.9)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--report", help="where bio-live writes its JSON report")
+    parser.add_argument("--warm", action="store_true",
+                        help="keep the render endpoint running with a silent shared stream")
     args = parser.parse_args()
 
     # Windows CI only; compare() needs no audio device. soundcard talks to
@@ -166,6 +178,11 @@ def main():
         command += ["--period-ms", str(args.period_ms)]
     if args.report:
         command += ["--report", args.report]
+    warm = None
+    if args.warm:
+        # Shared mode only: an exclusive open would be refused next to it.
+        warm = subprocess.Popen([sys.executable, __file__, "--keep-alive", args.render])
+        time.sleep(1.0)
     chunks = []
     with microphone.recorder(samplerate=rate, channels=2, blocksize=rate // 100) as recorder:
         chunks.append(recorder.record(numframes=rate // 2))
@@ -177,6 +194,8 @@ def main():
                 raise SystemExit("bio-live did not stop within 120 s")
             chunks.append(recorder.record(numframes=rate // 20))
         chunks.append(recorder.record(numframes=rate // 2))
+    if warm:
+        warm.kill()
     stderr = live.stderr.read() if live.stderr else ""
     print(stderr, flush=True)
     if live.returncode != 0:
@@ -184,7 +203,7 @@ def main():
 
     captured = np.concatenate(chunks).astype(np.float32)
     summary = compare(reference, ref_rate, captured, rate, args.min_correlation)
-    summary["mode"] = args.mode
+    summary["mode"] = args.mode + (" warm" if args.warm else "")
     summary["bio_live"] = stderr.strip().splitlines()[-1:]
     problems = []
     if args.report:
@@ -206,6 +225,18 @@ def main():
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0
+
+
+def keep_alive(endpoint):
+    """Plays silence on `endpoint` until killed (the --warm helper process)."""
+    np.fromstring = binary_fromstring
+    import soundcard as sc
+
+    rate = 48_000
+    silence = np.zeros((rate // 20, 2), dtype=np.float32)
+    with sc.get_speaker(endpoint).player(samplerate=rate, channels=2, blocksize=rate // 100) as player:
+        while True:
+            player.play(silence)
 
 
 if __name__ == "__main__":
