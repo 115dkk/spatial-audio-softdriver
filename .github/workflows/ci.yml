@@ -4,14 +4,24 @@ name: CI
 # is public, so Actions minutes are not rationed: every job runs on every
 # event, without path filters.
 #
-#   lint      fmt, clippy -D warnings, the bio-policy gates (forbid unsafe,
-#             unsafe budget, feature registry, Windows code only in bio-sys) and
-#             the release gate's unit tests
-#   test      cargo test on Linux and Windows, debug and release; on Windows
-#             also the generated driver header compiled as C89, C11 and C++17
+#   lint      fmt, clippy -D warnings (also for the x64 and ARM64 Windows
+#             targets, so cfg(windows) code is linted from Linux), the
+#             bio-policy gates (forbid unsafe, unsafe budget, feature registry,
+#             Windows code only in bio-sys), the release gate's unit tests and
+#             the CI tools' unit tests
+#   test      cargo test on Linux, Windows Server 2022 and 2025 (x64) and
+#             Windows 11 (ARM64), debug and release; on x64 Windows also the
+#             generated driver header compiled as C89, C11 and C++17
 #   replay    the replay fixtures rendered twice (hashes must match) and,
 #             on pull requests, against the base commit (reported, not failed)
-#   docs      rustdoc with warnings denied (broken intra-doc links included)
+#   audio     Windows Server 2022 and 2025 with a virtual audio cable
+#             (VB-CABLE): the device tests bio-sys keeps #[ignore]d, the live
+#             path played into the cable and recorded back against bio-replay's
+#             offline render, and soaks (exclusive, shared, under CPU load and
+#             under full page heap) that must end without faults, restarts or
+#             underruns
+#   docs      rustdoc with warnings denied (broken intra-doc links included),
+#             for Linux and for the Windows target
 #   miri      the pure parsing crates under Miri
 #   fuzz      every cargo-fuzz target for two minutes
 #   coverage  llvm-cov line coverage, summarised on the run page
@@ -47,6 +57,7 @@ jobs:
       - name: Install the pinned toolchain (rust-toolchain.toml)
         run: |
           rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
           rustup show active-toolchain
 
       - uses: Swatinem/rust-cache@v2
@@ -59,11 +70,29 @@ jobs:
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # Type-checking needs no linker, so the Windows targets are linted here
+      # too; the cfg(windows) modules of bio-sys and bio-live are otherwise
+      # compiled on Windows but never linted.
+      - name: cargo clippy for Windows x64 and ARM64 (deny warnings)
+        run: |
+          for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            cargo clippy --workspace --all-targets --locked --target "$target" -- -D warnings
+          done
+
       - name: Policy gates (crates/bio-policy)
         run: cargo test -p bio-policy --locked -- --nocapture
 
       - name: Release gate unit tests
         run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: CI tool unit tests (tools/ci)
+        run: |
+          python -m pip install --quiet -r tools/ci/requirements.txt
+          python -m unittest discover -s tools/ci -p "test_*.py" -v
 
   test:
     name: cargo test (${{ matrix.os }}, ${{ matrix.profile }})
@@ -71,7 +100,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # windows-latest is Server 2025; windows-11-arm is the client OS on
+        # ARM64, the only Windows 11 image GitHub hosts.
+        os: [ubuntu-latest, windows-latest, windows-2022, windows-11-arm]
         profile: [debug, release]
     runs-on: ${{ matrix.os }}
     env:
@@ -97,7 +128,7 @@ jobs:
         run: cargo test --workspace --doc --locked
 
       - name: Driver header compiles as C89, C11 and C++17 (MSVC)
-        if: runner.os == 'Windows' && matrix.profile == 'debug'
+        if: runner.os == 'Windows' && runner.arch == 'X64' && matrix.profile == 'debug'
         shell: pwsh
         run: ./tools/check-c-header.ps1
 
@@ -107,7 +138,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, windows-2022, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -189,6 +220,168 @@ jobs:
             echo "| $d | $verdict |" >> "$GITHUB_STEP_SUMMARY"
           done
 
+  # GitHub's Windows images have no sound device. VB-CABLE gives one render
+  # endpoint ("Speakers (VB-Audio Virtual Cable)") whose signal comes back on a
+  # capture endpoint ("CABLE Output"), so the live path can be heard by the
+  # job itself (ADR 0026).
+  audio:
+    name: live audio (${{ matrix.os }}, VB-CABLE)
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      # Line tables in the PDBs, so a crash dump's stack names the source.
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: audio
+
+      - name: Install a virtual audio cable (tools/ci/install-virtual-cable.ps1)
+        shell: pwsh
+        run: ./tools/ci/install-virtual-cable.ps1
+
+      # VB-CABLE's exclusive-mode events advance on the system timer, one per
+      # 15.6 ms tick whatever the period; a 1 ms tick lets it keep the periods
+      # the engine asks for, as hardware does (ADR 0026).
+      - name: Crash dumps on; system timer held at 1 ms; MMCSS running (tools/ci/crash-dumps.ps1, timer-resolution.ps1)
+        shell: pwsh
+        run: |
+          ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps')
+          ./tools/ci/timer-resolution.ps1
+          # MMCSS boosts the real-time threads. The Server images leave it
+          # stopped (manual start) until the first registration starts it,
+          # which lands in the first second of a run; desktops run it already.
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' |
+            Select-Object SystemResponsiveness, NetworkThrottlingIndex | Format-List
+          Start-Service -Name MMCSS
+          $mmcss = Get-Service -Name MMCSS
+          Write-Host "MMCSS $($mmcss.Status) ($($mmcss.StartType))"
+          if ($mmcss.Status -ne 'Running') { throw "MMCSS is $($mmcss.Status)" }
+
+      - name: Build bio-live and bio-replay; write the fixtures
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p bio-live -p bio-replay
+          cargo run --locked --release -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
+          target/release/bio-live.exe devices
+
+      # The exclusive cadence tests run at a 20 ms period, longer than a PCM
+      # block; exclusive_cadence_at_each_period prints the rate the sink
+      # keeps at 3 to 40 ms (ADR 0026).
+      - name: Device tests bio-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
+        env:
+          BIO_TEST_EXCLUSIVE_PERIOD_MS: "20"
+        run: cargo test --locked --release -p bio-sys --test windows -- --ignored --test-threads=1 --nocapture
+
+      # The stages below run even when an earlier one failed, so one CI round
+      # reports on all of them; the job still fails.
+      - uses: actions/setup-python@v7
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        with:
+          python-version: "3.13"
+
+      - name: Loopback (live output recorded back against the offline render)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
+          fx="$RUNNER_TEMP/fx"
+          {
+            echo "## Loopback (${{ matrix.os }})"
+            echo
+            echo "| dump | mode | windows | matched | resyncs | median | worst | underruns while streaming | restarts | reference at | first sound |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          for d in pcm71 ddp51; do
+            target/release/bio-replay.exe render "$fx/$d.biodump" --profile "$fx/profile.toml" \
+              --out "$RUNNER_TEMP/$d-ref.wav" --report "$RUNNER_TEMP/$d-ref.json"
+            # shared-warm keeps the endpoint running with a silent shared
+            # stream, as other apps do on a desktop; shared starts it cold.
+            for run in exclusive shared shared-warm; do
+              mode=${run%-warm}
+              warm=()
+              if [ "$run" = shared-warm ]; then warm=(--warm); fi
+              s="$RUNNER_TEMP/loopback-$d-$run.json"
+              python tools/ci/loopback_check.py --bio-live target/release/bio-live.exe \
+                --dump "$fx/$d.biodump" --profile "$fx/profile.toml" \
+                --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" "${warm[@]}" --period-ms 20 --summary "$s" \
+                --report "$RUNNER_TEMP/loopback-$d-$run-report.json" || status=1
+              if [ -f "$s" ]; then
+                jq -r --arg d "$d" '"| \($d) | \(.mode) | \(.windows) | \(.matched) | \(.resyncs) | \(.median_correlation) | \(.worst_correlation) | \(.underruns_while_streaming) | \(.output_restarts) | \(.offset_s) s | \(.first_sound_s) s |"' "$s" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+          done
+          exit $status
+
+      - name: Soaks (exclusive 5 min, exclusive at 10 ms 2 min, shared 2 min, DD+ 2 min, exclusive under CPU load 2 min, under full page heap 1 min)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $fx = Join-Path $env:RUNNER_TEMP 'fx'
+          $live = 'target/release/bio-live.exe'
+          Add-Content $env:GITHUB_STEP_SUMMARY "`n## Soaks (${{ matrix.os }})`n"
+          Add-Content $env:GITHUB_STEP_SUMMARY '| soak | ran | underruns | restarts | latency p50 / p99 | ring trough | clock | verdict |'
+          Add-Content $env:GITHUB_STEP_SUMMARY '| --- | --- | --- | --- | --- | --- | --- | --- |'
+          $failed = @()
+          $soaks = @(
+            @{ Name = 'exclusive'; Minutes = 5; PeriodMs = 20 },
+            @{ Name = 'exclusive-10ms'; Minutes = 2; PeriodMs = 10 },
+            @{ Name = 'shared'; Minutes = 2; Shared = $true },
+            @{ Name = 'ddp-exclusive'; Minutes = 2; Dump = 'ddp51'; PeriodMs = 20 },
+            @{ Name = 'cpu-load'; Minutes = 2; CpuLoad = $true; PeriodMs = 20 },
+            @{ Name = 'page-heap'; Minutes = 1; PageHeap = $true; PeriodMs = 20 }
+          )
+          foreach ($s in $soaks) {
+            try {
+              ./tools/ci/soak.ps1 -BioLive $live -Fixtures $fx @s
+            } catch {
+              Write-Host "::error::$($_.Exception.Message)"
+              $failed += $s.Name
+            }
+          }
+          if ($failed) { throw "failed soaks: $($failed -join ', ')" }
+
+      - name: Start and stop 60 times (exclusive and shared, half under CPU load; tools/ci/restart-stress.ps1)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: >-
+          ./tools/ci/restart-stress.ps1 -BioLive target/release/bio-live.exe
+          -Fixtures (Join-Path $env:RUNNER_TEMP 'fx') -Symbols (Resolve-Path target/release).Path
+
+      - name: Crash stacks (cdb on any dump)
+        if: always()
+        shell: pwsh
+        run: ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps') -Report -Symbols (Resolve-Path target/release).Path
+
+      - name: Keep the reports, dumps and symbols
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: audio-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/loopback-*.json
+            ${{ runner.temp }}/soak-*.json
+            ${{ runner.temp }}/soak-*.log
+            ${{ runner.temp }}/dumps
+            target/release/bio_live.pdb
+            target/release/bio_replay.pdb
+          if-no-files-found: ignore
+          retention-days: 14
+
   docs:
     name: rustdoc (deny warnings)
     runs-on: ubuntu-latest
@@ -206,6 +399,13 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --document-private-items --locked
+
+      - name: cargo doc for the Windows target (the cfg(windows) modules)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo doc --workspace --no-deps --document-private-items --locked --target x86_64-pc-windows-msvc
 
   miri:
     name: Miri (parsing crates)

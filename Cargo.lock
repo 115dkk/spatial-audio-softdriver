@@ -119,6 +119,7 @@ dependencies = [
  "clap",
  "engine",
  "rtrb",
+ "serde_json",
 ]
 
 [[package]]

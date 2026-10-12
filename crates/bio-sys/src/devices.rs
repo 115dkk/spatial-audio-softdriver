@@ -66,6 +66,7 @@ impl ComGuard {
         wasapi::initialize_mta()
             .ok()
             .map_err(|e| output_error(e.into()))?;
+        crate::apartment::pin();
         Ok(Self(std::marker::PhantomData))
     }
 }

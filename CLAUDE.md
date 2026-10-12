@@ -16,11 +16,12 @@
 
 ## 검사
 
-커밋 전에 아래를 통과시킵니다. CI(`ci.yml`)가 같은 것을 Linux와 Windows에서 돌립니다.
+커밋 전에 아래를 통과시킵니다. CI(`ci.yml`)가 같은 것을 Linux와 Windows에서 돌리고, Windows 러너에서는 가상 오디오 케이블로 장치 시험, 루프백, 소크까지 돌립니다(ADR 0026). Windows 대상 clippy는 `rustup target add x86_64-pc-windows-msvc` 뒤 Linux에서도 됩니다.
 
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo test --workspace
 cargo deny check
 ```

@@ -25,8 +25,8 @@
 //! [`Chain`]: crate::Chain
 
 use std::cell::RefCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -388,10 +388,10 @@ impl Engine {
         let capacity = self.capture_events.slots() + self.output_events.slots();
         let mut events = Vec::with_capacity(capacity);
         while let Ok(event) = self.capture_events.pop() {
-            events.push(event.into_public());
+            events.push(event.into_public(&self.shared));
         }
         while let Ok(event) = self.output_events.pop() {
-            events.push(event.into_public());
+            events.push(event.into_public(&self.shared));
         }
         events
     }
@@ -480,6 +480,9 @@ struct Shared {
     format_c: AtomicU64,
     epoch: AtomicU32,
     fault: AtomicU32,
+    /// Why the output sink failed, set once by the output thread as it stops.
+    /// The error was already formatted by the sink; the thread ends after it.
+    output_error: OnceLock<String>,
 }
 
 impl Shared {
@@ -510,7 +513,15 @@ impl Shared {
             format_c: AtomicU64::new(0),
             epoch: AtomicU32::new(0),
             fault: AtomicU32::new(FAULT_NONE),
+            output_error: OnceLock::new(),
         }
+    }
+
+    fn output_error(&self) -> String {
+        self.output_error
+            .get()
+            .cloned()
+            .unwrap_or_else(|| "output sink failed".into())
     }
 
     fn publish_format(&self, epoch: u32, format: SourceFormat) {
@@ -561,7 +572,7 @@ impl Shared {
             clock_ppm: f64::from_bits(self.clock_ppm_bits.load(Ordering::Acquire)),
             fault: match self.fault.load(Ordering::Acquire) {
                 FAULT_CAPTURE => Some(EngineFault::CaptureLost("capture source failed".into())),
-                FAULT_OUTPUT => Some(EngineFault::OutputLost("output sink failed".into())),
+                FAULT_OUTPUT => Some(EngineFault::OutputLost(self.output_error())),
                 FAULT_UNSUPPORTED => Some(EngineFault::UnsupportedFormat(
                     "source format is unsupported".into(),
                 )),
@@ -583,7 +594,7 @@ enum RtEvent {
 }
 
 impl RtEvent {
-    fn into_public(self) -> EngineEvent {
+    fn into_public(self, shared: &Shared) -> EngineEvent {
         match self {
             Self::FormatChanged { epoch, format } => EngineEvent::FormatChanged { epoch, format },
             Self::NeedsBrir { rate, block } => EngineEvent::NeedsBrir { rate, block },
@@ -591,9 +602,7 @@ impl RtEvent {
             Self::CaptureFault => {
                 EngineEvent::Fault(EngineFault::CaptureLost("capture source failed".into()))
             }
-            Self::OutputFault => {
-                EngineEvent::Fault(EngineFault::OutputLost("output sink failed".into()))
-            }
+            Self::OutputFault => EngineEvent::Fault(EngineFault::OutputLost(shared.output_error())),
             Self::UnsupportedFormat => EngineEvent::Fault(EngineFault::UnsupportedFormat(
                 "source format is unsupported".into(),
             )),
@@ -863,7 +872,8 @@ fn output_thread_main<O: OutputOpener>(
                 }
                 output.finish_period(qpc);
             }
-            Err(_) => {
+            Err(error) => {
+                let _ = shared.output_error.set(error.to_string());
                 shared.fault.store(FAULT_OUTPUT, Ordering::Release);
                 output.events.push(RtEvent::OutputFault);
                 break;
@@ -978,7 +988,12 @@ impl OutputState {
         }
         // Once the source has ended, play out whatever is left.
         if self.priming && !self.shared.capture_done.load(Ordering::Acquire) {
-            let Some(excess) = self.priming_excess(scene_rate, buffer.len() / 2) else {
+            // The direct clock copies the period's frames from the ring as is.
+            let take = match mode {
+                ClockMode::Trim => buffer.len() / 2,
+                ClockMode::Asrc | ClockMode::PendingAuto => self.asrc.frames_needed(),
+            };
+            let Some(excess) = self.priming_excess(scene_rate, take) else {
                 self.apply_mute(buffer);
                 return;
             };
@@ -993,13 +1008,16 @@ impl OutputState {
                 &mut buffer[..frames * 2],
                 &mut self.stream_frame,
             ),
-            ClockMode::Asrc | ClockMode::PendingAuto => self.asrc.render(
-                &mut self.audio,
-                &mut buffer[..frames * 2],
-                scene_rate,
-                self.device_rate,
-                &mut self.stream_frame,
-            ),
+            ClockMode::Asrc | ClockMode::PendingAuto => {
+                self.asrc.ending = self.shared.capture_done.load(Ordering::Acquire);
+                self.asrc.render(
+                    &mut self.audio,
+                    &mut buffer[..frames * 2],
+                    scene_rate,
+                    self.device_rate,
+                    &mut self.stream_frame,
+                )
+            }
         };
         self.period_source_frames = produced.source_frames;
         self.period_had_audio = produced.output_frames != 0;
@@ -1011,13 +1029,17 @@ impl OutputState {
         self.apply_mute(buffer);
     }
 
-    /// `None` until the ring holds target + the next block + one output
-    /// period (capped one block below capacity, where the capture side would
-    /// start dropping blocks instead); then the frames beyond target + one
-    /// block. Blocks land whole, so without that drop the trough would start
-    /// anywhere up to a block (32 ms of E-AC-3) above the target and the slow
-    /// controller would take a minute or more to bring it down.
-    fn priming_excess(&self, scene_rate: u32, period_frames: usize) -> Option<usize> {
+    /// `None` until the ring holds target + the next block + this period's
+    /// take (capped one block below capacity, where the capture side would
+    /// start dropping blocks instead); then the frames beyond target plus the
+    /// larger of a block and the take. Blocks land whole, so without that drop
+    /// the trough would start anywhere up to a block (32 ms of E-AC-3) above
+    /// the target and the slow controller would take a minute or more to bring
+    /// it down. The take is in scene frames and, for the ASRC, includes the
+    /// filter's lookahead before its first render: a period longer than a
+    /// block (20 ms exclusive against 10 ms PCM) that kept only target + block
+    /// came up short on every first render and primed again forever.
+    fn priming_excess(&self, scene_rate: u32, take: usize) -> Option<usize> {
         let rate = f64::from(scene_rate);
         let block_frames = self.pending_marker.map_or(0.0, |marker| {
             let marker_rate = if marker.rate == 0 {
@@ -1028,14 +1050,15 @@ impl OutputState {
             f64::from(marker.frames) * rate / f64::from(marker_rate)
         });
         let target_frames = self.target_ms * rate / 1_000.0;
-        let period_scene_frames = period_frames as f64 * rate / f64::from(self.device_rate);
-        let threshold = (target_frames + block_frames + period_scene_frames)
-            .min(self.capacity_frames as f64 - block_frames);
+        let take = take as f64;
+        let threshold =
+            (target_frames + block_frames + take).min(self.capacity_frames as f64 - block_frames);
         let level = self.period_ring_level_frames as f64;
         if level < threshold {
             return None;
         }
-        Some((level - (target_frames + block_frames)).max(0.0) as usize)
+        let keep = (target_frames + block_frames.max(take)).min(threshold);
+        Some((level - keep).max(0.0) as usize)
     }
 
     /// Drops `frames` from the head of the ring, keeping the stream position
@@ -1182,7 +1205,8 @@ impl OutputState {
                 self.asrc.flush(buffer);
                 self.apply_mute(buffer);
             };
-            if sink.next_period(&mut fill).is_err() {
+            if let Err(error) = sink.next_period(&mut fill) {
+                let _ = self.shared.output_error.set(error.to_string());
                 self.shared.fault.store(FAULT_OUTPUT, Ordering::Release);
                 self.events.push(RtEvent::OutputFault);
                 break;
@@ -1253,6 +1277,10 @@ struct AsrcClock {
     scene_rate: u32,
     device_rate: u32,
     period_output_frames: usize,
+    /// The source has ended: a last take shorter than the resampler asks for
+    /// is completed with silence instead of waiting for frames that will not
+    /// come.
+    ending: bool,
 }
 
 impl AsrcClock {
@@ -1283,6 +1311,7 @@ impl AsrcClock {
             scene_rate: 0,
             device_rate,
             period_output_frames: period_frames,
+            ending: false,
         }
     }
 
@@ -1340,6 +1369,16 @@ impl AsrcClock {
         0
     }
 
+    /// Scene frames the next render takes from the ring: one period at the
+    /// current ratio, plus the filter's lookahead before the first render.
+    fn frames_needed(&self) -> usize {
+        self.resampler
+            .as_ref()
+            .map_or(self.period_output_frames, |resampler| {
+                resampler.input_frames_next()
+            })
+    }
+
     fn drain_periods(&self) -> usize {
         self.resampler.as_ref().map_or(0, |resampler| {
             resampler.output_delay().div_ceil(self.period_output_frames)
@@ -1386,15 +1425,26 @@ impl ClockStrategy for AsrcClock {
             };
         };
         let input_frames = resampler.input_frames_next();
-        if input_frames > MAX_ASRC_INPUT_FRAMES || audio.slots() < input_frames * 2 {
+        let available = audio.slots() / 2;
+        // Before the end the whole take must be there; at the end the frames
+        // left over go out followed by silence, so the ring drains.
+        let short = available < input_frames && (!self.ending || available == 0);
+        if input_frames > MAX_ASRC_INPUT_FRAMES || short {
             return Rendered {
                 source_frames: 0,
                 output_frames: 0,
             };
         }
+        let real = available.min(input_frames);
         for frame in 0..input_frames {
-            let left = audio.pop().expect("availability was checked");
-            let right = audio.pop().expect("availability was checked");
+            let (left, right) = if frame < real {
+                (
+                    audio.pop().expect("availability was checked"),
+                    audio.pop().expect("availability was checked"),
+                )
+            } else {
+                (0.0, 0.0)
+            };
             let _ = self.input.write_sample(0, frame, &left);
             let _ = self.input.write_sample(1, frame, &right);
         }
@@ -1414,6 +1464,7 @@ impl ClockStrategy for AsrcClock {
             };
         };
         let output_frames = output_frames_capacity.min(produced);
+        let consumed = consumed.min(real);
         *stream_frame = stream_frame.saturating_add(consumed as u64);
         Rendered {
             source_frames: consumed,
@@ -1655,8 +1706,8 @@ mod tests {
     /// frames land whole at the source rate (device rate times 1 + skew, plus
     /// the trim), the output takes `period` frames per period (more or fewer
     /// by the ASRC correction), priming waits for target + block + period and
-    /// drops what lies beyond target + block, and the controller reads the
-    /// level left after each period.
+    /// drops what lies beyond target plus the larger of block and period, and
+    /// the controller reads the level left after each period.
     fn simulate_clock(
         skew_ppm: f64,
         block: usize,
@@ -1695,7 +1746,7 @@ mod tests {
                 if to_ms(level) < target + to_ms(block as f64) + to_ms(period as f64) {
                     continue;
                 }
-                level = level.min(target * rate / 1_000.0 + block as f64);
+                level = level.min(target * rate / 1_000.0 + block.max(period) as f64);
                 priming = false;
             }
             let consumed_ppm = if trim { 0.0 } else { correction };
@@ -1737,8 +1788,15 @@ mod tests {
     #[test]
     fn clock_holds_the_trough_without_chasing_the_block_sawtooth() {
         // (block, period): PCM or MAT at a 3 ms exclusive period, E-AC-3 at
-        // 3 ms, E-AC-3 at a 10 ms shared period.
-        for (block, period) in [(480, 144), (1_536, 144), (1_536, 480)] {
+        // 3 ms, E-AC-3 at a 10 ms shared period, PCM and E-AC-3 at a 20 ms
+        // exclusive period.
+        for (block, period) in [
+            (480, 144),
+            (1_536, 144),
+            (1_536, 480),
+            (480, 960),
+            (1_536, 960),
+        ] {
             for trim in [false, true] {
                 let run = simulate_clock(0.0, block, period, trim, 120.0);
                 let label = format!("block {block} period {period} trim {trim}");
@@ -1781,18 +1839,145 @@ mod tests {
     }
 
     #[test]
-    fn clock_with_a_period_as_long_as_a_block_stays_bounded() {
-        // A 10 ms shared period with 10 ms PCM blocks: as the arrival phase
-        // drifts past the period boundary the real trough drops by a block,
-        // so the controller cannot hold it as tightly. It must still not
+    fn clock_with_a_long_period_stays_bounded() {
+        // A 10 ms shared period with 10 ms PCM blocks, and a 20 ms exclusive
+        // period with PCM or E-AC-3: as the arrival phase drifts past the
+        // period boundary the real trough moves by up to a block, so the
+        // controller cannot hold it within the 2 ms above. It must still not
         // swing to its limit or starve the output more than now and then.
-        for skew in [-100.0, 100.0] {
-            let run = simulate_clock(skew, 480, 480, false, 300.0);
-            assert_eq!(run.clamped, 0, "skew {skew}");
+        for (block, period) in [(480, 480), (480, 960), (1_536, 960)] {
+            for skew in [-300.0, -100.0, 100.0, 300.0] {
+                let run = simulate_clock(skew, block, period, false, 300.0);
+                let label = format!("block {block} period {period} skew {skew}");
+                assert_eq!(run.clamped, 0, "{label}");
+                assert!(run.underruns <= 3, "{label}: {} underruns", run.underruns);
+            }
+        }
+    }
+
+    /// Drives the real output state (ring, priming, ASRC) with whole blocks
+    /// landing in step with the periods, as a paced source does, and returns
+    /// the underruns and the periods that carried audio.
+    fn play_output(block: usize, period: usize, periods: usize) -> (u64, usize) {
+        let rate = 48_000;
+        let shared = Arc::new(Shared::new());
+        shared.scene_rate.store(rate, Ordering::Release);
+        shared
+            .clock_mode
+            .store(ClockMode::Asrc.as_u32(), Ordering::Release);
+        shared.capture_started.store(true, Ordering::Release);
+        let (mut audio_in, audio) = RingBuffer::<f32>::new(80 * 48 * 2);
+        let (mut timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
+        let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
+        let mut output = OutputState::new(
+            audio,
+            timing,
+            rate,
+            period,
+            10.0,
+            DEFAULT_QPC_FREQUENCY,
+            events,
+            Arc::clone(&shared),
+        );
+        let mut buffer = vec![0.0; period * 2];
+        let (mut arriving, mut stream_frame, mut played) = (0, 0_u64, 0);
+        for index in 0..periods {
+            arriving += period;
+            while arriving >= block {
+                arriving -= block;
+                for _ in 0..block * 2 {
+                    audio_in.push(0.25).expect("the ring has room");
+                }
+                let _ = timing_in.push(TimingMarker {
+                    stream_frame,
+                    frames: block as u32,
+                    source_qpc: 0,
+                    rate,
+                });
+                stream_frame += block as u64;
+            }
+            output.fill(&mut buffer);
+            played += usize::from(output.period_had_audio);
+            output.finish_period(index as u64 * 200_000);
+        }
+        (shared.underruns.load(Ordering::Acquire), played)
+    }
+
+    #[test]
+    fn the_end_of_a_source_drains_without_underruns() {
+        // DD+ blocks against a 10 ms shared period: when the source ends, the
+        // frames left in the ring are fewer than the ASRC's next take. They
+        // must still go out, the ring must drain, and no period after the end
+        // may count as an underrun.
+        let rate = 48_000;
+        let (block, period) = (1_536, 480);
+        let shared = Arc::new(Shared::new());
+        shared.scene_rate.store(rate, Ordering::Release);
+        shared
+            .clock_mode
+            .store(ClockMode::Asrc.as_u32(), Ordering::Release);
+        shared.capture_started.store(true, Ordering::Release);
+        let (mut audio_in, audio) = RingBuffer::<f32>::new(80 * 48 * 2);
+        let (mut timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
+        let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
+        let mut output = OutputState::new(
+            audio,
+            timing,
+            rate,
+            period,
+            10.0,
+            DEFAULT_QPC_FREQUENCY,
+            events,
+            Arc::clone(&shared),
+        );
+        let mut buffer = vec![0.0; period * 2];
+        let (mut arriving, mut stream_frame) = (0, 0_u64);
+        for index in 0..103 {
+            arriving += period;
+            while arriving >= block {
+                arriving -= block;
+                for _ in 0..block * 2 {
+                    audio_in.push(0.25).expect("the ring has room");
+                }
+                let _ = timing_in.push(TimingMarker {
+                    stream_frame,
+                    frames: block as u32,
+                    source_qpc: 0,
+                    rate,
+                });
+                stream_frame += block as u64;
+            }
+            output.fill(&mut buffer);
+            output.finish_period(index as u64 * 100_000);
+        }
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
+        assert!(
+            output.audio.slots() > 0,
+            "the ring holds the last frames when the source ends"
+        );
+        shared.capture_done.store(true, Ordering::Release);
+        let mut periods = 0;
+        while !output.drained() {
+            periods += 1;
+            assert!(periods <= 20, "the ring did not drain");
+            output.fill(&mut buffer);
+            output.finish_period(0);
+        }
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_period_longer_than_a_block_plays_after_priming() {
+        // 20 and 40 ms exclusive periods against 10 ms PCM blocks, and 20 ms
+        // against 32 ms E-AC-3 blocks: priming must leave target plus the
+        // ASRC's whole first take (the period and the filter's lookahead), or
+        // the first render comes up short and primes again forever.
+        for (block, period) in [(480, 960), (480, 1_920), (1_536, 960), (480, 144)] {
+            let (underruns, played) = play_output(block, period, 400);
+            assert_eq!(underruns, 0, "block {block} period {period}");
             assert!(
-                run.underruns <= 3,
-                "skew {skew}: {} underruns",
-                run.underruns
+                played >= 390,
+                "block {block} period {period}: {played} of 400 periods carried audio"
             );
         }
     }

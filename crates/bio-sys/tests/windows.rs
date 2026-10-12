@@ -4,6 +4,18 @@
 use bio_sys::{devices, output::WasapiOpener, qpc, sal::SalRing};
 use bio_types::{CaptureError, OutputOpener, OutputSink};
 
+/// The exclusive period the cadence tests ask for: the device's minimum
+/// unless `BIO_TEST_EXCLUSIVE_PERIOD_MS` names one. CI sets 20 ms because
+/// VB-CABLE, a WaveCyclic driver, signals no faster than the 15.6 ms system
+/// timer (`exclusive_cadence_at_each_period` measures it; ADR 0026).
+fn exclusive_period() -> Option<std::time::Duration> {
+    std::env::var("BIO_TEST_EXCLUSIVE_PERIOD_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map(std::time::Duration::from_millis)
+}
+
 #[test]
 #[ignore = "requires at least one active Windows render endpoint"]
 fn render_endpoints_include_a_default() {
@@ -76,10 +88,11 @@ fn assert_real_time_cadence(exclusive: bool) {
         endpoint: None,
         rate: 48_000,
         exclusive,
-        period: None,
+        period: if exclusive { exclusive_period() } else { None },
     }
     .open()
     .unwrap();
+    println!("exclusive requested: {exclusive}; opened {sink:?}");
     let format = sink.format();
     for _ in 0..20 {
         sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
@@ -126,7 +139,7 @@ fn exclusive_sink_recovers_its_cadence_after_a_missed_deadline() {
         endpoint: None,
         rate: 48_000,
         exclusive: true,
-        period: None,
+        period: exclusive_period(),
     }
     .open()
     .unwrap();
@@ -159,6 +172,39 @@ fn exclusive_sink_recovers_its_cadence_after_a_missed_deadline() {
         "the sink took {rate:.0} frames/s at {} Hz after the miss",
         format.rate
     );
+}
+
+/// Diagnostic for endpoints whose events cannot keep a short exclusive
+/// period (WaveCyclic drivers such as VB-CABLE signal at their own timer's
+/// rate): prints the rate the sink achieves at each period. It asserts only
+/// that every period opens and plays; the cadence numbers decide whether the
+/// sink needs to move to a longer period on its own.
+#[test]
+#[ignore = "requires a render endpoint; plays about 5 s of silence in exclusive mode"]
+fn exclusive_cadence_at_each_period() {
+    for period_ms in [0_u64, 5, 10, 20, 40] {
+        let mut sink = WasapiOpener {
+            endpoint: None,
+            rate: 48_000,
+            exclusive: true,
+            period: (period_ms > 0).then(|| std::time::Duration::from_millis(period_ms)),
+        }
+        .open()
+        .unwrap();
+        let format = sink.format();
+        let started = qpc::now();
+        let mut frames = 0_usize;
+        while frames < format.rate as usize {
+            sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+            frames += format.period_frames;
+        }
+        let seconds = (qpc::now() - started) as f64 / qpc::frequency() as f64;
+        println!(
+            "period request {period_ms} ms: {sink:?}, {:.0} frames/s, {} restarts",
+            frames as f64 / seconds,
+            sink.restarts()
+        );
+    }
 }
 
 #[test]
