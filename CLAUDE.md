@@ -13,6 +13,7 @@
 - 실시간 스레드에서는 할당, 잠금, 파일 입출력을 하지 않습니다.
 - 클린룸(ADR 0005): SpatialAudioLab의 소스와 그 소스에서 나온 패치는 읽지 않고, 작업자에게도 넘기지 않습니다. 구축기 공유 zip의 `sal-cli-bio-game.patch`가 여기에 해당합니다.
 - 드라이버 계약(`crates/bio-abi/src/wire.rs`)을 바꾸면 `BIO_ABI_BLESS=1`로 C 헤더를 다시 생성해 함께 커밋합니다.
+- 사용자에게 보이는 이름(Windows 엔드포인트 이름이 되는 싱크 설명과 장치 설명, INF의 FriendlyName, 화면과 안내 문구)은 번호가 아니라 용도로 구분합니다. 이름만 보고 무엇에 쓰는지 알 수 있어야 합니다. 지금의 "BIO Atmos Virtual HDMI 2" 같은 번호 이름은 시험판 것이고, 릴리스 전에 용도 이름으로 바꾸면서 그 이름으로 엔드포인트를 찾는 시험(`tools/ci/driver_flow_check.py`)도 함께 고칩니다. 코드와 계약 안의 엔드포인트 번호(0, 1)는 식별자라 그대로 둡니다.
 
 ## 검사
 
@@ -24,6 +25,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo test --workspace
 cargo deny check
+```
+
+## 드라이버 (M3)
+
+`driver/`는 MS-PL이고 구조는 ADR 0027입니다. SysVAD에서 가져온 파일의 머리에는 원본 경로와 커밋을 적고, `driver/core/`는 커널 API를 부르지 않고 할당하지 않습니다. 드라이버를 고치면 커밋 전에 아래를 Linux에서 돌립니다. MSBuild, InfVerif, CodeQL, 시험서명 설치는 `driver.yml`이 Windows 러너에서 합니다.
+
+```sh
+python3 tools/kcheck.py --analyze
+cmake -S driver/core -B target/core -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DBIO_SANITIZE=ON
+cmake --build target/core && target/core/core_tests
 ```
 
 ## 화면 (M4)

@@ -52,6 +52,7 @@ tests = [
   "bio-abi::a_cut_record_ends_the_iteration_with_an_error",
   "bio-abi::a_payload_on_a_stop_record_is_an_error_but_not_the_end",
   "bio-abi::arbitrary_bytes_never_panic",
+  "bio-abi::the_largest_data_record_fits_one_read",
 ]
 
 [[feature]]
@@ -63,6 +64,7 @@ tests = [
   "bio-abi::every_format_round_trips",
   "bio-abi::plain_waveformatex_pcm_and_ac3_parse",
   "bio-abi::malformed_formats_are_errors",
+  "bio-abi::subtype_aliases_parse_as_their_container",
 ]
 
 [[feature]]
@@ -565,7 +567,28 @@ tests = [
   "engine::other_endpoint_records_are_skipped_without_affecting_primary_output",
   "bio-replay::default_render_ignores_second_endpoint_records",
 ]
-note = "the contract, parser, dump format and C header carry endpoint numbers, and a single Chain filters one endpoint; per-endpoint engine chains, the common-rate scene mixer (engine.two_endpoints), and the driver are not implemented"
+note = "the contract, parser, dump format and C header carry endpoint numbers, and a single Chain filters one endpoint; per-endpoint engine chains and the common-rate scene mixer (engine.two_endpoints) are not implemented, and the driver writes both endpoints only in the hosted-runner flow check (driver.kernel), not yet on a test-signed PC"
+
+# ---- Driver (M3, ADR 0027) ----
+
+[[feature]]
+id = "driver.core"
+kind = "driver"
+milestone = "M3"
+status = "partial"
+tests = [
+  "bio-abi::driver_core_dump_matches_expectations",
+  "bio-abi::the_largest_data_record_fits_one_read",
+]
+note = "driver/core (record ring, READ gate, DMA clock, format bits; no kernel API) is tested by driver/core/tests/core_tests.cpp under ASan and UBSan with clang, gcc and MSVC and fuzzed with libFuzzer in driver.yml, which also sets BIO_DRIVER_CORE_DUMP so bio-abi parses the stream the core writes (without it the Rust test returns early); partial until the kernel wrapper runs it on a test-signed PC"
+
+[[feature]]
+id = "driver.kernel"
+kind = "driver"
+milestone = "M3"
+status = "partial"
+tests = []
+note = "bioatmos.sys: SysVAD HDMI render x2 and the \\\\.\\BioAtmos control device; compile-checked on Linux (tools/kcheck.py), built for x64 and ARM64 with /W4 /WX and code analysis, InfVerif, CodeQL driver suites, and installed test-signed on windows-2022 and windows-2025 runners in driver.yml, where the kernel loads it, both render endpoints turn active, and a tone played into each comes back through the ring (tools/ci/driver_flow_check.py); Driver Verifier, HVCI, IOCTL fuzzing and Atmos negotiation need a test-signed PC"
 
 [[feature]]
 id = "engine.two_endpoints"

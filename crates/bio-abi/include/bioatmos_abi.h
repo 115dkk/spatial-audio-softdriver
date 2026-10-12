@@ -21,9 +21,11 @@
 
 /**
  * `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_OUT_DIRECT, FILE_READ_ACCESS)`;
- * input: [`ReadRequest`], output: a record stream. Pends until `min_bytes` of
- * records are queued, a format-change or stream-stop record arrives, or
- * `timeout_ms` passes. Cancellable.
+ * input: [`ReadRequest`], output: a record stream of whole records, at most
+ * [`READ_MAX_BYTES`] whatever the buffer. Pends until `min_bytes` of records
+ * are queued (clamped to the buffer and to [`READ_MAX_BYTES`]), a
+ * format-change or stream-stop record arrives, or `timeout_ms` passes.
+ * Cancellable.
  */
 #define IOCTL_BIO_READ ((((34 << 16) | (1 << 14)) | (2305 << 2)) | 2)
 
@@ -82,6 +84,20 @@
  * payload is zero padding.
  */
 #define BIO_RECORD_ALIGN 8
+
+/**
+ * Largest payload of one data record. The driver splits a longer span of the
+ * audio engine's buffer into several records, so a READ buffer of
+ * `record_size(MAX_DATA_PAYLOAD)` bytes always makes progress.
+ */
+#define BIO_MAX_DATA_PAYLOAD (64 * 1024)
+
+/**
+ * Most bytes one READ returns. The driver copies records out under a spin
+ * lock and keeps that copy short; a reader behind by more drains it over
+ * several READs.
+ */
+#define BIO_READ_MAX_BYTES (256 * 1024)
 
 #define BIO_TRIM_LIMIT_PPM 2000
 

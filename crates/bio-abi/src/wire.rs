@@ -20,9 +20,11 @@ pub const ABI_VERSION: u32 = 1;
 /// output: [`AbiInfo`].
 pub const IOCTL_BIO_QUERY_INFO: u32 = (0x22 << 16) | (1 << 14) | (0x900 << 2);
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_OUT_DIRECT, FILE_READ_ACCESS)`;
-/// input: [`ReadRequest`], output: a record stream. Pends until `min_bytes` of
-/// records are queued, a format-change or stream-stop record arrives, or
-/// `timeout_ms` passes. Cancellable.
+/// input: [`ReadRequest`], output: a record stream of whole records, at most
+/// [`READ_MAX_BYTES`] whatever the buffer. Pends until `min_bytes` of records
+/// are queued (clamped to the buffer and to [`READ_MAX_BYTES`]), a
+/// format-change or stream-stop record arrives, or `timeout_ms` passes.
+/// Cancellable.
 pub const IOCTL_BIO_READ: u32 = (0x22 << 16) | (1 << 14) | (0x901 << 2) | 2;
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_WRITE_ACCESS)`;
 /// input: [`RateTrim`]. Clamped to ±[`TRIM_LIMIT_PPM`], applied from the next
@@ -65,6 +67,16 @@ pub const RECORD_FLAG_FORMAT_REPEAT: u16 = 0x0002;
 /// Every record starts at a multiple of this many bytes; the gap after a
 /// payload is zero padding.
 pub const RECORD_ALIGN: u32 = 8;
+
+/// Largest payload of one data record. The driver splits a longer span of the
+/// audio engine's buffer into several records, so a READ buffer of
+/// `record_size(MAX_DATA_PAYLOAD)` bytes always makes progress.
+pub const MAX_DATA_PAYLOAD: u32 = 64 * 1024;
+
+/// Most bytes one READ returns. The driver copies records out under a spin
+/// lock and keeps that copy short; a reader behind by more drains it over
+/// several READs.
+pub const READ_MAX_BYTES: u32 = 256 * 1024;
 
 /// Header of one record. The payload (`len` bytes) follows immediately.
 ///
@@ -252,6 +264,11 @@ mod tests {
     const METHOD_OUT_DIRECT: u32 = 2;
     const FILE_READ_ACCESS: u32 = 1;
     const FILE_WRITE_ACCESS: u32 = 2;
+
+    #[test]
+    fn the_largest_data_record_fits_one_read() {
+        assert!(crate::record_size(MAX_DATA_PAYLOAD as usize) <= READ_MAX_BYTES as usize);
+    }
 
     #[test]
     fn ioctl_literals_match_ctl_code() {

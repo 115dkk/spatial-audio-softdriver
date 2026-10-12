@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-License-Identifier: MS-PL
+  Copyright (c) Microsoft Corporation. All rights reserved.
+  Copyright (c) 2026 115dkk
+  Licensed under the Microsoft Public License (MS-PL).
+
+  Driver project structure adapted from
+  audio/sysvad/TabletAudioSample/TabletAudioSample.vcxproj at
+  windows-driver-samples commit 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
+-->
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|ARM64">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM64">
+      <Configuration>Release</Configuration>
+      <Platform>ARM64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{D2CD4CFD-7C62-43A3-AE2B-C90B3A537162}</ProjectGuid>
+    <RootNamespace>bioatmos</RootNamespace>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <DriverType>WDM</DriverType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Release'">false</UseDebugLibraries>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="Exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
+  </ImportGroup>
+
+  <PropertyGroup>
+    <TargetName>bioatmos</TargetName>
+    <OutDir>$(ProjectDir)..\..\target\driver-build\$(Configuration)\$(Platform)\</OutDir>
+    <IntDir>$(ProjectDir)..\..\target\driver-build\obj\$(Configuration)\$(Platform)\</IntDir>
+    <!-- Code Analysis needs the WDK's PREfast plug-in (drivers.dll), which the
+         NuGet WDK ships for x64 and ARM64 hosts only and which the runner's
+         compiler would not load (C1250). Static analysis of the driver is the
+         CodeQL Windows driver suites in driver.yml, as for the WHCP static tools test. -->
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <SpectreMitigation>false</SpectreMitigation>
+    <Inf2CatUseLocalTime>true</Inf2CatUseLocalTime>
+    <EnableInf2Cat>false</EnableInf2Cat>
+    <SignMode>Off</SignMode>
+    <InfDateStamp Condition="'$(InfDateStamp)' == ''">*</InfDateStamp>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\kcrt;$(ProjectDir);$(ProjectDir)..\core;$(ProjectDir)..\..\crates\bio-abi\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CompileAs>CompileAsCpp</CompileAs>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <ExceptionHandling>false</ExceptionHandling>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>_WIN32;UNICODE;_UNICODE;NTDDI_VERSION=0x0A000008;PC_IMPLEMENTATION;_USE_WAVERT_;_NEW_DELETE_OPERATORS_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <WarningLevel>Level4</WarningLevel>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>portcls.lib;stdunk.lib;libcntpr.lib;ntstrsafe.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(OutDir)bioatmos.pdb</ProgramDatabaseFile>
+    </Link>
+    <Inf>
+      <CopyOutput>$(OutDir)bioatmos.inf</CopyOutput>
+      <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
+      <DateStamp>$(InfDateStamp)</DateStamp>
+      <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
+      <TimeStamp>1.0.0.0</TimeStamp>
+    </Inf>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="*.cpp" />
+    <ClCompile Include="..\core\*.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="*.h" />
+    <ClInclude Include="..\core\*.h" />
+    <ClInclude Include="..\..\crates\bio-abi\include\bioatmos_abi.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Inf Include="bioatmos.inx" />
+    <FilesToPackage Include="$(TargetPath)" Condition="'$(ConfigurationType)' == 'Driver'" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
