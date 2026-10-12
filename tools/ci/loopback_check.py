@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--mode", choices=["exclusive", "shared"], required=True)
     parser.add_argument("--render", default="VB-Audio Virtual Cable")
     parser.add_argument("--capture", default="CABLE Output")
+    parser.add_argument("--period-ms", type=float, help="exclusive device period for bio-live")
     parser.add_argument("--min-correlation", type=float, default=0.95)
     parser.add_argument("--min-matched", type=float, default=0.9)
     parser.add_argument("--summary", required=True)
@@ -119,6 +120,8 @@ def main():
     ]
     if args.mode == "shared":
         command.append("--shared")
+    if args.period_ms:
+        command += ["--period-ms", str(args.period_ms)]
     chunks = []
     with microphone.recorder(samplerate=rate, channels=2, blocksize=rate // 100) as recorder:
         chunks.append(recorder.record(numframes=rate // 2))

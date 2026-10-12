@@ -57,6 +57,9 @@ enum Command {
         /// Device sample rate.
         #[arg(long, default_value_t = 48_000)]
         rate: u32,
+        /// Device period in milliseconds; the device's minimum when omitted.
+        #[arg(long)]
+        period_ms: Option<f64>,
         /// Crossing-ring level to hold, in milliseconds (10 for games, 40 for music).
         #[arg(long, default_value_t = 10.0)]
         target_ms: f32,
@@ -97,6 +100,7 @@ fn main() -> ExitCode {
             output,
             shared,
             rate,
+            period_ms,
             target_ms,
             clock,
             record,
@@ -110,6 +114,7 @@ fn main() -> ExitCode {
             output,
             shared,
             rate,
+            period_ms,
             target_ms,
             clock,
             record,
@@ -161,6 +166,7 @@ mod platform {
         pub output: Option<String>,
         pub shared: bool,
         pub rate: u32,
+        pub period_ms: Option<f64>,
         pub target_ms: f32,
         pub clock: Clock,
         pub record: Option<PathBuf>,
@@ -546,7 +552,10 @@ mod platform {
             endpoint: Some(endpoint.id.clone()),
             rate: options.rate,
             exclusive: !options.shared,
-            period: None,
+            period: options
+                .period_ms
+                .filter(|ms| ms.is_finite() && *ms > 0.0)
+                .map(|ms| Duration::from_secs_f64(ms / 1000.0)),
         };
         let mut engine = engine::start_with_clock(config, capture, output, qpc::frequency())
             .map_err(|e| e.to_string())?;
@@ -886,6 +895,7 @@ mod platform {
         pub output: Option<String>,
         pub shared: bool,
         pub rate: u32,
+        pub period_ms: Option<f64>,
         pub target_ms: f32,
         pub clock: Clock,
         pub record: Option<PathBuf>,

@@ -465,6 +465,14 @@ note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a
 # ---- Driver and app (M3, M4) ----
 
 [[feature]]
+id = "sys.output_cadence_guard"
+kind = "platform"
+milestone = "M2"
+status = "planned"
+tests = []
+note = "the WASAPI sink measures the frames it is asked for per second and, when a device keeps a slower event cadence than its period (VB-CABLE in exclusive mode signals at the 15.6 ms system timer: 65 % of the nominal rate at a 10 ms period, with no single stall long enough to trigger a restart), moves to a period the device keeps instead of underfeeding it; found by the CI audio job (ADR 0026)"
+
+[[feature]]
 id = "sys.driver_ring"
 kind = "platform"
 milestone = "M3"

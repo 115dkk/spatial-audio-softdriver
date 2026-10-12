@@ -256,7 +256,13 @@ jobs:
           cargo run --locked --release -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
           target/release/bio-live.exe devices
 
+      # VB-CABLE signals exclusive-mode events no faster than the 15.6 ms
+      # system timer, so the exclusive cadence tests and soaks use a 20 ms
+      # period; exclusive_cadence_at_each_period prints the rate at each
+      # period (ADR 0026).
       - name: Device tests bio-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
+        env:
+          BIO_TEST_EXCLUSIVE_PERIOD_MS: "20"
         run: cargo test --locked --release -p bio-sys --test windows -- --ignored --test-threads=1 --nocapture
 
       # The stages below run even when an earlier one failed, so one CI round
@@ -287,7 +293,7 @@ jobs:
               s="$RUNNER_TEMP/loopback-$d-$mode.json"
               python tools/ci/loopback_check.py --bio-live target/release/bio-live.exe \
                 --dump "$fx/$d.biodump" --profile "$fx/profile.toml" \
-                --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" --summary "$s" || status=1
+                --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" --period-ms 20 --summary "$s" || status=1
               if [ -f "$s" ]; then
                 jq -r --arg d "$d" '"| \($d) | \(.mode) | \(.windows) | \(.matched) | \(.median_correlation) | \(.worst_correlation) |"' "$s" >> "$GITHUB_STEP_SUMMARY"
               fi
@@ -295,7 +301,7 @@ jobs:
           done
           exit $status
 
-      - name: Soaks (exclusive 5 min, shared 2 min, exclusive 2 min under CPU load, 1 min under full page heap)
+      - name: Soaks (exclusive 5 min, shared 2 min, DD+ 2 min, exclusive under CPU load 2 min, under full page heap 1 min)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         run: |
@@ -306,11 +312,11 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY '| --- | --- | --- | --- | --- | --- | --- | --- |'
           $failed = @()
           $soaks = @(
-            @{ Name = 'exclusive'; Minutes = 5 },
+            @{ Name = 'exclusive'; Minutes = 5; PeriodMs = 20 },
             @{ Name = 'shared'; Minutes = 2; Shared = $true },
-            @{ Name = 'ddp-exclusive'; Minutes = 2; Dump = 'ddp51' },
-            @{ Name = 'cpu-load'; Minutes = 2; CpuLoad = $true },
-            @{ Name = 'page-heap'; Minutes = 1; PageHeap = $true }
+            @{ Name = 'ddp-exclusive'; Minutes = 2; Dump = 'ddp51'; PeriodMs = 20 },
+            @{ Name = 'cpu-load'; Minutes = 2; CpuLoad = $true; PeriodMs = 20 },
+            @{ Name = 'page-heap'; Minutes = 1; PageHeap = $true; PeriodMs = 20 }
           )
           foreach ($s in $soaks) {
             try {

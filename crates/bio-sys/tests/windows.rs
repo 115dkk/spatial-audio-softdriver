@@ -4,6 +4,18 @@
 use bio_sys::{devices, output::WasapiOpener, qpc, sal::SalRing};
 use bio_types::{CaptureError, OutputOpener, OutputSink};
 
+/// The exclusive period the cadence tests ask for: the device's minimum
+/// unless `BIO_TEST_EXCLUSIVE_PERIOD_MS` names one. CI sets 20 ms because
+/// VB-CABLE, a WaveCyclic driver, signals no faster than the 15.6 ms system
+/// timer (`exclusive_cadence_at_each_period` measures it; ADR 0026).
+fn exclusive_period() -> Option<std::time::Duration> {
+    std::env::var("BIO_TEST_EXCLUSIVE_PERIOD_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map(std::time::Duration::from_millis)
+}
+
 #[test]
 #[ignore = "requires at least one active Windows render endpoint"]
 fn render_endpoints_include_a_default() {
@@ -76,7 +88,7 @@ fn assert_real_time_cadence(exclusive: bool) {
         endpoint: None,
         rate: 48_000,
         exclusive,
-        period: None,
+        period: if exclusive { exclusive_period() } else { None },
     }
     .open()
     .unwrap();
@@ -127,7 +139,7 @@ fn exclusive_sink_recovers_its_cadence_after_a_missed_deadline() {
         endpoint: None,
         rate: 48_000,
         exclusive: true,
-        period: None,
+        period: exclusive_period(),
     }
     .open()
     .unwrap();

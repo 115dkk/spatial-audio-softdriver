@@ -15,6 +15,8 @@ param(
     [Parameter(Mandatory)] [string] $Name,
     [double] $Minutes = 2,
     [string] $Dump = 'pcm71',
+    # Device period for exclusive mode; VB-CABLE keeps nothing under ~16 ms.
+    [double] $PeriodMs = 0,
     [switch] $Shared,
     [switch] $CpuLoad,
     [switch] $PageHeap
@@ -46,6 +48,7 @@ try {
     $arguments = @('play', '--from-dump', $dumpPath, '--profile', $profilePath,
         '--output', 'VB-Audio Virtual Cable', '--loop', '--seconds', $seconds, '--report', $report)
     if ($Shared) { $arguments += '--shared' }
+    if ($PeriodMs -gt 0) { $arguments += @('--period-ms', $PeriodMs) }
     Write-Host "bio-live $($arguments -join ' ')"
     & $BioLive @arguments 2>&1 | Tee-Object -FilePath $log
     if ($LASTEXITCODE -ne 0) { throw "bio-live exited with $LASTEXITCODE" }

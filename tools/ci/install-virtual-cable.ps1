@@ -142,6 +142,18 @@ public static class RootDevice
 $reboot = [RootDevice]::Install((Join-Path $work $Inf), $HardwareId)
 Write-Host "VB-CABLE installed (reboot requested: $reboot)"
 
+# Desktop apps need microphone consent to open a capture endpoint
+# (E_ACCESSDENIED otherwise), which the loopback check records from.
+$consent = 'SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'
+foreach ($hive in 'HKLM:', 'HKCU:') {
+    New-Item -Force -Path "$hive\$consent\NonPackaged" | Out-Null
+    Set-ItemProperty -Path "$hive\$consent" -Name Value -Value 'Allow'
+    Set-ItemProperty -Path "$hive\$consent\NonPackaged" -Name Value -Value 'Allow'
+}
+$privacy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
+New-Item -Force -Path $privacy | Out-Null
+Set-ItemProperty -Path $privacy -Name LetAppsAccessMicrophone -Value 1 -Type DWord
+
 # Windows Server leaves the audio services on manual start.
 foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
     Set-Service -Name $name -StartupType Automatic
