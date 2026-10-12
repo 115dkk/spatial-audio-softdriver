@@ -4,16 +4,16 @@
 #pragma once
 #include "common.h"
 #include "kshelper.h"
-// Not mode-aware: no IMiniportAudioSignalProcessing. A mode-aware pin must
-// also tag every data range with a KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE
-// attribute list; announcing RAW without it left both endpoints NOTPRESENT.
-// No APO is installed, so the default mode passes the stream untouched.
-class CMiniportWaveRT final : public IMiniportWaveRT {
+// The host pin announces RAW, as SysVAD's HDMI host pin does (no attribute
+// lists on its data ranges either): no APO runs, so the stream reaches the
+// ring untouched.
+class CMiniportWaveRT final : public IMiniportWaveRT, public IMiniportAudioSignalProcessing {
 public:
     CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint);
     ~CMiniportWaveRT();
     BIO_UNKNOWN_METHODS;
     IMP_IMiniportWaveRT;
+    STDMETHODIMP_(NTSTATUS) GetModes(ULONG pin, GUID* modes, ULONG* count) override;
     static NTSTATUS Property(PPCPROPERTY_REQUEST request);
     CAdapterCommon* Adapter() const { return adapter_; }
     USHORT Endpoint() const { return endpoint_; }
@@ -23,11 +23,12 @@ private:
     CAdapterCommon* adapter_;
     USHORT endpoint_;
     PCFILTER_DESCRIPTOR descriptor_{};
-    PCPIN_DESCRIPTOR pins_[2]{};
+    PCPIN_DESCRIPTOR pins_[3]{};
     KSDATARANGE_AUDIO ranges_[BioFormatCount]{};
     PKSDATARANGE rangePointers_[BioFormatCount]{};
+    PKSDATARANGE loopbackPointers_[BioFormatCount]{};
     KSDATARANGE bridges_[BioFormatCount]{};
     PKSDATARANGE bridgePointers_[BioFormatCount]{};
     PCNODE_DESCRIPTOR node_{};
-    PCCONNECTION_DESCRIPTOR connections_[2]{};
+    PCCONNECTION_DESCRIPTOR connections_[3]{};
 };

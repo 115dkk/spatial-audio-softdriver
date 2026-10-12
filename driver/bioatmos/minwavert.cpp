@@ -10,7 +10,7 @@ static PCPROPERTY_ITEM WaveProperties[] = {
 DEFINE_PCAUTOMATION_TABLE_PROP(WaveAutomation, WaveProperties);
 CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : adapter_(adapter), endpoint_(endpoint) {
     adapter_->AddRef();
-    ULONG count = 0;
+    ULONG count = 0, loopbacks = 0;
     for (const auto& format : BioFormats) if (format.Bit & Mask()) {
         auto& range = ranges_[count];
         range.DataRange.FormatSize = sizeof(range);
@@ -21,6 +21,7 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
         range.MinimumBitsPerSample = range.MaximumBitsPerSample = 16;
         range.MinimumSampleFrequency = range.MaximumSampleFrequency = format.Rate;
         rangePointers_[count] = &range.DataRange;
+        if (format.Bit == BIO_FORMAT_PCM) loopbackPointers_[loopbacks++] = &range.DataRange;
         auto& bridge = bridges_[count];
         bridge.FormatSize = sizeof(bridge);
         bridge.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
@@ -45,12 +46,22 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
     pins_[1].KsPinDescriptor.DataFlow = KSPIN_DATAFLOW_OUT;
     pins_[1].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_NONE;
     pins_[1].KsPinDescriptor.Category = &KSCATEGORY_AUDIO;
+    // A loopback pin, as SysVAD's HDMI wave filter has: PCM only, taps the
+    // mix after the SUM node. It takes no stream yet (NewStream).
+    pins_[2].MaxGlobalInstanceCount = 1;
+    pins_[2].MaxFilterInstanceCount = 1;
+    pins_[2].KsPinDescriptor.DataRangesCount = loopbacks;
+    pins_[2].KsPinDescriptor.DataRanges = loopbackPointers_;
+    pins_[2].KsPinDescriptor.DataFlow = KSPIN_DATAFLOW_OUT;
+    pins_[2].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_SINK;
+    pins_[2].KsPinDescriptor.Category = &KSNODETYPE_AUDIO_LOOPBACK;
     // Host pin -> SUM node -> bridge pin, as SysVAD's HDMI wave filter starts
     // its chain: with the host pin wired straight to the bridge pin the
     // endpoint builder found no path to it and left the endpoints NOTPRESENT.
     node_.Type = &KSNODETYPE_SUM;
     connections_[0] = {PCFILTER_NODE, BioWaveHostPin, 0, KSNODEPIN_STANDARD_IN};
     connections_[1] = {0, KSNODEPIN_STANDARD_OUT, PCFILTER_NODE, BioWaveBridgePin};
+    connections_[2] = {0, KSNODEPIN_STANDARD_OUT, PCFILTER_NODE, BioWaveLoopbackPin};
     descriptor_.AutomationTable = &WaveAutomation;
     descriptor_.PinSize = sizeof(PCPIN_DESCRIPTOR);
     descriptor_.PinCount = RTL_NUMBER_OF(pins_);
@@ -67,6 +78,7 @@ STDMETHODIMP CMiniportWaveRT::QueryInterface(REFIID iid, PVOID* object) {
     *object = nullptr;
     if (IsEqualGUIDAligned(iid, IID_IUnknown) || IsEqualGUIDAligned(iid, IID_IMiniport) || IsEqualGUIDAligned(iid, IID_IMiniportWaveRT))
         *object = static_cast<IMiniportWaveRT*>(this);
+    else if (IsEqualGUIDAligned(iid, IID_IMiniportAudioSignalProcessing)) *object = static_cast<IMiniportAudioSignalProcessing*>(this);
     else return STATUS_NOINTERFACE;
     AddRef(); return STATUS_SUCCESS;
 }
@@ -87,6 +99,7 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::GetDeviceDescription(PDEVICE_DESCRIPTIO
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::NewStream(PMINIPORTWAVERTSTREAM* output, PPORTWAVERTSTREAM port, ULONG pin, BOOLEAN capture, PKSDATAFORMAT format) {
     PAGED_CODE();
     *output = nullptr;
+    if (pin == BioWaveLoopbackPin) return STATUS_NOT_SUPPORTED;
     if (pin != BioWaveHostPin || capture) return STATUS_INVALID_PARAMETER;
     const WAVEFORMATEX* wave;
     NTSTATUS status = BioValidateFormat(Mask(), format, &wave);
@@ -101,7 +114,9 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::NewStream(PMINIPORTWAVERTSTREAM* output
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::DataRangeIntersection(ULONG pin, PKSDATARANGE range, PKSDATARANGE matching, ULONG size, PVOID output, PULONG required) {
     *required = 0;
     if (pin == BioWaveBridgePin) return BioBridgeIntersection(range, matching, size, output, required);
-    if (pin != BioWaveHostPin) return STATUS_NO_MATCH;
+    // The loopback pin's ranges are the host pin's PCM ranges, so the same
+    // search answers it with PCM only.
+    if (pin != BioWaveHostPin && pin != BioWaveLoopbackPin) return STATUS_NO_MATCH;
     for (const auto& entry : BioFormats) if ((Mask() & entry.Bit) && BioRangeAccepts(range, entry) && BioRangeAccepts(matching, entry)) {
         *required = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
         if (!size) return STATUS_BUFFER_OVERFLOW;
@@ -111,6 +126,21 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::DataRangeIntersection(ULONG pin, PKSDAT
         return STATUS_SUCCESS;
     }
     return STATUS_NO_MATCH;
+}
+// IMiniportAudioSignalProcessing::GetModes with SysVAD's contract: a pin
+// outside the filter is STATUS_INVALID_PARAMETER, a pin without modes is
+// STATUS_NOT_SUPPORTED, a NULL array asks for the count and succeeds, a short
+// array is STATUS_BUFFER_TOO_SMALL with the count set.
+STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::GetModes(ULONG pin, GUID* modes, ULONG* count) {
+    PAGED_CODE();
+    if (!count || pin >= RTL_NUMBER_OF(pins_)) return STATUS_INVALID_PARAMETER;
+    if (pin != BioWaveHostPin) return STATUS_NOT_SUPPORTED;
+    if (modes) {
+        if (*count < 1) { *count = 1; return STATUS_BUFFER_TOO_SMALL; }
+        modes[0] = AUDIO_SIGNALPROCESSINGMODE_RAW;
+    }
+    *count = 1;
+    return STATUS_SUCCESS;
 }
 NTSTATUS CMiniportWaveRT::Property(PPCPROPERTY_REQUEST request) {
     auto miniport = static_cast<CMiniportWaveRT*>(reinterpret_cast<IMiniportWaveRT*>(request->MajorTarget));

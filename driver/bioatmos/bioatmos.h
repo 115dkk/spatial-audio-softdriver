@@ -20,6 +20,7 @@ constexpr ULONGLONG BioCompiledFormats = 0x1ff;
 constexpr ULONGLONG BioDefaultFormats = 0x6f;
 constexpr ULONG BioWaveHostPin = 0;
 constexpr ULONG BioWaveBridgePin = 1;
+constexpr ULONG BioWaveLoopbackPin = 2;
 constexpr ULONG BioTopologyBridgePin = 0;
 constexpr ULONG BioTopologyJackPin = 1;
 
