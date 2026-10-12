@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 from scipy.signal import resample_poly
 
-from loopback_check import compare
+from loopback_check import binary_fromstring, compare
 
 RATE = 48_000
 
@@ -68,6 +68,19 @@ class CompareTest(unittest.TestCase):
         summary = compare(reference, RATE, captured, RATE, 0.95)
         self.assertLess(summary["matched"], 1.0, summary)
         self.assertGreater(summary["matched"], 0.6, summary)
+
+
+class BinaryFromstring(unittest.TestCase):
+    def test_reads_a_capture_buffer_as_a_writable_copy(self):
+        samples = np.array([0.25, -0.5, 1.0], dtype=np.float32)
+        buffer = bytearray(samples.tobytes())
+        read = binary_fromstring(memoryview(buffer), dtype="float32")
+        buffer[:] = bytes(len(buffer))
+        np.testing.assert_array_equal(read, samples)
+        read[0] = 2.0
+
+    def test_text_mode_is_numpy_s_own(self):
+        np.testing.assert_array_equal(binary_fromstring("1 2", dtype=int, sep=" "), [1, 2])
 
 
 if __name__ == "__main__":

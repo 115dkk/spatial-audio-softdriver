@@ -30,6 +30,21 @@ WINDOW_S = 0.05
 SEARCH = 64  # samples either side of the running offset
 
 
+_numpy_fromstring = np.fromstring
+
+
+def binary_fromstring(string, dtype=float, count=-1, *, sep=""):
+    """numpy.fromstring with the binary mode NumPy 2 removed.
+
+    soundcard 0.4.5 reads each WASAPI capture buffer with
+    numpy.fromstring(buffer, dtype='float32') (mediafoundation.py); frombuffer
+    does the same, and the copy outlives the released buffer.
+    """
+    if sep:
+        return _numpy_fromstring(string, dtype=dtype, count=count, sep=sep)
+    return np.frombuffer(string, dtype=dtype, count=count).copy()
+
+
 def ncc(a, b):
     a = a - a.mean()
     b = b - b.mean()
@@ -105,6 +120,7 @@ def main():
     # Windows CI only; compare() needs no audio device. soundcard talks to
     # WASAPI directly (shared mode with format conversion), where PortAudio's
     # WASAPI host refused VB-CABLE's capture endpoint.
+    np.fromstring = binary_fromstring
     import soundcard as sc
 
     reference, ref_rate = sf.read(args.reference, dtype="float32", always_2d=True)

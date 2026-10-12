@@ -233,6 +233,9 @@ jobs:
         os: [windows-2022, windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      # Line tables in the PDBs, so a crash dump's stack names the source.
+      CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v7
 
@@ -247,6 +250,15 @@ jobs:
         shell: pwsh
         run: ./tools/ci/install-virtual-cable.ps1
 
+      # VB-CABLE's exclusive-mode events advance on the system timer, one per
+      # 15.6 ms tick whatever the period; a 1 ms tick lets it keep the periods
+      # the engine asks for, as hardware does (ADR 0026).
+      - name: Crash dumps on; system timer held at 1 ms (tools/ci/crash-dumps.ps1, timer-resolution.ps1)
+        shell: pwsh
+        run: |
+          ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps')
+          ./tools/ci/timer-resolution.ps1
+
       - name: Build bio-live and bio-replay; write the fixtures
         id: build
         shell: bash
@@ -256,10 +268,9 @@ jobs:
           cargo run --locked --release -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
           target/release/bio-live.exe devices
 
-      # VB-CABLE signals exclusive-mode events no faster than the 15.6 ms
-      # system timer, so the exclusive cadence tests and soaks use a 20 ms
-      # period; exclusive_cadence_at_each_period prints the rate at each
-      # period (ADR 0026).
+      # The exclusive cadence tests run at a 20 ms period, longer than a PCM
+      # block; exclusive_cadence_at_each_period prints the rate the sink
+      # keeps at 3 to 40 ms (ADR 0026).
       - name: Device tests bio-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
         env:
           BIO_TEST_EXCLUSIVE_PERIOD_MS: "20"
@@ -301,7 +312,7 @@ jobs:
           done
           exit $status
 
-      - name: Soaks (exclusive 5 min, shared 2 min, DD+ 2 min, exclusive under CPU load 2 min, under full page heap 1 min)
+      - name: Soaks (exclusive 5 min, exclusive at the device minimum 2 min, shared 2 min, DD+ 2 min, exclusive under CPU load 2 min, under full page heap 1 min)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         run: |
@@ -313,6 +324,7 @@ jobs:
           $failed = @()
           $soaks = @(
             @{ Name = 'exclusive'; Minutes = 5; PeriodMs = 20 },
+            @{ Name = 'exclusive-min-period'; Minutes = 2 },
             @{ Name = 'shared'; Minutes = 2; Shared = $true },
             @{ Name = 'ddp-exclusive'; Minutes = 2; Dump = 'ddp51'; PeriodMs = 20 },
             @{ Name = 'cpu-load'; Minutes = 2; CpuLoad = $true; PeriodMs = 20 },
@@ -328,7 +340,17 @@ jobs:
           }
           if ($failed) { throw "failed soaks: $($failed -join ', ')" }
 
-      - name: Keep the reports
+      - name: Start and stop 40 times (exclusive and shared, half under CPU load; tools/ci/restart-stress.ps1)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: ./tools/ci/restart-stress.ps1 -BioLive target/release/bio-live.exe -Fixtures (Join-Path $env:RUNNER_TEMP 'fx')
+
+      - name: Crash stacks (cdb on any dump)
+        if: always()
+        shell: pwsh
+        run: ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps') -Report -Symbols (Resolve-Path target/release).Path
+
+      - name: Keep the reports, dumps and symbols
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -337,6 +359,9 @@ jobs:
             ${{ runner.temp }}/loopback-*.json
             ${{ runner.temp }}/soak-*.json
             ${{ runner.temp }}/soak-*.log
+            ${{ runner.temp }}/dumps
+            target/release/bio_live.pdb
+            target/release/bio_replay.pdb
           if-no-files-found: ignore
           retention-days: 14
 
