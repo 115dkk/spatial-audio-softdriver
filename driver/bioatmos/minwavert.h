@@ -28,5 +28,6 @@ private:
     PKSDATARANGE rangePointers_[BioFormatCount]{};
     KSDATARANGE bridges_[BioFormatCount]{};
     PKSDATARANGE bridgePointers_[BioFormatCount]{};
-    PCCONNECTION_DESCRIPTOR connection_{};
+    PCNODE_DESCRIPTOR node_{};
+    PCCONNECTION_DESCRIPTOR connections_[2]{};
 };

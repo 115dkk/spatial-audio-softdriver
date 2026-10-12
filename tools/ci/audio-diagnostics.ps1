@@ -50,9 +50,10 @@ foreach ($flow in 'Render', 'Capture') {
             Where-Object { $_ } | Select-Object -First 1
         $label = if ($states.ContainsKey([int]$state)) { $states[[int]$state] } else { "0x{0:X}" -f [int]$state }
         Write-Host "$($endpoint.PSChildName) state=$label name='$friendly' device='$device'"
-        if ($device -like '*ROOT\MEDIA*' -and $label -ne 'active') {
-            # Everything the endpoint builder stored for an endpoint that did
-            # not become active: which properties it got to tells how far it went.
+        if ($InstanceId -and $device -like "*$InstanceId") {
+            # Everything the endpoint builder stored for the device's endpoints:
+            # which properties it got to tells how far it went, and an active
+            # endpoint of another driver shows what a finished one carries.
             foreach ($property in $properties.PSObject.Properties | Where-Object { $_.Name -like '{*' }) {
                 $value = $property.Value
                 $text = if ($value -is [byte[]]) {

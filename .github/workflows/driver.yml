@@ -226,6 +226,17 @@ jobs:
           Start-Sleep -Seconds 15
           ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
 
+      # Diagnosis only: VB-CABLE, whose endpoints do become active on this
+      # image, through the same tools, so its KS filters and the endpoint
+      # properties of a finished endpoint can be set beside ours.
+      - name: A virtual audio driver that works on this image, through the same tools
+        if: failure() && steps.endpoints.outcome == 'failure'
+        shell: pwsh
+        run: |
+          ./tools/ci/install-virtual-cable.ps1
+          $cable = (Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -contains 'VBAudioVACWDM' }).InstanceId
+          ./tools/ci/audio-diagnostics.ps1 -InstanceId $cable
+
       - uses: actions/setup-python@v7
         if: steps.install.outputs.loaded == 'true'
         with:

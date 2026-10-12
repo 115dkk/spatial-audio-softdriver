@@ -41,14 +41,21 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
     pins_[1].KsPinDescriptor.DataFlow = KSPIN_DATAFLOW_OUT;
     pins_[1].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_NONE;
     pins_[1].KsPinDescriptor.Category = &KSCATEGORY_AUDIO;
-    connection_ = {PCFILTER_NODE, BioWaveHostPin, PCFILTER_NODE, BioWaveBridgePin};
+    // Host pin -> SUM node -> bridge pin, as SysVAD's HDMI wave filter starts
+    // its chain: with the host pin wired straight to the bridge pin the
+    // endpoint builder found no path to it and left the endpoints NOTPRESENT.
+    node_.Type = &KSNODETYPE_SUM;
+    connections_[0] = {PCFILTER_NODE, BioWaveHostPin, 0, KSNODEPIN_STANDARD_IN};
+    connections_[1] = {0, KSNODEPIN_STANDARD_OUT, PCFILTER_NODE, BioWaveBridgePin};
     descriptor_.AutomationTable = &WaveAutomation;
     descriptor_.PinSize = sizeof(PCPIN_DESCRIPTOR);
     descriptor_.PinCount = RTL_NUMBER_OF(pins_);
     descriptor_.Pins = pins_;
     descriptor_.NodeSize = sizeof(PCNODE_DESCRIPTOR);
-    descriptor_.ConnectionCount = 1;
-    descriptor_.Connections = &connection_;
+    descriptor_.NodeCount = 1;
+    descriptor_.Nodes = &node_;
+    descriptor_.ConnectionCount = RTL_NUMBER_OF(connections_);
+    descriptor_.Connections = connections_;
 }
 CMiniportWaveRT::~CMiniportWaveRT() { adapter_->Release(); }
 STDMETHODIMP CMiniportWaveRT::QueryInterface(REFIID iid, PVOID* object) {
