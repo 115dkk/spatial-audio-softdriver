@@ -258,6 +258,10 @@ jobs:
         run: |
           ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps')
           ./tools/ci/timer-resolution.ps1
+          # What MMCSS gives the real-time threads on this SKU.
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' |
+            Select-Object SystemResponsiveness, NetworkThrottlingIndex | Format-List
+          Get-Service -Name MMCSS -ErrorAction SilentlyContinue | Select-Object Status, StartType | Format-List
 
       - name: Build bio-live and bio-replay; write the fixtures
         id: build
@@ -312,7 +316,7 @@ jobs:
           done
           exit $status
 
-      - name: Soaks (exclusive 5 min, exclusive at the device minimum 2 min, shared 2 min, DD+ 2 min, exclusive under CPU load 2 min, under full page heap 1 min)
+      - name: Soaks (exclusive 5 min, exclusive at 10 ms 2 min, shared 2 min, DD+ 2 min, exclusive under CPU load 2 min, under full page heap 1 min)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         run: |
@@ -324,7 +328,7 @@ jobs:
           $failed = @()
           $soaks = @(
             @{ Name = 'exclusive'; Minutes = 5; PeriodMs = 20 },
-            @{ Name = 'exclusive-min-period'; Minutes = 2 },
+            @{ Name = 'exclusive-10ms'; Minutes = 2; PeriodMs = 10 },
             @{ Name = 'shared'; Minutes = 2; Shared = $true },
             @{ Name = 'ddp-exclusive'; Minutes = 2; Dump = 'ddp51'; PeriodMs = 20 },
             @{ Name = 'cpu-load'; Minutes = 2; CpuLoad = $true; PeriodMs = 20 },
@@ -340,10 +344,12 @@ jobs:
           }
           if ($failed) { throw "failed soaks: $($failed -join ', ')" }
 
-      - name: Start and stop 40 times (exclusive and shared, half under CPU load; tools/ci/restart-stress.ps1)
+      - name: Start and stop 60 times (exclusive and shared, half under CPU load; tools/ci/restart-stress.ps1)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
-        run: ./tools/ci/restart-stress.ps1 -BioLive target/release/bio-live.exe -Fixtures (Join-Path $env:RUNNER_TEMP 'fx')
+        run: >-
+          ./tools/ci/restart-stress.ps1 -BioLive target/release/bio-live.exe
+          -Fixtures (Join-Path $env:RUNNER_TEMP 'fx') -Symbols (Resolve-Path target/release).Path
 
       - name: Crash stacks (cdb on any dump)
         if: always()
