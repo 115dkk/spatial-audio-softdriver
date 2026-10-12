@@ -10,7 +10,8 @@ name: Release
 #                  changed since its tag, bump it (feat: minor, else patch),
 #                  commit the bump to master as github-actions[bot] and release
 #                  that.
-#   build-windows  tests in release mode, then the developer tools, zipped
+#   build-windows  tests in release mode, then the developer tools, zipped:
+#                  bio-replay, and bio-live for a tester's SAL PC (ADR 0018)
 #   build-linux    the same for Linux (bio-replay runs in Linux CI)
 #   driver-kit     the kernel driver (Release x64) test-signed into the kit a
 #                  tester installs on a test-signing PC
@@ -87,7 +88,7 @@ jobs:
       - name: Build
         env:
           BIO_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
-        run: cargo build --release --locked -p bio-replay
+        run: cargo build --release --locked -p bio-replay -p bio-live
 
       - name: Package
         shell: pwsh
@@ -95,11 +96,13 @@ jobs:
           VERSION: ${{ needs.gate.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $reported = & target/release/bio-replay.exe --version
-          if ($reported -ne "bio-replay $env:VERSION") { throw "binary reports '$reported'" }
+          foreach ($tool in 'bio-replay', 'bio-live') {
+            $reported = & "target/release/$tool.exe" --version
+            if ($reported -ne "$tool $env:VERSION") { throw "$tool reports '$reported'" }
+          }
           $stage = "bio-atmos-tools-$env:VERSION-windows-x86_64"
           New-Item -ItemType Directory -Force "dist/$stage" | Out-Null
-          Copy-Item target/release/bio-replay.exe, LICENSE, README.md "dist/$stage/"
+          Copy-Item target/release/bio-replay.exe, target/release/bio-live.exe, LICENSE, README.md "dist/$stage/"
           Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip"
           Remove-Item -Recurse -Force "dist/$stage"
           Get-ChildItem dist | Format-Table Name, Length

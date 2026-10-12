@@ -7,7 +7,21 @@
 - 두 렌더 엔드포인트가 활성이 되는지
 - 엔드포인트마다 톤을 재생해 링으로 읽어 오는지
 
-이 문서는 그 밖의 것을 다룹니다: Driver Verifier, 메모리 무결성(HVCI), 공간 음향과 Dolby Atmos 협상, 비트스트림 형식, 쓰기 패킷 주기, 수명 경계. 근거는 [ADR 0027](../adr/0027-driver-layout.md)과 [`driver/README.md`](../../driver/README.md)의 "시험서명 PC" 항목입니다.
+이 문서는 그 밖의 것을 두 부분으로 다룹니다.
+
+- **M2 (SAL PC):** SpatialAudioLab(SAL)을 깐 PC에서만 할 수 있는 실시간 경로 시험입니다.
+  - SAL 링 녹화
+  - 게임과 음악 듣기
+  - 지연을 구축기와 비교
+  - USB DAC 재시작
+  - 근거: [ADR 0015](../adr/0015-latency-as-numbers.md), [ADR 0018](../adr/0018-bio-live-dev-app.md), [ADR 0019](../adr/0019-restart-a-stalled-exclusive-stream.md)
+- **M3 (우리 드라이버):** 우리 커널 드라이버의 시험입니다.
+  - Driver Verifier, 메모리 무결성(HVCI)
+  - 공간 음향과 Dolby Atmos 협상, 비트스트림 형식
+  - 쓰기 패킷 주기, 수명 경계
+  - 근거: [ADR 0027](../adr/0027-driver-layout.md)과 [`driver/README.md`](../../driver/README.md)의 "시험서명 PC" 항목
+
+SAL이 없는 PC라면 M2 부분은 건너뜁니다. 둘 다 할 수 있으면 **M2를 먼저** 합니다. 우리 드라이버를 깔기 전의, 익숙한 구축기 상태에서 기준을 잡기 위해서입니다.
 
 > **이번 라운드는 드라이버만 봅니다.** 우리 드라이버의 소리를 헤드폰으로 끝까지 듣는 시험, 지연 숫자, 트림, 장시간 게임 시험은 엔진이 이 드라이버를 읽게 된 뒤(`sys.driver_ring`)의 릴리스에서 이 문서에 더합니다.
 
@@ -16,7 +30,8 @@
 - 이 문서에 적힌 명령만 실행하십시오. 레지스트리와 부팅 설정은 이 문서가 적은 값만 바꾸십시오.
 - 단계마다 출력과 JSON 파일을 지우거나 고치지 말고 그대로 두십시오. 합격 여부는 각 단계의 "합격 기준"으로만 판단하고, 기준에 없는 일이 생기면 있는 그대로 적으십시오.
 - 블루스크린(버그체크)이 나면 재부팅한 뒤 다른 일보다 먼저 [8단계의 수집](#8-결과-모으기와-보내기)을 실행하십시오.
-- 결과를 공개된 곳(GitHub 이슈 등)에 올릴 때는 숫자 요약만 올리십시오. `.biodump`에는 그때 재생한 소리가 그대로 들어 있으므로 저장소 소유자에게 따로 보냅니다.
+- 결과를 공개된 곳(GitHub 이슈 등)에 올릴 때는 숫자 요약만 올리십시오. `.biodump`와 녹음 WAV에는 그때 재생한 소리가 그대로 들어 있으므로 저장소 소유자에게 따로 보냅니다.
+- SAL과 구축기에서는 **출력만** 보냅니다. 덤프, 녹음, 화면, 숫자, 로그의 설정값이 여기에 해당합니다. SAL의 소스 코드, 그 소스에서 나온 패치(`sal-cli-bio-game.patch` 같은 것), SAL의 파일 자체는 보내지 마십시오. 이 저장소는 SAL을 보지 않고 만듭니다(클린룸, [ADR 0005](../adr/0005-clean-room.md)).
 
 ## 0. 준비
 
@@ -30,6 +45,7 @@
 | 시험서명 모드 | `bcdedit /set testsigning on` 뒤 재부팅. 바탕 화면 오른쪽 아래에 "테스트 모드"가 보입니다 |
 | Python | 3.10 이상([python.org](https://www.python.org/downloads/)). 설치할 때 "Add python.exe to PATH"를 켭니다 |
 | 선택 | Dolby Access(Microsoft Store), 비트스트림 재생기(예: MPC-HC와 LAV Filters), Dolby Atmos·DTS 시험 영상, Atmos를 내는 게임 |
+| M2 | 구축기 그대로의 SAL, 헤드폰과 DAC, 쓰던 BRIR(Impulcifer `hesuvi.wav` 또는 `hrir.wav`, 있으면 헤드폰 보정 FIR), Apple Music(Dolby Atmos 곡) |
 
 **시작 전에 시스템 복원 지점을 만드십시오.** 커널 드라이버를 시험하고 Driver Verifier를 켜므로, 블루스크린과 재부팅이 날 수 있습니다.
 
@@ -52,14 +68,17 @@
 
 ### 묶음 받기
 
-1. 릴리스 페이지에서 `bio-atmos-driver-test-<버전>-x64.zip`과 `SHA256SUMS.txt`를 받습니다.
+1. 릴리스 페이지에서 다음을 받습니다.
+   - `bio-atmos-driver-test-<버전>-x64.zip` (M3)
+   - `bio-atmos-tools-<버전>-windows-x86_64.zip` (M2. `bio-live.exe`, `bio-replay.exe`)
+   - `SHA256SUMS.txt`
 2. 해시를 확인합니다:
 
    ```powershell
    Get-FileHash .\bio-atmos-driver-test-*-x64.zip -Algorithm SHA256
    ```
 
-   `SHA256SUMS.txt`의 값과 같아야 합니다.
+   `SHA256SUMS.txt`의 값과 같아야 합니다. 도구 zip도 같은 방법으로 확인합니다.
 3. 압축을 풀고, 인터넷에서 받은 표시를 지웁니다(관리자 PowerShell, 압축을 푼 폴더에서):
 
    ```powershell
@@ -80,6 +99,101 @@
 묶음의 드라이버는 릴리스를 만들 때 한 번 쓰고 버린 인증서(`CN=BIO Atmos test signing <버전>`)로 서명했습니다. 그 인증서의 개인 키는 빌드 러너 밖으로 나가지 않았고 지워졌습니다. 그래서 이 인증서를 신뢰해도, 이 인증서로 다른 무엇이 서명될 수는 없습니다.
 
 `install.ps1`은 이 인증서를 이 PC의 "신뢰할 수 있는 루트 인증 기관"과 "신뢰할 수 있는 게시자"에 넣습니다. `uninstall.ps1`이 다시 지웁니다.
+
+## M2. SAL PC에서 하는 시험
+
+이 부분은 우리 드라이버가 필요 없습니다. 도구 zip을 푼 폴더에서, **관리자** PowerShell로 합니다. SAL 링은 관리자만 열 수 있습니다.
+
+### M2-0. 프로필 만들기
+
+`bio-live play`와 `bio-replay render`는 BRIR 프로필(TOML)을 읽습니다. 도구 폴더에 `profile.toml`을 만들고, 경로를 쓰던 BRIR로 바꿉니다. Windows 경로는 작은따옴표 문자열로 씁니다.
+
+```toml
+name = "bio-test"
+gain_db = 0.0
+limiter_ceiling_dbfs = -1.0
+
+[brir]
+hesuvi = 'C:\BRIR\hesuvi.wav'          # 또는: hrir = 'C:\BRIR\hrir.wav'
+# headphone_fir = 'C:\BRIR\headphones.wav'
+
+[lfe]
+direction = "FC"
+gain_db = 0.0
+```
+
+장치 목록을 확인합니다:
+
+```powershell
+.\bio-live.exe devices
+```
+
+헤드폰 DAC의 이름 일부를 적어 둡니다. 아래 `--output`에 씁니다.
+
+### M2-1. SAL 링 녹화 (MAT와 DD+ 덤프)
+
+MAT 디코더와 블랙박스 골든 시험의 재료입니다. 구축기에서 하던 대로 SAL 쪽 공간 음향(Dolby Atmos for home theater)을 켠 상태에서, 아래를 재생하는 동안 녹화합니다.
+
+| 덤프 이름 | 재생할 것 | 녹화 명령 |
+| --- | --- | --- |
+| `sal-game-atmos.biodump` | Atmos 게임(예: 오버워치 2)의 한 판 일부 | `.\bio-live.exe record --out sal-game-atmos.biodump --seconds 60` |
+| `sal-music-atmos.biodump` | Apple Music의 Dolby Atmos 곡 하나, 처음부터 60초 | `.\bio-live.exe record --out sal-music-atmos.biodump --seconds 60` |
+| `sal-music-stereo.biodump` | 같은 앱의 스테레오 곡 30초 | `--out sal-music-stereo.biodump --seconds 30` |
+| `sal-ddp.biodump` | E-AC-3(DD+)을 SAL로 비트스트림하는 재생(가능하면 JOC) 30초 | `--out sal-ddp.biodump --seconds 30` |
+
+녹화마다 확인합니다:
+
+```powershell
+.\bio-replay.exe inspect sal-game-atmos.biodump
+```
+
+**합격 기준**
+- `inspect`의 형식이 재생한 것과 맞음(Atmos → MAT, DD+ → E-AC-3)
+- 유실(losses)이 0
+
+**골든 기준 녹음(선택).** `sal-music-atmos`와 같은 곡의 같은 60초를 구축기로 재생하면서, 헤드폰 출력의 WASAPI 루프백을 32비트 WAV로 녹음해 `builder-music-atmos.wav`로 남깁니다. Audacity라면 호스트 "Windows WASAPI", 녹음 장치는 헤드폰 출력의 "(loopback)"입니다. 쓴 BRIR과 구축기 설정을 메모에 적습니다.
+
+### M2-2. 듣기 (게임과 음악)
+
+구축기를 끈 상태에서 `bio-live`가 SAL 링을 받아 헤드폰으로 내게 합니다. SAL 쪽 공간 음향은 켠 그대로 둡니다.
+
+게임(독점 모드, 장치 최소 주기, 링 목표 10 ms):
+
+```powershell
+.\bio-live.exe play --profile profile.toml --output "<DAC 이름 일부>" --target-ms 10 --report play-game.json
+```
+
+음악(링 목표 40 ms):
+
+```powershell
+.\bio-live.exe play --profile profile.toml --output "<DAC 이름 일부>" --target-ms 40 --report play-music.json
+```
+
+같은 것을 공유 모드로 한 번 더: `--shared --report play-music-shared.json`.
+
+Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 바닥, 클럭 보정이 남습니다. 화면에도 1초마다 나옵니다.
+
+들으며 적을 것:
+- 끊김이나 잡음이 들렸는지
+- 위치감과 음색이 구축기와 비교해 어떤지(같음/나음/못함과 한 줄 설명)
+- 게임에서 소리가 화면보다 늦게 느껴지는지
+
+**합격 기준**
+- 재생 중 `underruns` 0
+- `output_restarts` 0. 아니면 그 DAC 이름과 함께 적습니다(ADR 0019)
+- 들리는 문제 없음
+
+### M2-3. 지연을 구축기와 비교 (M2의 끝나는 조건)
+
+구축기는 체인 전체의 지연을 숫자로 잰 적이 없습니다(ADR 0015). 그래서 다음 셋을 함께 받습니다.
+
+1. `play-game.json`의 지연 p50과 p99(ms). 소스 기록 시각부터 장치 재생 시각까지입니다.
+2. 같은 게임, 같은 장면에서 구축기와 `bio-live`를 번갈아 들은 비교. 발소리나 총소리처럼 화면과 맞춰 볼 수 있는 소리로 합니다. 결과는 "bio-live가 더 늦음/같음/더 빠름"입니다.
+3. 구축기가 로그나 설정에 남기는 단계별 버퍼와 지연 값이 있으면 그 값. 값만 적고 파일은 보내지 않습니다.
+
+**합격 기준**
+- 2에서 "bio-live가 더 늦음"이 아님
+- 1의 p50이 3의 합보다 크지 않음(3이 있을 때)
 
 ## 1. 설치
 
@@ -284,7 +398,7 @@ py .\driver_flow_check.py --summary driver-flow-basic.json
 .\collect.ps1
 ```
 
-묶음 폴더에 `bio-atmos-test-report-<무작위>-<날짜시각>.zip`이 생깁니다. 무엇이 들어갔는지는 화면과 zip 안 목록에 나옵니다.
+M2의 결과(`play-*.json`, `sal-*.biodump`, `builder-*.wav`)는 묶음 폴더로 옮긴 뒤 실행하면 함께 모입니다. M2만 하고 우리 드라이버를 깔지 않았어도 이 스크립트는 돕니다. 묶음 폴더에 `bio-atmos-test-report-<무작위>-<날짜시각>.zip`이 생깁니다. 무엇이 들어갔는지는 화면과 zip 안 목록에 나옵니다.
 - OS 빌드, 부팅 설정, Secure Boot와 HVCI 상태
 - 장치와 서비스 상태, 드라이버 해시, 레지스트리 매개변수
 - 엔드포인트 상태
@@ -300,6 +414,9 @@ py .\driver_flow_check.py --summary driver-flow-basic.json
 
 | 단계 | 결과(합격/불합격/못 함) | 메모 |
 | --- | --- | --- |
+| M2-1 SAL 링 녹화(덤프별) | | 형식, 유실 |
+| M2-2 듣기(게임/음악/공유) | | underruns, restarts, 들은 느낌 |
+| M2-3 지연 비교 | | p50/p99 ms, 귀 비교 |
 | 1 설치 | | 종료 코드 |
 | 2 기본 흐름 | | |
 | 3 공간 음향 목록(엔드포인트 0/1) | | 보인 항목 |
