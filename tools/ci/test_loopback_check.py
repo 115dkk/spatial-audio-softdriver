@@ -69,6 +69,18 @@ class CompareTest(unittest.TestCase):
         self.assertLess(summary["matched"], 1.0, summary)
         self.assertGreater(summary["matched"], 0.6, summary)
 
+    def test_one_jump_costs_the_windows_around_it_only(self):
+        # 20 ms of the recording lost in the middle: every later window is
+        # 960 samples early, beyond the running search, and found again.
+        reference = tones(2.0, 1)
+        captured = through_the_cable(reference, 0.3, 0, 0.002, 5)
+        cut = int(1.3 * RATE)
+        captured = np.concatenate([captured[:cut], captured[cut + 960:]])
+        summary = compare(reference, RATE, captured, RATE, 0.95)
+        self.assertGreaterEqual(summary["resyncs"], 1, summary)
+        self.assertGreaterEqual(summary["matched"], 0.9, summary)
+        self.assertLessEqual(len(summary["missed"]), 2, summary)
+
 
 class BinaryFromstring(unittest.TestCase):
     def test_reads_a_capture_buffer_as_a_writable_copy(self):

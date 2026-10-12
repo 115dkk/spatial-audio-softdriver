@@ -6,8 +6,12 @@ then compares the recording with bio-replay's offline render of the same dump.
 The live path resamples (ASRC against the cable's clock), so the comparison is
 windowed: every 50 ms window of the reference must find itself in the
 recording within a few samples of the running offset, with a normalised
-correlation of at least --min-correlation. Silence in either signal is not
-compared.
+correlation of at least --min-correlation. A window that misses there is looked
+for again within 50 ms, so one jump in the recording (a glitch in the shared
+audio engine or the capture) costs the windows around it rather than every
+window after it. Silence in either signal is not compared. bio-live's own
+report must show no underrun while the dump streamed and no device restart:
+discontinuities the engine makes are judged there.
 
     python loopback_check.py --bio-live target/release/bio-live.exe \
         --dump fx/pcm71.biodump --profile fx/profile.toml \
@@ -28,6 +32,7 @@ from scipy.signal import correlate, resample_poly
 
 WINDOW_S = 0.05
 SEARCH = 64  # samples either side of the running offset
+RESYNC_S = 0.05  # either side, for a window that misses at the running offset
 
 
 _numpy_fromstring = np.fromstring
@@ -62,6 +67,8 @@ def compare(reference, ref_rate, captured, rate, min_correlation):
         "matched": 0.0,
         "median_correlation": 0.0,
         "worst_correlation": 0.0,
+        "resyncs": 0,
+        "missed": [],
         "captured_peak": float(np.abs(captured).max(initial=0.0)),
     }
     # Coarse alignment of the whole signals, on the mono sum.
@@ -73,22 +80,40 @@ def compare(reference, ref_rate, captured, rate, min_correlation):
     offset = int(np.argmax(lags))
 
     window = int(WINDOW_S * rate)
+    resync = int(RESYNC_S * rate)
+
+    def score_at(ref, at):
+        if at < 0 or at + window > len(captured):
+            return -1.0
+        cap = captured[at:at + window]
+        return min(ncc(ref[:, 0], cap[:, 0]), ncc(ref[:, 1], cap[:, 1]))
+
     scores = []
-    for start in range(0, len(reference) - window, window):
+    for index, start in enumerate(range(0, len(reference) - window, window)):
         ref = reference[start:start + window]
         if np.sqrt((ref * ref).mean()) < 1e-4:
             continue
         best = -1.0
         best_shift = 0
         for shift in range(-SEARCH, SEARCH + 1):
-            at = offset + start + shift
-            if at < 0 or at + window > len(captured):
-                continue
-            cap = captured[at:at + window]
-            score = min(ncc(ref[:, 0], cap[:, 0]), ncc(ref[:, 1], cap[:, 1]))
+            score = score_at(ref, offset + start + shift)
             if score > best:
                 best, best_shift = score, shift
-        offset += best_shift  # follow the clock drift
+        if best < min_correlation:
+            # Find the window again further away, on the mono sum.
+            lo = max(0, offset + start - resync)
+            hi = min(len(captured), offset + start + window + resync)
+            if hi - lo > window:
+                lags = correlate(cap_mono[lo:hi], ref.sum(axis=1), mode="valid", method="fft")
+                at = lo + int(np.argmax(lags))
+                score = score_at(ref, at)
+                if score > best:
+                    best, best_shift = score, at - (offset + start)
+                    summary["resyncs"] += 1
+        if best < min_correlation:
+            summary["missed"].append({"window": index, "correlation": round(best, 4),
+                                      "offset": int(offset + best_shift)})
+        offset += best_shift  # follow the clock drift, or the jump
         scores.append(best)
 
     if scores:
@@ -115,6 +140,7 @@ def main():
     parser.add_argument("--min-correlation", type=float, default=0.95)
     parser.add_argument("--min-matched", type=float, default=0.9)
     parser.add_argument("--summary", required=True)
+    parser.add_argument("--report", help="where bio-live writes its JSON report")
     args = parser.parse_args()
 
     # Windows CI only; compare() needs no audio device. soundcard talks to
@@ -138,6 +164,8 @@ def main():
         command.append("--shared")
     if args.period_ms:
         command += ["--period-ms", str(args.period_ms)]
+    if args.report:
+        command += ["--report", args.report]
     chunks = []
     with microphone.recorder(samplerate=rate, channels=2, blocksize=rate // 100) as recorder:
         chunks.append(recorder.record(numframes=rate // 2))
@@ -158,13 +186,26 @@ def main():
     summary = compare(reference, ref_rate, captured, rate, args.min_correlation)
     summary["mode"] = args.mode
     summary["bio_live"] = stderr.strip().splitlines()[-1:]
+    problems = []
+    if args.report:
+        with open(args.report, encoding="utf-8") as report:
+            figures = json.load(report)
+        summary["underruns_while_streaming"] = figures["underruns_while_streaming"]
+        summary["output_restarts"] = figures["output_restarts"]
+        if figures["underruns_while_streaming"]:
+            problems.append(f"{figures['underruns_while_streaming']} underruns while streaming")
+        if figures["output_restarts"]:
+            problems.append(f"{figures['output_restarts']} device restarts")
+        if figures["faults"]:
+            problems.append(f"faults: {figures['faults']}")
+    if summary["windows"] == 0 or summary["matched"] < args.min_matched:
+        problems.append(f"only {summary['matched']:.1%} of windows matched")
     with open(args.summary, "w", encoding="utf-8") as out:
         json.dump(summary, out, indent=2)
     print(json.dumps(summary, indent=2))
-    if summary["windows"] == 0 or summary["matched"] < args.min_matched:
-        print(f"only {summary['matched']:.1%} of windows matched", file=sys.stderr)
-        return 1
-    return 0
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    return 1 if problems else 0
 
 
 if __name__ == "__main__":

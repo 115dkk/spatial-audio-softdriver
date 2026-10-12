@@ -297,8 +297,8 @@ jobs:
           {
             echo "## Loopback (${{ matrix.os }})"
             echo
-            echo "| dump | mode | windows | matched | median | worst |"
-            echo "| --- | --- | --- | --- | --- | --- |"
+            echo "| dump | mode | windows | matched | resyncs | median | worst | underruns while streaming | restarts |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
           status=0
           for d in pcm71 ddp51; do
@@ -308,9 +308,10 @@ jobs:
               s="$RUNNER_TEMP/loopback-$d-$mode.json"
               python tools/ci/loopback_check.py --bio-live target/release/bio-live.exe \
                 --dump "$fx/$d.biodump" --profile "$fx/profile.toml" \
-                --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" --period-ms 20 --summary "$s" || status=1
+                --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" --period-ms 20 --summary "$s" \
+                --report "$RUNNER_TEMP/loopback-$d-$mode-report.json" || status=1
               if [ -f "$s" ]; then
-                jq -r --arg d "$d" '"| \($d) | \(.mode) | \(.windows) | \(.matched) | \(.median_correlation) | \(.worst_correlation) |"' "$s" >> "$GITHUB_STEP_SUMMARY"
+                jq -r --arg d "$d" '"| \($d) | \(.mode) | \(.windows) | \(.matched) | \(.resyncs) | \(.median_correlation) | \(.worst_correlation) | \(.underruns_while_streaming) | \(.output_restarts) |"' "$s" >> "$GITHUB_STEP_SUMMARY"
               fi
             done
           done
