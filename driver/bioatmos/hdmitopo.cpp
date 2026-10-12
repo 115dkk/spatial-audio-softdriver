@@ -41,7 +41,11 @@ STDMETHODIMP_(NTSTATUS) CMiniportTopologyHdmi::DataRangeIntersection(ULONG pin, 
     return BioBridgeIntersection(range, matching, bytes, output, required);
 }
 NTSTATUS CMiniportTopologyHdmi::Property(PPCPROPERTY_REQUEST request) {
-    if (request->InstanceSize < sizeof(ULONG) || *static_cast<PULONG>(request->Instance) != BioTopologyJackPin) return STATUS_INVALID_PARAMETER;
+    // Only the jack pin has a jack. Any other pin answers "not supported"
+    // (STATUS_INVALID_DEVICE_REQUEST), as SysVAD's HDMI topology does; its
+    // endpoint turns active on the same runner where ours, answering
+    // STATUS_INVALID_PARAMETER here, stopped short of the wave filter.
+    if (request->InstanceSize < sizeof(ULONG) || *static_cast<PULONG>(request->Instance) != BioTopologyJackPin) return STATUS_INVALID_DEVICE_REQUEST;
     if (request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) return BioBasicSupport(request, KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT);
     if (!(request->Verb & KSPROPERTY_TYPE_GET)) return STATUS_INVALID_DEVICE_REQUEST;
     ULONG id = request->PropertyItem->Id;

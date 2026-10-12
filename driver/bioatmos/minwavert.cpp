@@ -6,7 +6,6 @@
 #include "basetopo.h"
 static PCPROPERTY_ITEM WaveProperties[] = {
     {&KSPROPSETID_Pin, KSPROPERTY_PIN_PROPOSEDATAFORMAT, KSPROPERTY_TYPE_SET | KSPROPERTY_TYPE_BASICSUPPORT, CMiniportWaveRT::Property},
-    {&KSPROPSETID_General, KSPROPERTY_GENERAL_COMPONENTID, KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT, CMiniportWaveRT::Property},
 };
 DEFINE_PCAUTOMATION_TABLE_PROP(WaveAutomation, WaveProperties);
 CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : adapter_(adapter), endpoint_(endpoint) {
@@ -110,18 +109,12 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::DataRangeIntersection(ULONG pin, PKSDAT
 }
 NTSTATUS CMiniportWaveRT::Property(PPCPROPERTY_REQUEST request) {
     auto miniport = static_cast<CMiniportWaveRT*>(reinterpret_cast<IMiniportWaveRT*>(request->MajorTarget));
-    if (IsEqualGUIDAligned(*request->PropertyItem->Set, KSPROPSETID_General)) {
-        if (request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) return BioBasicSupport(request, KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT);
-        NTSTATUS status = BioPropertySize(request, sizeof(KSCOMPONENTID));
-        if (NT_SUCCESS(status)) {
-            auto id = static_cast<PKSCOMPONENTID>(request->Value);
-            RtlZeroMemory(id, sizeof(*id)); id->Component = BioAdapterInterface; id->Version = 1;
-        }
-        return status;
-    }
     if (request->Verb & KSPROPERTY_TYPE_BASICSUPPORT) return BioBasicSupport(request, KSPROPERTY_TYPE_SET | KSPROPERTY_TYPE_BASICSUPPORT);
+    // A pin that takes no stream has no format to propose: "not supported",
+    // as for the topology's pins, not a bad parameter.
     if (!(request->Verb & KSPROPERTY_TYPE_SET) || request->InstanceSize < sizeof(ULONG) ||
-        *static_cast<PULONG>(request->Instance) != BioWaveHostPin || request->ValueSize < sizeof(KSDATAFORMAT)) return STATUS_INVALID_PARAMETER;
+        *static_cast<PULONG>(request->Instance) != BioWaveHostPin) return STATUS_INVALID_DEVICE_REQUEST;
+    if (request->ValueSize < sizeof(KSDATAFORMAT)) return STATUS_INVALID_PARAMETER;
     auto data = static_cast<PKSDATAFORMAT>(request->Value);
     if (data->FormatSize > request->ValueSize) return STATUS_INVALID_PARAMETER;
     const WAVEFORMATEX* wave;
