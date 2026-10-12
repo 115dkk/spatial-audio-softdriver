@@ -62,7 +62,7 @@ def parse_records(stream):
             break
         records.append({
             "kind": kind, "flags": flags, "epoch": epoch, "byte_pos": byte_pos,
-            "qpc": qpc, "len": length, "endpoint": endpoint,
+            "qpc": qpc, "qpc_written": qpc_written, "len": length, "endpoint": endpoint,
             "payload": bytes(stream[offset + HEADER.size:end]),
         })
         offset = (end + RECORD_ALIGN - 1) // RECORD_ALIGN * RECORD_ALIGN
