@@ -1,9 +1,7 @@
 name: Driver
 
 # The kernel driver (driver/, ADR 0027) on every pull request and push to
-# master. Hosted runners cannot boot into test-signing mode, so nothing here
-# loads bioatmos.sys; the jobs take it as far as a machine without test
-# signing can:
+# master:
 #
 #   core       driver/core (the ring, READ gate, DMA clock and format checks
 #              that call no kernel API) built with clang and gcc under ASan
@@ -16,9 +14,11 @@ name: Driver
 #   build      MSBuild with the NuGet WDK, Debug and Release for x64 and ARM64
 #              (/W4 /WX, code analysis), and InfVerif
 #   package    the Release x64 package test-signed (Inf2Cat, signtool) and
-#              installed: driver store, root device node, service and
-#              Parameters defaults; the kernel then refuses the test-signed
-#              image (problem code 52), which is the expected end
+#              installed on a windows-2022 runner, whose boot entry has test
+#              signing on: driver store, root device node, service and
+#              Parameters defaults. The driver loads, the audio stack must
+#              build both render endpoints, and tools/ci/driver_flow_check.py
+#              plays a tone into each and reads the ring back
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
 

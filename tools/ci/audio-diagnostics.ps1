@@ -54,7 +54,12 @@ foreach ($flow in 'Render', 'Capture') {
             # not become active: which properties it got to tells how far it went.
             foreach ($property in $properties.PSObject.Properties | Where-Object { $_.Name -like '{*' }) {
                 $value = $property.Value
-                $text = if ($value -is [byte[]]) { ($value[0..([Math]::Min(47, $value.Length - 1))] | ForEach-Object { $_.ToString('x2') }) -join '' } else { "$value" }
+                $text = if ($value -is [byte[]]) {
+                    # Whole blob in hex, then any UTF-16 text in it (interface paths).
+                    $hex = ($value | ForEach-Object { $_.ToString('x2') }) -join ''
+                    $utf16 = ([Text.Encoding]::Unicode.GetString($value) -replace '[^\x20-\x7e]+', ' ').Trim()
+                    "$hex | $utf16"
+                } else { "$value" }
                 Write-Host "    $($property.Name) = $text"
             }
         }
