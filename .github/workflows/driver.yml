@@ -21,6 +21,9 @@ name: Driver
 #              plays a tone into each and reads the ring back
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
+#   sysvad-control  diagnosis only, while our endpoints stay NOTPRESENT on
+#              hosted runners: SysVAD itself built, test-signed and installed
+#              on the same image as a control for the endpoint builder
 
 on:
   pull_request:
@@ -298,3 +301,63 @@ jobs:
       - uses: github/codeql-action/analyze@v4
         with:
           category: windows-driver
+
+  # Diagnosis only, while our endpoints stay NOTPRESENT on hosted runners:
+  # SysVAD itself (the sample driver/bioatmos is reduced from, at the same
+  # commit) built with the NuGet WDK, test-signed and installed on the same
+  # image, then seen through the same tools. Its endpoints turning active
+  # would put the cause in our driver; staying NOTPRESENT, in the runner.
+  sysvad-control:
+    name: SysVAD on the same runner image (control, diagnosis only)
+    runs-on: windows-2022
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: microsoft/Windows-driver-samples
+          ref: 2dc3fd3a0cc84a2933f2194e7ec0871584979071
+          path: samples
+          sparse-checkout: audio/sysvad
+
+      - name: Build SysVAD TabletAudioSample (Release x64, KMDF 1.31) with the NuGet WDK
+        shell: pwsh
+        working-directory: samples
+        run: |
+          $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
+          if (-not $nuget) {
+            $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
+            Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/v6.12.1/nuget.exe' -OutFile $nuget -UseBasicParsing
+          }
+          & $nuget restore packages.config -PackagesDirectory packages -NonInteractive
+          if ($LASTEXITCODE -ne 0) { throw "nuget restore failed ($LASTEXITCODE)" }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          foreach ($project in 'EndpointsCommon\EndpointsCommon.vcxproj', 'TabletAudioSample\TabletAudioSample.vcxproj') {
+            & $msbuild "audio\sysvad\$project" /p:Configuration=Release /p:Platform=x64 /p:KMDF_VERSION_MINOR=31 /p:RunCodeAnalysis=false /nologo /v:minimal
+            if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for $project ($LASTEXITCODE)" }
+          }
+
+      - name: Start the audio services
+        shell: pwsh
+        run: |
+          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
+            Set-Service -Name $name -StartupType Automatic
+            Start-Service -Name $name
+          }
+
+      - name: Test-sign and install SysVAD (tools/ci/install-sysvad-control.ps1)
+        id: sysvad
+        shell: pwsh
+        run: ./tools/ci/install-sysvad-control.ps1 -Build samples/audio/sysvad/TabletAudioSample
+
+      - name: SysVAD's endpoints and KS filters through the same tools
+        if: always() && steps.sysvad.outputs.instance != ''
+        shell: pwsh
+        env:
+          INSTANCE: ${{ steps.sysvad.outputs.instance }}
+        run: |
+          Start-Sleep -Seconds 15
+          ./tools/ci/endpoint-states.ps1 -InstanceId $env:INSTANCE -Expect 1
+          ./tools/ci/audio-diagnostics.ps1 -InstanceId $env:INSTANCE
