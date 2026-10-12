@@ -16,14 +16,21 @@ NTSTATUS BioBasicSupport(PPCPROPERTY_REQUEST request, ULONG access, ULONG type) 
         RtlZeroMemory(description, sizeof(*description));
         description->AccessFlags = access;
         description->DescriptionSize = sizeof(*description);
-        description->PropTypeSet.Set = KSPROPTYPESETID_General;
-        description->PropTypeSet.Id = type;
+        // No value type: GUID_NULL and 0, as the zeroing left them.
+        if (type != VT_ILLEGAL) {
+            description->PropTypeSet.Set = KSPROPTYPESETID_General;
+            description->PropTypeSet.Id = type;
+        }
         request->ValueSize = sizeof(*description);
         return STATUS_SUCCESS;
     }
-    NTSTATUS status = BioPropertySize(request, sizeof(ULONG));
-    if (NT_SUCCESS(status)) *static_cast<PULONG>(request->Value) = access;
-    return status;
+    if (supplied >= sizeof(ULONG)) {
+        *static_cast<PULONG>(request->Value) = access;
+        request->ValueSize = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+    request->ValueSize = 0;
+    return STATUS_BUFFER_TOO_SMALL;
 }
 void BioBuildFormat(const BioFormatEntry& entry, PKSDATAFORMAT_WAVEFORMATEXTENSIBLE output) {
     RtlZeroMemory(output, sizeof(*output));

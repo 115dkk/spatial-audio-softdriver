@@ -102,11 +102,19 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::DataRangeIntersection(ULONG pin, PKSDAT
     }
     return STATUS_NO_MATCH;
 }
+// IMiniportAudioSignalProcessing::GetModes: a NULL array asks for the count
+// and succeeds; a short array is STATUS_BUFFER_TOO_SMALL with the count set.
+// Returning STATUS_BUFFER_OVERFLOW for the count query left PortCls without
+// the host pin's modes, and the endpoint builder made both endpoints
+// NOTPRESENT on the first CI run that loaded the driver.
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::GetModes(ULONG pin, GUID* modes, ULONG* count) {
+    if (!count || pin > BioWaveBridgePin) return STATUS_INVALID_PARAMETER;
     if (pin != BioWaveHostPin) return STATUS_NOT_SUPPORTED;
-    ULONG supplied = *count; *count = 1;
-    if (!modes || !supplied) return STATUS_BUFFER_OVERFLOW;
-    modes[0] = AUDIO_SIGNALPROCESSINGMODE_RAW;
+    if (modes) {
+        if (*count < 1) { *count = 1; return STATUS_BUFFER_TOO_SMALL; }
+        modes[0] = AUDIO_SIGNALPROCESSINGMODE_RAW;
+    }
+    *count = 1;
     return STATUS_SUCCESS;
 }
 NTSTATUS CMiniportWaveRT::Property(PPCPROPERTY_REQUEST request) {
