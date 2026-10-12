@@ -197,6 +197,26 @@ jobs:
           Start-Sleep -Seconds 10
           ./tools/ci/audio-diagnostics.ps1 -InstanceId 'ROOT\MEDIA\0000'
 
+      # Users get no service restart either: both render endpoints must be
+      # active as the device arrives.
+      - name: Both render endpoints are active after install (tools/ci/endpoint-states.ps1)
+        id: endpoints
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
+
+      # Diagnosis only, after the check above failed. A restarted endpoint
+      # builder enumerates every interface at once, so endpoints that turn
+      # active here point at the order in which the interfaces arrived.
+      - name: Endpoint states after restarting the endpoint builder
+        if: failure() && steps.endpoints.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Restart-Service -Name AudioEndpointBuilder -Force
+          Start-Service -Name Audiosrv
+          Start-Sleep -Seconds 15
+          ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
+
       - uses: actions/setup-python@v7
         if: steps.install.outputs.loaded == 'true'
         with:

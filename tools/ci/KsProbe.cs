@@ -607,18 +607,29 @@ public static class KsProbe
 
     static void CreateHostPin(IntPtr handle, string prefix, uint pin, List<string> lines)
     {
-        // PortWaveRT uses KSINTERFACE_STANDARD_LOOPED_STREAMING (id 1).
-        byte[] connect = Connection(pin);
+        // PortWaveRT uses KSINTERFACE_STANDARD_LOOPED_STREAMING (id 1). The variants
+        // tell a rejected request (interface, priority, format shape) from a
+        // rejection inside the miniport's NewStream: only the last differs per row.
+        CreateHostPin(handle, prefix, pin, 1, 0, true, "looped, subclass 0, EXTENSIBLE", lines);
+        CreateHostPin(handle, prefix, pin, 1, 1, true, "looped, subclass 1, EXTENSIBLE", lines);
+        CreateHostPin(handle, prefix, pin, 0, 1, true, "streaming, subclass 1, EXTENSIBLE", lines);
+        CreateHostPin(handle, prefix, pin, 1, 1, false, "looped, subclass 1, WAVEFORMATEX", lines);
+    }
+
+    static void CreateHostPin(IntPtr handle, string prefix, uint pin, uint interfaceId, uint subclass,
+        bool extensible, string variant, List<string> lines)
+    {
+        byte[] connect = Connection(pin, interfaceId, subclass, extensible);
         IntPtr memory = Marshal.AllocHGlobal(connect.Length);
         IntPtr created = IntPtr.Zero;
         try
         {
             Marshal.Copy(connect, 0, memory, connect.Length);
             uint error = KsCreatePin(handle, memory, 0x40000000, out created);
-            lines.Add(prefix + " KsCreatePin PCM-48000-2ch-16bit WAVEFORMATEXTENSIBLE looped: " +
+            lines.Add(prefix + " KsCreatePin PCM-48000-2ch-16bit (" + variant + "): " +
                 (error == 0 ? "OK" : ErrorText(unchecked((int)error))));
         }
-        catch (Exception e) { lines.Add(prefix + " KsCreatePin: " + ExceptionText(e)); }
+        catch (Exception e) { lines.Add(prefix + " KsCreatePin (" + variant + "): " + ExceptionText(e)); }
         finally
         {
             if (created != IntPtr.Zero && created != InvalidHandle)
@@ -692,13 +703,27 @@ public static class KsProbe
         return b;
     }
 
-    static byte[] Connection(uint pin)
+    // KSDATAFORMAT_WAVEFORMATEX: WAVE_FORMAT_PCM, cbSize 0, 82 bytes.
+    static byte[] PcmFormatEx()
     {
-        var b = new byte[ConnectSize + FormatExtensibleSize];
-        PutGuid(b, 0, StandardInterface); Put32(b, 16, 1);
+        var b = new byte[FormatWaveSize];
+        Put32(b, 0, FormatWaveSize); Put32(b, 8, 4);
+        PutGuid(b, 16, AudioType); PutGuid(b, 32, PcmSubtype); PutGuid(b, 48, WaveSpecifier);
+        Put16(b, 64, 1); Put16(b, 66, 2); Put32(b, 68, 48000); Put32(b, 72, 192000);
+        Put16(b, 76, 4); Put16(b, 78, 16); Put16(b, 80, 0);
+        return b;
+    }
+
+    static byte[] Connection(uint pin) { return Connection(pin, 1, 0, true); }
+
+    static byte[] Connection(uint pin, uint interfaceId, uint subclass, bool extensible)
+    {
+        byte[] format = extensible ? PcmFormat() : PcmFormatEx();
+        var b = new byte[ConnectSize + format.Length];
+        PutGuid(b, 0, StandardInterface); Put32(b, 16, interfaceId);
         PutGuid(b, 24, StandardMedium); Put32(b, 40, 0); Put32(b, 48, pin);
-        Put32(b, 64, 0x40000000); // KSPRIORITY_NORMAL, subclass 0; PinToHandle is NULL.
-        Buffer.BlockCopy(PcmFormat(), 0, b, ConnectSize, FormatExtensibleSize);
+        Put32(b, 64, 0x40000000); Put32(b, 68, subclass); // KSPRIORITY_NORMAL; PinToHandle is NULL.
+        Buffer.BlockCopy(format, 0, b, ConnectSize, format.Length);
         return b;
     }
 
