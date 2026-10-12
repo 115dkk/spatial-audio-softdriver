@@ -119,7 +119,7 @@ fn main() -> ExitCode {
 #[cfg(windows)]
 mod platform {
     use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::fs::File;
     use std::io::{BufRead, BufWriter, Write};
     use std::mem::offset_of;
@@ -182,7 +182,8 @@ mod platform {
         let mut ring = open_ring()?;
         let mut writer = create_dump(out)?;
         let mut buf = vec![0_u8; 1 << 20];
-        let (mut bytes, mut data, mut formats, mut lost) = (0_u64, 0_u64, 0_u64, 0_u64);
+        let mut bytes = 0_u64;
+        let mut endpoints = BTreeMap::<u16, (u64, u64, u64)>::new();
         let started = Instant::now();
         let mut next_report = Duration::from_secs(1);
         eprintln!(
@@ -197,26 +198,31 @@ mod platform {
                 writer.write_all(&buf[..n]).map_err(|e| e.to_string())?;
                 bytes += n as u64;
                 for record in records(&buf[..n]).flatten() {
+                    let endpoint = record.endpoint();
+                    let counts = endpoints.entry(endpoint).or_default();
                     match record {
-                        Record::Data { bytes: payload, .. } => data += payload.len() as u64,
+                        Record::Data { bytes: payload, .. } => counts.0 += payload.len() as u64,
                         Record::FormatChange { epoch, format, .. } => {
-                            formats += 1;
-                            eprintln!("epoch {epoch}: {format:?}");
+                            counts.1 += 1;
+                            eprintln!("endpoint {endpoint} epoch {epoch}: {format:?}");
                         }
-                        Record::Overrun { lost_bytes, .. } => lost += lost_bytes,
+                        Record::Overrun { lost_bytes, .. } => counts.2 += lost_bytes,
                         _ => {}
                     }
                 }
             }
             if started.elapsed() >= next_report {
-                eprintln!(
-                    "{:>4} s  {data} payload bytes, {formats} format changes, {lost} bytes lost",
-                    next_report.as_secs()
-                );
+                for (endpoint, (data, formats, lost)) in &endpoints {
+                    eprintln!(
+                        "{:>4} s  endpoint {endpoint}: {data} payload bytes, {formats} format changes, {lost} bytes lost",
+                        next_report.as_secs()
+                    );
+                }
                 next_report += Duration::from_secs(1);
             }
         }
         writer.flush().map_err(|e| e.to_string())?;
+        let data = endpoints.values().map(|counts| counts.0).sum::<u64>();
         eprintln!(
             "wrote {bytes} bytes of records ({data} payload bytes) to {}",
             out.display()

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use bio_abi::{Record, records, split_dump};
+use bio_abi::{ENDPOINT_PRIMARY, Record, records, split_dump};
 use clap::{Parser, Subcommand};
 use engine::{Chain, ChainConfig, ChainEvent, Prepared, partition_for, scene_shape};
 use serde::Serialize;
@@ -32,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print a JSON summary of a dump: formats per epoch, record counts, losses.
+    /// Print a JSON summary of a dump: formats per endpoint and epoch, record counts, losses.
     Inspect { dump: PathBuf },
     /// Render a diagnostic dump to a deterministic 32-bit float stereo WAV.
     Render {
@@ -43,23 +43,34 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Render endpoint number.
+        #[arg(long, default_value_t = ENDPOINT_PRIMARY)]
+        endpoint: u16,
     },
+}
+
+#[derive(Serialize, Default)]
+struct EndpointSummary {
+    records: u64,
+    data_bytes: u64,
 }
 
 #[derive(Serialize, Default)]
 struct Summary {
     abi_version: u32,
+    dump_format_version: u32,
     qpc_frequency: u64,
     records: BTreeMap<&'static str, u64>,
     data_bytes: u64,
     lost_bytes: u64,
-    epochs: BTreeMap<u32, String>,
+    epochs: BTreeMap<String, String>,
+    endpoints: BTreeMap<u16, EndpointSummary>,
     errors: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
 struct RenderReport {
-    epochs: BTreeMap<u32, String>,
+    epochs: BTreeMap<String, String>,
     blocks: u64,
     frames_written: u64,
     errors: Vec<String>,
@@ -67,35 +78,58 @@ struct RenderReport {
     output_sha256: String,
 }
 
+fn epoch_key(endpoint: u16, epoch: u32) -> String {
+    format!("{endpoint}:{epoch}")
+}
+
 fn inspect(bytes: &[u8]) -> Result<Summary, String> {
     let (header, stream) = split_dump(bytes).map_err(|error| error.to_string())?;
     let mut summary = Summary {
         abi_version: header.abi_version,
+        dump_format_version: header.format_version,
         qpc_frequency: header.qpc_frequency,
         ..Summary::default()
     };
     for record in records(stream) {
-        let kind = match record {
-            Ok(Record::Data { bytes, .. }) => {
+        let (kind, endpoint, data_bytes) = match record {
+            Ok(Record::Data {
+                endpoint, bytes, ..
+            }) => {
                 summary.data_bytes += bytes.len() as u64;
-                "data"
+                ("data", Some(endpoint), bytes.len() as u64)
             }
-            Ok(Record::FormatChange { epoch, format, .. }) => {
-                summary.epochs.insert(epoch, format!("{format:?}"));
-                "format_change"
+            Ok(Record::FormatChange {
+                endpoint,
+                epoch,
+                format,
+                ..
+            }) => {
+                summary
+                    .epochs
+                    .insert(epoch_key(endpoint, epoch), format!("{format:?}"));
+                ("format_change", Some(endpoint), 0)
             }
-            Ok(Record::StreamStart { .. }) => "stream_start",
-            Ok(Record::StreamStop { .. }) => "stream_stop",
-            Ok(Record::Overrun { lost_bytes, .. }) => {
+            Ok(Record::StreamStart { endpoint, .. }) => ("stream_start", Some(endpoint), 0),
+            Ok(Record::StreamStop { endpoint, .. }) => ("stream_stop", Some(endpoint), 0),
+            Ok(Record::Overrun {
+                endpoint,
+                lost_bytes,
+                ..
+            }) => {
                 summary.lost_bytes += lost_bytes;
-                "overrun"
+                ("overrun", Some(endpoint), 0)
             }
             Err(error) => {
                 summary.errors.push(error.to_string());
-                "invalid"
+                ("invalid", None, 0)
             }
         };
         *summary.records.entry(kind).or_default() += 1;
+        if let Some(endpoint) = endpoint {
+            let endpoint = summary.endpoints.entry(endpoint).or_default();
+            endpoint.records += 1;
+            endpoint.data_bytes += data_bytes;
+        }
     }
     Ok(summary)
 }
@@ -104,10 +138,14 @@ fn render_dump(
     bytes: &[u8],
     profile_path: &Path,
     output_path: &Path,
+    endpoint: u16,
 ) -> Result<RenderReport, String> {
     let (_, stream) = split_dump(bytes).map_err(|error| error.to_string())?;
     let profile = brir::load_profile(profile_path).map_err(|error| error.to_string())?;
-    let config = ChainConfig::default();
+    let config = ChainConfig {
+        endpoint,
+        ..ChainConfig::default()
+    };
     let mut chain = Chain::new(config);
     let mut installed_shape = None;
     let mut writer: Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>> = None;
@@ -123,9 +161,18 @@ fn render_dump(
                 continue;
             }
         };
-        if let Record::FormatChange { epoch, format, .. } = record {
-            report.epochs.insert(epoch, format!("{format:?}"));
-            if let Some(shape) = scene_shape(&format)
+        if let Record::FormatChange {
+            endpoint: record_endpoint,
+            epoch,
+            format,
+            ..
+        } = record
+        {
+            report
+                .epochs
+                .insert(epoch_key(record_endpoint, epoch), format!("{format:?}"));
+            if record_endpoint == endpoint
+                && let Some(shape) = scene_shape(&format)
                 && installed_shape != Some(shape)
             {
                 let prepared = brir::prepare(&profile, shape.0, partition_for(shape.1))
@@ -226,10 +273,11 @@ fn run() -> Result<(), String> {
             profile,
             out,
             report,
+            endpoint,
         } => {
             let bytes =
                 std::fs::read(&dump).map_err(|error| format!("{}: {error}", dump.display()))?;
-            let rendered = render_dump(&bytes, &profile, &out)?;
+            let rendered = render_dump(&bytes, &profile, &out, endpoint)?;
             if let Some(report_path) = report {
                 let json = serde_json::to_vec_pretty(&rendered).expect("render report serializes");
                 std::fs::write(&report_path, json)
@@ -259,7 +307,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use bio_abi::{RecordWriter, dump_header_bytes, wave_format_bytes};
+    use bio_abi::{ENDPOINT_SECOND, RecordWriter, dump_header_bytes, wave_format_bytes};
     use bio_types::{PcmFormat, SampleType, SourceFormat};
 
     use super::*;
@@ -279,16 +327,23 @@ mod tests {
         assert!(writer.stream_start(1, 0));
         assert!(writer.format_change(1, 0, &wave_format_bytes(&pcm)));
         assert!(writer.data(1, 0, 1, &[0; 16]));
-        assert!(writer.overrun(16, 2, 64));
+        writer.set_endpoint(ENDPOINT_SECOND);
+        assert!(writer.data(3, 0, 1, &[0; 8]));
+        assert!(writer.overrun(8, 2, 64));
         let length = writer.len();
         let mut file = dump_header_bytes(10_000_000);
         file.extend_from_slice(&stream[..length]);
 
         let summary = inspect(&file).unwrap();
-        assert_eq!(summary.records["data"], 1);
+        assert_eq!(summary.dump_format_version, bio_abi::DUMP_FORMAT_VERSION);
+        assert_eq!(summary.records["data"], 2);
         assert_eq!(summary.records["format_change"], 1);
-        assert_eq!((summary.data_bytes, summary.lost_bytes), (16, 64));
-        assert!(summary.epochs[&1].contains("Pcm"));
+        assert_eq!((summary.data_bytes, summary.lost_bytes), (24, 64));
+        assert!(summary.epochs["0:1"].contains("Pcm"));
+        assert_eq!(summary.endpoints[&ENDPOINT_PRIMARY].records, 3);
+        assert_eq!(summary.endpoints[&ENDPOINT_PRIMARY].data_bytes, 16);
+        assert_eq!(summary.endpoints[&ENDPOINT_SECOND].records, 2);
+        assert_eq!(summary.endpoints[&ENDPOINT_SECOND].data_bytes, 8);
         assert!(summary.errors.is_empty());
         assert!(inspect(b"not a dump").is_err());
     }
