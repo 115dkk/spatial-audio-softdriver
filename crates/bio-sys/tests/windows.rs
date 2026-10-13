@@ -46,14 +46,20 @@ fn render_endpoints_include_a_default() {
 #[test]
 #[ignore = "requires VB-CABLE with a supported multichannel render format; plays silence"]
 fn wasapi_opens_multichannel_layouts_on_the_cable() {
-    let Some(cable) = devices::render_endpoint_formats()
+    // The runners name the cable's render endpoint "Speakers (VB-Audio Virtual
+    // Cable)"; the job that runs this installs it, so its absence is a failure
+    // rather than a skip that would pass without testing anything.
+    let cable = devices::render_endpoint_formats()
         .unwrap()
         .into_iter()
-        .find(|formats| formats.endpoint.name.to_lowercase().contains("cable input"))
-    else {
-        eprintln!("skipped: CABLE Input render endpoint is absent");
-        return;
-    };
+        .find(|formats| {
+            formats
+                .endpoint
+                .name
+                .to_lowercase()
+                .contains("vb-audio virtual cable")
+        })
+        .expect("the VB-CABLE render endpoint is installed");
     let mut tested = 0;
     for layout in [
         bio_types::OutputLayout {
@@ -91,7 +97,7 @@ fn wasapi_opens_multichannel_layouts_on_the_cable() {
         tested += 1;
     }
     if tested == 0 {
-        eprintln!("skipped: CABLE Input supports neither tested layout");
+        eprintln!("skipped: the cable supports neither tested layout");
     }
 }
 

@@ -18,12 +18,15 @@ if ($device.HardwareID -contains $SpatialPackage.HardwareId) {
     }
 } else {
     # SysVAD control job has no Spatial mini-pair contract. Count only the
-    # supplied node's endpoints, without matching display names.
+    # supplied node's endpoints, without matching display names. The owner
+    # property reads like '{1}.ROOT\MEDIA\0000': the instance id must end it
+    # whole, after a '.' or '\' (ROOT\MEDIA\0000 is not ROOT\MEDIA\10000).
+    $ownerPattern = '(^|[.\\])' + [regex]::Escape($InstanceId) + '$'
     $active = @()
     foreach ($endpoint in Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render') {
         $properties = Get-ItemProperty (Join-Path $endpoint.PSPath 'Properties')
         $owner = [string]$properties.'{b3f8fa53-0004-438e-9003-51a46e139bfc},2'
-        if (-not ($owner.Equals($InstanceId, [StringComparison]::OrdinalIgnoreCase) -or $owner.EndsWith("\$InstanceId", [StringComparison]::OrdinalIgnoreCase))) { continue }
+        if ($owner -notmatch $ownerPattern) { continue }
         $state = [int](Get-ItemProperty $endpoint.PSPath).DeviceState
         Write-Host "$($endpoint.PSChildName) $($states[$state]) '$($properties.'{a45c254e-df1c-4efd-8020-67d146a850e0},2')'"
         if ($state -eq 1) { $active += $endpoint }

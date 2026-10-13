@@ -737,6 +737,19 @@ void Formats() {
     CHECK(bio::CodecBit(plain, sizeof(plain)) == BIO_FORMAT_DTS);
 }
 
+// Overwriting an endpoint that never had a format leaves no format to
+// restate; that must not leave a recovery request behind that blocks READ.
+void FormatlessOverwriteKeepsReading() {
+    bio::RecordRing ring;
+    CHECK(ring.Init(storage, sizeof(storage)));
+    uint8_t payload[1024]{};
+    for (uint64_t i = 0; i < 80; ++i) CHECK(ring.Data(0, i, i, payload, sizeof(payload), nullptr, 0));
+    CHECK(ring.Endpoint(0).lost_bytes != 0);
+    CHECK(ring.PrepareRead(100));
+    uint8_t out[4096];
+    CHECK(ring.Read(out, sizeof(out), 100) != 0);
+}
+
 void Volume32() {
     bio::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
@@ -912,6 +925,7 @@ int main() {
     PcmIntersectionOrder();
     PcmRules();
     Volume32();
+    FormatlessOverwriteKeepsReading();
     if (failures != 0) {
         fprintf(stderr, "%d checks failed\n", failures);
         return 1;

@@ -17,8 +17,11 @@
 
 constexpr ULONG BioPoolTag = 'oiBA';
 constexpr ULONG BioRingBytes = 8 * 1024 * 1024;
-const BIO_ENDPOINT_FORMATS BioCompiledFormats = {BIO_COMPILED_CODECS, BIO_COMPILED_PCM};
-const BIO_ENDPOINT_FORMATS BioDefaultFormats = {BIO_DEFAULT_ENABLED_CODECS, BIO_DEFAULT_PCM};
+// constexpr from the header's initializer lists: copying BIO_COMPILED_PCM
+// here would need a dynamic initializer, and a kernel image has no CRT to
+// run one (LNK4210 in Debug builds).
+constexpr BIO_ENDPOINT_FORMATS BioCompiledFormats = {BIO_COMPILED_CODECS, BIO_COMPILED_PCM_INIT};
+constexpr BIO_ENDPOINT_FORMATS BioDefaultFormats = {BIO_DEFAULT_ENABLED_CODECS, BIO_DEFAULT_PCM_INIT};
 constexpr ULONG BioWaveHostPin = 0;
 constexpr ULONG BioWaveBridgePin = 1;
 constexpr ULONG BioTopologyBridgePin = 0;

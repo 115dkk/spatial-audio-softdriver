@@ -86,7 +86,7 @@ void RecordRing::DropFirst() {
         }
         endpoint.discontinuity = true;
         needs_overrun_[header.endpoint] = true;
-        needs_repeat_[header.endpoint] = true;
+        needs_repeat_[header.endpoint] = endpoint.format_bytes != 0;
         needs_state_repeat_[header.endpoint] = true;
         needs_volume_repeat_[header.endpoint] = endpoint.volume.channel_count != 0;
         recovery_prepared_[header.endpoint] = false;
@@ -163,6 +163,11 @@ bool RecordRing::PrepareRecovery(uint16_t ep, uint64_t qpc, uint32_t main_bytes,
         const uint32_t state_bytes = state_repeat ? RecordBytes(0) : 0U;
         const uint32_t volume_bytes = volume_repeat ? RecordBytes(sizeof(BIO_VOLUME_PAYLOAD)) : 0U;
         const uint64_t required = static_cast<uint64_t>(main_bytes) + overrun_bytes + repeat_bytes + volume_bytes + state_bytes;
+        // Nothing to emit and no record to follow (a cleared format repeat
+        // with no format): there is no room to make, and READ must go on.
+        if (required == 0) {
+            return true;
+        }
         if (required > capacity_ || !MakeRoom(static_cast<uint32_t>(required))) {
             return false;
         }
@@ -354,7 +359,7 @@ bool RecordRing::SourceGap(uint16_t ep, uint64_t qpc, uint64_t lost_bytes) {
     endpoint.pending_lost += lost_bytes;
     endpoint.discontinuity = true;
     needs_overrun_[ep] = true;
-    needs_repeat_[ep] = true;
+    needs_repeat_[ep] = endpoint.format_bytes != 0;
     needs_state_repeat_[ep] = true;
     needs_volume_repeat_[ep] = endpoint.volume.channel_count != 0;
     recovery_prepared_[ep] = false;

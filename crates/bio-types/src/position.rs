@@ -223,13 +223,17 @@ impl Speaker {
 mod tests {
     use super::*;
 
+    /// sin, cos and atan2 may differ by a few ULP between platform libms
+    /// (Miri perturbs them to model that). The round trips amplify it to at
+    /// most 3.2e-6 under Miri and 7.2e-7 natively over the dense grid, far
+    /// below any audible change in a position.
     fn close(a: Position, b: Position) {
         assert!(
             (a.x - b.x)
                 .abs()
                 .max((a.y - b.y).abs())
                 .max((a.z - b.z).abs())
-                < 2e-6,
+                < 1e-5,
             "{a:?} != {b:?}"
         );
     }

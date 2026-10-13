@@ -219,6 +219,10 @@ fn generate() -> String {
         .write(&mut out);
     let generated = String::from_utf8(out).expect("cbindgen writes UTF-8");
     // C89 and C++17 share aggregate initialization, not C99 compound literals.
+    // The PCM structs also get an initializer-list macro: a `static const`
+    // struct is not a constant expression in C++, and a kernel image has no
+    // CRT to run the dynamic initializer that copying it at namespace scope
+    // would need.
     generated
         .lines()
         .map(|line| {
@@ -233,7 +237,8 @@ fn generate() -> String {
                     ("BIO_COMPILED_PCM", bio_abi::COMPILED_PCM)
                 };
                 format!(
-                    "static const BIO_PCM_FORMATS {name} = {{ {}, {}, {}, {}U }};",
+                    "#define {name}_INIT {{ {}, {}, {}, {}U }}\n\n\
+                     static const BIO_PCM_FORMATS {name} = {name}_INIT;",
                     value.rates, value.shapes, value.max_masked_channels, value.direct_channels
                 )
             } else {

@@ -288,6 +288,17 @@ mod paced_bounds {
     #[cfg_attr(not(windows), allow(dead_code))]
     const QPC_AT: usize = offset_of!(RecordHeader, qpc);
 
+    /// Where one READ chunk ends in the cleaned stream. `recorded` is false for
+    /// a chunk the recorder did not close with a READ end: the unterminated
+    /// tail (all of a dump written by a tool rather than recorded) or bytes
+    /// cut short by a recorder gap. Only recorded ends are READ boundaries.
+    #[derive(Clone, Copy, Debug)]
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(super) struct ReadEnd {
+        pub(super) at: usize,
+        pub(super) recorded: bool,
+    }
+
     /// The READ-aligned records `--loop` repeats, and how far one pass moves
     /// the dump's clock and byte position.
     #[derive(Clone, Copy, Debug)]
@@ -334,12 +345,14 @@ mod paced_bounds {
     }
 
     /// Finds the repeat span. Format 2 supplies READ ends so the span expands
-    /// from the first data record's READ start through the last one's READ end;
-    /// legacy dumps retain their data-record span.
+    /// from the first data record's READ start through the last one's READ end,
+    /// when the recorder closed that READ. Otherwise (legacy dumps, and dumps
+    /// with no recorded READ around the last data record) the span is the data
+    /// records alone, so state records before them play once.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(super) fn loop_span(
         stream: &[u8],
-        read_ends: Option<&[usize]>,
+        read_ends: Option<&[ReadEnd]>,
     ) -> Result<LoopSpan, String> {
         let mut data = Vec::new();
         let mut at = 0;
@@ -355,18 +368,17 @@ mod paced_bounds {
             _ => return Err("--loop needs a dump with at least two data records".to_owned()),
         };
         let spacing = data[1].4.saturating_sub(first.4);
-        let (start, end, first_read_end) = match read_ends {
-            Some(ends) => {
-                let first_read = ends.partition_point(|&end| end <= first.0);
-                let last_read = ends.partition_point(|&end| end <= last.0);
-                let start = first_read.checked_sub(1).map_or(0, |before| ends[before]);
-                let end = ends.get(last_read).copied().ok_or_else(|| {
-                    "the last data record is outside the recorded READs".to_owned()
-                })?;
-                (start, end, Some(first_read))
-            }
-            None => (first.0, last.0 + last.1, None),
-        };
+        let recorded_span = read_ends.and_then(|ends| {
+            let first_read = ends.partition_point(|end| end.at <= first.0);
+            let last_read = ends.partition_point(|end| end.at <= last.0);
+            let end = ends.get(last_read).filter(|end| end.recorded)?;
+            let start = first_read
+                .checked_sub(1)
+                .map_or(0, |before| ends[before].at);
+            Some((start, end.at, Some(first_read)))
+        });
+        let (start, end, first_read_end) =
+            recorded_span.unwrap_or((first.0, last.0 + last.1, None));
         Ok(LoopSpan {
             start,
             end,
@@ -398,11 +410,9 @@ mod paced_bounds {
             let read_three = writer.len();
             let len = writer.len();
 
-            let span = loop_span(
-                &stream[..len],
-                Some(&[read_zero, read_one, read_two, read_three]),
-            )
-            .unwrap();
+            let ends = [read_zero, read_one, read_two, read_three]
+                .map(|at| ReadEnd { at, recorded: true });
+            let span = loop_span(&stream[..len], Some(&ends)).unwrap();
             assert_eq!(span.start, read_zero);
             assert_eq!(span.end, read_two);
             assert_eq!(span.first_read_end, Some(1));
@@ -422,6 +432,49 @@ mod paced_bounds {
             assert_eq!(next_read_end, 1);
             assert_eq!(qpc_shift, span.qpc);
             assert_eq!(pos_shift, span.bytes);
+        }
+
+        /// A format-2 dump written by a tool (the CI fixtures) has no READ
+        /// ends: its one unterminated chunk is not a READ, so the loop repeats
+        /// the data records and never the format or stream records before
+        /// them.
+        #[test]
+        fn unrecorded_reads_loop_the_data_records() {
+            let mut stream = [0; 512];
+            let mut writer = RecordWriter::new(&mut stream);
+            assert!(writer.format_change(1, 0, &[]));
+            assert!(writer.stream_start(1, 0));
+            let first_data = writer.len();
+            assert!(writer.data(1, 0, 10, &[1; 16]));
+            assert!(writer.data(1, 16, 20, &[2; 16]));
+            let after_data = writer.len();
+            assert!(writer.stream_stop(1, 25));
+            let len = writer.len();
+
+            let tail = [ReadEnd {
+                at: len,
+                recorded: false,
+            }];
+            let span = loop_span(&stream[..len], Some(&tail)).unwrap();
+            assert_eq!((span.start, span.end), (first_data, after_data));
+            assert_eq!(span.first_read_end, None);
+            assert_eq!(span.bytes, 32);
+
+            // A recorded READ before the data does not make the unterminated
+            // tail that holds the last data record a READ either.
+            let ends = [
+                ReadEnd {
+                    at: first_data,
+                    recorded: true,
+                },
+                ReadEnd {
+                    at: len,
+                    recorded: false,
+                },
+            ];
+            let span = loop_span(&stream[..len], Some(&ends)).unwrap();
+            assert_eq!((span.start, span.end), (first_data, after_data));
+            assert_eq!(span.first_read_end, None);
         }
     }
 }
@@ -834,7 +887,7 @@ mod platform {
     };
 
     use super::capture_tap::{READ_END_BYTES, TeeCapture, read_end_marker};
-    use super::paced_bounds::{LoopSpan, loop_span, record_at, wrap_loop};
+    use super::paced_bounds::{LoopSpan, ReadEnd, loop_span, record_at, wrap_loop};
     use super::{CaptureKind, Clock, parse_endpoints};
 
     pub struct PlayOptions {
@@ -1122,14 +1175,19 @@ mod platform {
             }
             let mut clean = Vec::with_capacity(stream.len());
             let mut read_ends = Vec::new();
+            let mut bounds = Vec::new();
             for chunk in bio_abi::reads(&header, stream) {
                 clean.extend_from_slice(chunk.bytes);
                 read_ends.push(clean.len());
+                bounds.push(ReadEnd {
+                    at: clean.len(),
+                    recorded: chunk.end_qpc.is_some(),
+                });
             }
             let repeat = if repeat {
                 Some(loop_span(
                     &clean,
-                    (header.format_version >= 2).then_some(read_ends.as_slice()),
+                    (header.format_version >= 2).then_some(bounds.as_slice()),
                 )?)
             } else {
                 None

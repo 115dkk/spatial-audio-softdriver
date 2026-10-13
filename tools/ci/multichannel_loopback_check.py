@@ -111,7 +111,9 @@ def main():
     parser.add_argument("--work", required=True)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--channels", type=int)
-    parser.add_argument("--render", default="CABLE Input")
+    # The cable's render endpoint is "Speakers (VB-Audio Virtual Cable)" on
+    # the runners, as loopback_check.py and soak.ps1 expect.
+    parser.add_argument("--render", default="VB-Audio Virtual Cable")
     parser.add_argument("--capture", default="CABLE Output")
     parser.add_argument("--seconds", type=float, default=4.0)
     # Exclusive by default: a shared stream is matrixed to the endpoint's mix
