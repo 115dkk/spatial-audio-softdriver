@@ -83,6 +83,12 @@ const PI_LIMIT_PPM: f64 = 2_000.0;
 // only bounds transients.
 const PI_KP: f64 = 60.0;
 const PI_KI: f64 = 3.0;
+// The integral learns only within this many milliseconds of the target; P
+// alone drains larger errors (see PiController::update). P gives 360 ppm at
+// 6 ms, above the largest skew the simulation covers (real devices are within
+// about ±100 ppm), so every steady-state error the integral must learn lies
+// inside; a narrower band let P chase the E-AC-3 sawtooth at a 20 ms period.
+const PI_INTEGRAL_BAND_MS: f64 = 6.0;
 const CONTROL_WINDOW_SECONDS: f64 = 0.2;
 const FAULT_NONE: u32 = 0;
 const FAULT_CAPTURE: u32 = 1;
@@ -2734,9 +2740,20 @@ impl PiController {
     }
 
     fn update(&mut self, error_ms: f64, seconds: f64) -> f64 {
-        self.integral =
-            (self.integral + error_ms * seconds).clamp(-PI_LIMIT_PPM / PI_KI, PI_LIMIT_PPM / PI_KI);
-        (PI_KP * error_ms + PI_KI * self.integral).clamp(-PI_LIMIT_PPM, PI_LIMIT_PPM)
+        let proportional = PI_KP * error_ms;
+        // The integral is the clock skew. An error beyond the band is latency
+        // to drain (priming keeps audible excess, ADR 0028), and integrating
+        // it, or integrating further into a saturated output, winds the
+        // integral up so it keeps draining past the target until the output
+        // runs dry.
+        let unclamped = proportional + PI_KI * self.integral;
+        let saturated_this_way =
+            unclamped.abs() >= PI_LIMIT_PPM && unclamped.signum() == error_ms.signum();
+        if error_ms.abs() <= PI_INTEGRAL_BAND_MS && !saturated_this_way {
+            self.integral = (self.integral + error_ms * seconds)
+                .clamp(-PI_LIMIT_PPM / PI_KI, PI_LIMIT_PPM / PI_KI);
+        }
+        (proportional + PI_KI * self.integral).clamp(-PI_LIMIT_PPM, PI_LIMIT_PPM)
     }
 }
 
@@ -3052,6 +3069,8 @@ mod tests {
     struct ClockRun {
         underruns: u32,
         clamped: u32,
+        /// Windows at the ppm limit over the second half.
+        late_clamped: u32,
         /// Lowest and highest window trough over the second half, in ms.
         trough: (f64, f64),
         /// Lowest and highest correction over the second half, in ppm.
@@ -3062,14 +3081,28 @@ mod tests {
     /// The crossing ring at 48 kHz as the runtime sees it: blocks of `block`
     /// frames land whole at the source rate (device rate times 1 + skew, plus
     /// the trim), the output takes `period` frames per period (more or fewer
-    /// by the ASRC correction), priming waits for and retains target + block +
-    /// period, and the controller reads the level left after each period.
+    /// by the ASRC correction), priming waits for target + block + period and
+    /// keeps every audible frame beyond it (ADR 0028: only exact silence is
+    /// discarded), and the controller reads the level left after each period.
     fn simulate_clock(
         skew_ppm: f64,
         block: usize,
         period: usize,
         trim: bool,
         seconds: f64,
+    ) -> ClockRun {
+        simulate_clock_from(skew_ppm, block, period, trim, seconds, 0.0)
+    }
+
+    /// As [`simulate_clock`], with `backlog_ms` of audible source already
+    /// queued when the output starts (a dump or driver that delivers a burst).
+    fn simulate_clock_from(
+        skew_ppm: f64,
+        block: usize,
+        period: usize,
+        trim: bool,
+        seconds: f64,
+        backlog_ms: f64,
     ) -> ClockRun {
         let rate = 48_000.0;
         let target = 10.0;
@@ -3082,11 +3115,13 @@ mod tests {
         let period_seconds = period as f64 / rate;
         let periods = (seconds / period_seconds) as usize;
         let mut controller = TroughController::new();
-        let (mut level, mut arriving, mut correction) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let (mut arriving, mut correction) = (0.0_f64, 0.0_f64);
+        let mut level = (backlog_ms * rate / 1_000.0).round();
         let mut priming = true;
         let mut run = ClockRun {
             underruns: 0,
             clamped: 0,
+            late_clamped: 0,
             trough: (f64::INFINITY, f64::NEG_INFINITY),
             ppm: (f64::INFINITY, f64::NEG_INFINITY),
             final_ppm: 0.0,
@@ -3102,7 +3137,6 @@ mod tests {
                 if to_ms(level) < target + to_ms(block as f64) + to_ms(period as f64) {
                     continue;
                 }
-                level = level.min(target * rate / 1_000.0 + block.max(period) as f64);
                 priming = false;
             }
             let consumed_ppm = if trim { 0.0 } else { correction };
@@ -3121,6 +3155,9 @@ mod tests {
             correction = ppm;
             if ppm.abs() >= PI_LIMIT_PPM {
                 run.clamped += 1;
+                if index * 2 >= periods {
+                    run.late_clamped += 1;
+                }
             }
             if index * 2 >= periods {
                 run.trough = (run.trough.0.min(trough), run.trough.1.max(trough));
@@ -3278,18 +3315,71 @@ mod tests {
     }
 
     #[test]
+    fn audible_priming_excess_drains_without_winding_up_the_clock() {
+        // Priming keeps every audible frame (ADR 0028), so a source that
+        // starts with a backlog leaves the trough tens of milliseconds above
+        // target. The controller drains that latency at up to its limit; if
+        // the integral learned it as clock skew, it kept draining past the
+        // target, the output ran dry, primed again with the excess, and the
+        // cycle repeated every ~20 s (the CI soaks' underruns).
+        // Periods shorter than a block, at any skew the simulation covers; and
+        // every period at no skew (the CI soaks: a QPC-paced dump into a
+        // QPC-clocked virtual cable). Longer periods under skew starve now
+        // and then for another reason (clock_with_a_long_period_stays_bounded).
+        let short =
+            [(480, 144), (1_536, 144), (1_536, 480)].map(|case| (case, [-300.0, 0.0, 300.0]));
+        let long = [(480, 480), (480, 960), (1_536, 960)].map(|case| (case, [0.0; 3]));
+        for ((block, period), skews) in short.into_iter().chain(long) {
+            for skew in skews {
+                for backlog in [30.0, 60.0] {
+                    for trim in [false, true] {
+                        let run = simulate_clock_from(skew, block, period, trim, 300.0, backlog);
+                        let label = format!(
+                            "block {block} period {period} skew {skew} backlog {backlog} trim {trim}"
+                        );
+                        assert_eq!(run.underruns, 0, "{label}");
+                        assert_eq!(run.late_clamped, 0, "{label}: still at the limit");
+                        assert!(
+                            run.trough.0 >= 7.0 && run.trough.1 <= 13.0,
+                            "{label}: trough {:?} ms",
+                            run.trough
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn clock_with_a_long_period_stays_bounded() {
         // A 10 ms shared period with 10 ms PCM blocks, and a 20 ms exclusive
         // period with PCM or E-AC-3: as the arrival phase drifts past the
         // period boundary the real trough moves by up to a block, so the
         // controller cannot hold it within the 2 ms above. It must still not
-        // swing to its limit or starve the output more than now and then.
+        // swing to its limit. At a real device's skew (about ±100 ppm) it may
+        // starve only now and then. At ±300 ppm a period as long as a block
+        // can starve once per phase slip (one every block / skew seconds,
+        // 33 s for 10 ms blocks): the 10 ms target holds no block of margin,
+        // and since priming keeps audible frames (ADR 0028) each underrun is
+        // followed by latency to drain rather than by a trimmed ring.
+        let seconds = 300.0;
         for (block, period) in [(480, 480), (480, 960), (1_536, 960)] {
             for skew in [-300.0, -100.0, 100.0, 300.0] {
-                let run = simulate_clock(skew, block, period, false, 300.0);
+                let run = simulate_clock(skew, block, period, false, seconds);
                 let label = format!("block {block} period {period} skew {skew}");
                 assert_eq!(run.clamped, 0, "{label}");
-                assert!(run.underruns <= 3, "{label}: {} underruns", run.underruns);
+                let slips =
+                    (seconds * f64::abs(skew) * 1.0e-6 * 48_000.0 / block as f64).ceil() as u32;
+                let allowed = if f64::abs(skew) <= 100.0 {
+                    3
+                } else {
+                    slips.max(3)
+                };
+                assert!(
+                    run.underruns <= allowed,
+                    "{label}: {} underruns",
+                    run.underruns
+                );
             }
         }
     }

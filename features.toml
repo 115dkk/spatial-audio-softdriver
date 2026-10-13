@@ -468,13 +468,14 @@ tests = [
   "engine::clock_holds_the_trough_without_chasing_the_block_sawtooth",
   "engine::clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim",
   "engine::clock_with_a_long_period_stays_bounded",
+  "engine::audible_priming_excess_drains_without_winding_up_the_clock",
   "engine::a_period_longer_than_a_block_plays_after_priming",
   "engine::the_end_of_a_source_drains_without_underruns",
   "engine::pi_controller_clamps_and_integrates",
   "engine::auto_selects_trim_only_when_capture_and_output_support_it",
   "engine::format_change_does_not_change_the_startup_clock_or_mix_rate",
 ]
-note = "rubato Async sinc on the binaural pair. Auto chooses Trim only when the capture supports trim and the output is 48 kHz; otherwise it chooses ASRC at startup, and a device-loss reconnect that changes the output rate reselects ASRC. Source format changes never alter that choice or the fixed 48 kHz scene rate. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
+note = "rubato Async sinc on the binaural pair. Auto chooses Trim only when the capture supports trim and the output is 48 kHz; otherwise it chooses ASRC at startup, and a device-loss reconnect that changes the output rate reselects ASRC. Source format changes never alter that choice or the fixed 48 kHz scene rate. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation that keeps audible priming excess as the runtime does. The integral learns only within 6 ms of the target and never further into a saturated output: priming keeps audible frames (ADR 0028), so a backlog or a refill after an underrun starts the trough tens of ms high, and integrating that latency as skew drained the ring dry every ~20 s in the CI soaks. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly; at 300 ppm such a period can starve once per phase slip (33 s for 10 ms blocks), at about ±100 ppm at most now and then. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
 
 [[feature]]
 id = "engine.clock_trim"
