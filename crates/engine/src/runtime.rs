@@ -96,6 +96,8 @@ const PI_KI: f64 = 3.0;
 // ring. At 16 ms it learned the E-AC-3 sawtooth at a 3 ms period as skew.
 const PI_INTEGRAL_BAND_MS: f64 = 12.0;
 const CONTROL_WINDOW_SECONDS: f64 = 0.2;
+// An overflow burst reports at most one event per this many nanoseconds.
+const OVERFLOW_REPORT_NS: u64 = 1_000_000_000;
 // Priming waits for the largest delivery among this many recent capture steps
 // that delivered audio (see ArrivalPeak). A DD+ sync frame is 3.2 mixer blocks,
 // so deliveries run three blocks four times and then four; eight steps always
@@ -1157,13 +1159,58 @@ struct TimingMarker {
 struct EventWriter {
     producer: Producer<RtEvent>,
     shared: Arc<Shared>,
+    /// Overflowed frames not yet reported in an event.
+    overflow_pending: u64,
+    /// When the last overflow event went out, from [`Shared::elapsed_ns`].
+    overflow_reported_ns: Option<u64>,
 }
 
 impl EventWriter {
+    fn new(producer: Producer<RtEvent>, shared: Arc<Shared>) -> Self {
+        Self {
+            producer,
+            shared,
+            overflow_pending: 0,
+            overflow_reported_ns: None,
+        }
+    }
+
     fn push(&mut self, event: RtEvent) {
         if self.producer.push(event).is_err() {
             self.shared.dropped_events.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Reports `frames` that did not fit the crossing ring. While the output
+    /// is stalled every delivery overflows; one event per block filled the
+    /// event queue (1,148 dropped events in a CI soak whose device stopped)
+    /// and printed a line per 10 ms. A burst reports its first block at once,
+    /// then at most once a second, then what is left when a block fits again
+    /// ([`Self::overflow_ended`]); `output_overflow_frames` stays exact.
+    fn overflow(&mut self, frames: u64) {
+        self.overflow_pending = self.overflow_pending.saturating_add(frames);
+        let now = self.shared.elapsed_ns();
+        if self
+            .overflow_reported_ns
+            .is_none_or(|last| now.saturating_sub(last) >= OVERFLOW_REPORT_NS)
+        {
+            self.report_overflow(now);
+        }
+    }
+
+    /// A block fitted: reports the rest of an overflow burst.
+    fn overflow_ended(&mut self) {
+        if self.overflow_pending != 0 {
+            let now = self.shared.elapsed_ns();
+            self.report_overflow(now);
+        }
+        self.overflow_reported_ns = None;
+    }
+
+    fn report_overflow(&mut self, now: u64) {
+        let frames = std::mem::take(&mut self.overflow_pending);
+        self.push(RtEvent::OutputOverflow { frames });
+        self.overflow_reported_ns = Some(now);
     }
 
     fn fault(&mut self, fault: u32, event: RtEvent) {
@@ -1281,10 +1328,7 @@ fn capture_thread_main<C: CaptureSource>(
         hook(RealtimeThread::Capture);
     }
     let mut read_buffer = vec![0_u8; config.read_buffer_bytes];
-    let mut events = EventWriter {
-        producer: event_producer,
-        shared: Arc::clone(&shared),
-    };
+    let mut events = EventWriter::new(event_producer, Arc::clone(&shared));
     let mut stream_frame = 0_u64;
     let mut applied_trim = f64::NAN;
     let mut pending_retired: Option<Box<Prepared>> = None;
@@ -1478,12 +1522,11 @@ fn push_block(
             shared
                 .output_overflow_frames
                 .fetch_add(frames as u64, Ordering::Relaxed);
-            events.push(RtEvent::OutputOverflow {
-                frames: frames as u64,
-            });
+            events.overflow(frames as u64);
         }
         return;
     }
+    events.overflow_ended();
 
     // Publish metadata first. The capacity preflight above means all following
     // pushes succeed, so the output cannot observe samples without a marker.
@@ -1999,10 +2042,7 @@ impl OutputState {
     ) -> Self {
         let channels = usize::from(layout.channels);
         let asrc = AsrcClock::new(period_frames, device_rate, channels);
-        let events = EventWriter {
-            producer: event_producer,
-            shared: Arc::clone(&shared),
-        };
+        let events = EventWriter::new(event_producer, Arc::clone(&shared));
         let strategy_mode = ClockMode::from_u32(shared.clock_mode.load(Ordering::Acquire));
         let latency = LatencyWriter::new(&shared);
         Self {
@@ -3777,10 +3817,7 @@ mod tests {
         let (mut audio, mut audio_out) = RingBuffer::<f32>::new(64);
         let (mut timing, mut timing_out) = RingBuffer::<TimingMarker>::new(4);
         let (event_producer, _event_out) = RingBuffer::<RtEvent>::new(4);
-        let mut events = EventWriter {
-            producer: event_producer,
-            shared: Arc::clone(&shared),
-        };
+        let mut events = EventWriter::new(event_producer, Arc::clone(&shared));
         let mut stream_frame = 11;
         let samples = [
             1.0, 2.0, 3.0, // channel 0
@@ -3834,10 +3871,7 @@ mod tests {
         audio.push(1.0).unwrap();
         let (mut timing, _timing_out) = RingBuffer::<TimingMarker>::new(1);
         let (events, _events_out) = RingBuffer::<RtEvent>::new(1);
-        let mut events = EventWriter {
-            producer: events,
-            shared: Arc::new(Shared::new()),
-        };
+        let mut events = EventWriter::new(events, Arc::new(Shared::new()));
         let mut stream_frame = 0;
         push_block(
             crate::chain::BlockOut {
@@ -3870,10 +3904,7 @@ mod tests {
         let (mut timing, _timing_out) = RingBuffer::<TimingMarker>::new(1);
         let (events, mut events_out) = RingBuffer::<RtEvent>::new(1);
         let event_shared = Arc::new(Shared::new());
-        let mut events = EventWriter {
-            producer: events,
-            shared: event_shared,
-        };
+        let mut events = EventWriter::new(events, event_shared);
         let mut stream_frame = 0;
         push_block(
             crate::chain::BlockOut {
@@ -3899,6 +3930,67 @@ mod tests {
             Ok(RtEvent::OutputOverflow { frames: 2 })
         ));
         assert_eq!(stream_frame, 0);
+    }
+
+    #[test]
+    fn an_overflow_burst_reports_its_frames_without_flooding_the_event_queue() {
+        // A stalled output makes every delivery overflow. The burst reports
+        // its first block at once and the rest when a block fits again, so a
+        // thousand overflowing blocks neither fill an 8-slot queue nor lose a
+        // frame from the events' total.
+        let shared = Shared::new();
+        let (mut audio, mut audio_out) = RingBuffer::<f32>::new(4);
+        let (mut timing, mut timing_out) = RingBuffer::<TimingMarker>::new(4);
+        let (events, mut events_out) = RingBuffer::<RtEvent>::new(8);
+        let event_shared = Arc::new(Shared::new());
+        let mut events = EventWriter::new(events, Arc::clone(&event_shared));
+        let mut stream_frame = 0;
+        let block = |samples: &'static [f32]| crate::chain::BlockOut {
+            epoch: 1,
+            rate: 48_000,
+            source_qpc: 1,
+            channels: 2,
+            channel_mask: 0x3,
+            frames: 2,
+            samples,
+            silent: false,
+            idle: false,
+        };
+        let mut push = |audio: &mut Producer<f32>,
+                        timing: &mut Producer<TimingMarker>,
+                        events: &mut EventWriter| {
+            push_block(
+                block(&[0.25; 4]),
+                audio,
+                timing,
+                &mut stream_frame,
+                events,
+                &shared,
+            );
+        };
+        // Fill the ring, then overflow a thousand blocks.
+        push(&mut audio, &mut timing, &mut events);
+        for _ in 0..1_000 {
+            push(&mut audio, &mut timing, &mut events);
+        }
+        // The output takes the block; the next one fits and ends the burst.
+        for _ in 0..4 {
+            audio_out.pop().unwrap();
+        }
+        timing_out.pop().unwrap();
+        push(&mut audio, &mut timing, &mut events);
+
+        let mut reported = Vec::new();
+        while let Ok(RtEvent::OutputOverflow { frames }) = events_out.pop() {
+            reported.push(frames);
+        }
+        // The first block at once, the rest at the end (and one more only if
+        // the loop took over a second).
+        assert_eq!(event_shared.dropped_events.load(Ordering::Acquire), 0);
+        assert_eq!(reported.first(), Some(&2), "{reported:?}");
+        assert!(reported.len() <= 3, "{reported:?}");
+        assert_eq!(reported.iter().sum::<u64>(), 2_000);
+        assert_eq!(shared.output_overflow_frames.load(Ordering::Acquire), 2_000);
     }
 
     #[test]
@@ -4555,10 +4647,7 @@ mod tests {
     fn fault_transitions_emit_once_and_clear_only_the_matching_fault() {
         let shared = Arc::new(Shared::new());
         let (producer, mut consumer) = RingBuffer::new(8);
-        let mut events = EventWriter {
-            producer,
-            shared: Arc::clone(&shared),
-        };
+        let mut events = EventWriter::new(producer, Arc::clone(&shared));
 
         events.fault(FAULT_OUTPUT, RtEvent::OutputFault);
         events.fault(FAULT_OUTPUT, RtEvent::OutputFault);
@@ -4629,10 +4718,7 @@ mod tests {
         let (audio, _audio_out) = RingBuffer::<f32>::new(2);
         let (timing, _timing_out) = RingBuffer::<TimingMarker>::new(2);
         let (event_producer, _event_consumer) = RingBuffer::<RtEvent>::new(8);
-        let mut events = EventWriter {
-            producer: event_producer,
-            shared: Arc::clone(&shared),
-        };
+        let mut events = EventWriter::new(event_producer, Arc::clone(&shared));
         let mut stream_frame = 0;
         let format = SourceFormat::Pcm(PcmFormat {
             channels: 2,
