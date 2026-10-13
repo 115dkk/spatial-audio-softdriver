@@ -255,6 +255,7 @@ py .\driver_flow_check.py --expect-mask 0x7 --summary driver-flow-basic.json
   - `tone_db`가 −6 dB 안팎
   - `other_tone_db`가 −60 dB 이하
   - `rate_error_ppm`의 절댓값이 100 이하
+- `snapshot_skew_us`가 100 이하이고 `snapshot_reads_compared`가 1 이상. 한 번의 READ 안에서 엔드포인트들의 마지막 데이터가 같은 시각에서 끝나는지 봅니다. 드라이버가 모든 스트림을 함께 진행시키므로 차이는 한 프레임(수십 µs) 이하여야 합니다.
 
 이 시험은 세 엔드포인트의 **공간 오디오가 꺼진 상태**에서 돌립니다. 켜져 있으면 공간 음향 엔진이 형식을 바꿔(예: MAT) 스테레오 톤 검사가 맞지 않습니다. 3단계 뒤에 이 시험을 다시 돌릴 때는 먼저 공간 오디오를 끕니다.
 

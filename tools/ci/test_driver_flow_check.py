@@ -8,7 +8,8 @@ import numpy as np
 
 from driver_flow_check import (
     ABI_INFO, DEFAULT_ENDPOINT_MASK, find_speaker, FLAG_DISCONTINUITY, FLAG_REPEAT, HEADER, KIND_DATA, KIND_FORMAT_CHANGE, KIND_OVERRUN, KIND_STREAM_START,
-    check_endpoint, parse_records, parse_wave_format, parse_abi_info,
+    READ_MAX_BYTES, SNAPSHOT_SKEW_LIMIT_US, check_endpoint, parse_records, parse_wave_format, parse_abi_info,
+    snapshot_skew_us,
 )
 
 QPC = 10_000_000
@@ -63,6 +64,37 @@ def interleave(*streams):
     for parts in zip(*[s + [b""] * (max(map(len, streams)) - len(s)) for s in streams]):
         merged.extend(p for p in parts if p)
     return b"".join(merged)
+
+
+def tick(qpcs, frames=48):
+    """One READ: a data record per endpoint, each ending at its own QPC."""
+    return b"".join(record(KIND_DATA, endpoint, b"\0" * frames * 4, qpc=qpc)
+                    for endpoint, qpc in qpcs.items())
+
+
+class SnapshotSkewTest(unittest.TestCase):
+    def test_endpoints_updated_together_have_no_skew(self):
+        reads = [tick({0: 10_000 * n, 1: 10_000 * n, 2: 10_000 * n}) for n in range(1, 5)]
+        self.assertEqual(snapshot_skew_us(reads, QPC), (0.0, 4))
+
+    def test_one_endpoint_a_tick_behind_is_reported(self):
+        # The asking stream reached now; the others stayed at the last 1 ms tick.
+        reads = [tick({0: 10_000, 1: 10_000}), tick({0: 25_000, 1: 20_000})]
+        skew, compared = snapshot_skew_us(reads, QPC)
+        self.assertEqual(compared, 2)
+        self.assertEqual(skew, 500.0)
+        self.assertGreater(skew, SNAPSHOT_SKEW_LIMIT_US)
+
+    def test_reads_with_one_endpoint_or_a_state_change_are_not_compared(self):
+        start = record(KIND_STREAM_START, 1)
+        reads = [tick({0: 10_000}), start + tick({0: 30_000, 1: 20_000}),
+                 record(KIND_FORMAT_CHANGE, 2, pcm16_format()) + tick({0: 40_000, 2: 1_000})]
+        self.assertEqual(snapshot_skew_us(reads, QPC), (0.0, 0))
+
+    def test_a_read_its_buffer_cut_short_is_not_compared(self):
+        # Four 56 KiB records leave less than one maximum record free.
+        full = tick({0: 10_000, 1: 1_000, 2: 10_000, 3: 10_000}, frames=56 * 1024 // 4)
+        self.assertEqual(snapshot_skew_us([full], QPC), (0.0, 0))
 
 
 class DriverFlowTest(unittest.TestCase):

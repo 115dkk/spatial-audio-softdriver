@@ -11,6 +11,9 @@ from \\\\.\\SpatialSoftReceiver with IOCTL_BIO_READ meanwhile, and checks per en
   each record against the bytes in between), and
 * the endpoint's own tone is in its data and the other active endpoints are not.
 
+Across endpoints it checks that every READ is one snapshot: the endpoints that
+delivered data in a READ end it at the same QPC, within one frame.
+
     python driver_flow_check.py --summary out.json
 
 Exit status 0 when every check passes, 1 otherwise. main() is CI only; the
@@ -33,6 +36,7 @@ IOCTL_BIO_QUERY_INFO = (0x22 << 16) | (1 << 14) | (0x900 << 2)
 IOCTL_BIO_READ = (0x22 << 16) | (1 << 14) | (0x901 << 2) | 2
 IOCTL_BIO_GET_STATS = (0x22 << 16) | (1 << 14) | (0x903 << 2)
 READ_MAX_BYTES = 256 * 1024
+MAX_DATA_PAYLOAD = 64 * 1024
 
 KIND_DATA, KIND_FORMAT_CHANGE, KIND_STREAM_START, KIND_STREAM_STOP, KIND_OVERRUN, KIND_VOLUME = 1, 2, 3, 4, 5, 6
 VOLUME = struct.Struct("<II32i")
@@ -95,6 +99,42 @@ def parse_records(stream):
         })
         offset = (end + RECORD_ALIGN - 1) // RECORD_ALIGN * RECORD_ALIGN
     return records
+
+
+# The driver brings every running stream to the same QPC under one lock
+# (CAdapterCommon::UpdatePositions), so the last data records of the endpoints
+# in one READ end at most a frame apart (22.7 us at 44.1 kHz). When a position
+# query advanced only the asking stream, a READ could hold one endpoint up to
+# now and another a timer tick or more behind, and the mixer counted the
+# difference as a lane underrun.
+SNAPSHOT_SKEW_LIMIT_US = 100.0
+SNAPSHOT_EXCLUDED_KINDS = (KIND_FORMAT_CHANGE, KIND_STREAM_START, KIND_STREAM_STOP, KIND_OVERRUN)
+
+
+def snapshot_skew_us(reads, qpc_frequency, capacity=READ_MAX_BYTES):
+    """The largest spread, in microseconds, between the last data QPCs of the
+    endpoints in one READ, and how many READs were compared. A READ counts when
+    it holds data from two or more endpoints, no format, start, stop or overrun
+    record (a stream entering or leaving RUN), and was not cut short by its
+    buffer."""
+    worst = 0.0
+    compared = 0
+    for chunk in reads:
+        # A READ whose buffer could not take one more record may end mid-tick.
+        if len(chunk) + HEADER.size + MAX_DATA_PAYLOAD > capacity:
+            continue
+        records = parse_records(chunk)
+        if any(r["kind"] in SNAPSHOT_EXCLUDED_KINDS for r in records):
+            continue
+        last = {}
+        for r in records:
+            if r["kind"] == KIND_DATA:
+                last[r["endpoint"]] = r["qpc"]
+        if len(last) < 2:
+            continue
+        compared += 1
+        worst = max(worst, (max(last.values()) - min(last.values())) * 1e6 / qpc_frequency)
+    return worst, compared
 
 
 def parse_volume(payload):
@@ -329,7 +369,7 @@ def main():
     device = ControlDevice()
     info = device.query_info()
     print("QUERY_INFO:", info, flush=True)
-    stream = bytearray()
+    reads = []
     stop = threading.Event()
     errors = []
     playback_errors = []
@@ -337,7 +377,7 @@ def main():
     def reader():
         try:
             while not stop.is_set():
-                stream.extend(device.read(4096, 50))
+                reads.append(device.read(4096, 50))
         except OSError as error:
             errors.append(str(error))
 
@@ -364,8 +404,11 @@ def main():
     stats = device.stats()
     device.close()
 
-    records = parse_records(bytes(stream))
+    stream = b"".join(reads)
+    records = parse_records(stream)
+    skew_us, skew_reads = snapshot_skew_us(reads, info["qpc_frequency"])
     summary = {"render_endpoints": rows, "query_info": info, "stats": stats, "read_errors": errors, "read_bytes": len(stream),
+               "snapshot_skew_us": round(skew_us, 1), "snapshot_reads_compared": skew_reads,
                "playback_errors": playback_errors, "playback_mode": "shared",
                "passthrough_shared_policy": "allowed while idle; exclusive permission is not a shared-mode ban",
                "endpoints": []}
@@ -379,6 +422,10 @@ def main():
         result, issues = check_endpoint(records, endpoint, info["qpc_frequency"], hz, others, args.seconds * 0.8)
         summary["endpoints"].append(result)
         problems += issues
+    if len(active_tones) >= 2 and skew_reads == 0:
+        problems.append("no READ held data from two endpoints to compare their QPCs")
+    if skew_us > SNAPSHOT_SKEW_LIMIT_US:
+        problems.append(f"a READ held endpoints {skew_us:.0f} us apart (limit {SNAPSHOT_SKEW_LIMIT_US:.0f} us)")
     with open(args.summary, "w", encoding="utf-8") as out:
         json.dump(summary, out, indent=2, default=str)
     print(json.dumps(summary, indent=2, default=str))
@@ -395,6 +442,7 @@ def main():
                           f"{r.get('overruns')} | {r.get('rate_error_ppm')} ppm | {r.get('tone_db')} dBFS | "
                           f"{r.get('other_tone_db')} dBFS |\n")
             out.write(f"\nmax timer lateness {stats['max_timer_lateness_us']} us; "
+                      f"READ snapshot skew {skew_us:.1f} us over {skew_reads} READs; "
                       f"{'FAIL: ' + '; '.join(problems) if problems else 'ok'}\n")
     for problem in problems:
         print(problem, file=sys.stderr)

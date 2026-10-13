@@ -59,10 +59,8 @@ void CMiniportWaveRTStream::Reset() {
     if (packets_) RtlZeroMemory(packets_, sizeof(Packet) * notifications_);
 }
 void CMiniportWaveRTStream::AdapterStop(ULONGLONG qpc) {
-    if (state_ == KSSTATE_RUN) {
-        UpdatePosition(qpc);
-        adapter_->StreamState(endpoint_, qpc, false);
-    }
+    // CAdapterCommon::Stop has already brought every stream to qpc.
+    if (state_ == KSSTATE_RUN) adapter_->StreamState(endpoint_, qpc, false);
     state_ = KSSTATE_STOP;
 }
 void CMiniportWaveRTStream::PowerResume(ULONGLONG qpc) {
@@ -76,10 +74,9 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::SetState(KSSTATE state) {
     if (state == KSSTATE_RUN && (!adapter_->Active() || !dma_ || !bufferBytes_)) status = STATUS_DEVICE_NOT_READY;
     else if (state != state_) {
         ULONGLONG qpc = BioQpc();
-        if (state_ == KSSTATE_RUN) {
-            UpdatePosition(qpc);
-            adapter_->StreamState(endpoint_, qpc, false);
-        }
+        // Every stream reaches qpc before this one's start or stop record.
+        adapter_->UpdatePositions(qpc);
+        if (state_ == KSSTATE_RUN) adapter_->StreamState(endpoint_, qpc, false);
         if (state == KSSTATE_STOP) Reset();
         if (state == KSSTATE_RUN) {
             clock_.Start(qpc, adapter_->State()->Frequency, Format()->nAvgBytesPerSec, Format()->nBlockAlign);
@@ -146,7 +143,7 @@ STDMETHODIMP_(void) CMiniportWaveRTStream::FreeAudioBuffer(PMDL mdl, ULONG) {
     BYTE* buffer = nullptr; Packet* packets = nullptr;
     if (mdl && mdl == mdl_) {
         if (state_ == KSSTATE_RUN) {
-            ULONGLONG qpc = BioQpc(); UpdatePosition(qpc);
+            ULONGLONG qpc = BioQpc(); adapter_->UpdatePositions(qpc);
             adapter_->StreamState(endpoint_, qpc, false);
         }
         state_ = KSSTATE_STOP;
@@ -202,13 +199,13 @@ void CMiniportWaveRTStream::WriteBytes(ULONGLONG begin, ULONGLONG bytes, ULONGLO
             if (packet.Valid && packet.Number == number) written = packet.Qpc;
         }
         ULONG first = length < bufferBytes_ - offset ? length : bufferBytes_ - offset;
-        adapter_->Data(endpoint_, qpc, written, dma_ + offset, first, length > first ? dma_ : nullptr, length - first);
+        adapter_->DataLocked(endpoint_, qpc, written, dma_ + offset, first, length > first ? dma_ : nullptr, length - first);
         begin += length; bytes -= length;
     }
 }
-void CMiniportWaveRTStream::UpdatePosition(ULONGLONG qpc) {
+void CMiniportWaveRTStream::UpdatePosition(ULONGLONG qpc, LONG trim) {
     if (state_ != KSSTATE_RUN || !dma_ || !adapter_->Active()) return;
-    clock_.SetTrim(adapter_->Trim());
+    clock_.SetTrim(trim);
     ULONGLONG advance = clock_.Advance(qpc);
     linear_ += advance;
     ULONGLONG end = eos_ && linear_ > eosPosition_ ? eosPosition_ : linear_;
@@ -219,7 +216,7 @@ void CMiniportWaveRTStream::UpdatePosition(ULONGLONG qpc) {
         ULONGLONG bytes = end - transferred_;
         ULONGLONG begin = transferred_;
         if (bytes > bufferBytes_) {
-            adapter_->SourceGap(endpoint_, qpc, bytes - bufferBytes_);
+            adapter_->SourceGapLocked(endpoint_, qpc, bytes - bufferBytes_);
             begin = end - bufferBytes_; bytes = bufferBytes_;
         }
         WriteBytes(begin, bytes, qpc);
@@ -237,7 +234,7 @@ void CMiniportWaveRTStream::UpdatePosition(ULONGLONG qpc) {
 }
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::GetPosition(PKSAUDIO_POSITION position) {
     KIRQL irql; adapter_->Lock(&irql);
-    UpdatePosition(BioQpc());
+    adapter_->UpdatePositions(BioQpc());
     position->PlayOffset = bufferBytes_ ? transferred_ % bufferBytes_ : 0;
     position->WriteOffset = position->PlayOffset;
     adapter_->Unlock(irql);
@@ -251,7 +248,7 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::SetWritePacket(ULONG number, DWOR
     KIRQL irql; adapter_->Lock(&irql);
     NTSTATUS status = STATUS_SUCCESS;
     ULONGLONG qpc = BioQpc();
-    UpdatePosition(qpc);
+    adapter_->UpdatePositions(qpc);
     if (!adapter_->Settings().WritePacket || !notifications_ || !dma_) status = STATUS_NOT_SUPPORTED;
     else if (!adapter_->Active() || eos_) status = STATUS_INVALID_DEVICE_STATE;
     else if ((flags & ~KSSTREAM_HEADER_OPTIONSF_ENDOFSTREAM)) status = STATUS_INVALID_PARAMETER;
@@ -279,13 +276,13 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::SetWritePacket(ULONG number, DWOR
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::GetPacketCount(ULONG* count) {
     KIRQL irql; adapter_->Lock(&irql);
     NTSTATUS status = notifications_ ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
-    UpdatePosition(BioQpc()); *count = static_cast<ULONG>(packetCount_);
+    adapter_->UpdatePositions(BioQpc()); *count = static_cast<ULONG>(packetCount_);
     adapter_->Unlock(irql); BioPumpRead(adapter_->State()); return status;
 }
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::GetOutputStreamPresentationPosition(KSAUDIO_PRESENTATION_POSITION* position) {
     KIRQL irql; adapter_->Lock(&irql);
     NTSTATUS status = notifications_ ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
-    UpdatePosition(BioQpc());
+    adapter_->UpdatePositions(BioQpc());
     position->u64PositionInBlocks = Format()->nBlockAlign ? linear_ / Format()->nBlockAlign : 0;
     position->u64QPCPosition = positionQpc_;
     adapter_->Unlock(irql); BioPumpRead(adapter_->State()); return status;

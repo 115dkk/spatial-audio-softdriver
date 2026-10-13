@@ -34,6 +34,7 @@ void CAdapterCommon::Stop() {
     bool wasActive = active_;
     if (wasActive) {
         ULONGLONG qpc = BioQpc();
+        UpdatePositions(qpc);
         for (auto stream : streams_) if (stream) stream->AdapterStop(qpc);
     }
     active_ = false;
@@ -58,20 +59,17 @@ void CAdapterCommon::UnregisterStream(USHORT endpoint, CMiniportWaveRTStream* st
     if (endpoint < BIO_MAX_ENDPOINTS && streams_[endpoint] == stream) streams_[endpoint] = nullptr;
     Unlock(irql);
 }
-LONG CAdapterCommon::Trim() {
+void CAdapterCommon::UpdatePositions(ULONGLONG qpc) {
     KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
-    LONG trim = state_->Trim;
-    KeReleaseSpinLock(&state_->Lock, irql); return trim;
+    const LONG trim = state_->Trim;
+    for (auto stream : streams_) if (stream) stream->UpdatePosition(qpc, trim);
+    KeReleaseSpinLock(&state_->Lock, irql);
 }
-void CAdapterCommon::SourceGap(USHORT ep, ULONGLONG qpc, ULONGLONG bytes) {
-    KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
+void CAdapterCommon::SourceGapLocked(USHORT ep, ULONGLONG qpc, ULONGLONG bytes) {
     if (active_ && state_->Started) state_->Ring.SourceGap(ep, qpc, bytes);
-    KeReleaseSpinLock(&state_->Lock, irql);
 }
-void CAdapterCommon::Data(USHORT ep, ULONGLONG qpc, ULONGLONG written, const BYTE* a, ULONG an, const BYTE* b, ULONG bn) {
-    KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
+void CAdapterCommon::DataLocked(USHORT ep, ULONGLONG qpc, ULONGLONG written, const BYTE* a, ULONG an, const BYTE* b, ULONG bn) {
     if (active_ && state_->Started) state_->Ring.Data(ep, qpc, written, a, an, b, bn);
-    KeReleaseSpinLock(&state_->Lock, irql);
 }
 void CAdapterCommon::Format(USHORT ep, ULONGLONG qpc, const WAVEFORMATEX* format) {
     KIRQL irql; KeAcquireSpinLock(&state_->Lock, &irql);
@@ -116,7 +114,7 @@ VOID CAdapterCommon::TimerTick(PEX_TIMER, PVOID context) {
             if (value > state->MaxLatenessUs) state->MaxLatenessUs = value;
             KeReleaseSpinLock(&state->Lock, stateIrql);
         }
-        for (auto stream : adapter->streams_) if (stream) stream->UpdatePosition(qpc);
+        adapter->UpdatePositions(qpc);
     }
     adapter->lastTick_ = qpc;
     adapter->Unlock(irql);
@@ -125,7 +123,7 @@ VOID CAdapterCommon::TimerTick(PEX_TIMER, PVOID context) {
 STDMETHODIMP_(void) CAdapterCommon::PowerChangeState(POWER_STATE state) {
     KIRQL irql; Lock(&irql);
     ULONGLONG qpc = BioQpc();
-    if (Active()) for (auto stream : streams_) if (stream) stream->UpdatePosition(qpc);
+    if (Active()) UpdatePositions(qpc);
     if (state.DeviceState == PowerDeviceD0 && power_ != PowerDeviceD0)
         for (auto stream : streams_) if (stream) stream->PowerResume(qpc);
     power_ = state.DeviceState;
