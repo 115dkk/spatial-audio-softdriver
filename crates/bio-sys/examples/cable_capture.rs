@@ -1,14 +1,17 @@
 #![forbid(unsafe_code)]
 
 //! Captures the far end of a virtual cable. Samples stay in preallocated memory
-//! until capture stops; only then is the extensible float WAV written.
+//! until capture stops; only then is the extensible float WAV written. In
+//! exclusive mode the stream takes the first of float, 32-bit, 24-in-32 and
+//! 16-bit integer that the endpoint accepts (the order format_probe reports),
+//! and integer samples are converted to float for the WAV.
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::VecDeque;
     use std::io::{BufWriter, Write};
     use std::time::Instant;
-    use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+    use wasapi::{DeviceEnumerator, Direction, SampleType, ShareMode, StreamMode, WaveFormat};
 
     struct Options {
         endpoint: String,
@@ -126,13 +129,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let device = cable.ok_or("capture endpoint missing")?;
         println!("capture endpoint: {}", device.get_friendlyname()?);
         let mut client = device.get_iaudioclient()?;
-        let wave = WaveFormat::new(
-            32,
-            32,
-            &SampleType::Float,
-            48_000,
-            usize::from(options.channels),
-            Some(options.mask),
+        let shape = |bits: usize, valid: usize, kind: &SampleType| {
+            WaveFormat::new(
+                bits,
+                valid,
+                kind,
+                48_000,
+                usize::from(options.channels),
+                Some(options.mask),
+            )
+        };
+        let (bits, kind) = if options.exclusive {
+            [
+                (32, 32, SampleType::Float),
+                (32, 32, SampleType::Int),
+                (32, 24, SampleType::Int),
+                (16, 16, SampleType::Int),
+            ]
+            .into_iter()
+            .find(|(bits, valid, kind)| {
+                client
+                    .is_supported(&shape(*bits, *valid, kind), &ShareMode::Exclusive)
+                    .is_ok_and(|closest| closest.is_none())
+            })
+            .map(|(bits, valid, kind)| ((bits, valid), kind))
+            .ok_or("the capture endpoint takes none of the exclusive formats")?
+        } else {
+            ((32, 32), SampleType::Float)
+        };
+        let wave = shape(bits.0, bits.1, &kind);
+        println!(
+            "capture format: {}-bit {} ({} valid bits)",
+            bits.0,
+            if matches!(kind, SampleType::Float) {
+                "float"
+            } else {
+                "integer"
+            },
+            bits.1
         );
         if options.exclusive {
             let (_, minimum) = client.get_device_period()?;
@@ -174,13 +208,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })();
         client.stop_stream()?;
         capture_result?;
-        let bytes: Vec<_> = queue.into_iter().collect();
+        let raw: Vec<_> = queue.into_iter().collect();
+        // Integer samples are left-aligned in their container (24-in-32
+        // included), so dividing by the container's full scale is exact.
+        let samples: Vec<f32> = match (bits.0, &kind) {
+            (32, SampleType::Float) => raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect(),
+            (32, _) => raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| (f64::from(i32::from_le_bytes(*b)) / 2_147_483_648.0) as f32)
+                .collect(),
+            _ => raw
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| f32::from(i16::from_le_bytes(*b)) / 32_768.0)
+                .collect(),
+        };
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let channels = usize::from(options.channels);
         let mut peak = vec![0.0_f32; channels];
         let mut energy = vec![0.0_f64; channels];
         let mut active = vec![0_usize; channels];
-        for (i, sample) in bytes.as_chunks::<4>().0.iter().enumerate() {
-            let sample = f32::from_le_bytes(*sample);
+        for (i, &sample) in samples.iter().enumerate() {
             if !sample.is_finite() {
                 return Err("non-finite capture sample".into());
             }
