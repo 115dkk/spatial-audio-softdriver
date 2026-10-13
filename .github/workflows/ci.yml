@@ -124,9 +124,11 @@ jobs:
         with:
           shared-key: test-${{ matrix.profile }}
 
+      # --no-fail-fast: one failing test binary must not hide the others,
+      # many of which (bio-sys, bio-live platform) run only on Windows.
       - name: cargo test --workspace
         shell: bash
-        run: cargo test --workspace --all-targets --locked $PROFILE_FLAG
+        run: cargo test --workspace --all-targets --locked --no-fail-fast $PROFILE_FLAG
 
       - name: cargo test --doc
         if: matrix.profile == 'debug'
