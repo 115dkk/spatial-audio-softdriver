@@ -108,6 +108,11 @@ def main():
     parser.add_argument("--report", required=True)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--min-margin-db", type=float, default=20.0)
+    parser.add_argument(
+        "--record",
+        help="also have bio-live write the READ stream it captured to this dump, "
+        "so a failure can be replayed offline (bio-replay render)",
+    )
     args = parser.parse_args()
 
     from loopback_check import binary_fromstring
@@ -135,6 +140,8 @@ def main():
         args.report,
         "--shared",
     ]
+    if args.record:
+        command += ["--record", args.record]
     chunks = []
     errors = []
 

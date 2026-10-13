@@ -391,7 +391,8 @@ jobs:
           python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
           python tools/ci/driver_e2e_check.py --bio-live target/release/bio-live.exe \
             --profile "$RUNNER_TEMP/fx/profile.toml" --seconds 8 \
-            --report "$RUNNER_TEMP/driver-e2e-report.json" --summary "$RUNNER_TEMP/driver-e2e.json"
+            --report "$RUNNER_TEMP/driver-e2e-report.json" --summary "$RUNNER_TEMP/driver-e2e.json" \
+            --record "$RUNNER_TEMP/driver-e2e.biodump"
 
       - name: Is Driver Verifier checking spatialsoftreceiver.sys
         id: verified
@@ -458,6 +459,7 @@ jobs:
             ${{ runner.temp }}/driver-flow.json
             ${{ runner.temp }}/driver-e2e.json
             ${{ runner.temp }}/driver-e2e-report.json
+            ${{ runner.temp }}/driver-e2e.biodump
             ${{ runner.temp }}/ioctl-fuzz.json
             ${{ runner.temp }}/volume.json
             ${{ runner.temp }}/exclusive-policy.json
