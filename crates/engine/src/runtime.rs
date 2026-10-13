@@ -69,10 +69,10 @@ const RECONNECT_MAX_MS: u64 = 5_000;
 const CADENCE_WINDOW_SECONDS: f64 = 2.0;
 const CADENCE_FAULT_SECONDS: f64 = 3.0;
 const PI_LIMIT_PPM: f64 = 2_000.0;
-// Blocks land in the crossing ring whole (10 ms of PCM or MAT, 32 ms of
-// E-AC-3) while the output takes one period at a time, so the level is a
-// sawtooth whose trough, just before the next block lands, is how close the
-// output came to running dry. The controller holds that trough at target_ms:
+// Deliveries land in the crossing ring whole (10 ms of PCM or MAT, 32 ms of
+// E-AC-3 as several mixer blocks) while the output takes one period at a
+// time, so the level is a sawtooth whose trough, just before the next
+// delivery lands, is how close the output came to running dry. The controller holds that trough at target_ms:
 // it reads the lowest level left after each period over a window, and acts
 // once per window. The error is in milliseconds; P turns one millisecond into
 // 60 ppm and I adds 3 ppm per millisecond-second. Larger gains chase the
@@ -90,6 +90,11 @@ const PI_KI: f64 = 3.0;
 // inside; a narrower band let P chase the E-AC-3 sawtooth at a 20 ms period.
 const PI_INTEGRAL_BAND_MS: f64 = 6.0;
 const CONTROL_WINDOW_SECONDS: f64 = 0.2;
+// Priming waits for the largest delivery among this many recent capture steps
+// that delivered audio (see ArrivalPeak). A DD+ sync frame is 3.2 mixer blocks,
+// so deliveries run three blocks four times and then four; eight steps always
+// hold a four-block one, and a one-off backlog is forgotten soon after.
+const ARRIVAL_WINDOW: usize = 8;
 const FAULT_NONE: u32 = 0;
 const FAULT_CAPTURE: u32 = 1;
 const FAULT_OUTPUT: u32 = 2;
@@ -733,6 +738,9 @@ struct Shared {
     latency_values: [AtomicU32; LATENCY_SAMPLES],
     lost_bytes: AtomicU64,
     lane_underrun_frames: AtomicU64,
+    /// Frames per channel of the largest recent capture-step delivery into
+    /// the crossing ring ([`ArrivalPeak`]); the output primes for it.
+    arrival_frames: AtomicU64,
     dropped_frames: AtomicU64,
     volume_transitions_coalesced: AtomicU64,
     output_overflow_frames: AtomicU64,
@@ -780,6 +788,7 @@ impl Shared {
             latency_values: std::array::from_fn(|_| AtomicU32::new(0)),
             lost_bytes: AtomicU64::new(0),
             lane_underrun_frames: AtomicU64::new(0),
+            arrival_frames: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
             volume_transitions_coalesced: AtomicU64::new(0),
             output_overflow_frames: AtomicU64::new(0),
@@ -1202,10 +1211,12 @@ fn capture_thread_main<C: CaptureSource>(
     let mut stream_frame = 0_u64;
     let mut applied_trim = f64::NAN;
     let mut pending_retired: Option<Box<Prepared>> = None;
+    let mut arrivals = ArrivalPeak::new();
     shared.capture_started.store(true, Ordering::Release);
     let mut finishing = false;
     while !shared.stop.load(Ordering::Acquire) {
         let mut step = None;
+        let step_start = stream_frame;
         let mut work = || {
             step = Some(capture_rt_step(
                 &mut capture,
@@ -1229,6 +1240,12 @@ fn capture_thread_main<C: CaptureSource>(
             scope(RtSection::Capture, &mut work);
         } else {
             work();
+        }
+        let delivered = stream_frame.saturating_sub(step_start);
+        if delivered != 0 {
+            shared
+                .arrival_frames
+                .store(arrivals.record(delivered), Ordering::Release);
         }
         if let Some(hook) = &config.rt_event {
             hook(RtLoopEvent::CaptureEnd);
@@ -1871,9 +1888,9 @@ struct OutputState {
     /// Ring level left after this period's frames were taken.
     period_trough_frames: usize,
     /// Set at start, after an underrun or a device restart, and when the
-    /// strategy or scene rate changes: output silence until the ring holds target + one block + one
-    /// period, then drop what lies beyond target + one block, so the trough
-    /// starts at the target instead of at zero or a block above it.
+    /// strategy or scene rate changes: output silence until the ring holds
+    /// target + one delivery + one period, then drop the exact-zero frames
+    /// beyond that, so the trough starts at the target instead of at zero.
     priming: bool,
     /// Crossing-ring capacity in frames per channel.
     capacity_frames: usize,
@@ -2050,23 +2067,29 @@ impl OutputState {
         }
     }
 
-    /// `None` until the ring holds target + the next block + this period's
-    /// take (capped one block below capacity, where the capture side would
+    /// `None` until the ring holds target + the next delivery + this period's
+    /// take (capped one delivery below capacity, where the capture side would
     /// start dropping blocks instead); then the frames beyond target plus the
-    /// block and the take. Only exact-zero frames may actually be discarded;
+    /// delivery and the take. The next delivery is the larger of the head
+    /// block and the largest recent capture step: a decoder hands over a
+    /// whole sync frame (32 ms of E-AC-3) as several mixer blocks at once, and
+    /// the ring must last until the next one. Only exact-zero frames may actually be discarded;
     /// audible excess remains as latency for the PI controller to reduce.
     /// The take is in scene frames and, for the ASRC, includes the filter's
     /// lookahead before its first render.
     fn priming_excess(&self, scene_rate: u32, take: usize) -> Option<usize> {
         let rate = f64::from(scene_rate);
-        let block_frames = self.pending_marker.map_or(0.0, |marker| {
-            let marker_rate = if marker.rate == 0 {
-                scene_rate
-            } else {
-                marker.rate
-            };
-            f64::from(marker.frames) * rate / f64::from(marker_rate)
-        });
+        let block_frames = self
+            .pending_marker
+            .map_or(0.0, |marker| {
+                let marker_rate = if marker.rate == 0 {
+                    scene_rate
+                } else {
+                    marker.rate
+                };
+                f64::from(marker.frames) * rate / f64::from(marker_rate)
+            })
+            .max(self.shared.arrival_frames.load(Ordering::Acquire) as f64);
         let target_frames = self.target_ms * rate / 1_000.0;
         let take = take as f64;
         let threshold =
@@ -2754,6 +2777,31 @@ impl PiController {
                 .clamp(-PI_LIMIT_PPM / PI_KI, PI_LIMIT_PPM / PI_KI);
         }
         (proportional + PI_KI * self.integral).clamp(-PI_LIMIT_PPM, PI_LIMIT_PPM)
+    }
+}
+
+/// The largest number of frames one capture step put into the crossing ring,
+/// over the last [`ARRIVAL_WINDOW`] steps that put any. The mixer cuts its
+/// output into `MIX_FRAMES` blocks, but a decoder delivers a whole sync frame
+/// in one step, so the ring waits that long, not one block, for the next.
+struct ArrivalPeak {
+    recent: [u64; ARRIVAL_WINDOW],
+    next: usize,
+}
+
+impl ArrivalPeak {
+    fn new() -> Self {
+        Self {
+            recent: [0; ARRIVAL_WINDOW],
+            next: 0,
+        }
+    }
+
+    /// Records one step's delivery and returns the window's largest.
+    fn record(&mut self, frames: u64) -> u64 {
+        self.recent[self.next] = frames;
+        self.next = (self.next + 1) % ARRIVAL_WINDOW;
+        self.recent.iter().copied().max().unwrap_or(frames)
     }
 }
 

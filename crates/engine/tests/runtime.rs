@@ -169,7 +169,7 @@ struct RecordsCapture {
     trim_supported: bool,
     gate: Option<Arc<AtomicBool>>,
     /// Without it every record arrives at once, the output's priming drops
-    /// what lies beyond target + one block, and QPCs written in advance no
+    /// what lies beyond target + one delivery, and QPCs written in advance no
     /// longer match when the remaining blocks play.
     paced_by: Option<Pacing>,
     lockstep: Option<Arc<Lockstep>>,
@@ -1213,6 +1213,84 @@ fn first_sound_after_start_is_not_dropped() {
             .iter()
             .any(|sample| *sample != 0.0),
         "first sound was lost: {report:?}"
+    );
+}
+
+/// A DD+ decoder hands the mixer a whole 1536-frame sync frame every 32 ms,
+/// which leaves one capture step as three or four mixer blocks. Priming must
+/// cover that gap rather than one block: with silence first, the exact zeros
+/// beyond the threshold are discarded, so a threshold of one block ran the
+/// ring dry before the next sync frame whenever one arrived just before a
+/// period (CI loopback, DD+ shared at 10 ms periods). Every arrival phase is
+/// tried, in fifths of a period.
+#[test]
+fn priming_covers_a_decoder_sized_delivery() {
+    const SYNC_FRAME: usize = 1536;
+    const FRAMES: u64 = 40;
+    let mut underruns = Vec::new();
+    for phase in (0..BLOCK as u64).step_by(BLOCK / 5) {
+        let lockstep = Arc::new(Lockstep::default());
+        let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+        let mut records = vec![format_record(RATE)];
+        records.extend((0..FRAMES).map(|frame| {
+            let value = if frame < 4 { 0.0 } else { 0.25 };
+            data_record_for(
+                ENDPOINT_PRIMARY,
+                frame * SYNC_FRAME as u64,
+                value,
+                value,
+                SYNC_FRAME,
+            )
+        }));
+        let capture = RecordsCapture {
+            records,
+            next: 0,
+            trim_supported: false,
+            gate: None,
+            paced_by: None,
+            lockstep: Some(Arc::clone(&lockstep)),
+            stay_open: true,
+        };
+        let engine = start_with(
+            lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+            capture,
+            opener(Arc::clone(&state), RATE),
+            StartOptions {
+                qpc_frequency: QPC_FREQUENCY,
+                prepared: Some(prepared(RATE)),
+            },
+        )
+        .unwrap();
+        lockstep.step_read(1);
+        // A period every BLOCK frames; sync frame k arrives at
+        // k * SYNC_FRAME + phase and is read before the next period.
+        let mut delivered = 0_u64;
+        for period in 0..(FRAMES * SYNC_FRAME as u64 / BLOCK as u64 - 8) {
+            while delivered < FRAMES
+                && delivered * SYNC_FRAME as u64 + phase <= period * BLOCK as u64
+            {
+                lockstep.step_read(1);
+                delivered += 1;
+            }
+            lockstep.step_period(1);
+        }
+        lockstep.release();
+        let report = engine.stop();
+        assert_eq!(report.dropped_frames, 0, "phase {phase}: {report:?}");
+        assert!(
+            state
+                .samples
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|sample| *sample != 0.0),
+            "phase {phase}: no sound reached the output: {report:?}"
+        );
+        underruns.push((phase, report.underruns));
+    }
+    assert!(
+        underruns.iter().all(|(_, count)| *count == 0),
+        "underruns by arrival phase: {underruns:?}"
     );
 }
 

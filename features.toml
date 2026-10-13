@@ -430,6 +430,7 @@ tests = [
   "engine::idle_blocks_are_dropped_silently_when_the_ring_is_full",
   "engine::a_full_ring_counts_overflowed_frames",
   "engine::priming_never_discards_sound",
+  "engine::priming_covers_a_decoder_sized_delivery",
   "engine::unsupported_format_on_one_endpoint_is_not_a_global_fault",
   "engine::a_supported_format_clears_only_its_endpoints_unsupported_state",
   "engine::first_sound_after_start_is_not_dropped",
@@ -456,7 +457,7 @@ tests = [
   "engine::ended_input_drains_a_thirty_two_channel_ring_below_the_priming_threshold",
   "engine::zero_budget_finish_completes_an_already_quiet_chain",
 ]
-note = "capture/DSP and output threads joined by an output-width rtrb ring; lock-free control queues; retired BRIR sets are freed on the control thread. The output primes with exact-zero frames only and never discards a nonzero sample; startup can install the first Prepared before capture begins. Full idle-silent blocks are omitted, while any other crossing overflow is counted and reported. Lockstep tests use a virtual QPC rather than wall time. After warmup, allocation guards wrap each complete capture iteration (changes, trim, read, record processing, idle and EOF draining) and output iteration (fill, device period, period accounting, cadence and latency); reconnect waits, device opens, layout/format recovery and ASRC reconfiguration are structurally outside those scopes. Status carries four endpoint-local format/epoch/unsupported slots; each parsed format atomically publishes its support result independently of duplicate diagnostic suppression"
+note = "capture/DSP and output threads joined by an output-width rtrb ring; lock-free control queues; retired BRIR sets are freed on the control thread. The output primes with exact-zero frames only and never discards a nonzero sample, and waits for target + the largest recent capture delivery (a whole DD+ sync frame arrives as several mixer blocks in one step) + one period; startup can install the first Prepared before capture begins. Full idle-silent blocks are omitted, while any other crossing overflow is counted and reported. Lockstep tests use a virtual QPC rather than wall time. After warmup, allocation guards wrap each complete capture iteration (changes, trim, read, record processing, idle and EOF draining) and output iteration (fill, device period, period accounting, cadence and latency); reconnect waits, device opens, layout/format recovery and ASRC reconfiguration are structurally outside those scopes. Status carries four endpoint-local format/epoch/unsupported slots; each parsed format atomically publishes its support result independently of duplicate diagnostic suppression"
 
 [[feature]]
 id = "engine.clock_asrc"
