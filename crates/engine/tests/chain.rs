@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bio_abi::{RECORD_FLAG_DISCONTINUITY, Record, RecordWriter, wave_format_bytes};
+use bio_abi::{
+    ENDPOINT_PRIMARY, ENDPOINT_SECOND, RECORD_FLAG_DISCONTINUITY, Record, RecordWriter,
+    wave_format_bytes,
+};
 use bio_types::{BitstreamCodec, BitstreamFormat, PcmFormat, SampleType, SourceFormat};
 use brir::{AnglePreset, BrirSource, DirectionFile, LfePolicy, Profile};
 use engine::{Chain, ChainConfig, ChainEvent, Prepared, partition_for};
@@ -239,7 +242,9 @@ fn overrun_and_discontinuity_reset_without_panicking() {
     let mut chain = Chain::new(ChainConfig::default());
     chain.push_record(
         Record::FormatChange {
+            endpoint: ENDPOINT_PRIMARY,
             epoch: 1,
+            flags: 0,
             qpc: 0,
             format: stereo_pcm_format(),
         },
@@ -247,6 +252,7 @@ fn overrun_and_discontinuity_reset_without_panicking() {
     );
     chain.push_record(
         Record::Data {
+            endpoint: ENDPOINT_PRIMARY,
             epoch: 1,
             flags: 0,
             pos: 0,
@@ -259,6 +265,7 @@ fn overrun_and_discontinuity_reset_without_panicking() {
     let mut overruns = 0;
     chain.push_record(
         Record::Overrun {
+            endpoint: ENDPOINT_PRIMARY,
             pos: 7,
             qpc: 2,
             lost_bytes: 99,
@@ -271,6 +278,7 @@ fn overrun_and_discontinuity_reset_without_panicking() {
     );
     chain.push_record(
         Record::Data {
+            endpoint: ENDPOINT_PRIMARY,
             epoch: 1,
             flags: RECORD_FLAG_DISCONTINUITY,
             pos: 106,
@@ -281,6 +289,48 @@ fn overrun_and_discontinuity_reset_without_panicking() {
         &mut |_| {},
     );
     assert_eq!(overruns, 1);
+}
+
+#[test]
+fn other_endpoint_records_are_skipped_without_affecting_primary_output() {
+    let mut chain = Chain::new(ChainConfig::default());
+    let mut events = 0;
+    chain.push_record(
+        Record::FormatChange {
+            endpoint: ENDPOINT_SECOND,
+            epoch: 1,
+            flags: 0,
+            qpc: 0,
+            format: stereo_pcm_format(),
+        },
+        &mut |_| events += 1,
+    );
+    chain.push_record(
+        Record::Data {
+            endpoint: ENDPOINT_SECOND,
+            epoch: 1,
+            flags: 0,
+            pos: 0,
+            qpc: 1,
+            qpc_written: 0,
+            bytes: &[0; 8],
+        },
+        &mut |_| events += 1,
+    );
+    assert_eq!(events, 0);
+    assert_eq!(chain.skipped_records(), 2);
+
+    let mut stream = vec![0; 64];
+    let mut writer = RecordWriter::new(&mut stream);
+    writer.set_endpoint(ENDPOINT_SECOND);
+    assert!(writer.stream_stop(1, 2));
+    let length = writer.len();
+    // Turn the endpoint-1 stop into a bad-length record while retaining its header.
+    stream[32..36].copy_from_slice(&1_u32.to_le_bytes());
+    stream.resize(length + 1, 0);
+    chain.push_records(&stream, &mut |_| events += 1);
+    assert_eq!(events, 0);
+    assert_eq!(chain.skipped_records(), 3);
 }
 
 #[test]

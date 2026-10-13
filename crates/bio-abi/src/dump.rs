@@ -3,7 +3,7 @@
 
 use zerocopy::{FromBytes, IntoBytes};
 
-use crate::wire::{ABI_VERSION, DUMP_MAGIC, DumpHeader};
+use crate::wire::{ABI_VERSION, DUMP_FORMAT_VERSION, DUMP_MAGIC, DumpHeader};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DumpError {
@@ -13,6 +13,8 @@ pub enum DumpError {
     Truncated { need: usize, have: usize },
     #[error("the dump was recorded with ABI {found}; this build reads ABI {expected}")]
     AbiMismatch { found: u32, expected: u32 },
+    #[error("the dump format is {found}; this build supports up to {supported}")]
+    FormatTooNew { found: u32, supported: u32 },
 }
 
 /// The header for a new dump.
@@ -22,6 +24,7 @@ pub fn dump_header(qpc_frequency: u64) -> DumpHeader {
         abi_version: ABI_VERSION,
         header_size: size_of::<DumpHeader>() as u32,
         qpc_frequency,
+        format_version: DUMP_FORMAT_VERSION,
         reserved: 0,
     }
 }
@@ -49,6 +52,12 @@ pub fn split_dump(bytes: &[u8]) -> Result<(DumpHeader, &[u8]), DumpError> {
             expected: ABI_VERSION,
         });
     }
+    if header.format_version > DUMP_FORMAT_VERSION {
+        return Err(DumpError::FormatTooNew {
+            found: header.format_version,
+            supported: DUMP_FORMAT_VERSION,
+        });
+    }
     let start = (header.header_size as usize).max(size_of::<DumpHeader>());
     if bytes.len() < start {
         return Err(DumpError::Truncated {
@@ -62,6 +71,7 @@ pub fn split_dump(bytes: &[u8]) -> Result<(DumpHeader, &[u8]), DumpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ENDPOINT_PRIMARY, Record, RecordWriter, records};
 
     #[test]
     fn header_round_trips_and_guards_the_magic() {
@@ -81,5 +91,35 @@ mod tests {
             split_dump(&other),
             Err(DumpError::AbiMismatch { found: 9, .. })
         ));
+    }
+
+    #[test]
+    fn old_dump_format_is_primary_and_newer_format_is_rejected() {
+        let mut stream = [0; 64];
+        let mut writer = RecordWriter::new(&mut stream);
+        assert!(writer.stream_start(1, 2));
+        let length = writer.len();
+        let mut header = dump_header(10_000_000);
+        header.format_version = 0;
+        let mut file = header.as_bytes().to_vec();
+        file.extend_from_slice(&stream[..length]);
+        let (_, old_stream) = split_dump(&file).unwrap();
+        assert!(matches!(
+            records(old_stream).next(),
+            Some(Ok(Record::StreamStart {
+                endpoint: ENDPOINT_PRIMARY,
+                ..
+            }))
+        ));
+
+        header.format_version = DUMP_FORMAT_VERSION + 1;
+        file[..size_of::<DumpHeader>()].copy_from_slice(header.as_bytes());
+        assert_eq!(
+            split_dump(&file),
+            Err(DumpError::FormatTooNew {
+                found: DUMP_FORMAT_VERSION + 1,
+                supported: DUMP_FORMAT_VERSION,
+            })
+        );
     }
 }

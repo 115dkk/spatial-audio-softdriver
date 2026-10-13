@@ -20,9 +20,11 @@ pub const ABI_VERSION: u32 = 1;
 /// output: [`AbiInfo`].
 pub const IOCTL_BIO_QUERY_INFO: u32 = (0x22 << 16) | (1 << 14) | (0x900 << 2);
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_OUT_DIRECT, FILE_READ_ACCESS)`;
-/// input: [`ReadRequest`], output: a record stream. Pends until `min_bytes` of
-/// records are queued, a format-change or stream-stop record arrives, or
-/// `timeout_ms` passes. Cancellable.
+/// input: [`ReadRequest`], output: a record stream of whole records, at most
+/// [`READ_MAX_BYTES`] whatever the buffer. Pends until `min_bytes` of records
+/// are queued (clamped to the buffer and to [`READ_MAX_BYTES`]), a
+/// format-change or stream-stop record arrives, or `timeout_ms` passes.
+/// Cancellable.
 pub const IOCTL_BIO_READ: u32 = (0x22 << 16) | (1 << 14) | (0x901 << 2) | 2;
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_WRITE_ACCESS)`;
 /// input: [`RateTrim`]. Clamped to ±[`TRIM_LIMIT_PPM`], applied from the next
@@ -45,13 +47,36 @@ pub const RECORD_KIND_STREAM_START: u16 = 3;
 pub const RECORD_KIND_STREAM_STOP: u16 = 4;
 pub const RECORD_KIND_OVERRUN: u16 = 5;
 
+/// Endpoint numbers in [`RecordHeader::endpoint`] and the per-endpoint arrays.
+pub const ENDPOINT_PRIMARY: u16 = 0;
+pub const ENDPOINT_SECOND: u16 = 1;
+/// Render endpoints the v1 driver can expose; sizes the per-endpoint arrays.
+pub const MAX_ENDPOINTS: usize = 2;
+
 /// Data record flag: the bytes do not follow the previous data record
 /// (the stream restarted or an overrun dropped bytes in between).
 pub const RECORD_FLAG_DISCONTINUITY: u16 = 0x0001;
 
+/// Format-change record flag: the record restates the endpoint's current
+/// format after an overrun and carries the current epoch instead of a new one.
+/// The ring may have overwritten the format change that opened the epoch, so
+/// the driver repeats it before the endpoint's next data; user mode treats it
+/// like any format change (reset the decoder, select by format).
+pub const RECORD_FLAG_FORMAT_REPEAT: u16 = 0x0002;
+
 /// Every record starts at a multiple of this many bytes; the gap after a
 /// payload is zero padding.
 pub const RECORD_ALIGN: u32 = 8;
+
+/// Largest payload of one data record. The driver splits a longer span of the
+/// audio engine's buffer into several records, so a READ buffer of
+/// `record_size(MAX_DATA_PAYLOAD)` bytes always makes progress.
+pub const MAX_DATA_PAYLOAD: u32 = 64 * 1024;
+
+/// Most bytes one READ returns. The driver copies records out under a spin
+/// lock and keeps that copy short; a reader behind by more drains it over
+/// several READs.
+pub const READ_MAX_BYTES: u32 = 256 * 1024;
 
 /// Header of one record. The payload (`len` bytes) follows immediately.
 ///
@@ -64,7 +89,8 @@ pub const RECORD_ALIGN: u32 = 8;
 pub struct RecordHeader {
     pub kind: u16,
     pub flags: u16,
-    /// +1 with every format-change record (the record carries the new epoch).
+    /// +1 with every format-change record (the record carries the new
+    /// epoch), except one flagged [`RECORD_FLAG_FORMAT_REPEAT`], which keeps it.
     pub epoch: u32,
     /// Bytes of data since the stream started, at the first payload byte.
     pub byte_pos: u64,
@@ -75,7 +101,11 @@ pub struct RecordHeader {
     pub qpc_written: u64,
     /// Payload length in bytes, excluding padding.
     pub len: u32,
-    pub reserved: u32,
+    /// The render endpoint that emitted this record. Epoch, `byte_pos`, start,
+    /// stop, format change, and overrun state are counted per endpoint. Old
+    /// records have zero here and therefore belong to the primary endpoint.
+    pub endpoint: u16,
+    pub reserved: u16,
 }
 
 /// Payload of an overrun record.
@@ -131,10 +161,28 @@ pub struct AbiInfo {
     pub driver_version: u32,
     pub ring_bytes: u32,
     pub compiled_formats: u64,
-    pub enabled_formats: u64,
     pub features: u64,
     /// `KeQueryPerformanceCounter` frequency, so records' QPCs convert to time.
     pub qpc_frequency: u64,
+    /// Endpoints exposed now: 1, or 2 when the service's Parameters key enables the second.
+    pub endpoint_count: u32,
+    pub reserved: u32,
+    /// The registry format mask per endpoint, indexed by endpoint number; 0 past `endpoint_count`.
+    pub enabled_formats: [u64; MAX_ENDPOINTS],
+}
+
+pub const ENDPOINT_STATE_STREAMING: u32 = 1 << 0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable)]
+#[repr(C)]
+pub struct EndpointStats {
+    pub total_bytes: u64,
+    pub overruns: u64,
+    pub lost_bytes: u64,
+    /// The endpoint's current epoch.
+    pub epoch: u32,
+    /// `ENDPOINT_STATE_*` bits.
+    pub state: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, FromBytes, IntoBytes, KnownLayout, Immutable)]
@@ -142,18 +190,20 @@ pub struct AbiInfo {
 pub struct BioStats {
     pub struct_size: u32,
     pub open_count: u32,
-    pub total_bytes: u64,
-    pub overruns: u64,
-    pub lost_bytes: u64,
-    /// Worst lateness of the virtual DMA timer, microseconds.
+    /// Worst lateness of the virtual DMA timer, microseconds; both endpoints share the timer.
     pub max_timer_lateness_us: u32,
     pub reserved: u32,
+    pub endpoints: [EndpointStats; MAX_ENDPOINTS],
 }
 
 // ---- Dump files ----
 
 /// First bytes of a dump file: `BIODUMP` and a NUL.
 pub const DUMP_MAGIC: [u8; 8] = *b"BIODUMP\0";
+
+/// 0: recorded before records carried an endpoint (every record is the primary's).
+/// 1: records carry `endpoint`.
+pub const DUMP_FORMAT_VERSION: u32 = 1;
 
 /// Header of a diagnostic recording. The record stream follows, exactly as
 /// READ returned it.
@@ -165,7 +215,8 @@ pub struct DumpHeader {
     pub header_size: u32,
     /// QPC frequency of the machine that recorded, for latency figures.
     pub qpc_frequency: u64,
-    pub reserved: u64,
+    pub format_version: u32,
+    pub reserved: u32,
 }
 
 // Layout assertions. tests/c_header.rs writes the same numbers into the C
@@ -179,17 +230,28 @@ const _: () = {
     assert!(offset_of!(RecordHeader, qpc) == 16);
     assert!(offset_of!(RecordHeader, qpc_written) == 24);
     assert!(offset_of!(RecordHeader, len) == 32);
-    assert!(offset_of!(RecordHeader, reserved) == 36);
+    assert!(offset_of!(RecordHeader, endpoint) == 36);
+    assert!(offset_of!(RecordHeader, reserved) == 38);
     assert!(size_of::<RecordHeader>().is_multiple_of(RECORD_ALIGN as usize));
     assert!(size_of::<OverrunPayload>() == 8);
     assert!(size_of::<ReadRequest>() == 8);
     assert!(size_of::<RateTrim>() == 8);
-    assert!(size_of::<AbiInfo>() == 48);
+    assert!(size_of::<AbiInfo>() == 64);
     assert!(offset_of!(AbiInfo, compiled_formats) == 16);
-    assert!(offset_of!(AbiInfo, qpc_frequency) == 40);
-    assert!(size_of::<BioStats>() == 40);
-    assert!(offset_of!(BioStats, max_timer_lateness_us) == 32);
+    assert!(offset_of!(AbiInfo, features) == 24);
+    assert!(offset_of!(AbiInfo, qpc_frequency) == 32);
+    assert!(offset_of!(AbiInfo, endpoint_count) == 40);
+    assert!(offset_of!(AbiInfo, enabled_formats) == 48);
+    assert!(size_of::<EndpointStats>() == 32);
+    assert!(offset_of!(EndpointStats, epoch) == 24);
+    assert!(offset_of!(EndpointStats, state) == 28);
+    assert!(size_of::<BioStats>() == 80);
+    assert!(offset_of!(BioStats, max_timer_lateness_us) == 8);
+    assert!(offset_of!(BioStats, endpoints) == 16);
     assert!(size_of::<DumpHeader>() == 32);
+    assert!(offset_of!(DumpHeader, format_version) == 24);
+    assert!(offset_of!(DumpHeader, reserved) == 28);
+    assert!(MAX_ENDPOINTS == 2);
     assert!(FORMAT_DTS_HD < 1 << 31 && FEATURE_WRITE_PACKET < 1 << 31);
 };
 
@@ -202,6 +264,11 @@ mod tests {
     const METHOD_OUT_DIRECT: u32 = 2;
     const FILE_READ_ACCESS: u32 = 1;
     const FILE_WRITE_ACCESS: u32 = 2;
+
+    #[test]
+    fn the_largest_data_record_fits_one_read() {
+        assert!(crate::record_size(MAX_DATA_PAYLOAD as usize) <= READ_MAX_BYTES as usize);
+    }
 
     #[test]
     fn ioctl_literals_match_ctl_code() {
@@ -222,6 +289,13 @@ mod tests {
             IOCTL_BIO_GET_STATS,
             code(0x903, METHOD_BUFFERED, FILE_READ_ACCESS)
         );
+    }
+
+    #[test]
+    fn endpoint_numbers_are_distinct_and_in_range() {
+        assert_ne!(ENDPOINT_PRIMARY, ENDPOINT_SECOND);
+        assert!((ENDPOINT_PRIMARY as usize) < MAX_ENDPOINTS);
+        assert!((ENDPOINT_SECOND as usize) < MAX_ENDPOINTS);
     }
 
     #[test]

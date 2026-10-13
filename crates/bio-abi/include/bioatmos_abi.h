@@ -21,9 +21,11 @@
 
 /**
  * `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_OUT_DIRECT, FILE_READ_ACCESS)`;
- * input: [`ReadRequest`], output: a record stream. Pends until `min_bytes` of
- * records are queued, a format-change or stream-stop record arrives, or
- * `timeout_ms` passes. Cancellable.
+ * input: [`ReadRequest`], output: a record stream of whole records, at most
+ * [`READ_MAX_BYTES`] whatever the buffer. Pends until `min_bytes` of records
+ * are queued (clamped to the buffer and to [`READ_MAX_BYTES`]), a
+ * format-change or stream-stop record arrives, or `timeout_ms` passes.
+ * Cancellable.
  */
 #define IOCTL_BIO_READ ((((34 << 16) | (1 << 14)) | (2305 << 2)) | 2)
 
@@ -51,16 +53,51 @@
 #define BIO_RECORD_KIND_OVERRUN 5
 
 /**
+ * Endpoint numbers in [`RecordHeader::endpoint`] and the per-endpoint arrays.
+ */
+#define BIO_ENDPOINT_PRIMARY 0
+
+#define BIO_ENDPOINT_SECOND 1
+
+/**
+ * Render endpoints the v1 driver can expose; sizes the per-endpoint arrays.
+ */
+#define BIO_MAX_ENDPOINTS 2
+
+/**
  * Data record flag: the bytes do not follow the previous data record
  * (the stream restarted or an overrun dropped bytes in between).
  */
 #define BIO_RECORD_FLAG_DISCONTINUITY 1
 
 /**
+ * Format-change record flag: the record restates the endpoint's current
+ * format after an overrun and carries the current epoch instead of a new one.
+ * The ring may have overwritten the format change that opened the epoch, so
+ * the driver repeats it before the endpoint's next data; user mode treats it
+ * like any format change (reset the decoder, select by format).
+ */
+#define BIO_RECORD_FLAG_FORMAT_REPEAT 2
+
+/**
  * Every record starts at a multiple of this many bytes; the gap after a
  * payload is zero padding.
  */
 #define BIO_RECORD_ALIGN 8
+
+/**
+ * Largest payload of one data record. The driver splits a longer span of the
+ * audio engine's buffer into several records, so a READ buffer of
+ * `record_size(MAX_DATA_PAYLOAD)` bytes always makes progress.
+ */
+#define BIO_MAX_DATA_PAYLOAD (64 * 1024)
+
+/**
+ * Most bytes one READ returns. The driver copies records out under a spin
+ * lock and keeps that copy short; a reader behind by more drains it over
+ * several READs.
+ */
+#define BIO_READ_MAX_BYTES (256 * 1024)
 
 #define BIO_TRIM_LIMIT_PPM 2000
 
@@ -95,6 +132,14 @@
 
 #define BIO_FEATURE_WRITE_PACKET (1 << 2)
 
+#define BIO_ENDPOINT_STATE_STREAMING (1 << 0)
+
+/**
+ * 0: recorded before records carried an endpoint (every record is the primary's).
+ * 1: records carry `endpoint`.
+ */
+#define BIO_DUMP_FORMAT_VERSION 1
+
 /**
  * Header of one record. The payload (`len` bytes) follows immediately.
  *
@@ -107,7 +152,8 @@ typedef struct BIO_RECORD_HEADER {
   uint16_t kind;
   uint16_t flags;
   /**
-   * +1 with every format-change record (the record carries the new epoch).
+   * +1 with every format-change record (the record carries the new
+   * epoch), except one flagged [`RECORD_FLAG_FORMAT_REPEAT`], which keeps it.
    */
   uint32_t epoch;
   /**
@@ -127,7 +173,13 @@ typedef struct BIO_RECORD_HEADER {
    * Payload length in bytes, excluding padding.
    */
   uint32_t len;
-  uint32_t reserved;
+  /**
+   * The render endpoint that emitted this record. Epoch, `byte_pos`, start,
+   * stop, format change, and overrun state are counted per endpoint. Old
+   * records have zero here and therefore belong to the primary endpoint.
+   */
+  uint16_t endpoint;
+  uint16_t reserved;
 } BIO_RECORD_HEADER;
 
 /**
@@ -162,25 +214,45 @@ typedef struct BIO_ABI_INFO {
   uint32_t driver_version;
   uint32_t ring_bytes;
   uint64_t compiled_formats;
-  uint64_t enabled_formats;
   uint64_t features;
   /**
    * `KeQueryPerformanceCounter` frequency, so records' QPCs convert to time.
    */
   uint64_t qpc_frequency;
+  /**
+   * Endpoints exposed now: 1, or 2 when the service's Parameters key enables the second.
+   */
+  uint32_t endpoint_count;
+  uint32_t reserved;
+  /**
+   * The registry format mask per endpoint, indexed by endpoint number; 0 past `endpoint_count`.
+   */
+  uint64_t enabled_formats[BIO_MAX_ENDPOINTS];
 } BIO_ABI_INFO;
 
-typedef struct BIO_STATS {
-  uint32_t struct_size;
-  uint32_t open_count;
+typedef struct BIO_ENDPOINT_STATS {
   uint64_t total_bytes;
   uint64_t overruns;
   uint64_t lost_bytes;
   /**
-   * Worst lateness of the virtual DMA timer, microseconds.
+   * The endpoint's current epoch.
+   */
+  uint32_t epoch;
+  /**
+   * `ENDPOINT_STATE_*` bits.
+   */
+  uint32_t state;
+} BIO_ENDPOINT_STATS;
+
+typedef struct BIO_STATS {
+  uint32_t struct_size;
+  uint32_t open_count;
+  /**
+   * Worst lateness of the virtual DMA timer, microseconds; both endpoints share the timer.
    */
   uint32_t max_timer_lateness_us;
   uint32_t reserved;
+  struct BIO_ENDPOINT_STATS endpoints[BIO_MAX_ENDPOINTS];
 } BIO_STATS;
 
 /**
@@ -195,7 +267,8 @@ typedef struct BIO_DUMP_HEADER {
    * QPC frequency of the machine that recorded, for latency figures.
    */
   uint64_t qpc_frequency;
-  uint64_t reserved;
+  uint32_t format_version;
+  uint32_t reserved;
 } BIO_DUMP_HEADER;
 
 
@@ -217,7 +290,8 @@ BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, byte_pos) == 8, "BIO_RECORD_HEADER
 BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, qpc) == 16, "BIO_RECORD_HEADER.qpc offset");
 BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, qpc_written) == 24, "BIO_RECORD_HEADER.qpc_written offset");
 BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, len) == 32, "BIO_RECORD_HEADER.len offset");
-BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, reserved) == 36, "BIO_RECORD_HEADER.reserved offset");
+BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, endpoint) == 36, "BIO_RECORD_HEADER.endpoint offset");
+BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, reserved) == 38, "BIO_RECORD_HEADER.reserved offset");
 BIO_STATIC_ASSERT(sizeof(BIO_OVERRUN_PAYLOAD) == 8, "BIO_OVERRUN_PAYLOAD size");
 BIO_STATIC_ASSERT(offsetof(BIO_OVERRUN_PAYLOAD, lost_bytes) == 0, "BIO_OVERRUN_PAYLOAD.lost_bytes offset");
 BIO_STATIC_ASSERT(sizeof(BIO_READ_REQUEST) == 8, "BIO_READ_REQUEST size");
@@ -226,28 +300,35 @@ BIO_STATIC_ASSERT(offsetof(BIO_READ_REQUEST, timeout_ms) == 4, "BIO_READ_REQUEST
 BIO_STATIC_ASSERT(sizeof(BIO_RATE_TRIM) == 8, "BIO_RATE_TRIM size");
 BIO_STATIC_ASSERT(offsetof(BIO_RATE_TRIM, ppm_q16) == 0, "BIO_RATE_TRIM.ppm_q16 offset");
 BIO_STATIC_ASSERT(offsetof(BIO_RATE_TRIM, reserved) == 4, "BIO_RATE_TRIM.reserved offset");
-BIO_STATIC_ASSERT(sizeof(BIO_ABI_INFO) == 48, "BIO_ABI_INFO size");
+BIO_STATIC_ASSERT(sizeof(BIO_ABI_INFO) == 64, "BIO_ABI_INFO size");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, abi_version) == 0, "BIO_ABI_INFO.abi_version offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, struct_size) == 4, "BIO_ABI_INFO.struct_size offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, driver_version) == 8, "BIO_ABI_INFO.driver_version offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, ring_bytes) == 12, "BIO_ABI_INFO.ring_bytes offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, compiled_formats) == 16, "BIO_ABI_INFO.compiled_formats offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, enabled_formats) == 24, "BIO_ABI_INFO.enabled_formats offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, features) == 32, "BIO_ABI_INFO.features offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, qpc_frequency) == 40, "BIO_ABI_INFO.qpc_frequency offset");
-BIO_STATIC_ASSERT(sizeof(BIO_STATS) == 40, "BIO_STATS size");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, features) == 24, "BIO_ABI_INFO.features offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, qpc_frequency) == 32, "BIO_ABI_INFO.qpc_frequency offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, endpoint_count) == 40, "BIO_ABI_INFO.endpoint_count offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, reserved) == 44, "BIO_ABI_INFO.reserved offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, enabled_formats) == 48, "BIO_ABI_INFO.enabled_formats offset");
+BIO_STATIC_ASSERT(sizeof(BIO_ENDPOINT_STATS) == 32, "BIO_ENDPOINT_STATS size");
+BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, total_bytes) == 0, "BIO_ENDPOINT_STATS.total_bytes offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, overruns) == 8, "BIO_ENDPOINT_STATS.overruns offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, lost_bytes) == 16, "BIO_ENDPOINT_STATS.lost_bytes offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, epoch) == 24, "BIO_ENDPOINT_STATS.epoch offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, state) == 28, "BIO_ENDPOINT_STATS.state offset");
+BIO_STATIC_ASSERT(sizeof(BIO_STATS) == 80, "BIO_STATS size");
 BIO_STATIC_ASSERT(offsetof(BIO_STATS, struct_size) == 0, "BIO_STATS.struct_size offset");
 BIO_STATIC_ASSERT(offsetof(BIO_STATS, open_count) == 4, "BIO_STATS.open_count offset");
-BIO_STATIC_ASSERT(offsetof(BIO_STATS, total_bytes) == 8, "BIO_STATS.total_bytes offset");
-BIO_STATIC_ASSERT(offsetof(BIO_STATS, overruns) == 16, "BIO_STATS.overruns offset");
-BIO_STATIC_ASSERT(offsetof(BIO_STATS, lost_bytes) == 24, "BIO_STATS.lost_bytes offset");
-BIO_STATIC_ASSERT(offsetof(BIO_STATS, max_timer_lateness_us) == 32, "BIO_STATS.max_timer_lateness_us offset");
-BIO_STATIC_ASSERT(offsetof(BIO_STATS, reserved) == 36, "BIO_STATS.reserved offset");
+BIO_STATIC_ASSERT(offsetof(BIO_STATS, max_timer_lateness_us) == 8, "BIO_STATS.max_timer_lateness_us offset");
+BIO_STATIC_ASSERT(offsetof(BIO_STATS, reserved) == 12, "BIO_STATS.reserved offset");
+BIO_STATIC_ASSERT(offsetof(BIO_STATS, endpoints) == 16, "BIO_STATS.endpoints offset");
 BIO_STATIC_ASSERT(sizeof(BIO_DUMP_HEADER) == 32, "BIO_DUMP_HEADER size");
 BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, magic) == 0, "BIO_DUMP_HEADER.magic offset");
 BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, abi_version) == 8, "BIO_DUMP_HEADER.abi_version offset");
 BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, header_size) == 12, "BIO_DUMP_HEADER.header_size offset");
 BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, qpc_frequency) == 16, "BIO_DUMP_HEADER.qpc_frequency offset");
-BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, reserved) == 24, "BIO_DUMP_HEADER.reserved offset");
+BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, format_version) == 24, "BIO_DUMP_HEADER.format_version offset");
+BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, reserved) == 28, "BIO_DUMP_HEADER.reserved offset");
 
 #endif /* BIOATMOS_ABI_H */

@@ -20,9 +20,9 @@ The bump is minor when a commit that touched shipped files has a ``feat``
 subject (``feat:``, ``feat(scope):``, ``feat!:``) or says ``BREAKING CHANGE``,
 and patch otherwise. Before 1.0 a breaking change is still a minor bump.
 
-A file ships when it is a build input of the released binaries: ``SHIP``
-patterns minus ``NOT_SHIPPED`` and anything under a ``tests``, ``benches`` or
-``fuzz`` directory.
+A file ships when it is a build input of the released binaries or of the
+driver test kit: ``SHIP`` patterns minus ``NOT_SHIPPED`` and anything under a
+``tests``, ``benches`` or ``fuzz`` directory, plus ``SHIP_ALWAYS``.
 
 The pure functions are unit-tested in ``test_release_gate.py``; ``main`` wires
 them to git and ``$GITHUB_OUTPUT``.
@@ -44,7 +44,20 @@ SHIP = (
     "Cargo.lock",
     "rust-toolchain.toml",
     "LICENSE",
+    # The driver test kit (release.yml's driver-kit job): the driver, how it is
+    # built and signed, and what the tester runs.
+    "driver/*",
+    "tools/build-driver.ps1",
+    "tools/testkit/*",
+    "tools/ci/driver-test-kit.ps1",
+    "tools/ci/kit-tools.ps1",
+    "tools/ci/RootDevice.cs",
+    "tools/ci/driver_flow_check.py",
+    "tools/ci/ring_record.py",
+    "tools/ci/requirements.txt",
 )
+# Shipped although they match NOT_SHIPPED: the kit's README.
+SHIP_ALWAYS = ("docs/testing/test-signed-pc.md",)
 NOT_SHIPPED = ("*.md", "crates/bio-policy/*")
 NOT_SHIPPED_DIRS = ("tests", "benches", "fuzz")
 
@@ -72,6 +85,8 @@ def _matches(path: str, patterns) -> bool:
 
 
 def ships(path: str) -> bool:
+    if path in SHIP_ALWAYS:
+        return True
     if not path or not _matches(path, SHIP) or _matches(path, NOT_SHIPPED):
         return False
     return not any(part in NOT_SHIPPED_DIRS for part in path.split("/")[:-1])

@@ -1,0 +1,466 @@
+name: Driver
+
+# The kernel driver (driver/, ADR 0027) on every pull request and push to
+# master:
+#
+#   core       driver/core (the ring, READ gate, DMA clock and format checks
+#              that call no kernel API) built with clang and gcc under ASan
+#              and UBSan, its tests, libFuzzer for two minutes, and the record
+#              stream it writes parsed back by bio-abi
+#   core-msvc  the same core with MSVC and /fsanitize=address on Windows
+#   kcheck     every kernel source compiled by clang in MSVC mode against the
+#              WDK headers, x64 and ARM64, plus the clang static analyzer, as
+#              a contributor runs it on Linux (tools/kcheck.py)
+#   build      MSBuild with the NuGet WDK, Debug and Release for x64 and ARM64
+#              (/W4 /WX, code analysis), and InfVerif
+#   package    the Release x64 driver test kit a release ships
+#              (tools/ci/driver-test-kit.ps1: test-signed, its certificate's
+#              private key thrown away) installed on windows-2022 and
+#              windows-2025 runners by the kit's own install.ps1: driver store,
+#              root device node, service and Parameters defaults. The driver
+#              loads, the audio stack must build both render endpoints,
+#              tools/ci/driver_flow_check.py plays a tone into each and reads
+#              the ring back, and the kit's collect.ps1 and uninstall.ps1 run
+#              as a tester would run them
+#   codeql     the Windows driver CodeQL suites the hardware program requires
+#              (must-fix and recommended)
+#   sysvad-build, sysvad-control  diagnosis only: SysVAD itself built on
+#              windows-2022, then test-signed and installed on windows-2025
+#              as a control for the endpoint builder, so a runner image
+#              change can be told from a regression in our driver
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: driver-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  core:
+    name: driver core (clang, gcc, sanitizers, fuzz)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: driver-core
+
+      - name: Build and test with clang and gcc (ASan, UBSan)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q > /dev/null
+          sudo apt-get install -y --no-install-recommends ninja-build libclang-rt-18-dev > /dev/null
+          for cc in "clang clang++" "gcc g++"; do
+            set -- $cc
+            cmake -S driver/core -B "$RUNNER_TEMP/core-$1" -G Ninja \
+              -DCMAKE_C_COMPILER="$1" -DCMAKE_CXX_COMPILER="$2" -DBIO_SANITIZE=ON
+            cmake --build "$RUNNER_TEMP/core-$1"
+            "$RUNNER_TEMP/core-$1/core_tests"
+            "$RUNNER_TEMP/core-$1/write_dump" "$RUNNER_TEMP/core-$1/core.biodump"
+          done
+
+      - name: The record stream the core writes parses back in bio-abi
+        env:
+          BIO_DRIVER_CORE_DUMP: ${{ runner.temp }}/core-clang/core.biodump
+        run: cargo test --locked -p bio-abi --test driver_core -- --nocapture
+
+      - name: libFuzzer on the ring and READ gate (120 s)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ring-artifacts"
+          "$RUNNER_TEMP/core-clang/ring_fuzz" -max_total_time=120 -print_final_stats=1 \
+            -artifact_prefix="$RUNNER_TEMP/ring-artifacts/"
+
+      - name: libFuzzer on the DMA clock against an __int128 reference (120 s)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ring-artifacts"
+          "$RUNNER_TEMP/core-clang/clock_fuzz" -max_total_time=120 -print_final_stats=1 \
+            -artifact_prefix="$RUNNER_TEMP/ring-artifacts/clock-"
+
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ring-fuzz-artifacts
+          path: ${{ runner.temp }}/ring-artifacts
+          if-no-files-found: ignore
+          retention-days: 14
+
+  core-msvc:
+    name: driver core (MSVC, ASan)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: driver-core-msvc
+
+      # RelWithDebInfo: CMake's Debug flags carry /RTC1, which MSVC refuses
+      # together with /fsanitize=address.
+      - name: Build and test with MSVC (/W4 /WX, /fsanitize=address)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $build = Join-Path $env:RUNNER_TEMP 'core-msvc'
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && cmake -S driver/core -B `"$build`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBIO_SANITIZE=ON && cmake --build `"$build`""
+          if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+          # The ASan runtime DLL sits next to the compiler.
+          $cl = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && where cl" | Select-Object -First 1
+          $env:PATH = "$(Split-Path $cl);$env:PATH"
+          & "$build\core_tests.exe"
+          if ($LASTEXITCODE -ne 0) { throw "core_tests failed ($LASTEXITCODE)" }
+          & "$build\write_dump.exe" "$build\core.biodump"
+          if ($LASTEXITCODE -ne 0) { throw "write_dump failed ($LASTEXITCODE)" }
+          "BIO_DRIVER_CORE_DUMP=$build\core.biodump" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: The record stream the MSVC build writes parses back in bio-abi
+        run: cargo test --locked -p bio-abi --test driver_core -- --nocapture
+
+  kcheck:
+    name: kernel sources on Linux (kcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/bio-kcheck
+          key: kcheck-${{ hashFiles('tools/kcheck.py') }}
+
+      - name: Compile and analyse every kernel source for x64 and ARM64
+        run: python3 tools/kcheck.py --analyze
+
+  build:
+    name: driver build (${{ matrix.configuration }}, ${{ matrix.platform }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+        platform: [x64, ARM64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build with the NuGet WDK, then InfVerif (tools/build-driver.ps1)
+        shell: pwsh
+        run: ./tools/build-driver.ps1 -Configuration ${{ matrix.configuration }} -Platform ${{ matrix.platform }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bioatmos-${{ matrix.configuration }}-${{ matrix.platform }}
+          path: target/driver/${{ matrix.configuration }}/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: driver package (test-signed install, x64, ${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Server 2025 shares its audio stack with Windows 11 24H2, where the
+        # driver ships; Server 2022 is the older floor.
+        os: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: bioatmos-Release-x64
+          path: ${{ runner.temp }}/package
+
+      # The audio services are manual on Server images; endpoints appear only
+      # when they run.
+      - name: Start the audio services
+        shell: pwsh
+        run: |
+          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
+            Set-Service -Name $name -StartupType Automatic
+            Start-Service -Name $name
+          }
+
+      # Diagnosis: the driver's own trace of every KS request that reaches its
+      # filters, from before the device exists until the endpoint builder is
+      # done with it. It found why the endpoints stayed NOTPRESENT (a bare
+      # KSDATAFORMAT proposal) and why the audio service could not open a pin
+      # (a mode with no attribute list on the ranges); a regression prints the
+      # same conversation.
+      - name: Start the driver's KS request trace (tools/ci/ks-trace.ps1)
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Start
+
+      # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
+      # by the tester's own install.ps1.
+      - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
+        id: install
+        shell: pwsh
+        run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      # Stopped before the diagnostics below open the filters themselves.
+      - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
+        if: always() && steps.install.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          ./tools/ci/ks-trace.ps1 -Stop
+
+      - name: What the audio stack made of the driver (tools/ci/audio-diagnostics.ps1)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          ./tools/ci/audio-diagnostics.ps1 -InstanceId 'ROOT\MEDIA\0000'
+
+      # Users get no service restart either: both render endpoints must be
+      # active as the device arrives.
+      - name: Both render endpoints are active after install (tools/ci/endpoint-states.ps1)
+        id: endpoints
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
+
+      # Diagnosis only, after the check above failed. A restarted endpoint
+      # builder enumerates every interface at once, so endpoints that turn
+      # active here point at the order in which the interfaces arrived.
+      # Then the device restarts under an ETW session with every provider the
+      # endpoint builder's process registered, so its own account of the
+      # endpoints is printed (tools/ci/aeb-trace.ps1).
+      - name: Endpoint states after restarting the endpoint builder, then the builder's trace of a device restart
+        if: failure() && steps.endpoints.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Restart-Service -Name AudioEndpointBuilder -Force
+          Start-Service -Name Audiosrv
+          Start-Sleep -Seconds 15
+          ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
+          ./tools/ci/aeb-trace.ps1 -InstanceId 'ROOT\MEDIA\0000'
+          ./tools/ci/endpoint-states.ps1 -InstanceId 'ROOT\MEDIA\0000'
+
+      # Diagnosis only: VB-CABLE, whose endpoints do become active on this
+      # image, through the same tools, so its KS filters and the endpoint
+      # properties of a finished endpoint can be set beside ours.
+      - name: A virtual audio driver that works on this image, through the same tools
+        if: failure() && steps.endpoints.outcome == 'failure'
+        shell: pwsh
+        run: |
+          ./tools/ci/install-virtual-cable.ps1
+          $cable = (Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -contains 'VBAudioVACWDM' }).InstanceId
+          ./tools/ci/audio-diagnostics.ps1 -InstanceId $cable
+
+      - uses: actions/setup-python@v7
+        if: steps.install.outputs.loaded == 'true'
+        with:
+          python-version: '3.13'
+
+      - name: Start the KS request trace for the flow check (tools/ci/ks-trace.ps1)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Start -Label flow
+
+      # Both endpoints at once, each with its own tone, read back from the
+      # ring: records, byte continuity, DMA rate and content per endpoint.
+      - name: Play through both endpoints and read the ring (tools/ci/driver_flow_check.py)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: |
+          python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
+          python tools/ci/driver_flow_check.py --summary (Join-Path $env:RUNNER_TEMP 'driver-flow.json')
+
+      - name: What the audio engine asked our filters during the flow check (tools/ci/ks-trace.ps1)
+        if: always() && steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Stop -Label flow
+
+      - name: The audio stack after the flow check
+        if: failure() && steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: ./tools/ci/audio-diagnostics.ps1 -InstanceId 'ROOT\MEDIA\0000'
+
+      # What a tester sends back: the kit's own collector, run here so a
+      # change that breaks it fails the pull request, not the tester.
+      - name: The report a tester would send (tools/testkit/collect.ps1)
+        id: report
+        if: always() && steps.install.outputs.kit != ''
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'report'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          & (Join-Path '${{ steps.install.outputs.kit }}' 'collect.ps1') -OutDir $out
+          if ($LASTEXITCODE -ne 0) { throw "collect.ps1 exited $LASTEXITCODE" }
+          $zip = Get-ChildItem $out -Filter 'bio-atmos-test-report-*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'collect.ps1 wrote no report zip' }
+          Write-Host "report: $($zip.Name), $($zip.Length) bytes"
+
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.install.outputs.loaded == 'true'
+        with:
+          name: driver-flow-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/driver-flow.json
+            ${{ runner.temp }}/aeb-trace
+            ${{ runner.temp }}/bioatmos-ks-*.etl
+            ${{ runner.temp }}/bioatmos-ks-*.xml
+            ${{ runner.temp }}/report/*.zip
+          if-no-files-found: ignore
+
+      # Last: the tester's uninstaller must leave no device, driver package,
+      # service or test certificate behind.
+      - name: Uninstall as a tester would (tools/testkit/uninstall.ps1)
+        if: always() && steps.install.outputs.kit != ''
+        shell: pwsh
+        run: |
+          & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
+          if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
+
+  codeql:
+    name: CodeQL Windows driver suites
+    runs-on: windows-2022
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # The driver suites name microsoft/cpp-queries@0.0.5, which init does
+      # not fetch on its own; the runner image caches a CodeQL bundle.
+      - name: Fetch the query pack the driver suites depend on
+        shell: pwsh
+        run: |
+          $codeql = Get-ChildItem -Path (Join-Path $env:RUNNER_TOOL_CACHE 'CodeQL') -Recurse -Filter codeql.exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+          if (-not $codeql) { throw 'no CodeQL bundle in the tool cache' }
+          & $codeql.FullName pack download microsoft/cpp-queries@0.0.5
+          if ($LASTEXITCODE -ne 0) { throw "codeql pack download failed ($LASTEXITCODE)" }
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: c-cpp
+          build-mode: manual
+          # scope/pack@version:path runs one suite from a pack; `queries`
+          # takes only local paths and repositories.
+          packs: >-
+            microsoft/windows-drivers@1.10.0:windows-driver-suites/mustfix.qls,
+            microsoft/windows-drivers@1.10.0:windows-driver-suites/recommended.qls
+
+      - name: Build for the database (Release x64)
+        shell: pwsh
+        run: ./tools/build-driver.ps1 -Configuration Release -Platform x64
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: windows-driver
+
+  # Diagnosis only: SysVAD itself (the sample driver/bioatmos is reduced from,
+  # at the same commit) built with the NuGet WDK, test-signed and installed,
+  # then seen through the same tools. It targets Windows 11 22H2 and later
+  # (build 22621: its INF floor, and kernel routines Server 2022 lacks), so it
+  # is installed on windows-2025 (build 26100), beside the windows-2025 leg of
+  # `package`. If our endpoints stop turning active, its endpoints turning
+  # active on the same image put the cause in our driver, and its KS answers
+  # are there to set beside ours. It is built on windows-2022: our WDK pin's
+  # build tasks need MSBuild 17, which windows-2025 (MSBuild 18) lacks.
+  sysvad-build:
+    name: SysVAD build (control, diagnosis only)
+    runs-on: windows-2022
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: microsoft/Windows-driver-samples
+          ref: 2dc3fd3a0cc84a2933f2194e7ec0871584979071
+          path: samples
+          sparse-checkout: audio/sysvad
+
+      # The samples pin a WDK NuGet whose build tasks need MSBuild 18; the
+      # runner has 17. Our driver's WDK pin and MSBuild switches
+      # (tools/build-driver.ps1) build SysVAD the same way they build ours.
+      - name: Build SysVAD TabletAudioSample (Release x64) with our NuGet WDK
+        shell: pwsh
+        working-directory: samples
+        run: |
+          Copy-Item ../driver/packages.config, ../driver/Directory.Build.props . -Force
+          $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
+          if (-not $nuget) {
+            $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
+            Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/v6.12.1/nuget.exe' -OutFile $nuget -UseBasicParsing
+          }
+          & $nuget restore packages.config -PackagesDirectory packages -NonInteractive
+          if ($LASTEXITCODE -ne 0) { throw "nuget restore failed ($LASTEXITCODE)" }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = (& $vswhere -latest -products * -requires Microsoft.Component.MSBuild Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
+          $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
+          foreach ($project in 'EndpointsCommon\EndpointsCommon.vcxproj', 'TabletAudioSample\TabletAudioSample.vcxproj') {
+            & $msbuild "audio\sysvad\$project" /restore:false /p:Configuration=Release /p:Platform=x64 `
+              /p:RunCodeAnalysis=false /p:SignMode=Off /p:EnableInf2Cat=false `
+              /p:SkipPackageVerification=true /p:ApiValidator_Enable=false "/p:InfDateStamp=$(Get-Date -Format 'MM/dd/yyyy')" `
+              /nologo /verbosity:minimal
+            if ($LASTEXITCODE -ne 0) { throw "MSBuild failed for $project ($LASTEXITCODE)" }
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sysvad-Release-x64
+          path: |
+            samples/audio/sysvad/TabletAudioSample/**/TabletAudioSample.sys
+            samples/audio/sysvad/TabletAudioSample/**/ComponentizedAudioSample.inf
+          if-no-files-found: error
+          retention-days: 3
+
+  sysvad-control:
+    name: SysVAD on windows-2025 (control, diagnosis only)
+    needs: sysvad-build
+    runs-on: windows-2025
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: sysvad-Release-x64
+          path: ${{ runner.temp }}/sysvad-build
+
+      - name: Start the audio services
+        shell: pwsh
+        run: |
+          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
+            Set-Service -Name $name -StartupType Automatic
+            Start-Service -Name $name
+          }
+
+      - name: Test-sign and install SysVAD (tools/ci/install-sysvad-control.ps1)
+        id: sysvad
+        shell: pwsh
+        run: ./tools/ci/install-sysvad-control.ps1 -Build (Join-Path $env:RUNNER_TEMP 'sysvad-build')
+
+      - name: SysVAD's endpoints and KS filters through the same tools
+        if: always() && steps.sysvad.outputs.instance != ''
+        shell: pwsh
+        env:
+          INSTANCE: ${{ steps.sysvad.outputs.instance }}
+        run: |
+          Start-Sleep -Seconds 15
+          ./tools/ci/endpoint-states.ps1 -InstanceId $env:INSTANCE -Expect 1
+          ./tools/ci/audio-diagnostics.ps1 -InstanceId $env:INSTANCE

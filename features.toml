@@ -52,6 +52,7 @@ tests = [
   "bio-abi::a_cut_record_ends_the_iteration_with_an_error",
   "bio-abi::a_payload_on_a_stop_record_is_an_error_but_not_the_end",
   "bio-abi::arbitrary_bytes_never_panic",
+  "bio-abi::the_largest_data_record_fits_one_read",
 ]
 
 [[feature]]
@@ -63,6 +64,7 @@ tests = [
   "bio-abi::every_format_round_trips",
   "bio-abi::plain_waveformatex_pcm_and_ac3_parse",
   "bio-abi::malformed_formats_are_errors",
+  "bio-abi::subtype_aliases_parse_as_their_container",
 ]
 
 [[feature]]
@@ -358,10 +360,12 @@ tests = [
   "engine::asrc_converts_48_khz_to_44_1_khz_over_ten_seconds",
   "engine::clock_holds_the_trough_without_chasing_the_block_sawtooth",
   "engine::clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim",
-  "engine::clock_with_a_period_as_long_as_a_block_stays_bounded",
+  "engine::clock_with_a_long_period_stays_bounded",
+  "engine::a_period_longer_than_a_block_plays_after_priming",
+  "engine::the_end_of_a_source_drains_without_underruns",
   "engine::pi_controller_clamps_and_integrates",
 ]
-note = "rubato Async sinc on the binaural pair. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
+note = "rubato Async sinc on the binaural pair. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun. Priming keeps target plus the larger of a block and the period's take (the ASRC's includes its filter lookahead before the first render); keeping only target + block left a 20 ms exclusive period short on every first render, so it never played (found by the VB-CABLE soak, ADR 0026)"
 
 [[feature]]
 id = "engine.clock_trim"
@@ -456,8 +460,13 @@ id = "live.tool"
 kind = "tool"
 milestone = "M2"
 status = "partial"
-tests = ["bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them"]
-note = "bio-live record, play and devices (ADR 0018). Paced dumps exercise the live path on the dev PC. Windows 2025 CI also records and plays actual SAL 7.1.4 PCM into VB-CABLE, retaining the far-end stereo WAV. Game/MAT and Apple Music/JOC source and listening checks remain"
+tests = [
+  "bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them",
+  "bio-live::paced_dump_loops_with_continuous_positions_and_times",
+  "bio-live::a_dump_that_ends_on_data_keeps_looping",
+  "bio-live::looping_needs_two_data_records",
+]
+note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace (--loop repeats it, --report writes the run's figures), so the whole live path runs on the dev PC and, through a virtual cable, on the Windows CI runners (ADR 0026). The opt-in SAL runner experiment also records and plays actual SAL 7.1.4 PCM into VB-CABLE and keeps the far-end stereo WAV. Game/MAT and Apple Music/JOC source and listening checks remain"
 
 [[feature]]
 id = "ci.sal_runner"
@@ -468,6 +477,14 @@ tests = []
 note = "Opt-in GitHub-hosted Windows experiment: VB-CABLE, opaque pinned SAL driver build, synthetic PCM stimulus and retained diagnostic artifacts. Does not replace game/Apple Music listening or the latency baseline. See docs/experiments/m2-sal-runner.md."
 
 # ---- Driver and app (M3, M4) ----
+
+[[feature]]
+id = "sys.output_cadence_guard"
+kind = "platform"
+milestone = "M2"
+status = "planned"
+tests = []
+note = "the WASAPI sink measures the frames it is asked for per second and, when a device keeps a slower event cadence than its period (VB-CABLE in exclusive mode signals at the 15.6 ms system timer: 65 % of the nominal rate at a 10 ms period, with no single stall long enough to trigger a restart), moves to a period the device keeps instead of underfeeding it; found by the CI audio job (ADR 0026)"
 
 [[feature]]
 id = "sys.driver_ring"
@@ -489,3 +506,120 @@ kind = "app"
 milestone = "M4"
 status = "planned"
 tests = []
+
+# ---- Upmix and plugin hosting (ADR 0020, 0021, 0022) ----
+# Not bound to the driver freeze. Milestone M4 marks the app they ship in.
+
+[[feature]]
+id = "upmix.stage"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "upmix stage between the decoder and scene trimming; bed channel tags, latency alignment, fallback signal and crossfades live inside the stage (extension design, candidate 10)"
+
+[[feature]]
+id = "upmix.first_party"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "Rust rewrite of the upmixer posted in dcinside speakers 580088, as a derivative work once its repository and licence are published (ADR 0020); runs in the engine process, separation inference on a worker thread"
+
+[[feature]]
+id = "hostvst.isolation"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "one bio-plughost process per plugin under a job object; shared-memory ring one block behind, the engine never waits; crash and hang restart with state restore (ADR 0021)"
+
+[[feature]]
+id = "hostvst.vst3"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "VST 3 adapter through the vst3 crate (bindings generated from the MIT-licensed SDK 3.8)"
+
+[[feature]]
+id = "hostvst.vst2"
+kind = "platform"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "VST 2 adapter from a Rust translation of Xaymar's clean-room vst2sdk header (BSD-2-Clause), never the Steinberg SDK"
+
+[[feature]]
+id = "app.default_device_guard"
+kind = "app"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "bio-guard restores the three default device roles when the app exits abnormally (ADR 0023, proposed)"
+
+# ---- Entrances (ADR 0024, 0025) ----
+
+[[feature]]
+id = "abi.second_endpoint"
+kind = "abi"
+milestone = "M3"
+status = "partial"
+tests = [
+  "bio-abi::endpoint_numbers_are_distinct_and_in_range",
+  "bio-abi::writer_defaults_to_primary_and_preserves_mixed_endpoint_order",
+  "bio-abi::old_zero_reserved_bytes_are_the_primary_endpoint",
+  "bio-abi::errors_report_the_endpoint_when_a_header_is_available",
+  "bio-abi::arbitrary_endpoint_kind_length_sequences_round_trip",
+  "bio-abi::old_dump_format_is_primary_and_newer_format_is_rejected",
+  "bio-abi::a_format_repeat_keeps_the_epoch_and_carries_its_flag",
+  "bio-abi::c_header_matches_the_rust_layout",
+  "engine::other_endpoint_records_are_skipped_without_affecting_primary_output",
+  "bio-replay::default_render_ignores_second_endpoint_records",
+]
+note = "the contract, parser, dump format and C header carry endpoint numbers, and a single Chain filters one endpoint; per-endpoint engine chains and the common-rate scene mixer (engine.two_endpoints) are not implemented, and the driver writes both endpoints only in the hosted-runner flow check (driver.kernel), not yet on a test-signed PC"
+
+# ---- Driver (M3, ADR 0027) ----
+
+[[feature]]
+id = "driver.core"
+kind = "driver"
+milestone = "M3"
+status = "partial"
+tests = [
+  "bio-abi::driver_core_dump_matches_expectations",
+  "bio-abi::the_largest_data_record_fits_one_read",
+]
+note = "driver/core (record ring, READ gate, DMA clock, format bits; no kernel API) is tested by driver/core/tests/core_tests.cpp under ASan and UBSan with clang, gcc and MSVC and fuzzed with libFuzzer in driver.yml, which also sets BIO_DRIVER_CORE_DUMP so bio-abi parses the stream the core writes (without it the Rust test returns early); partial until the kernel wrapper runs it on a test-signed PC"
+
+[[feature]]
+id = "driver.kernel"
+kind = "driver"
+milestone = "M3"
+status = "partial"
+tests = []
+note = "bioatmos.sys: SysVAD HDMI render x2 and the \\\\.\\BioAtmos control device; compile-checked on Linux (tools/kcheck.py), built for x64 and ARM64 with /W4 /WX and code analysis, InfVerif, CodeQL driver suites, and installed test-signed on windows-2022 and windows-2025 runners in driver.yml, where the kernel loads it, both render endpoints turn active, and a tone played into each comes back through the ring (tools/ci/driver_flow_check.py); Driver Verifier, HVCI, IOCTL fuzzing and Atmos negotiation need a test-signed PC"
+
+[[feature]]
+id = "engine.two_endpoints"
+kind = "pipeline"
+milestone = "M3"
+status = "planned"
+tests = []
+note = "per-endpoint deframer, decoder and epoch state and the 10 ms common-rate scene mixer of ADR 0024; one trim controller after mixing"
+
+[[feature]]
+id = "ring.streamring"
+kind = "pipeline"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "cross-process block ring ported from EqualizerAPO-XT StreamRing with its author's permission; shared by the plugin host and the ASIO entrance"
+
+[[feature]]
+id = "asio.entrance"
+kind = "app"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "bioasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Only asio-sys touches the ASIO SDK and carries GPL-3.0-or-later SPDX headers; releases that ship bioasio.dll are GPLv3 as a whole (ADR 0003, 0025)"

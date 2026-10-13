@@ -22,4 +22,5 @@ SAL 링은 관리자 권한이 있어야 열리므로 `record`와 `play`는 관�
 
 - bio-live는 `bio-sys`를 링크하는 개발 도구입니다. 정책 게이트가 허용하는 범위(apps 아래의 앱)에 들고, `bio-replay`처럼 Linux CI에서 돌지는 않습니다.
 - 릴리스 워크플로는 bio-live를 패키징하지 않습니다. SAL 드라이버를 가진 개발 PC에서만 의미가 있기 때문입니다. 필요하면 CI 산출물로만 받습니다.
+  - 2026-10-12 고침: SAL을 깐 시험서명 PC를 가진 분이 릴리스를 받아 M2의 남은 시험(SAL 링 녹화, 듣기, 지연)을 맡습니다(`docs/testing/test-signed-pc.md`). 그래서 릴리스의 Windows 도구 zip에 bio-live를 싣습니다. SAL이 없는 PC에서는 `record`와 `play`가 SAL 장치를 찾지 못했다고 끝나므로 다른 사람에게 해가 없습니다.
 - M4에서 Tauri 앱이 생기면 bio-live의 엔진 배선은 supervisor로 옮겨 가고, `record`는 앱의 진단 녹화가 대신합니다. 그때 이 앱을 지울지 다시 정합니다.

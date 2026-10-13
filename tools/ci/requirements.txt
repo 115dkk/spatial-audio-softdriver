@@ -1,0 +1,5 @@
+# tools/ci: the loopback comparison and its tests. soundcard is installed
+# separately on the Windows audio job, which is the only place it records.
+numpy==2.3.4
+scipy==1.16.3
+soundfile==0.13.1

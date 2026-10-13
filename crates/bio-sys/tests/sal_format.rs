@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod common;
-use bio_abi::{Record, RecordWriter, records};
+use bio_abi::{ENDPOINT_PRIMARY, Record, RecordWriter, records};
 use bio_sys::sal_format::{SalError, SalTranslator, parse_header};
 use bio_types::{BitstreamCodec, SampleType, SourceFormat};
 use common::{header, read};
@@ -37,7 +37,11 @@ fn sal_idle_before_first_format_waits_without_committing_an_epoch() {
     let len = writer.len();
     assert_eq!(
         records(&bytes[..len]).next().unwrap().unwrap(),
-        Record::StreamStart { epoch: 1, qpc: 5 }
+        Record::StreamStart {
+            endpoint: ENDPOINT_PRIMARY,
+            epoch: 1,
+            qpc: 5
+        }
     );
     // A reset-looking invalid header during an active stream is still an error.
     assert!(
@@ -144,13 +148,20 @@ fn sal_records_parse_back_with_positions_qpc_and_drops() {
     assert_eq!(
         parsed,
         vec![
-            Record::StreamStart { epoch: 1, qpc: 20 },
-            Record::FormatChange {
+            Record::StreamStart {
+                endpoint: ENDPOINT_PRIMARY,
                 epoch: 1,
+                qpc: 20
+            },
+            Record::FormatChange {
+                endpoint: ENDPOINT_PRIMARY,
+                epoch: 1,
+                flags: 0,
                 qpc: 20,
                 format: h.source_format().unwrap()
             },
             Record::Data {
+                endpoint: ENDPOINT_PRIMARY,
                 epoch: 1,
                 flags: 0,
                 pos: 0,
@@ -159,11 +170,13 @@ fn sal_records_parse_back_with_positions_qpc_and_drops() {
                 bytes: &[1, 2]
             },
             Record::Overrun {
+                endpoint: ENDPOINT_PRIMARY,
                 pos: 2,
                 qpc: 30,
                 lost_bytes: 7
             },
             Record::Data {
+                endpoint: ENDPOINT_PRIMARY,
                 epoch: 1,
                 flags: 0,
                 pos: 9,
@@ -172,11 +185,13 @@ fn sal_records_parse_back_with_positions_qpc_and_drops() {
                 bytes: &[3, 4]
             },
             Record::Overrun {
+                endpoint: ENDPOINT_PRIMARY,
                 pos: 11,
                 qpc: 40,
                 lost_bytes: 4
             },
             Record::Data {
+                endpoint: ENDPOINT_PRIMARY,
                 epoch: 1,
                 flags: 0,
                 pos: 15,
@@ -211,7 +226,11 @@ fn sal_format_change_bumps_epoch_for_each_format_field() {
         let len = writer.len();
         assert_eq!(
             records(&bytes[..len]).next().unwrap().unwrap(),
-            Record::StreamStart { epoch: 2, qpc: 2 }
+            Record::StreamStart {
+                endpoint: ENDPOINT_PRIMARY,
+                epoch: 2,
+                qpc: 2
+            }
         );
         assert_eq!(
             t.translate(&read(h, &[]), 3, &mut RecordWriter::new(&mut bytes)),
@@ -240,7 +259,11 @@ fn sal_buffer_full_retry_is_transactional() {
     let len = writer.len();
     assert_eq!(
         records(&enough[..len]).next().unwrap().unwrap(),
-        Record::StreamStart { epoch: 1, qpc: 5 }
+        Record::StreamStart {
+            endpoint: ENDPOINT_PRIMARY,
+            epoch: 1,
+            qpc: 5
+        }
     );
 }
 

@@ -20,9 +20,13 @@
 //!   not know and an older app survives a newer driver;
 //! * the epoch rises only with a format-change record, and all data within one
 //!   epoch has the same format;
-//! * on overrun the kernel does not wait: it overwrites, then reports the lost
-//!   byte count in an overrun record; user mode resets the affected decoder and
-//!   resumes at the next sync;
+//! * on overrun the kernel does not wait: it overwrites whole records, then,
+//!   before the affected endpoint's next data, reports the lost byte count in
+//!   an overrun record and restates the current format in a format-change
+//!   record flagged [`RECORD_FLAG_FORMAT_REPEAT`]; user mode resets the
+//!   affected decoder and resumes at the next sync;
+//! * records carry the render endpoint that wrote them; epoch, position and
+//!   losses are counted per endpoint (ADR 0024);
 //! * structure sizes and offsets are asserted at compile time on both sides.
 
 pub mod dump;

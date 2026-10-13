@@ -11,6 +11,8 @@
 //! * `output` (Windows): WASAPI output, exclusive and event-driven when the
 //!   device allows, opened on the output thread (`OutputOpener`).
 //! * `devices` (Windows): render endpoints by name and id.
+//! * `apartment` (Windows): keeps the multithreaded apartment, and the audio
+//!   DLLs COM loaded into it, until the process exits.
 //! * `qpc`, `mmcss` (Windows): QueryPerformanceCounter and MMCSS "Pro Audio"
 //!   registration for real-time threads.
 //!
@@ -20,6 +22,8 @@
 
 pub mod sal_format;
 
+#[cfg(windows)]
+mod apartment;
 #[cfg(windows)]
 pub mod devices;
 #[cfg(windows)]

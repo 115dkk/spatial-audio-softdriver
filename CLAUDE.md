@@ -1,25 +1,40 @@
 # 저장소 작업 규약
 
-바꾸기 전에 [`CONTEXT.md`](CONTEXT.md)의 용어와 불변식, 관련 [ADR](docs/adr)을 읽습니다. 설계 전체는 `docs/BIO Atmos 아키텍처.html`입니다.
+바꾸기 전에 [`CONTEXT.md`](CONTEXT.md)의 용어와 불변식, 관련 [ADR](docs/adr)을 읽습니다. 설계 전체는 `docs/BIO Atmos 아키텍처.html`이고, 드라이버 동결 전의 확장(업믹스, 플러그인 호스트, 시스템 소리)은 `docs/BIO Atmos 확장 설계.html`입니다.
 
 ## 지킬 것
 
-- unsafe는 `bio-sys`에만 둡니다. 새 크레이트 루트에는 `#![forbid(unsafe_code)]`를 걸고 Cargo.toml에 `[lints] workspace = true`를 둡니다. `unsafe-budget.toml`의 숫자를 올리려면 ADR이 먼저입니다.
-- Windows API 의존성(`windows`, `windows-sys`, `wasapi`)은 `bio-sys`만 가집니다. `engine` 이하는 Linux에서 빌드되고 테스트되어야 합니다.
+- unsafe는 격리 크레이트(`unsafe-budget.toml`에 오른 `-sys` 크레이트, 지금은 `bio-sys`)에만 둡니다. 격리 크레이트를 뺀 새 크레이트 루트에는 `#![forbid(unsafe_code)]`를 걸고 Cargo.toml에 `[lints] workspace = true`를 둡니다. 격리 크레이트는 `bio-sys`처럼 `#![deny(unsafe_code)]`와 자기 lint 표를 씁니다(ADR 0022). 숫자를 올리거나 격리 크레이트를 더하려면 ADR이 먼저입니다. `hostvst-sys`, `asio-sys`, `upmix-sys`는 ADR 0022가 허용했고, 처음 만드는 PR에서 숫자와 게이트를 함께 정합니다.
+- Windows API 의존성(`windows`, `windows-sys`, `wasapi`)은 `bio-sys`만 가집니다(`hostvst-sys`와 `asio-sys`가 생기면 그 크레이트도). `engine` 이하는 Linux에서 빌드되고 테스트되어야 합니다.
+- 외부 플러그인(VST 2, VST 3)은 엔진 프로세스에서 돌리지 않고 `bio-plughost`에서만 돌립니다(ADR 0021). `streamring`과 hostvst 계열 크레이트는 `bio-*`에 의존하지 않습니다.
+- ASIO SDK 파일은 저장소에 넣지 않고 빌드 때 받아 SHA-256으로 고정합니다. EqualizerAPO-XT의 ASIO 래퍼에서 옮긴 커밋에는 원본 파일과 커밋을 적습니다(ADR 0025).
+- 라이선스: 소스는 MIT입니다. ASIO SDK에 닿는 코드는 `asio-sys`에만 두고 파일 머리에 `// SPDX-License-Identifier: GPL-3.0-or-later`를 적습니다(SDK 정의를 손으로 옮긴 파일은 `GPL-3.0-only`). 다른 크레이트에는 GPL 코드를 들이지 않습니다(ADR 0003, 0025).
 - 기능을 더하면 `features.toml`에 등록하고, `implemented`로 표시할 때는 실제로 있는 테스트를 가리킵니다.
 - 실시간 스레드에서는 할당, 잠금, 파일 입출력을 하지 않습니다.
 - 클린룸(ADR 0005): SpatialAudioLab의 소스와 그 소스에서 나온 패치는 읽지 않고, 작업자에게도 넘기지 않습니다. 구축기 공유 zip의 `sal-cli-bio-game.patch`가 여기에 해당합니다.
 - 드라이버 계약(`crates/bio-abi/src/wire.rs`)을 바꾸면 `BIO_ABI_BLESS=1`로 C 헤더를 다시 생성해 함께 커밋합니다.
+- 사용자에게 보이는 이름(Windows 엔드포인트 이름이 되는 싱크 설명과 장치 설명, INF의 FriendlyName, 화면과 안내 문구)은 번호가 아니라 용도로 구분합니다. 이름만 보고 무엇에 쓰는지 알 수 있어야 합니다. 지금의 "BIO Atmos Virtual HDMI 2" 같은 번호 이름은 시험판 것이고, 릴리스 전에 용도 이름으로 바꾸면서 그 이름으로 엔드포인트를 찾는 시험(`tools/ci/driver_flow_check.py`)도 함께 고칩니다. 코드와 계약 안의 엔드포인트 번호(0, 1)는 식별자라 그대로 둡니다.
 
 ## 검사
 
-커밋 전에 아래를 통과시킵니다. CI(`ci.yml`)가 같은 것을 Linux와 Windows에서 돌립니다.
+커밋 전에 아래를 통과시킵니다. CI(`ci.yml`)가 같은 것을 Linux와 Windows에서 돌리고, Windows 러너에서는 가상 오디오 케이블로 장치 시험, 루프백, 소크까지 돌립니다(ADR 0026). Windows 대상 clippy는 `rustup target add x86_64-pc-windows-msvc` 뒤 Linux에서도 됩니다.
 
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo test --workspace
 cargo deny check
+```
+
+## 드라이버 (M3)
+
+`driver/`는 MS-PL이고 구조는 ADR 0027입니다. SysVAD에서 가져온 파일의 머리에는 원본 경로와 커밋을 적고, `driver/core/`는 커널 API를 부르지 않고 할당하지 않습니다. 릴리스는 시험서명한 드라이버 시험 묶음(`tools/ci/driver-test-kit.ps1`, `tools/testkit/`)을 싣고, 시험서명 PC에서 시험하는 분은 [`docs/testing/test-signed-pc.md`](docs/testing/test-signed-pc.md)를 따릅니다. 드라이버, 묶음, 시험 도구의 동작이나 출력이 바뀌면 그 문서의 명령과 합격 기준도 함께 고칩니다. 드라이버를 고치면 커밋 전에 아래를 Linux에서 돌립니다. MSBuild, InfVerif, CodeQL, 시험서명 설치는 `driver.yml`이 Windows 러너에서 합니다.
+
+```sh
+python3 tools/kcheck.py --analyze
+cmake -S driver/core -B target/core -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DBIO_SANITIZE=ON
+cmake --build target/core && target/core/core_tests
 ```
 
 ## 화면 (M4)

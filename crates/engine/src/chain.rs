@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use bio_abi::{AbiError, RECORD_FLAG_DISCONTINUITY, Record};
+use bio_abi::{AbiError, ENDPOINT_PRIMARY, RECORD_FLAG_DISCONTINUITY, Record};
 use bio_types::{BitstreamCodec, Feeds, SceneBlock, SourceFormat};
 use brir::PreparedBrir;
 use convolver::Binauralizer;
@@ -18,11 +18,16 @@ use crate::limiter::Limiter;
 pub struct ChainConfig {
     /// Largest scene block in frames (DD+: 1536).
     pub max_block: usize,
+    /// Render endpoint this chain consumes.
+    pub endpoint: u16,
 }
 
 impl Default for ChainConfig {
     fn default() -> Self {
-        Self { max_block: 1536 }
+        Self {
+            max_block: 1536,
+            endpoint: ENDPOINT_PRIMARY,
+        }
     }
 }
 
@@ -170,6 +175,7 @@ pub struct Chain {
     right: Vec<f32>,
     route: Option<Route>,
     last_needs_brir: Option<(u32, usize)>,
+    skipped_records: u64,
 }
 
 impl Chain {
@@ -187,6 +193,7 @@ impl Chain {
             right: vec![0.0; config.max_block],
             route: None,
             last_needs_brir: None,
+            skipped_records: 0,
         }
     }
 
@@ -203,8 +210,17 @@ impl Chain {
         self.prepared.replace(prepared)
     }
 
+    /// Records ignored because they belong to another endpoint.
+    pub fn skipped_records(&self) -> u64 {
+        self.skipped_records
+    }
+
     /// Feeds one record.
     pub fn push_record(&mut self, record: Record<'_>, out: &mut dyn FnMut(ChainEvent<'_>)) {
+        if record.endpoint() != self.config.endpoint {
+            self.skipped_records = self.skipped_records.saturating_add(1);
+            return;
+        }
         match record {
             Record::FormatChange { epoch, format, .. } => {
                 self.deframer.reset();
@@ -247,7 +263,18 @@ impl Chain {
         for record in bio_abi::records(stream) {
             match record {
                 Ok(record) => self.push_record(record, out),
-                Err(error) => out(ChainEvent::Error(ChainError::Record(error))),
+                Err(error) => {
+                    let endpoint = match &error {
+                        AbiError::Truncated { endpoint, .. } => *endpoint,
+                        AbiError::BadLength { endpoint, .. }
+                        | AbiError::BadFormat { endpoint, .. } => Some(*endpoint),
+                    };
+                    if endpoint.is_some_and(|endpoint| endpoint != self.config.endpoint) {
+                        self.skipped_records = self.skipped_records.saturating_add(1);
+                    } else {
+                        out(ChainEvent::Error(ChainError::Record(error)));
+                    }
+                }
             }
         }
     }

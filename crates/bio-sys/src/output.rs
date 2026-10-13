@@ -21,8 +21,8 @@ use windows::Win32::{
     Foundation::E_INVALIDARG,
     Media::Audio::{
         AUDCLNT_E_BUFFER_SIZE_ERROR, AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED,
-        AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED, AUDCLNT_E_INVALID_DEVICE_PERIOD,
-        AUDCLNT_E_UNSUPPORTED_FORMAT,
+        AUDCLNT_E_ENDPOINT_CREATE_FAILED, AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED,
+        AUDCLNT_E_INVALID_DEVICE_PERIOD, AUDCLNT_E_UNSUPPORTED_FORMAT,
     },
 };
 
@@ -219,7 +219,17 @@ impl WasapiOpener {
             Encoding::Int16,
         ] {
             let mut client = device.get_iaudioclient()?;
-            let wave = encoding.wave(self.rate);
+            // Older WDM drivers accept a stereo format only as a plain
+            // WAVEFORMATEX or only with another channel mask, and fail
+            // Initialize with AUDCLNT_E_ENDPOINT_CREATE_FAILED when handed
+            // one they did not accept, so ask for the form they take first.
+            let wave = match client.is_supported_exclusive_with_quirks(&encoding.wave(self.rate)) {
+                Ok(wave) => wave,
+                Err(error) => {
+                    last_error = error;
+                    continue;
+                }
+            };
             let (_, minimum) = client.get_device_period()?;
             let period = self.period_hns(minimum)?;
             let mut result = client.initialize_client(
@@ -279,6 +289,7 @@ fn mode_error(error: &WasapiError) -> bool {
         WasapiError::Windows(e) => matches!(
             e.code(),
             AUDCLNT_E_UNSUPPORTED_FORMAT
+                | AUDCLNT_E_ENDPOINT_CREATE_FAILED
                 | AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED
                 | AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED
                 | AUDCLNT_E_BUFFER_SIZE_ERROR
