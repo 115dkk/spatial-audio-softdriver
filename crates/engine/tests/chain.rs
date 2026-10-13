@@ -2796,10 +2796,14 @@ fn real_ddp_and_pcm_match_their_solo_sum_at_twenty_fixed_seed_phases() {
             assert!(mixed[channel].len() > 1_920, "case={case}");
             assert_eq!(mixed[channel].len(), ddp[channel].len(), "case={case}");
             assert_eq!(mixed[channel].len(), pcm[channel].len(), "case={case}");
+            // The mixed render convolves both lanes in one FFT block, which
+            // can leave ~1e-8 residue before the onset that neither solo has
+            // (it depends on the FFT's SIMD path). Compare the audible onset;
+            // every frame is still compared below.
             let expected_start = (0..mixed[channel].len())
-                .find(|&frame| ddp[channel][frame] + pcm[channel][frame] != 0.0);
+                .find(|&frame| (ddp[channel][frame] + pcm[channel][frame]).abs() > 1.0e-4);
             assert_eq!(
-                first_nonzero(&mixed[channel]),
+                first_audible(&mixed[channel]),
                 expected_start,
                 "case={case} channel={channel} start"
             );
