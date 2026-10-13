@@ -152,7 +152,10 @@ fn ddp_rejects_bad_access_units_without_emitting_and_recovers() {
             .push(&wrong, 0, 0, &mut |_| panic!("wrong codec"))
             .is_err()
     );
-    let mut small = DdpDecoder::new(DecodeConfig { max_frames: 1535 });
+    let mut small = DdpDecoder::new(DecodeConfig {
+        max_frames: 1535,
+        ..DecodeConfig::default()
+    });
     assert!(
         small
             .push(&burst(first), 0, 0, &mut |_| panic!("too small"))
@@ -177,13 +180,17 @@ fn ddp_joc_external_sample_has_positioned_objects() {
     while cursor < input.len() {
         let header = eac3::parse_header(&input[cursor..]).unwrap();
         if header.stream_type != eac3::StreamType::Dependent && samples == 1536 {
+            let mut emitted_frames = 0;
             decoder
                 .push(&burst(&input[start..cursor]), scenes, 9, &mut |s| {
                     assert!(s.is_consistent());
-                    assert!(s.objects.iter().all(|o| o.position.direction().is_some()));
-                    assert_eq!(s.frames, 1536);
+                    assert!(s.objects.iter().all(|o| o.position.direction().is_some()
+                        || (o.position == Position::default() && o.spread == 1.0)));
+                    assert!((1..=1536).contains(&s.frames));
+                    emitted_frames += s.frames;
                 })
                 .unwrap();
+            assert_eq!(emitted_frames, 1536);
             scenes += 1;
             start = cursor;
             samples = 0;

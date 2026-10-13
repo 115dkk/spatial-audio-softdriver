@@ -40,6 +40,11 @@ fn driver_core_dump_matches_expectations() {
         let pos = u64_at(stream, offset + 8);
         let len = u32_at(stream, offset + 32);
         let endpoint = u16_at(stream, offset + 36);
+        let reserved = u16_at(stream, offset + 38);
+        assert_eq!(
+            reserved, 0,
+            "driver must write reserved record fields as zero"
+        );
         let payload = &stream[offset + 40..offset + 40 + len as usize];
         let sum = if kind == bio_abi::RECORD_KIND_DATA {
             payload.iter().map(|&byte| u64::from(byte)).sum()
@@ -54,6 +59,34 @@ fn driver_core_dump_matches_expectations() {
         offset += raw.div_ceil(align) * align;
     }
     assert_eq!(parsed.len(), actual.len());
+    assert!(parsed.iter().any(|r| matches!(r, Record::Volume { endpoint: 0, channel_count: 12, mute_mask: 0, levels, .. } if levels[..12].iter().all(|l| *l == -20 * 65536))));
+    assert!(parsed.iter().any(|r| matches!(
+        r,
+        Record::Volume {
+            endpoint: 1,
+            channel_count: 2,
+            mute_mask: 3,
+            repeat: true,
+            ..
+        }
+    )));
+
+    assert!(parsed.iter().any(
+        |r| matches!(r, Record::Data { endpoint: 2, bytes, .. } if bytes.iter().all(|b| *b == 3))
+    ));
+    assert!(parsed.iter().any(|r| matches!(
+        r,
+        Record::Volume {
+            endpoint: 2,
+            channel_count: 8,
+            ..
+        }
+    )));
+    assert!(
+        parsed
+            .iter()
+            .any(|r| matches!(r, Record::StreamStop { endpoint: 2, .. }))
+    );
 
     let expected: Vec<String> = fs::read_to_string(path.with_extension("biodump.expect"))
         .expect("read driver-core expectations")

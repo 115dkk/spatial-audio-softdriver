@@ -14,7 +14,7 @@ class ShipsTest(unittest.TestCase):
             "rust-toolchain.toml",
             "crates/bio-abi/include/bioatmos_abi.h",
             "driver/bioatmos/minwavert.cpp",
-            "driver/bioatmos/bioatmos.inf",
+            "driver/bioatmos/spatialsoftreceiver.inx",
             "driver/core/bio_ring.cpp",
             "tools/build-driver.ps1",
             "tools/testkit/install.ps1",
@@ -23,6 +23,21 @@ class ShipsTest(unittest.TestCase):
             "docs/testing/test-signed-pc.md",
         ]:
             self.assertTrue(g.ships(path), path)
+
+    def test_every_kit_tool_ships(self):
+        # driver-test-kit.ps1 copies these into the kit; a change to any of
+        # them must release a new kit.
+        import re
+        from pathlib import Path
+        kit = (Path(__file__).resolve().parents[2] / "tools/ci/driver-test-kit.ps1").read_text(
+            encoding="utf-8-sig")
+        lists = re.findall(r"foreach \(\$name in ([^)]*)\)\s*\{\s*Copy-Item \(Join-Path \$repo \"([^\"]*)\\\$name\"\)", kit)
+        self.assertTrue(lists, "no copy lists found in driver-test-kit.ps1")
+        for names, folder in lists:
+            for name in re.findall(r"'([^']+)'", names):
+                path = folder.replace("\\", "/") + "/" + name
+                self.assertTrue(g.ships(path), path)
+        self.assertTrue(g.ships("docs/profiles/speakers-5.1.toml"))
 
     def test_tests_docs_policy_and_ci_do_not_ship(self):
         for path in [

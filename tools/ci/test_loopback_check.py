@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 from scipy.signal import resample_poly
 
-from loopback_check import binary_fromstring, compare
+from loopback_check import binary_fromstring, compare, report_problems
 
 RATE = 48_000
 
@@ -94,6 +94,82 @@ class CompareTest(unittest.TestCase):
             summary = compare(reference, RATE, captured, RATE, 0.95)
             self.assertAlmostEqual(summary["offset_s"], 0.65, delta=0.002, msg=summary)
             self.assertGreaterEqual(summary["matched"], 0.95, summary)
+
+
+class ReportProblems(unittest.TestCase):
+    @staticmethod
+    def clean_report():
+        return {
+            "underruns_while_streaming": 0,
+            "output_restarts": 0,
+            "output_reconnects": 0,
+            "output_cadence_faults": 0,
+            "output_mode": "exclusive",
+            "output_fell_back": False,
+            "dropped_frames": 0,
+            "lane_underrun_frames": 0,
+            "output_overflow_frames": 0,
+            "dropped_events": 0,
+            "faults": [],
+            "endpoints": [
+                {
+                    "endpoint": endpoint,
+                    "format": None,
+                    "epoch": 0,
+                    "unsupported": None,
+                }
+                for endpoint in range(4)
+            ],
+        }
+
+    def test_accepts_complete_loss_free_report(self):
+        self.assertEqual(report_problems(self.clean_report()), [])
+
+    def test_rejects_missing_and_nonzero_new_counters(self):
+        report = self.clean_report()
+        del report["dropped_events"]
+        report["output_overflow_frames"] = 480
+        self.assertEqual(
+            report_problems(report),
+            [
+                "report is missing dropped_events",
+                "output_overflow_frames is 480",
+            ],
+        )
+
+    def test_rejects_reconnects_cadence_faults_fallback_and_wrong_mode(self):
+        report = self.clean_report()
+        report["output_reconnects"] = 1
+        report["output_cadence_faults"] = 2
+        report["output_fell_back"] = True
+        report["output_mode"] = "shared"
+        self.assertEqual(
+            report_problems(report, expected_mode="exclusive"),
+            [
+                "output_reconnects is 1",
+                "output_cadence_faults is 2",
+                "exclusive output fell back to shared mode",
+                "output opened shared, expected exclusive",
+            ],
+        )
+        self.assertEqual(report_problems(self.clean_report(), expected_mode="exclusive"), [])
+
+    def test_rejects_non_array_endpoints_and_non_object_entries(self):
+        report = self.clean_report()
+        report["endpoints"] = None
+        self.assertIn("report endpoints must be an array", report_problems(report))
+
+        report = self.clean_report()
+        report["endpoints"][2] = "bad"
+        self.assertIn("report endpoint 2 must be an object", report_problems(report))
+
+    def test_rejects_endpoint_unsupported_state(self):
+        report = self.clean_report()
+        report["endpoints"][1]["unsupported"] = "unsupported format"
+        self.assertIn(
+            "endpoint 1 has unsupported format: unsupported format",
+            report_problems(report),
+        )
 
 
 class BinaryFromstring(unittest.TestCase):

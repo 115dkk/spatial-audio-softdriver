@@ -39,12 +39,42 @@ fn wasapi_shared_periods_do_not_allocate() {
     let mut sink = bio_sys::output::WasapiOpener {
         endpoint: None,
         rate: 48_000,
+        shared_fallback: true,
         exclusive: false,
         period: None,
     }
-    .open()
+    .open(bio_types::OutputLayout::STEREO)
     .unwrap();
     let count = (sink.format().rate as usize / 5).div_ceil(sink.format().period_frames);
+    sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+    assert_no_alloc(|| {
+        for _ in 0..count {
+            sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+        }
+    });
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires a multichannel default render endpoint and plays 200 ms of silence"]
+fn wasapi_multichannel_periods_do_not_allocate() {
+    use bio_types::{OutputLayout, OutputOpener, OutputSink};
+    let layout = OutputLayout {
+        channels: 6,
+        channel_mask: 0x3f,
+    };
+    let mut sink = bio_sys::output::WasapiOpener {
+        endpoint: None,
+        rate: 48_000,
+        shared_fallback: true,
+        exclusive: true,
+        period: None,
+    }
+    .open(layout)
+    .unwrap();
+    let format = sink.format();
+    assert_eq!((format.channels, format.channel_mask), (6, 0x3f));
+    let count = (format.rate as usize / 5).div_ceil(format.period_frames);
     sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
     assert_no_alloc(|| {
         for _ in 0..count {
@@ -61,10 +91,11 @@ fn wasapi_exclusive_periods_and_a_restart_do_not_allocate() {
     let mut sink = bio_sys::output::WasapiOpener {
         endpoint: None,
         rate: 48_000,
+        shared_fallback: true,
         exclusive: true,
         period: None,
     }
-    .open()
+    .open(bio_types::OutputLayout::STEREO)
     .unwrap();
     let count = (sink.format().rate as usize / 2).div_ceil(sink.format().period_frames);
     sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();

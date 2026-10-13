@@ -1,11 +1,11 @@
 //! PCM adapter: interleaved samples to one object per channel at the standard
 //! position of its channel-mask bit; LFE goes to the scene's LFE signal.
 
-use bio_types::{PcmFormat, Position, SampleType, SceneBlock};
+use bio_types::{PcmFormat, Position, SampleType, SceneBlock, Speaker};
 
 use crate::{DecodeConfig, DecodeError, SceneBuffers};
 
-const MAX_PCM_CHANNELS: usize = 12;
+pub const MAX_PCM_CHANNELS: usize = 32;
 
 /// Position of one `dwChannelMask` speaker bit (`SPEAKER_FRONT_LEFT` = 0x1 ...),
 /// or `None` for LFE (0x8) and bits with no standard position.
@@ -15,27 +15,7 @@ const MAX_PCM_CHANNELS: usize = 12;
 /// TFL (45, 45), TFC (0, 45), TFR (-45, 45), TBL (135, 45), TBC (180, 45),
 /// TBR (-135, 45).
 pub fn speaker_position(mask_bit: u32) -> Option<Position> {
-    let (az, el) = match mask_bit {
-        0x1 => (30.0, 0.0),
-        0x2 => (-30.0, 0.0),
-        0x4 => (0.0, 0.0),
-        0x10 => (150.0, 0.0),
-        0x20 => (-150.0, 0.0),
-        0x40 => (15.0, 0.0),
-        0x80 => (-15.0, 0.0),
-        0x100 => (180.0, 0.0),
-        0x200 => (90.0, 0.0),
-        0x400 => (-90.0, 0.0),
-        0x800 => (0.0, 90.0),
-        0x1000 => (45.0, 45.0),
-        0x2000 => (0.0, 45.0),
-        0x4000 => (-45.0, 45.0),
-        0x8000 => (135.0, 45.0),
-        0x10000 => (180.0, 45.0),
-        0x20000 => (-135.0, 45.0),
-        _ => return None,
-    };
-    Some(Position::from_angles(az, el))
+    Speaker::from_wave_bit(mask_bit).and_then(Speaker::position)
 }
 
 /// The mask Windows assumes when a format gives none: 1 FC; 2 FL FR;
@@ -58,6 +38,7 @@ pub fn default_mask(channels: u16) -> Option<u32> {
 pub struct PcmDecoder {
     buffers: SceneBuffers,
     format: Option<PcmFormat>,
+    direct: crate::direct::DirectLayouts,
     // None is LFE; all other channels index the object buffers.
     channels: [Option<usize>; MAX_PCM_CHANNELS],
     frame: [u8; MAX_PCM_CHANNELS * 4],
@@ -72,6 +53,7 @@ impl PcmDecoder {
         Self {
             buffers: SceneBuffers::new(config.max_frames),
             format: None,
+            direct: config.direct,
             channels: [None; MAX_PCM_CHANNELS],
             frame: [0; MAX_PCM_CHANNELS * 4],
             pending: 0,
@@ -81,7 +63,7 @@ impl PcmDecoder {
         }
     }
 
-    /// Accepts the epoch's format: 1 to 12 channels, 16/24/32-bit integer or
+    /// Accepts the epoch's format: 1 to 32 channels, 16/24/32-bit integer or
     /// 32-bit float, any rate whose nonempty 10 ms block fits `max_frames`.
     /// Integer valid bits must be in `1..=bits_per_sample` and are left aligned
     /// as in WAVEFORMATEXTENSIBLE; floats require 32 valid bits.
@@ -105,34 +87,54 @@ impl PcmDecoder {
                 && (format.bits_per_sample != 32 || format.valid_bits != 32))
         {
             return Err(invalid(
-                "channels, rate or sample width outside 1-12 ch, 16/24/32-bit int or 32-bit float",
+                "channels, rate or sample width outside 1-32 ch, 16/24/32-bit int or 32-bit float",
             ));
         }
-        let mask = if format.channel_mask == 0 {
-            default_mask(format.channels)
-                .ok_or_else(|| invalid("no channel mask and no default for this channel count"))?
-        } else {
-            format.channel_mask
-        };
-        if mask.count_ones() != u32::from(format.channels) || mask & !0x3ffff != 0 {
-            return Err(invalid("channel mask does not match the channel count"));
-        }
-        let mut remaining = mask;
         let mut objects = 0;
-        for channel in 0..usize::from(format.channels) {
-            let bit = 1 << remaining.trailing_zeros();
-            remaining &= !bit;
-            self.channels[channel] = if bit == 0x8 {
-                None
-            } else {
-                let position = speaker_position(bit)
-                    .ok_or_else(|| invalid("channel mask has a speaker without a position"))?;
-                self.buffers.set_object(objects, position, 1.0, 0.0);
-                objects += 1;
-                Some(objects - 1)
-            };
+        let mut has_lfe = false;
+        if format.channel_mask == 0 {
+            let layout = self
+                .direct
+                .get(format.channels)
+                .ok_or(DecodeError::NoDirectLayout(format.channels))?;
+            for (channel, &speaker) in layout.speakers().iter().enumerate() {
+                self.channels[channel] = if matches!(speaker, Speaker::Lfe | Speaker::Lfe2) {
+                    if has_lfe {
+                        return Err(invalid("direct layout has more than one LFE channel"));
+                    }
+                    has_lfe = true;
+                    None
+                } else {
+                    let position = speaker
+                        .position()
+                        .ok_or_else(|| invalid("direct layout speaker has no position"))?;
+                    self.buffers.set_object(objects, position, 1.0, 0.0);
+                    objects += 1;
+                    Some(objects - 1)
+                };
+            }
+        } else {
+            let mask = format.channel_mask;
+            if mask.count_ones() != u32::from(format.channels) || mask & !0x3ffff != 0 {
+                return Err(invalid("channel mask does not match the channel count"));
+            }
+            let mut remaining = mask;
+            for channel in 0..usize::from(format.channels) {
+                let bit = 1 << remaining.trailing_zeros();
+                remaining &= !bit;
+                self.channels[channel] = if bit == 0x8 {
+                    has_lfe = true;
+                    None
+                } else {
+                    let position = speaker_position(bit)
+                        .ok_or_else(|| invalid("channel mask has a speaker without a position"))?;
+                    self.buffers.set_object(objects, position, 1.0, 0.0);
+                    objects += 1;
+                    Some(objects - 1)
+                };
+            }
         }
-        self.buffers.set_layout(objects, mask & 0x8 != 0);
+        self.buffers.set_layout(objects, has_lfe);
         self.format = Some(format);
         Ok(())
     }
@@ -186,6 +188,25 @@ impl PcmDecoder {
                 self.frames = 0;
             }
         }
+        Ok(())
+    }
+
+    /// Emits the final complete PCM frames as a short scene. A trailing partial
+    /// interleaved frame is incomplete input and is discarded. Does not allocate.
+    pub fn flush(&mut self, out: &mut dyn FnMut(&SceneBlock<'_>)) -> Result<(), DecodeError> {
+        let format = self.format.ok_or(DecodeError::NoFormat)?;
+        if self.frames != 0 {
+            self.buffers.emit(
+                self.frames,
+                self.epoch.unwrap_or(0),
+                format.sample_rate,
+                self.source_qpc,
+                out,
+            );
+        }
+        self.pending = 0;
+        self.frames = 0;
+        self.source_qpc = 0;
         Ok(())
     }
 

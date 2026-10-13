@@ -1,16 +1,27 @@
 // SPDX-License-Identifier: MS-PL
 // Copyright (c) Microsoft Corporation. All Rights Reserved.
 // Reduced from audio/sysvad/TabletAudioSample/hdmitopo.cpp at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
+// Volume/mute properties adapted from audio/sysvad/kshelper.cpp at the same commit.
 #include "hdmitopo.h"
 #include "hdmitoptable.h"
 CMiniportTopologyHdmi::CMiniportTopologyHdmi(CAdapterCommon* adapter, USHORT endpoint) : adapter_(adapter), endpoint_(endpoint) {
     adapter_->AddRef();
+    channels_ = BioVolumeChannels(endpoint_);
     ULONG count = 0;
-    for (const auto& format : BioFormats) if (format.Bit & adapter_->Settings().FormatMask[endpoint_]) {
+    const auto& pcm = adapter_->Settings().Formats[endpoint_].pcm;
+    if (BioPcmEnabled(pcm, false) || BioPcmEnabled(pcm, true)) {
         auto& range = ranges_[count];
         range.FormatSize = sizeof(range);
         range.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
-        range.SubFormat = format.Bit == BIO_FORMAT_PCM ? KSDATAFORMAT_SUBTYPE_ANALOG : format.Subtype;
+        range.SubFormat = KSDATAFORMAT_SUBTYPE_ANALOG;
+        range.Specifier = KSDATAFORMAT_SPECIFIER_NONE;
+        pointers_[count++] = &range;
+    }
+    for (const auto& format : BioFormats) if (format.Bit & adapter_->Settings().Formats[endpoint_].codecs) {
+        auto& range = ranges_[count];
+        range.FormatSize = sizeof(range);
+        range.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
+        range.SubFormat = format.Subtype;
         range.Specifier = KSDATAFORMAT_SPECIFIER_NONE;
         pointers_[count++] = &range;
     }
@@ -21,11 +32,14 @@ CMiniportTopologyHdmi::CMiniportTopologyHdmi(CAdapterCommon* adapter, USHORT end
         pins_[i].KsPinDescriptor.Communication = KSPIN_COMMUNICATION_NONE;
         pins_[i].KsPinDescriptor.Category = i ? &KSNODETYPE_HDMI_INTERFACE : &KSCATEGORY_AUDIO;
     }
-    connection_ = {PCFILTER_NODE, BioTopologyBridgePin, PCFILTER_NODE, BioTopologyJackPin};
+    connections_[0] = {PCFILTER_NODE, BioTopologyBridgePin, 0, 1};
+    connections_[1] = {0, 0, 1, 1};
+    connections_[2] = {1, 0, PCFILTER_NODE, BioTopologyJackPin};
     descriptor_.AutomationTable = &HdmiAutomation;
     descriptor_.PinSize = sizeof(PCPIN_DESCRIPTOR); descriptor_.PinCount = 2; descriptor_.Pins = pins_;
     descriptor_.NodeSize = sizeof(PCNODE_DESCRIPTOR);
-    descriptor_.ConnectionCount = 1; descriptor_.Connections = &connection_;
+    descriptor_.NodeCount = ARRAYSIZE(BioVolumeNodes); descriptor_.Nodes = BioVolumeNodes;
+    descriptor_.ConnectionCount = ARRAYSIZE(connections_); descriptor_.Connections = connections_;
 }
 CMiniportTopologyHdmi::~CMiniportTopologyHdmi() { adapter_->Release(); }
 STDMETHODIMP CMiniportTopologyHdmi::QueryInterface(REFIID iid, PVOID* object) {
@@ -59,18 +73,15 @@ NTSTATUS CMiniportTopologyHdmi::Property(PPCPROPERTY_REQUEST request) {
         sink->ProductId = 1;
         sink->AudioLatency = 0;
         sink->HDCPCapable = FALSE; sink->AICapable = TRUE;
-        // The endpoint builder names an HDMI endpoint after its sink, so each
-        // endpoint carries its own name (the INF's Endpoint0Name and
-        // Endpoint1Name); with one shared name the two were indistinguishable.
-        static const WCHAR primary[] = L"BIO Atmos Virtual HDMI";
-        static const WCHAR second[] = L"BIO Atmos Virtual HDMI 2";
+        // Names are validated once at PASSIVE_LEVEL and copied into adapter
+        // state. The endpoint builder names an HDMI endpoint after this sink.
+        static_assert(bio::kEndpointNameCapacity * sizeof(WCHAR) == sizeof(sink->SinkDescription), "sink name capacity");
         auto miniport = static_cast<CMiniportTopologyHdmi*>(reinterpret_cast<IMiniportTopology*>(request->MajorTarget));
-        const bool isSecond = miniport->endpoint_ == BIO_ENDPOINT_SECOND;
-        const WCHAR* name = isSecond ? second : primary;
-        const ULONG bytes = isSecond ? sizeof(second) : sizeof(primary);
-        static_assert(sizeof(second) <= sizeof(sink->SinkDescription), "sink name fits");
-        sink->SinkDescriptionLength = static_cast<UCHAR>(bytes / sizeof(WCHAR) - 1);
-        RtlCopyMemory(sink->SinkDescription, name, bytes);
+        if (miniport->endpoint_ >= BIO_MAX_ENDPOINTS) return STATUS_INVALID_PARAMETER;
+        const WCHAR* name = miniport->adapter_->Settings().EndpointName[miniport->endpoint_];
+        const size_t characters = wcslen(name);
+        sink->SinkDescriptionLength = static_cast<UCHAR>(characters);
+        RtlCopyMemory(sink->SinkDescription, name, (characters + 1) * sizeof(WCHAR));
         return STATUS_SUCCESS;
     }
     ULONG itemBytes;
@@ -93,4 +104,88 @@ NTSTATUS CMiniportTopologyHdmi::Property(PPCPROPERTY_REQUEST request) {
         jack->JackCapabilities = JACKDESC2_PRESENCE_DETECT_CAPABILITY;
     }
     return STATUS_SUCCESS;
+}
+
+// Adapted from PropertyHandler_BasicSupportVolume / PropertyHandler_BasicSupportMute
+// in audio/sysvad/kshelper.cpp at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
+static NTSTATUS BioVolumeSupport(PPCPROPERTY_REQUEST request, ULONG channels, bool mute) {
+    const ULONG access = KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_SET | KSPROPERTY_TYPE_BASICSUPPORT;
+    const ULONG full = sizeof(KSPROPERTY_DESCRIPTION) + sizeof(KSPROPERTY_MEMBERSHEADER) +
+        sizeof(KSPROPERTY_STEPPING_LONG) * channels;
+    if (!request->ValueSize) { request->ValueSize = full; return STATUS_BUFFER_OVERFLOW; }
+    if (!request->Value) { request->ValueSize = 0; return STATUS_INVALID_PARAMETER; }
+    if (request->ValueSize >= sizeof(KSPROPERTY_DESCRIPTION)) {
+        auto description = static_cast<PKSPROPERTY_DESCRIPTION>(request->Value);
+        RtlZeroMemory(description, sizeof(*description));
+        description->AccessFlags = access;
+        description->DescriptionSize = full;
+        description->PropTypeSet.Set = KSPROPTYPESETID_General;
+        description->PropTypeSet.Id = mute ? VT_BOOL : VT_I4;
+        description->MembersListCount = 1;
+        if (request->ValueSize >= full) {
+            auto members = reinterpret_cast<PKSPROPERTY_MEMBERSHEADER>(description + 1);
+            members->MembersFlags = KSPROPERTY_MEMBER_STEPPEDRANGES;
+            members->MembersSize = sizeof(KSPROPERTY_STEPPING_LONG);
+            members->MembersCount = channels;
+            members->Flags = KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_MULTICHANNEL;
+            auto range = reinterpret_cast<PKSPROPERTY_STEPPING_LONG>(members + 1);
+            for (ULONG i = 0; i < channels; ++i) {
+                range[i].Bounds.SignedMinimum = mute ? 0 : BIO_VOLUME_MIN_Q16;
+                range[i].Bounds.SignedMaximum = mute ? 1 : BIO_VOLUME_MAX_Q16;
+                range[i].SteppingDelta = mute ? 1 : BIO_VOLUME_STEP_Q16;
+                range[i].Reserved = 0;
+            }
+            request->ValueSize = full;
+        } else request->ValueSize = sizeof(*description);
+        return STATUS_SUCCESS;
+    }
+    if (request->ValueSize >= sizeof(ULONG)) {
+        *static_cast<PULONG>(request->Value) = access;
+        request->ValueSize = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+    request->ValueSize = 0;
+    return STATUS_BUFFER_TOO_SMALL;
+}
+
+// Adapted from PropertyHandler_Volume / PropertyHandler_Mute in
+// audio/sysvad/kshelper.cpp at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
+// ALL_CHANNELS GET reads channel zero; SET changes every supported channel,
+// bounded by channel_count (not the upstream ALL_CHANNELS_ID loop bound).
+NTSTATUS CMiniportTopologyHdmi::AudioProperty(PPCPROPERTY_REQUEST request) {
+    if (!request || !request->MajorTarget || !request->PropertyItem) return STATUS_INVALID_PARAMETER;
+    auto miniport = static_cast<CMiniportTopologyHdmi*>(reinterpret_cast<IMiniportTopology*>(request->MajorTarget));
+    const ULONG id = request->PropertyItem->Id;
+    const bool mute = id == KSPROPERTY_AUDIO_MUTE;
+    if ((!mute && id != KSPROPERTY_AUDIO_VOLUMELEVEL) ||
+        request->Node != (mute ? 1UL : 0UL) || miniport->channels_ == 0 ||
+        miniport->channels_ > BIO_MAX_VOLUME_CHANNELS) return STATUS_INVALID_DEVICE_REQUEST;
+    if (request->Verb & KSPROPERTY_TYPE_BASICSUPPORT)
+        return BioVolumeSupport(request, miniport->channels_, mute);
+    if (!(request->Verb & (KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_SET))) return STATUS_INVALID_DEVICE_REQUEST;
+    if (!request->Instance || request->InstanceSize < sizeof(LONG)) return STATUS_INVALID_PARAMETER;
+    const LONG channel = *static_cast<PLONG>(request->Instance);
+    if (channel < -1 || (channel != -1 && static_cast<ULONG>(channel) >= miniport->channels_)) return STATUS_INVALID_PARAMETER;
+    NTSTATUS status = BioPropertySize(request, sizeof(LONG));
+    if (!NT_SUCCESS(status)) return status;
+    if (!request->Value) return STATUS_INVALID_PARAMETER;
+    auto value = static_cast<PLONG>(request->Value);
+    auto state = miniport->adapter_->State();
+    KIRQL irql;
+    KeAcquireSpinLock(&state->Lock, &irql);
+    if (!state->Started || state->Removed) status = STATUS_DEVICE_NOT_READY;
+    else if (request->Verb & KSPROPERTY_TYPE_GET) {
+        const auto& volume = state->Ring.Endpoint(miniport->endpoint_).volume;
+        const ULONG index = channel == -1 ? 0 : static_cast<ULONG>(channel);
+        *value = mute ? ((volume.mute_mask & (1UL << index)) != 0) : volume.level_q16[index];
+    } else {
+        const bool ok = mute ? state->Ring.SetMute(miniport->endpoint_, channel, *value != 0, BioQpc())
+                             : state->Ring.SetVolume(miniport->endpoint_, channel, *value, BioQpc());
+        if (!ok) status = STATUS_INVALID_PARAMETER;
+    }
+    KeReleaseSpinLock(&state->Lock, irql);
+    // The stream timer may be idle. A changed volume is urgent and completes a
+    // waiting READ without needing playback; never pump while holding Lock.
+    if (NT_SUCCESS(status) && (request->Verb & KSPROPERTY_TYPE_SET)) BioPumpRead(state);
+    return status;
 }

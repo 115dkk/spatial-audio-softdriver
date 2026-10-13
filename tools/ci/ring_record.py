@@ -1,10 +1,11 @@
-"""Records the BIO Atmos driver ring into a .biodump diagnostic file.
+"""Records the Spatial SoftReceiver driver ring into a .biodump diagnostic file.
 
 The dump is a 32-byte DumpHeader followed by the exact bytes returned by READ.
 Parsing and Windows device access are shared with driver_flow_check.py.
 """
 
 import argparse
+import ctypes
 import datetime as dt
 import json
 import math
@@ -17,11 +18,15 @@ from pathlib import Path
 
 from driver_flow_check import (
     FLAG_DISCONTINUITY,
+    FLAG_REPEAT,
     KIND_DATA,
     KIND_FORMAT_CHANGE,
     KIND_OVERRUN,
+    KIND_VOLUME,
+    parse_volume,
     KIND_STREAM_START,
     KIND_STREAM_STOP,
+    HEADER,
     ControlDevice,
     parse_records,
     parse_wave_format,
@@ -30,7 +35,9 @@ from driver_flow_check import (
 DUMP_HEADER = struct.Struct("<8sIIQII")
 DUMP_MAGIC = b"BIODUMP\0"
 ABI_VERSION = 1
-DUMP_FORMAT_VERSION = 1
+DUMP_FORMAT_VERSION = 3
+KIND_READ_END = 0x8001
+RECORDER_ENDPOINT = 0xFFFF
 ERROR_SHARING_VIOLATION = 32
 DEFAULT_TIMEOUT_MS = 50
 
@@ -54,6 +61,19 @@ def dump_header(qpc_frequency):
                             DUMP_FORMAT_VERSION, 0)
 
 
+def qpc_now(qpc_frequency):
+    if os.name == "nt":
+        value = ctypes.c_longlong()
+        if not ctypes.windll.kernel32.QueryPerformanceCounter(ctypes.byref(value)):
+            raise ctypes.WinError()
+        return value.value
+    return time.monotonic_ns() * qpc_frequency // 1_000_000_000
+
+
+def read_end(qpc):
+    return HEADER.pack(KIND_READ_END, 0, 0, 0, qpc, 0, 0, RECORDER_ENDPOINT, 0)
+
+
 def format_description(payload):
     """Returns a JSON-safe, human-readable WAVEFORMATEX description."""
     fmt = parse_wave_format(payload)
@@ -75,7 +95,9 @@ def format_description(payload):
         if payload[30:40] == GUID_TAIL:
             if family == 0:
                 if data1 == 1:
-                    name = "PCM {0}-bit".format(valid_bits or fmt["bits"])
+                    name = ("PCM 24-in-32-bit" if valid_bits == 24 and fmt["bits"] == 32
+                            else "PCM 24-bit packed" if fmt["bits"] == 24
+                            else "PCM {0}-bit".format(valid_bits or fmt["bits"]))
                 elif data1 == 3:
                     name = "PCM 32-bit float"
                 elif data1 == 0x92:
@@ -88,8 +110,11 @@ def format_description(payload):
             name = "WAVEFORMATEXTENSIBLE {0:#x}/{1:#x}".format(family, data1)
     else:
         name = "WAVEFORMATEX tag {0:#06x}".format(tag)
+    if tag in (1, 3) and fmt["channels"] in (1, 2):
+        channel_mask = 4 if fmt["channels"] == 1 else 3
     return {
         "name": name,
+        "channel_layout": "direct-out" if channel_mask == 0 and fmt["sample"] else "speaker-mask",
         "channels": fmt["channels"],
         "container_rate": fmt["rate"],
         "container_bits": fmt["bits"],
@@ -112,15 +137,15 @@ def percentile(values, fraction):
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def summarize_records(records, qpc_frequency, elapsed_seconds, stats_start=None, stats_end=None):
+def summarize_records(records, qpc_frequency, elapsed_seconds, endpoint_mask, stats_start=None, stats_end=None):
     endpoints = []
-    endpoint_ids = sorted(set([0, 1] + [r["endpoint"] for r in records]))
+    endpoint_ids = [endpoint for endpoint in range(4) if endpoint_mask & (1 << endpoint)]
     for endpoint in endpoint_ids:
         mine = [r for r in records if r["endpoint"] == endpoint]
         data = [r for r in mine if r["kind"] == KIND_DATA]
         formats = []
         for record in mine:
-            if record["kind"] == KIND_FORMAT_CHANGE:
+            if record["kind"] == KIND_FORMAT_CHANGE and not record["flags"] & FLAG_REPEAT:
                 item = format_description(record["payload"])
                 item.update({"qpc": record["qpc"], "epoch": record["epoch"]})
                 formats.append(item)
@@ -157,9 +182,14 @@ def summarize_records(records, qpc_frequency, elapsed_seconds, stats_start=None,
                 "max_ms": max(intervals),
             }
         total_bytes = sum(r["len"] for r in data)
+        volumes = [r for r in mine if r["kind"] == KIND_VOLUME]
         endpoint_summary = {
             "endpoint": endpoint,
             "formats": formats,
+            "volume_records": len(volumes),
+            "volume_changes": sum(not r["flags"] & FLAG_REPEAT for r in volumes),
+            "volume_repeats": sum(bool(r["flags"] & FLAG_REPEAT) for r in volumes),
+            "volume": parse_volume(volumes[-1]["payload"]) if volumes else None,
             "data_records": len(data),
             "data_bytes": total_bytes,
             "bytes_per_second": total_bytes / elapsed_seconds if elapsed_seconds > 0 else None,
@@ -167,8 +197,9 @@ def summarize_records(records, qpc_frequency, elapsed_seconds, stats_start=None,
             "discontinuity_flags": discontinuity_flags,
             "overrun_records": len(overruns),
             "lost_bytes": max(lost_from_gaps, overrun_lost),
-            "starts": sum(r["kind"] == KIND_STREAM_START for r in mine),
-            "stops": sum(r["kind"] == KIND_STREAM_STOP for r in mine),
+            "starts": sum(r["kind"] == KIND_STREAM_START and not r["flags"] & FLAG_REPEAT for r in mine),
+            "stops": sum(r["kind"] == KIND_STREAM_STOP and not r["flags"] & FLAG_REPEAT for r in mine),
+            "state_repeats": sum(bool(r["flags"] & FLAG_REPEAT) for r in mine),
             "qpc_written_intervals": interval_summary,
         }
         if stats_start and stats_end and endpoint < len(stats_end.get("endpoints", [])):
@@ -194,7 +225,9 @@ def metadata(records):
     hold its audio in memory."""
     kept = []
     for record in records:
-        if record["kind"] not in (KIND_FORMAT_CHANGE, KIND_OVERRUN):
+        if record["kind"] >= 0x8000:
+            continue
+        if record["kind"] not in (KIND_FORMAT_CHANGE, KIND_OVERRUN, KIND_VOLUME):
             record = dict(record, payload=b"")
         kept.append(record)
     return kept
@@ -227,7 +260,7 @@ def main():
         if error.errno == ERROR_SHARING_VIOLATION:
             print("다른 프로그램(재생 시험, bio-live 등)이 장치를 열고 있습니다.", file=sys.stderr)
             return 2
-        print("BIO Atmos 제어 장치를 열 수 없습니다: {0}".format(error), file=sys.stderr)
+        print("Spatial SoftReceiver 제어 장치를 열 수 없습니다: {0}".format(error), file=sys.stderr)
         return 1
 
     out_path = Path(args.out).resolve()
@@ -242,18 +275,19 @@ def main():
                 while args.seconds == 0 or time.monotonic() - started < args.seconds:
                     chunk = device.read(args.min_bytes, args.timeout_ms)
                     output.write(chunk)
+                    output.write(read_end(qpc_now(info["qpc_frequency"])))
                     records.extend(metadata(parse_records(chunk)))
             except KeyboardInterrupt:
                 print("녹화를 중지합니다.")
         elapsed = time.monotonic() - started
         stats_end = device.stats()
     except OSError as error:
-        print("BIO Atmos 장치 읽기 오류: {0}".format(error), file=sys.stderr)
+        print("Spatial SoftReceiver 장치 읽기 오류: {0}".format(error), file=sys.stderr)
         return 1
     finally:
         device.close()
 
-    summary = summarize_records(records, info["qpc_frequency"], elapsed, stats_start, stats_end)
+    summary = summarize_records(records, info["qpc_frequency"], elapsed, info["endpoint_mask"], stats_start, stats_end)
     summary.update({"dump": str(out_path), "query_info": info, "time": dt.datetime.now().astimezone().isoformat()})
     sidecar = summary_path(out_path)
     with open(sidecar, "w", encoding="utf-8") as output:

@@ -1,5 +1,5 @@
 ﻿#Requires -RunAsAdministrator
-# Collects only BIO Atmos and Windows driver diagnostics into a shareable zip.
+# Collects only Spatial SoftReceiver and Windows driver diagnostics into a shareable zip.
 param([string] $OutDir = $PSScriptRoot)
 $ErrorActionPreference = 'Continue'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -12,6 +12,9 @@ $zip = Join-Path $OutDir "$name.zip"
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $collected = New-Object System.Collections.Generic.List[string]
+$endpointHelper = Join-Path $PSScriptRoot 'endpoints.ps1'
+if (-not (Test-Path -LiteralPath $endpointHelper)) { $endpointHelper = Join-Path $PSScriptRoot '..\ci\endpoints.ps1' }
+. $endpointHelper
 
 function Save-Text([string] $Name, [scriptblock] $Command) {
     $path = Join-Path $work $Name
@@ -30,12 +33,12 @@ Save-Text 'device-guard.txt' { Get-CimInstance -Namespace 'root\Microsoft\Window
 Save-Text 'verifier-query.txt' { verifier.exe /query }
 
 Save-Text 'devices.txt' {
-    Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\BioAtmos' } | ForEach-Object {
+    Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'Root\SpatialSoftReceiver' } | ForEach-Object {
         $problem = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_ProblemCode' -ErrorAction SilentlyContinue).Data
         [pscustomobject]@{ InstanceId = $_.InstanceId; Status = $_.Status; ProblemCode = $problem }
     } | Format-List
 }
-$driver = Get-CimInstance Win32_SystemDriver -Filter "Name='bioatmos'" -ErrorAction SilentlyContinue
+$driver = Get-CimInstance Win32_SystemDriver -Filter "Name='SpatialSoftReceiver'" -ErrorAction SilentlyContinue
 $driverPath = if ($driver) { [Environment]::ExpandEnvironmentVariables($driver.PathName.Trim('"')) } else { $null }
 if ($driverPath -and (Test-Path $driverPath)) {
     $file = Get-Item $driverPath
@@ -44,32 +47,44 @@ if ($driverPath -and (Test-Path $driverPath)) {
         ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $work 'driver-file.json')
     $collected.Add('driver-file.json')
 }
-$parameterPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\bioatmos\Parameters'
+$parameterPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\SpatialSoftReceiver\Parameters'
 if (Test-Path $parameterPath) {
     $key = Get-Item $parameterPath
     $values = [ordered]@{}
-    foreach ($property in 'SecondEndpoint', 'FormatMask0', 'FormatMask1', 'WritePacket') {
+    foreach ($property in 'EndpointMask', 'CodecMask0', 'PcmRateMask0', 'PcmShapeMask0', 'PcmMaxMaskedChannels0', 'PcmDirectChannels0', 'CodecMask1', 'PcmRateMask1', 'PcmShapeMask1', 'PcmMaxMaskedChannels1', 'PcmDirectChannels1', 'CodecMask2', 'PcmRateMask2', 'PcmShapeMask2', 'PcmMaxMaskedChannels2', 'PcmDirectChannels2', 'CodecMask3', 'PcmRateMask3', 'PcmShapeMask3', 'PcmMaxMaskedChannels3', 'PcmDirectChannels3', 'WritePacket') {
         $values[$property] = [ordered]@{ value = $key.GetValue($property); kind = [string]$key.GetValueKind($property) }
     }
     $values | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $work 'service-parameters.json')
     $collected.Add('service-parameters.json')
 }
 
-$states = @{ 1 = 'active'; 2 = 'disabled'; 4 = 'not present'; 8 = 'unplugged' }
-$endpoints = @()
-foreach ($endpoint in Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render' -ErrorAction SilentlyContinue) {
-    $props = Get-ItemProperty (Join-Path $endpoint.PSPath 'Properties') -ErrorAction SilentlyContinue
-    $label = $props.'{a45c254e-df1c-4efd-8020-67d146a850e0},2'
-    if ($label -notlike '*BIO Atmos*') { continue }
-    $value = [int](Get-ItemProperty $endpoint.PSPath).DeviceState
-    $endpoints += [pscustomobject]@{ name = $label; state = $(if ($states.ContainsKey($value)) { $states[$value] } else { '0x{0:X}' -f $value }) }
+Save-Text 'endpoints.json' {
+    $endpoints = @(Get-SpatialEndpoints)
+    foreach ($endpoint in $endpoints) {
+        $guid = $endpoint.id.Substring($endpoint.id.LastIndexOf('.') + 1)
+        $props = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\$guid\Properties" -ErrorAction Stop
+        $deviceFormat = $props.'{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0'
+        $format = if ($deviceFormat) { [BitConverter]::ToString([byte[]]$deviceFormat).Replace('-', '') } else { $null }
+        $endpoint | Add-Member -NotePropertyName PKEY_AudioEngine_DeviceFormat -NotePropertyValue $format
+    }
+    ConvertTo-Json -InputObject $endpoints -Depth 4
 }
-$endpoints | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $work 'endpoints.json')
-$collected.Add('endpoints.json')
+Save-Text 'endpoint-policy.json' {
+    $policyHelper = Join-Path $PSScriptRoot 'exclusive-policy.ps1'
+    if (-not (Test-Path -LiteralPath $policyHelper)) { $policyHelper = Join-Path $PSScriptRoot '..\ci\exclusive-policy.ps1' }
+    . $policyHelper
+    @(Get-BioPolicySnapshot) | ConvertTo-Json -Depth 6
+}
+Save-Text 'endpoint-volumes.json' {
+    $volumeHelper = Join-Path $PSScriptRoot 'endpoint-volume.ps1'
+    if (-not (Test-Path -LiteralPath $volumeHelper)) { $volumeHelper = Join-Path $PSScriptRoot '..\ci\endpoint-volume.ps1' }
+    . $volumeHelper
+    @(Get-BioVolumeSnapshot) | ConvertTo-Json -Depth 6
+}
 
 $setup = 'C:\Windows\INF\setupapi.dev.log'
 if (Test-Path $setup) {
-    $setupHits = Select-String -Path $setup -Pattern 'bioatmos|BioAtmos' -Context 20,40
+    $setupHits = Select-String -Path $setup -Pattern 'spatialsoftreceiver' -Context 20,40
     $setupHits | Out-String -Width 4096 | Set-Content -Encoding UTF8 (Join-Path $work 'setupapi-bioatmos.txt')
     $collected.Add('setupapi-bioatmos.txt')
 }
@@ -81,7 +96,7 @@ Save-Text 'events-system.txt' {
 }
 Save-Text 'events-code-integrity.txt' {
     Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-CodeIntegrity/Operational'; StartTime = $since } -ErrorAction SilentlyContinue |
-        Where-Object { $_.Message -match 'bioatmos' } |
+        Where-Object { $_.Message -match 'spatialsoftreceiver' } |
         Select-Object TimeCreated, Id, LevelDisplayName, ProviderName, Message | Format-List
 }
 

@@ -89,7 +89,12 @@ jobs:
         with:
           python-version: "3.13"
 
+      # BIO_TEST_PWSH runs the tests that compile the tools' inline C# and run
+      # their PowerShell logic (endpoint lookup, exclusive-policy verdicts);
+      # PowerShell 7 ships on the hosted images.
       - name: CI tool unit tests (tools/ci)
+        env:
+          BIO_TEST_PWSH: pwsh
         run: |
           python -m pip install --quiet -r tools/ci/requirements.txt
           python -m unittest discover -s tools/ci -p "test_*.py" -v
@@ -327,6 +332,42 @@ jobs:
           done
           exit $status
 
+      # Speaker output (ADR 0030). A profile whose speakers sit exactly at a
+      # PCM layout's positions routes source channel k to device channel k,
+      # so each channel's own tone must come back on its own channel through
+      # the cable, matching the offline render and 40 dB above the others.
+      # The layout is the widest of 8, 6, 4 channels both cable ends take in
+      # exclusive mode; exit 2 means the cable took none of them.
+      - name: Multichannel loopback (speaker profile through VB-CABLE; tools/ci/multichannel_loopback_check.py)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          python -m pip install --quiet -r tools/ci/requirements.txt
+          cargo build --locked --release -p bio-sys --example format_probe --example cable_capture || exit 1
+          out="$RUNNER_TEMP/multichannel"
+          python tools/ci/multichannel_loopback_check.py \
+            --format-probe target/release/examples/format_probe.exe \
+            --cable-capture target/release/examples/cable_capture.exe \
+            --bio-live target/release/bio-live.exe --bio-replay target/release/bio-replay.exe \
+            --work "$out" --summary "$out/summary.json"
+          status=$?
+          {
+            echo "## Multichannel loopback (${{ matrix.os }})"
+            echo
+            if [ -f "$out/summary.json" ]; then
+              jq -r '"channels \(.selected_channels), mode \(.mode), passed \(.passed)"' "$out/summary.json"
+              jq -r '(.problems // [])[] | "- \(.)"' "$out/summary.json"
+              jq -r '.reason // empty' "$out/summary.json"
+            else
+              echo "no summary"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" = 2 ]; then
+            echo "::error::VB-CABLE took no 4, 6 or 8-channel layout in exclusive mode on both ends"
+          fi
+          exit $status
+
       - name: Soaks (exclusive 5 min, exclusive at 10 ms 2 min, shared 2 min, DD+ 2 min, exclusive under CPU load 2 min, under full page heap 1 min)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
@@ -374,6 +415,7 @@ jobs:
           name: audio-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/loopback-*.json
+            ${{ runner.temp }}/multichannel
             ${{ runner.temp }}/soak-*.json
             ${{ runner.temp }}/soak-*.log
             ${{ runner.temp }}/dumps

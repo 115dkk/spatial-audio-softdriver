@@ -1,9 +1,14 @@
 #![forbid(unsafe_code)]
 
 use assert_no_alloc::assert_no_alloc;
-use bio_types::{PcmFormat, SampleType};
+use bio_types::{PcmFormat, SampleType, Speaker};
 use bitstream::{Burst, DataType};
-use decode::{DecodeConfig, ddp::DdpDecoder, pcm::PcmDecoder};
+use decode::{
+    DecodeConfig,
+    ddp::DdpDecoder,
+    direct::{DirectLayout, DirectLayouts},
+    pcm::PcmDecoder,
+};
 
 #[cfg(debug_assertions)]
 #[global_allocator]
@@ -43,10 +48,87 @@ fn pcm_configure_push_reset_do_not_allocate() {
                         .unwrap();
                 }
             }
+            decoder
+                .flush(&mut |scene| {
+                    assert!(scene.is_consistent());
+                    assert!(scene.frames < 480);
+                    count += 1;
+                })
+                .unwrap();
             decoder.reset();
         }
     });
     assert!(count >= 40);
+}
+
+#[test]
+fn thirty_two_channel_direct_configure_push_and_reset_do_not_allocate() {
+    let speakers = [
+        Speaker::L,
+        Speaker::R,
+        Speaker::C,
+        Speaker::Lfe,
+        Speaker::Lrs,
+        Speaker::Rrs,
+        Speaker::Lc,
+        Speaker::Rc,
+        Speaker::Cs,
+        Speaker::Lss,
+        Speaker::Rss,
+        Speaker::Tc,
+        Speaker::Tfl,
+        Speaker::Tfc,
+        Speaker::Tfr,
+        Speaker::Trl,
+        Speaker::Trc,
+        Speaker::Trr,
+        Speaker::Ls,
+        Speaker::Rs,
+        Speaker::Lw,
+        Speaker::Rw,
+        Speaker::Tsl,
+        Speaker::Tsr,
+        Speaker::L,
+        Speaker::R,
+        Speaker::C,
+        Speaker::Lrs,
+        Speaker::Rrs,
+        Speaker::Lss,
+        Speaker::Rss,
+        Speaker::Tc,
+    ];
+    let mut direct = DirectLayouts::empty();
+    direct
+        .set(32, DirectLayout::new(&speakers).unwrap())
+        .unwrap();
+    let mut decoder = PcmDecoder::new(DecodeConfig {
+        direct,
+        ..DecodeConfig::default()
+    });
+    let bytes = [0_u8; 480 * 32 * 4 + 3];
+    let mut count = 0;
+    assert_no_alloc(|| {
+        decoder
+            .configure(PcmFormat {
+                channels: 32,
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+                valid_bits: 32,
+                sample_type: SampleType::Int,
+                channel_mask: 0,
+            })
+            .unwrap();
+        for chunk in bytes.chunks(137) {
+            decoder
+                .push(chunk, 77, 2, &mut |scene| {
+                    assert!(scene.is_consistent());
+                    count += 1;
+                })
+                .unwrap();
+        }
+        decoder.reset();
+    });
+    assert_eq!(count, 1);
 }
 
 #[test]

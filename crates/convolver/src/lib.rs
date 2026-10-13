@@ -62,6 +62,7 @@ pub struct FilterBank {
     inputs: usize,
     partition: usize,
     partitions: usize,
+    quiet_hops: usize,
     segments: Vec<FilterSegment>,
 }
 
@@ -118,11 +119,24 @@ impl FilterBank {
             ));
         }
         let partitions = segments.iter().map(|segment| segment.partitions).sum();
+        // A scheduled segment can still be collecting one large input window
+        // and spread that window's work across the next. Reserve two complete
+        // windows at the largest segment ratio; `+ 2` is sufficient only for
+        // the immediate P-sized segment.
+        let largest_ratio = segments
+            .iter()
+            .map(|segment| segment.partition / partition)
+            .max()
+            .unwrap_or(1);
+        let quiet_hops = longest
+            .div_ceil(partition)
+            .saturating_add(2 * largest_ratio);
 
         Ok(Self {
             inputs: irs.len(),
             partition,
             partitions,
+            quiet_hops,
             segments,
         })
     }
@@ -691,6 +705,7 @@ pub struct Binauralizer {
     max_block: usize,
     immediate: ImmediateState,
     scheduled: Vec<ScheduledState>,
+    silent_hops: usize,
 }
 
 impl fmt::Debug for Binauralizer {
@@ -714,6 +729,7 @@ impl Binauralizer {
         );
 
         let immediate = ImmediateState::new(&bank.segments[0], bank.inputs);
+        let silent_hops = bank.quiet_hops;
         let scheduled = bank.segments[1..]
             .iter()
             .map(|segment| ScheduledState::new(segment, bank.inputs, bank.partition))
@@ -724,11 +740,31 @@ impl Binauralizer {
             max_block,
             immediate,
             scheduled,
+            silent_hops,
         }
     }
 
     pub fn bank(&self) -> &Arc<FilterBank> {
         &self.bank
+    }
+
+    /// Whether enough zero input has passed to empty every convolution state.
+    pub fn is_quiet(&self) -> bool {
+        self.silent_hops >= self.bank.quiet_hops
+    }
+
+    /// Accounts for a known zero-input block after it has been processed.
+    pub fn note_silent_input(&mut self, frames: usize) {
+        debug_assert!(frames.is_multiple_of(self.bank.partition));
+        self.silent_hops = self
+            .silent_hops
+            .saturating_add(frames / self.bank.partition)
+            .min(self.bank.quiet_hops);
+    }
+
+    /// Marks the next processed block as containing signal.
+    pub fn note_active_input(&mut self) {
+        self.silent_hops = 0;
     }
 
     /// Convolves `feeds` (one channel per bank input, `feeds.frames()` a
@@ -790,5 +826,6 @@ impl Binauralizer {
         for state in &mut self.scheduled {
             state.reset();
         }
+        self.silent_hops = self.bank.quiet_hops;
     }
 }

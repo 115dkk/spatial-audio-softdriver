@@ -26,6 +26,7 @@ struct EndpointState {
     uint32_t state;          // BIO_ENDPOINT_STATE_* bits
     uint32_t format_bytes;   // 0 until the first format change
     uint8_t  format[kMaxFormatBytes];
+    BIO_VOLUME_PAYLOAD volume; // channel_count == 0 until configured
     bool     discontinuity;  // flag the next data record
 };
 
@@ -40,10 +41,17 @@ public:
 
     // Producer side. `ep` < BIO_MAX_ENDPOINTS (others return false).
     // Each call appends one record (plus, after an overrun on `ep`, an overrun
-    // record and a repeat of the current format first). When the ring is full
+    // record and repeats of current format, volume, and stream state first). When the ring is full
     // the oldest whole records are overwritten and their data bytes counted
     // as lost for their own endpoint. Returns false only when the record can
     // never fit (bigger than the ring) or the arguments are invalid.
+    // Configure once after Init, before exposing endpoints. Default 0 dB/unmuted.
+    bool ConfigureVolume(uint16_t ep, uint32_t channels);
+    // -1 means all channels; GET -1 reads channel zero (SysVAD convention).
+    // SET clamps and quantizes to the advertised half-dB range. All operations
+    // share the caller's ring lock; unchanged SETs emit nothing.
+    bool SetVolume(uint16_t ep, int32_t channel, int32_t level, uint64_t qpc);
+    bool SetMute(uint16_t ep, int32_t channel, bool mute, uint64_t qpc);
     bool StreamStart(uint16_t ep, uint64_t qpc);
     bool StreamStop(uint16_t ep, uint64_t qpc);
     // Bumps the endpoint's epoch, keeps a copy of `wfx` for repeats, and
@@ -56,24 +64,26 @@ public:
     // The audio engine's bytes for `lost_bytes` were lost before the driver
     // copied them (the DMA timer ran more than a buffer lap late). Advances the
     // endpoint's pos by lost_bytes, adds them to total_bytes, lost_bytes and
-    // pending_lost, and sets discontinuity, so the endpoint's next record is
-    // preceded by an overrun record and a FORMAT_REPEAT, and its next data
-    // carries BIO_RECORD_FLAG_DISCONTINUITY. Writes nothing by itself. Returns
+    // pending_lost, and sets discontinuity. Before the next READ or producer
+    // record, the ring queues Overrun, repeated format/volume, and repeated current
+    // Start/Stop; the next data carries BIO_RECORD_FLAG_DISCONTINUITY. Returns
     // false only for an invalid endpoint or lost_bytes == 0.
     bool SourceGap(uint16_t ep, uint64_t qpc, uint64_t lost_bytes);
 
-    // Consumer side.
+    // Consumer side. Queues every pending endpoint's overrun, repeated format,
+    // volume and repeated current Start/Stop before a READ is gated or returned.
+    bool PrepareRead(uint64_t qpc);
     uint32_t QueuedBytes() const;      // bytes of whole records waiting
-    bool UrgentQueued() const;         // a format change or stream stop waits
+    bool UrgentQueued() const;         // a format change, volume or stream stop waits
     // Moves whole records into `out` (never splits one); returns bytes moved.
-    uint32_t Read(uint8_t* out, uint32_t capacity);
+    uint32_t Read(uint8_t* out, uint32_t capacity, uint64_t qpc = 0);
     // Bytes of the first queued record (0 if none): a READ whose buffer is
     // smaller can never complete and is failed by the caller.
     uint32_t FirstRecordBytes() const;
-    // Drops queued records (the handle closed). Endpoint counters are kept; an
-    // endpoint with a known format repeats it and marks its next data
-    // discontinuous for the next reader.
-    void DiscardQueued();
+    // Drops queued records (the handle closed), then queues each known format,
+    // configured volume and current Start/Stop as repeats for the next reader. The first
+    // following data for every known endpoint is discontinuous.
+    void DiscardQueued(uint64_t qpc = 0);
 
     const EndpointState& Endpoint(uint16_t ep) const;
     uint32_t CapacityBytes() const;
@@ -84,6 +94,7 @@ private:
               uint64_t pos, uint64_t qpc, uint64_t qpc_written,
               const uint8_t* a, uint32_t a_len, const uint8_t* b, uint32_t b_len);
     bool MakeRoom(uint32_t bytes);
+    bool ChangeVolume(uint16_t ep, const BIO_VOLUME_PAYLOAD& value, uint64_t qpc);
     bool PrepareRecovery(uint16_t ep, uint64_t qpc, uint32_t main_bytes,
                          bool main_is_format_change = false);
     void DropFirst();
@@ -100,12 +111,15 @@ private:
     uint32_t queued_ = 0;
     uint32_t urgent_ = 0;
     EndpointState endpoints_[BIO_MAX_ENDPOINTS]{};
+    bool needs_overrun_[BIO_MAX_ENDPOINTS]{};
     bool needs_repeat_[BIO_MAX_ENDPOINTS]{};
+    bool needs_state_repeat_[BIO_MAX_ENDPOINTS]{};
+    bool needs_volume_repeat_[BIO_MAX_ENDPOINTS]{};
     bool recovery_prepared_[BIO_MAX_ENDPOINTS]{};
 };
 
 // READ completion rule (ADR 0011): complete when `min_bytes` of records are
-// queued, a format change or stop is queued, or the deadline passes.
+// queued, a format change, volume or stop is queued, or the deadline passes.
 // A min_bytes of 0 completes at once. A min_bytes larger than the caller's
 // output buffer is clamped to the buffer.
 struct ReadGate {
@@ -160,15 +174,22 @@ private:
     int32_t trim_ = 0;
 };
 
-// Maps a WAVEFORMATEX(TENSIBLE) to its BIO_FORMAT_* bit, or 0 when unknown or
-// malformed (too short, cbSize inconsistent). The mapping is exactly the one
-// crates/bio-abi/src/wave.rs implements (its GUID families and subtype
-// numbers are the source of truth): PCM and IEEE float -> BIO_FORMAT_PCM,
-// AC-3 (format tag 0x0092 or its subtype) -> AC3, IEC 61937 0x000a -> EAC3,
-// 0x010a -> EAC3_ATMOS, 0x000c -> TRUEHD, 0x010c -> MAT20,
-// 0x030c and 0x070c -> MAT21, DTS (0x0008) -> DTS, 0x000b and the DTS:X
-// subtypes 0x010b, 0x030b -> DTS_HD.
-uint64_t FormatBit(const void* wfx, uint32_t bytes);
-bool FormatAllowed(uint64_t enabled_mask, const void* wfx, uint32_t bytes);
+// Codec classification keeps the IEC 61937 GUID families and aliases from wave.rs.
+// PCM is a product of rate, sample shape and channel rules, never a codec bit.
+uint64_t CodecBit(const void* wfx, uint32_t bytes);
+bool PcmAllowed(const BIO_PCM_FORMATS& enabled, const void* wfx, uint32_t bytes);
+bool FormatAllowed(const BIO_ENDPOINT_FORMATS& enabled, const void* wfx, uint32_t bytes);
+
+struct PcmCandidate {
+    uint16_t channels;
+    uint32_t rate;
+    uint32_t channel_mask;
+    uint16_t bits;
+    uint16_t valid_bits;
+    bool floating;
+};
+using PcmCandidateAccept = bool (*)(const PcmCandidate&, void* context);
+bool ChoosePcmIntersection(const BIO_PCM_FORMATS& pcm, const PcmCandidate& oem,
+                           PcmCandidateAccept accepts, void* context, PcmCandidate* result);
 
 }  // namespace bio

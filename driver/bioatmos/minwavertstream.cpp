@@ -38,7 +38,7 @@ STDMETHODIMP CMiniportWaveRTStream::QueryInterface(REFIID iid, PVOID* object) {
 }
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::SetFormat(PKSDATAFORMAT data) {
     const WAVEFORMATEX* wave;
-    NTSTATUS status = BioValidateFormat(miniport_->Mask(), data, &wave);
+    NTSTATUS status = BioValidateFormat(miniport_->Formats(), data, &wave);
     if (!NT_SUCCESS(status)) return status;
     KIRQL irql; adapter_->Lock(&irql);
     if (!adapter_->Active()) status = STATUS_DEVICE_NOT_READY;

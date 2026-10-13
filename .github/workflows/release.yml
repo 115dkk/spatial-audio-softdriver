@@ -103,6 +103,9 @@ jobs:
           $stage = "bio-atmos-tools-$env:VERSION-windows-x86_64"
           New-Item -ItemType Directory -Force "dist/$stage" | Out-Null
           Copy-Item target/release/bio-replay.exe, target/release/bio-live.exe, LICENSE, README.md "dist/$stage/"
+          # Speaker profile examples (ADR 0030): a tester copies one and edits it.
+          New-Item -ItemType Directory -Force "dist/$stage/profiles" | Out-Null
+          Copy-Item docs/profiles/*.toml "dist/$stage/profiles/"
           Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip"
           Remove-Item -Recurse -Force "dist/$stage"
           Get-ChildItem dist | Format-Table Name, Length
@@ -217,7 +220,10 @@ jobs:
           {
             echo "Built from ${RELEASE_SHA}. Developer tools only; the app arrives in M4."
             echo
-            echo "시험서명 PC에서 드라이버를 시험하려면 \`bio-atmos-driver-test-${VERSION}-x64.zip\`을 받아 그 안의 README.md([docs/testing/test-signed-pc.md](https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_SHA}/docs/testing/test-signed-pc.md))를 따르십시오."
+            # The tester's summary: what to download, in which order, how to
+            # send results. The guide link is pinned to this release's commit.
+            guide="https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_SHA}/docs/testing/test-signed-pc.md"
+            sed -e "s|{version}|${VERSION}|g" -e "s|{guide}|${guide}|g" .github/release-notes.md
             echo
             echo "## Changes"
             git log --no-merges --pretty=format:'- %s' "$range" | grep -v '^- chore(release): ' || true
@@ -235,6 +241,6 @@ jobs:
             gh release edit "$TAG" --notes-file notes.md "${flags[@]}"
           else
             gh release create "$TAG" release/* --target "$RELEASE_SHA" \
-              --title "BIO Atmos $VERSION" --notes-file notes.md "${flags[@]}"
+              --title "Spatial SoftReceiver $VERSION" --notes-file notes.md "${flags[@]}"
           fi
           gh release view "$TAG" --json assets,isPrerelease -q '{prerelease: .isPrerelease, assets: [.assets[].name]}'

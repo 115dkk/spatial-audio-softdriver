@@ -56,7 +56,7 @@
   </ImportGroup>
 
   <PropertyGroup>
-    <TargetName>bioatmos</TargetName>
+    <TargetName>spatialsoftreceiver</TargetName>
     <OutDir>$(ProjectDir)..\..\target\driver-build\$(Configuration)\$(Platform)\</OutDir>
     <IntDir>$(ProjectDir)..\..\target\driver-build\obj\$(Configuration)\$(Platform)\</IntDir>
     <!-- Code Analysis needs the WDK's PREfast plug-in (drivers.dll), which the
@@ -86,10 +86,10 @@
     <Link>
       <AdditionalDependencies>portcls.lib;stdunk.lib;libcntpr.lib;ntstrsafe.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <ProgramDatabaseFile>$(OutDir)bioatmos.pdb</ProgramDatabaseFile>
+      <ProgramDatabaseFile>$(OutDir)spatialsoftreceiver.pdb</ProgramDatabaseFile>
     </Link>
     <Inf>
-      <CopyOutput>$(OutDir)bioatmos.inf</CopyOutput>
+      <CopyOutput>$(OutDir)spatialsoftreceiver.inf</CopyOutput>
       <SpecifyDriverVerDirectiveDate>true</SpecifyDriverVerDirectiveDate>
       <DateStamp>$(InfDateStamp)</DateStamp>
       <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
@@ -107,7 +107,7 @@
     <ClInclude Include="..\..\crates\bio-abi\include\bioatmos_abi.h" />
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="bioatmos.inx" />
+    <Inf Include="spatialsoftreceiver.inx" />
     <FilesToPackage Include="$(TargetPath)" Condition="'$(ConfigurationType)' == 'Driver'" />
   </ItemGroup>
 

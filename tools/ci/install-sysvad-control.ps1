@@ -42,7 +42,7 @@ $lines | Set-Content -LiteralPath (Join-Path $work 'sysvad.inf') -Encoding unico
 
 $signtool = Find-KitTool 'signtool.exe' 'x64'
 $inf2cat = Find-KitTool 'Inf2Cat.exe' 'x86'
-$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=BIO Atmos CI SysVAD control' `
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Spatial SoftReceiver CI SysVAD control' `
     -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(2)
 foreach ($store in 'Root', 'TrustedPublisher') {
     $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')

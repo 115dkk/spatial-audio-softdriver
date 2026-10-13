@@ -96,16 +96,28 @@ impl SceneBuffers {
         source_qpc: u64,
         out: &mut dyn FnMut(&SceneBlock<'_>),
     ) {
-        assert!(
-            frames <= self.max_frames,
-            "block of {frames} frames exceeds buffers"
-        );
+        self.emit_range(0..frames, epoch, rate, source_qpc, out);
+    }
+
+    /// Lends a range from every active signal without copying or allocating.
+    /// `source_qpc` remains the arrival time of the source burst; splitting a
+    /// burst does not invent a QPC frequency or a later capture timestamp.
+    pub fn emit_range(
+        &self,
+        range: std::ops::Range<usize>,
+        epoch: u32,
+        rate: u32,
+        source_qpc: u64,
+        out: &mut dyn FnMut(&SceneBlock<'_>),
+    ) {
+        assert!(range.start <= range.end && range.end <= self.max_frames);
+        let frames = range.len();
         let mut objects = [Object::SILENT; MAX_OBJECTS];
         for (i, slot) in objects.iter_mut().enumerate().take(self.objects) {
             let start = i * self.max_frames;
             let m = self.meta[i];
             *slot = Object {
-                signal: &self.signals[start..start + frames],
+                signal: &self.signals[start + range.start..start + range.end],
                 position: m.position,
                 gain: m.gain,
                 spread: m.spread,
@@ -117,7 +129,8 @@ impl SceneBuffers {
             rate,
             source_qpc,
             objects: &objects[..self.objects],
-            lfe: self.has_lfe.then(|| &self.lfe[..frames]),
+            lfe: self.has_lfe.then(|| &self.lfe[range]),
+            new_objects: 0,
         };
         debug_assert!(block.is_consistent());
         out(&block);

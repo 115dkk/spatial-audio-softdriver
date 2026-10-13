@@ -6,6 +6,8 @@
 //! * [`sal_format`] (every OS): the SpatialAudioLab ring's READ result format
 //!   and its translation into the `bio_abi` record stream. Only the interface
 //!   the SAL driver exposes is used (ADR 0005).
+//! * `bio_ring` (Windows): `BioRing`, a `CaptureSource` over the Spatial
+//!   SoftReceiver driver's control ring (`bio_abi::CONTROL_DEVICE_PATH`).
 //! * `sal` (Windows): `SalRing`, a `CaptureSource` over SAL's
 //!   `\\.\DolbyDecoderMat`. Development only; release builds leave it out.
 //! * `output` (Windows): WASAPI output, exclusive and event-driven when the
@@ -17,13 +19,15 @@
 //!   registration for real-time threads.
 //!
 //! The crate builds on every OS so `cargo test --workspace` runs on Linux; the
-//! Windows modules are `cfg(windows)`. The driver's own control device
-//! (`\\.\BioAtmos`) joins in M3; `host` and `install` in M4.
+//! Windows modules are `cfg(windows)`; `host` and `install` join in M4.
 
+pub mod bio_ring;
 pub mod sal_format;
 
 #[cfg(windows)]
 mod apartment;
+#[cfg(windows)]
+mod device;
 #[cfg(windows)]
 pub mod devices;
 #[cfg(windows)]

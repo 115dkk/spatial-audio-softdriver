@@ -19,25 +19,45 @@ static KSATTRIBUTE_LIST ModeAttributeList = {RTL_NUMBER_OF(ModeAttributes), Mode
 CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : adapter_(adapter), endpoint_(endpoint) {
     adapter_->AddRef();
     ULONG count = 0;
-    for (const auto& format : BioFormats) if (format.Bit & Mask()) {
+    auto addRange = [&](const GUID& subtype, ULONG channels, ULONG minBits, ULONG maxBits,
+                        ULONG minRate, ULONG maxRate, bool pcm) {
         auto& range = ranges_[count];
         range.DataRange.FormatSize = sizeof(range);
         range.DataRange.Flags = KSDATARANGE_ATTRIBUTES;
         range.DataRange.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
-        range.DataRange.SubFormat = format.Subtype;
+        range.DataRange.SubFormat = subtype;
         range.DataRange.Specifier = KSDATAFORMAT_SPECIFIER_WAVEFORMATEX;
-        range.MaximumChannels = format.Channels;
-        range.MinimumBitsPerSample = range.MaximumBitsPerSample = 16;
-        range.MinimumSampleFrequency = range.MaximumSampleFrequency = format.Rate;
+        range.MaximumChannels = channels;
+        range.MinimumBitsPerSample = minBits; range.MaximumBitsPerSample = maxBits;
+        range.MinimumSampleFrequency = minRate; range.MaximumSampleFrequency = maxRate;
         rangePointers_[2 * count] = &range.DataRange;
         rangePointers_[2 * count + 1] = reinterpret_cast<PKSDATARANGE>(&ModeAttributeList);
         auto& bridge = bridges_[count];
         bridge.FormatSize = sizeof(bridge);
         bridge.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
-        bridge.SubFormat = format.Bit == BIO_FORMAT_PCM ? KSDATAFORMAT_SUBTYPE_ANALOG : format.Subtype;
+        bridge.SubFormat = pcm ? KSDATAFORMAT_SUBTYPE_ANALOG : subtype;
         bridge.Specifier = KSDATAFORMAT_SPECIFIER_NONE;
         bridgePointers_[count++] = &bridge;
+    };
+    const auto& pcm = Formats().pcm;
+    ULONG maxChannels = pcm.max_masked_channels;
+    for (ULONG c = 1; c <= BIO_MAX_PCM_CHANNELS; ++c)
+        if ((pcm.direct_channels & (1U << (c - 1))) && c > maxChannels) maxChannels = c;
+    ULONG minRate = 192000, maxRate = 0;
+    for (ULONG r = 0; r < 6; ++r) if (pcm.rates & (1U << r)) {
+        if (BIO_PCM_RATES[r] < minRate) minRate = BIO_PCM_RATES[r];
+        maxRate = BIO_PCM_RATES[r];
     }
+    // The OEM device format is float: try its range first for wildcard queries.
+    if (BioPcmEnabled(pcm, true))
+        addRange(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, maxChannels, 32, 32, minRate, maxRate, true);
+    if (BioPcmEnabled(pcm, false)) {
+        ULONG minBits = (pcm.shapes & 1) ? 16UL : (pcm.shapes & 2) ? 24UL : 32UL;
+        ULONG maxBits = (pcm.shapes & 12) ? 32UL : (pcm.shapes & 2) ? 24UL : 16UL;
+        addRange(KSDATAFORMAT_SUBTYPE_PCM, maxChannels, minBits, maxBits, minRate, maxRate, true);
+    }
+    for (const auto& format : BioFormats) if (format.Bit & Formats().codecs)
+        addRange(format.Subtype, format.Channels, format.Bits, format.Bits, format.Rate, format.Rate, false);
     pins_[0].MaxGlobalInstanceCount = 1;
     pins_[0].MaxFilterInstanceCount = 1;
     pins_[0].KsPinDescriptor.DataRangesCount = 2 * count;
@@ -95,7 +115,7 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::NewStream(PMINIPORTWAVERTSTREAM* output
     *output = nullptr;
     if (pin != BioWaveHostPin || capture) return STATUS_INVALID_PARAMETER;
     const WAVEFORMATEX* wave;
-    NTSTATUS status = BioValidateFormat(Mask(), format, &wave);
+    NTSTATUS status = BioValidateFormat(Formats(), format, &wave);
     if (!NT_SUCCESS(status)) return status;
     auto stream = new (BioNonPaged{}) CMiniportWaveRTStream(this, port);
     if (!stream) return STATUS_INSUFFICIENT_RESOURCES;
@@ -108,15 +128,19 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::DataRangeIntersection(ULONG pin, PKSDAT
     *required = 0;
     if (pin == BioWaveBridgePin) return BioBridgeIntersection(range, matching, size, output, required);
     if (pin != BioWaveHostPin) return STATUS_NO_MATCH;
-    for (const auto& entry : BioFormats) if ((Mask() & entry.Bit) && BioRangeAccepts(range, entry) && BioRangeAccepts(matching, entry)) {
-        *required = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
-        if (!size) return STATUS_BUFFER_OVERFLOW;
-        if (size < *required) return STATUS_BUFFER_TOO_SMALL;
-        if (!output) return STATUS_INVALID_PARAMETER;
-        BioBuildFormat(entry, static_cast<PKSDATAFORMAT_WAVEFORMATEXTENSIBLE>(output));
-        return STATUS_SUCCESS;
-    }
-    return STATUS_NO_MATCH;
+    BioFormatEntry selected{};
+    bool found = BioPcmIntersection(Formats().pcm, endpoint_, range, matching, &selected);
+    if (!found) for (const auto& entry : BioFormats)
+        if ((Formats().codecs & entry.Bit) && BioRangeAccepts(range, entry) && BioRangeAccepts(matching, entry)) {
+            selected = entry; found = true; break;
+        }
+    if (!found) return STATUS_NO_MATCH;
+    *required = sizeof(KSDATAFORMAT_WAVEFORMATEXTENSIBLE);
+    if (!size) return STATUS_BUFFER_OVERFLOW;
+    if (size < *required) return STATUS_BUFFER_TOO_SMALL;
+    if (!output) return STATUS_INVALID_PARAMETER;
+    BioBuildFormat(selected, static_cast<PKSDATAFORMAT_WAVEFORMATEXTENSIBLE>(output));
+    return STATUS_SUCCESS;
 }
 // IMiniportAudioSignalProcessing::GetModes with SysVAD's contract: a pin
 // outside the filter is STATUS_INVALID_PARAMETER, a pin without modes is
@@ -148,7 +172,7 @@ NTSTATUS CMiniportWaveRT::Property(PPCPROPERTY_REQUEST request) {
     // STATUS_NO_MATCH to PCM, and the builder left both endpoints NOTPRESENT
     // (driver KS trace, tools/ci/ks-trace.ps1).
     if (data->FormatSize == sizeof(KSDATAFORMAT))
-        return BioFormatTypeAllowed(miniport->Mask(), data) ? STATUS_SUCCESS : STATUS_NO_MATCH;
+        return BioFormatTypeAllowed(miniport->Formats(), data) ? STATUS_SUCCESS : STATUS_NO_MATCH;
     const WAVEFORMATEX* wave;
-    return BioValidateFormat(miniport->Mask(), data, &wave);
+    return BioValidateFormat(miniport->Formats(), data, &wave);
 }

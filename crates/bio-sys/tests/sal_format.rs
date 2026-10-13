@@ -2,7 +2,7 @@
 
 mod common;
 use bio_abi::{ENDPOINT_PRIMARY, Record, RecordWriter, records};
-use bio_sys::sal_format::{SalError, SalTranslator, parse_header};
+use bio_sys::sal_format::{SAL_STOP_IDLE_MS, SalError, SalTranslator, parse_header};
 use bio_types::{BitstreamCodec, SampleType, SourceFormat};
 use common::{header, read};
 
@@ -40,7 +40,8 @@ fn sal_idle_before_first_format_waits_without_committing_an_epoch() {
         Record::StreamStart {
             endpoint: ENDPOINT_PRIMARY,
             epoch: 1,
-            qpc: 5
+            qpc: 5,
+            repeat: false,
         }
     );
     // A reset-looking invalid header during an active stream is still an error.
@@ -151,12 +152,13 @@ fn sal_records_parse_back_with_positions_qpc_and_drops() {
             Record::StreamStart {
                 endpoint: ENDPOINT_PRIMARY,
                 epoch: 1,
+                repeat: false,
                 qpc: 20
             },
             Record::FormatChange {
                 endpoint: ENDPOINT_PRIMARY,
                 epoch: 1,
-                flags: 0,
+                repeat: false,
                 qpc: 20,
                 format: h.source_format().unwrap()
             },
@@ -229,6 +231,7 @@ fn sal_format_change_bumps_epoch_for_each_format_field() {
             Record::StreamStart {
                 endpoint: ENDPOINT_PRIMARY,
                 epoch: 2,
+                repeat: false,
                 qpc: 2
             }
         );
@@ -262,9 +265,75 @@ fn sal_buffer_full_retry_is_transactional() {
         Record::StreamStart {
             endpoint: ENDPOINT_PRIMARY,
             epoch: 1,
+            repeat: false,
             qpc: 5
         }
     );
+}
+
+#[test]
+fn sal_large_read_drains_in_order_across_output_buffers() {
+    let mut t = SalTranslator::new();
+    let h = header();
+    let payload: Vec<_> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+    let input = read(h, &payload);
+    let mut output = vec![0; 128 * 1024];
+    let mut got = Vec::new();
+    let mut calls = 0;
+    loop {
+        let mut writer = RecordWriter::new(&mut output);
+        t.translate_chunked(&input, 10, &mut writer).unwrap();
+        let len = writer.len();
+        for record in records(&output[..len]) {
+            if let Record::Data { pos, bytes, .. } = record.unwrap() {
+                assert_eq!(pos as usize, got.len());
+                got.extend_from_slice(bytes);
+            }
+        }
+        calls += 1;
+        if !t.has_pending() {
+            break;
+        }
+    }
+    assert!(calls >= 2);
+    assert_eq!(got, payload);
+}
+
+#[test]
+fn sal_idle_stop_restart_resets_position_and_repeats_format() {
+    let frequency = 10_000;
+    let stop_ticks = frequency * SAL_STOP_IDLE_MS / 1_000;
+    let mut t = SalTranslator::with_qpc_frequency(frequency);
+    let h = header();
+    let mut bytes = [0; 2048];
+    let mut writer = RecordWriter::new(&mut bytes);
+    t.translate(&read(h, &[1, 2, 3]), 100, &mut writer).unwrap();
+    t.translate(&read(h, &[]), 100 + stop_ticks - 1, &mut writer)
+        .unwrap();
+    t.translate(&read(h, &[]), 100 + stop_ticks, &mut writer)
+        .unwrap();
+    t.translate(&read(h, &[4, 5]), 100 + stop_ticks + 1, &mut writer)
+        .unwrap();
+    let len = writer.len();
+    let parsed: Vec<_> = records(&bytes[..len]).collect::<Result<_, _>>().unwrap();
+    assert!(matches!(parsed[3], Record::StreamStop { epoch: 1, .. }));
+    assert!(matches!(parsed[4], Record::StreamStart { epoch: 1, .. }));
+    assert!(matches!(
+        parsed[5],
+        Record::FormatChange {
+            epoch: 1,
+            repeat: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        parsed[6],
+        Record::Data {
+            pos: 0,
+            bytes: [4, 5],
+            ..
+        }
+    ));
 }
 
 #[test]

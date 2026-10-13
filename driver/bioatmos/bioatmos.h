@@ -12,12 +12,13 @@
 #include <ksmedia.h>
 #include <ntstrsafe.h>
 #include "bio_core.h"
+#include "bio_names.h"
 #include "NewDelete.h"
 
 constexpr ULONG BioPoolTag = 'oiBA';
 constexpr ULONG BioRingBytes = 8 * 1024 * 1024;
-constexpr ULONGLONG BioCompiledFormats = 0x1ff;
-constexpr ULONGLONG BioDefaultFormats = 0x6f;
+const BIO_ENDPOINT_FORMATS BioCompiledFormats = {BIO_COMPILED_CODECS, BIO_COMPILED_PCM};
+const BIO_ENDPOINT_FORMATS BioDefaultFormats = {BIO_DEFAULT_ENABLED_CODECS, BIO_DEFAULT_PCM};
 constexpr ULONG BioWaveHostPin = 0;
 constexpr ULONG BioWaveBridgePin = 1;
 constexpr ULONG BioTopologyBridgePin = 0;
@@ -26,9 +27,10 @@ constexpr ULONG BioTopologyJackPin = 1;
 class CAdapterCommon;
 struct BioControlState;
 struct BioSettings {
-    ULONG EndpointCount;
-    ULONGLONG FormatMask[BIO_MAX_ENDPOINTS];
+    ULONG EndpointMask;
+    BIO_ENDPOINT_FORMATS Formats[BIO_MAX_ENDPOINTS];
     BOOLEAN WritePacket;
+    WCHAR EndpointName[BIO_MAX_ENDPOINTS][bio::kEndpointNameCapacity];
 };
 // PortCls documents slots 4..7 as adapter-owned (PcAddAdapterDevice).
 struct BioAdapterExtension {

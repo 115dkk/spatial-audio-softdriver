@@ -40,7 +40,7 @@ $kitName = "bio-atmos-driver-test-$Version-$Arch"
 $kit = Join-Path $OutDir $kitName
 Remove-Item -Recurse -Force $kit -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $kit | Out-Null
-Copy-Item (Join-Path $packagePath 'bioatmos.sys'), (Join-Path $packagePath 'bioatmos.inf') $kit
+Copy-Item (Join-Path $packagePath 'spatialsoftreceiver.sys'), (Join-Path $packagePath 'spatialsoftreceiver.inf') $kit
 
 $cert = $null
 $subject = $null
@@ -48,20 +48,20 @@ $notAfter = $null
 $thumbprint = $null
 try {
     $cert = New-SelfSignedCertificate -Type CodeSigningCert `
-        -Subject "CN=BIO Atmos test signing $Version" `
+        -Subject "CN=Spatial SoftReceiver test signing $Version" `
         -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddYears(10)
     $subject = $cert.Subject
     $notAfter = $cert.NotAfter
     $thumbprint = $cert.Thumbprint
-    Export-Certificate -Cert $cert -FilePath (Join-Path $kit 'bioatmos-test.cer') -Type CERT | Out-Null
+    Export-Certificate -Cert $cert -FilePath (Join-Path $kit 'spatialsoftreceiver-test.cer') -Type CERT | Out-Null
     foreach ($store in 'Root', 'TrustedPublisher') { Add-CertificateToStore $cert $store }
 
     $sign = @('sign', '/fd', 'sha256', '/sm', '/s', 'My', '/sha1', $thumbprint)
-    Invoke-Checked $signtool ($sign + (Join-Path $kit 'bioatmos.sys'))
+    Invoke-Checked $signtool ($sign + (Join-Path $kit 'spatialsoftreceiver.sys'))
     Invoke-Checked $inf2cat @("/driver:$kit", '/os:10_VB_X64,ServerFE_X64', '/uselocaltime')
-    Invoke-Checked $signtool ($sign + (Join-Path $kit 'bioatmos.cat'))
-    Invoke-Checked $signtool @('verify', '/pa', '/v', (Join-Path $kit 'bioatmos.sys'))
-    Invoke-Checked $signtool @('verify', '/pa', '/v', '/c', (Join-Path $kit 'bioatmos.cat'), (Join-Path $kit 'bioatmos.sys'))
+    Invoke-Checked $signtool ($sign + (Join-Path $kit 'spatialsoftreceiver.cat'))
+    Invoke-Checked $signtool @('verify', '/pa', '/v', (Join-Path $kit 'spatialsoftreceiver.sys'))
+    Invoke-Checked $signtool @('verify', '/pa', '/v', '/c', (Join-Path $kit 'spatialsoftreceiver.cat'), (Join-Path $kit 'spatialsoftreceiver.sys'))
 } finally {
     if ($thumbprint) {
         foreach ($store in 'Root', 'TrustedPublisher') { Remove-CertificateFromStore $thumbprint $store }
@@ -75,27 +75,27 @@ try {
 foreach ($name in 'install.ps1', 'uninstall.ps1', 'collect.ps1') {
     Copy-Item (Join-Path $repo "tools\testkit\$name") $kit
 }
-foreach ($name in 'RootDevice.cs', 'driver_flow_check.py', 'ring_record.py', 'requirements.txt') {
+foreach ($name in 'RootDevice.cs', 'endpoints.ps1', 'endpoints.py', 'package-identities.ps1', 'driver_flow_check.py', 'ring_record.py', 'volume_check.py', 'volume_check.ps1', 'endpoint-volume.ps1', 'exclusive-policy.ps1', 'exclusive_policy_check.ps1', 'loopback_check.py', 'ioctl_fuzz.py', 'requirements.txt') {
     Copy-Item (Join-Path $repo "tools\ci\$name") $kit
 }
-$commit = $env:GITHUB_SHA
-if (-not $commit) {
-    $commit = (& git -C $repo rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0) { throw 'git rev-parse HEAD failed' }
-}
+# The commit checked out, not GITHUB_SHA: the release job checks out the
+# release commit, which can differ from the commit that triggered the run.
+$commit = (& git -C $repo rev-parse HEAD)
+if ($LASTEXITCODE -ne 0 -or -not $commit) { throw 'git rev-parse HEAD failed' }
+$commit = $commit.Trim()
 
 # The guide becomes the kit's README. Its links are relative to docs/testing/
 # in the repository; inside the kit they point at the same commit on GitHub.
 $readme = Join-Path $repo 'docs\testing\test-signed-pc.md'
 if (-not (Test-Path $readme)) { throw "the testing guide $readme is missing" }
 $server = if ($env:GITHUB_SERVER_URL) { $env:GITHUB_SERVER_URL } else { 'https://github.com' }
-$repository = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { '115dkk/spatial-audio-softdriver' }
+$repository = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { '115dkk/spatial-audio-softreceiver' }
 $base = "$server/$repository/blob/$commit"
 $text = [IO.File]::ReadAllText($readme, [Text.Encoding]::UTF8)
 $text = $text.Replace('](../../', "]($base/").Replace('](../', "]($base/docs/")
 [IO.File]::WriteAllText((Join-Path $kit 'README.md'), $text, (New-Object Text.UTF8Encoding($false)))
 $hashes = [ordered]@{}
-foreach ($name in 'bioatmos.sys', 'bioatmos.cat', 'bioatmos.inf', 'bioatmos-test.cer') {
+foreach ($name in 'spatialsoftreceiver.sys', 'spatialsoftreceiver.cat', 'spatialsoftreceiver.inf', 'spatialsoftreceiver-test.cer') {
     $hashes[$name] = (Get-FileHash -Algorithm SHA256 (Join-Path $kit $name)).Hash.ToLowerInvariant()
 }
 $manifest = [ordered]@{

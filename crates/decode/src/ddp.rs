@@ -7,39 +7,53 @@
 //! The upstream decoder allocates per frame; this adapter adds no allocations
 //! in `push`, including error paths (owned error details are empty).
 //!
-//! Bed angles (azimuth positive left, elevation positive up): FL/FR +/-30/0,
-//! C 0/0, Ls/Rs +/-110/0, rear centre 180/0, Lrs/Rrs +/-150/0,
-//! Lw/Rw +/-60/0, top front +/-45/45, top surround +/-90/45,
-//! top rear +/-135/45. Both LFE labels are unpositioned.
+//! Nominal bed positions come from `bio_types::Speaker`, shared with PCM;
+//! measured BRIR directions remain separate. OAMD room coordinates are axis
+//! converted, then mapped to directions using ITU-R BS.2127-1 §10.1.
 //!
-//! With JOC, reconstructed channels replace the fullband downmix; emitting
-//! both would count the same audio twice. Only the aligned core LFE is kept.
-//! `eac3::JOC_LATENCY_SAMPLES` (577) is already applied to that LFE upstream.
-//! A scene has one position per object: we use the first OAMD block of the
-//! access unit, holding that position across its 1536 samples. Sub-block ramps,
-//! screen geometry and distance are not represented by SceneBlock.
+//! With JOC, reconstructed bed and dynamic channels replace the fullband
+//! downmix; emitting both would count the same audio twice. Only the aligned
+//! core LFE is kept (`eac3::JOC_LATENCY_SAMPLES`, 577, applied upstream).
+//! Each OAMD update starts a scene; room-coordinate ramps are sampled in
+//! pieces no longer than 256 samples, with state carried across access units.
+//! All audio/LFE samples are preserved. Unknown absolute positions stay at
+//! the directionless centre with spread 1, including mid-stream delta updates.
+//!
+//! Screen-anchored objects use the room axes because SceneBlock has no screen
+//! dimensions; screen warping and distance are not rendered because this is a
+//! direction-only renderer. ISF/alternate-object mappings and a five-channel
+//! JOC payload on an expanded bed still require information upstream omits.
 
-use bio_types::{MAX_OBJECTS, Position, SceneBlock};
+use bio_types::{MAX_OBJECTS, Position, SceneBlock, Speaker, room_to_direction};
 use bitstream::{Burst, DataType};
-use eac3::{
-    BedChannel, CorePcmFrame, OamdElementKind, ObjectAnchor, ObjectPcmFrame, ParsedEmdfPayloadData,
-    StreamType, Vec3,
-};
+use eac3::{BedChannel, CorePcmFrame, ObjectPcmFrame, ParsedEmdfPayloadData, StreamType, Vec3};
 
 use crate::{DecodeConfig, DecodeError, SceneBuffers};
+
+mod timeline;
+
+use timeline::Timeline;
 
 const FRAMES: usize = 1536;
 
 #[derive(Clone, Copy, Debug)]
 struct ObjectMeta {
     position: Position,
+    room: Vec3,
+    is_room: bool,
     gain: f32,
     spread: f32,
     known: bool,
 }
 
 const EMPTY_META: ObjectMeta = ObjectMeta {
-    position: Position::FRONT,
+    position: Position::new(0.0, 0.0, 0.0),
+    room: Vec3 {
+        x: 0.5,
+        y: 0.5,
+        z: 0.0,
+    },
+    is_room: true,
     gain: 1.0,
     spread: 0.0,
     known: false,
@@ -51,7 +65,7 @@ pub struct DdpDecoder {
     core: eac3::PcmDecoder,
     dependent: [eac3::PcmDecoder; 8],
     objects: eac3::ObjectPcmDecoder,
-    metadata: [ObjectMeta; MAX_OBJECTS],
+    timeline: Timeline,
     epoch: Option<u32>,
     joc_sequence: Option<u16>,
 }
@@ -63,15 +77,15 @@ impl DdpDecoder {
             core: eac3::PcmDecoder::new(),
             dependent: std::array::from_fn(|_| eac3::PcmDecoder::new()),
             objects: eac3::ObjectPcmDecoder::new(),
-            metadata: [EMPTY_META; MAX_OBJECTS],
+            timeline: Timeline::new(),
             epoch: None,
             joc_sequence: None,
         }
     }
 
-    /// Decodes the E-AC-3 syncframes in one burst payload and emits one scene
-    /// per access unit (1536 frames): bed channels as objects at their
-    /// standard positions, JOC objects at the positions their OAMD gives.
+    /// Decodes one 1536-frame access unit. Plain beds emit one scene; JOC emits
+    /// scenes at OAMD update/ramp boundaries whose frame counts sum to 1536.
+    /// Bed channels use nominal positions and JOC uses converted room positions.
     /// The payload must contain exactly 1536 independent samples, each followed
     /// by its dependents. Alternate independent presentations are refused.
     /// Errors discard cross-frame state and emit no scene. Epoch changes reset.
@@ -119,15 +133,14 @@ impl DdpDecoder {
             bytes = rest;
             let decoded = self.core.push_access_unit(frame).map_err(|_| corrupt())?;
             let mut joc_frame = has_joc(&decoded.info).then_some(frame);
+            let mut joc_channels = joc_channel_count(&decoded.info);
             let mut core = decoded.pcm;
             while !bytes.is_empty() {
                 let (dep_frame, dep_header, rest) = syncframe(bytes)?;
                 if dep_header.stream_type != StreamType::Dependent {
                     break;
                 }
-                // ETSI TS 103 420 puts JOC in the last substream. In
-                // particular, never overlay discrete surrounds onto a core
-                // whose own five-channel JOC matrices expect folded surrounds.
+                // ETSI TS 103 420 §8.2 puts JOC in the last substream.
                 if joc_frame.is_some() {
                     return Err(corrupt());
                 }
@@ -135,11 +148,7 @@ impl DdpDecoder {
                     .push_access_unit(dep_frame)
                     .map_err(|_| corrupt())?;
                 if has_joc(&dep.info) {
-                    if dep.info.payloads().any(|p| {
-                        matches!(&p.parsed, ParsedEmdfPayloadData::Joc(joc) if joc.channel_count == 5)
-                    }) {
-                        return Err(unsupported("five-channel JOC on an overlaid dependent bed"));
-                    }
+                    joc_channels = joc_channel_count(&dep.info);
                     joc_frame = Some(dep_frame);
                 }
                 // Allocations in this merge belong to the upstream eac3 API.
@@ -150,6 +159,7 @@ impl DdpDecoder {
             let samples = usize::from(header.samples);
             rate = header.sample_rate;
             let object_frame = if let Some(frame) = joc_frame {
+                validate_joc_bed(&core, joc_channels.ok_or_else(corrupt)?)?;
                 Some(
                     self.objects
                         .push_access_unit_with_core(frame, core)
@@ -159,7 +169,7 @@ impl DdpDecoder {
             } else {
                 self.objects.note_non_joc_presentation();
                 self.joc_sequence = None;
-                self.metadata.fill(EMPTY_META);
+                self.timeline.reset();
                 let current = (
                     false,
                     core.fullband_channels.len(),
@@ -191,7 +201,7 @@ impl DdpDecoder {
                     sequence != 0 && sequence == if previous == 1023 { 1 } else { previous + 1 }
                 });
                 if !continuous {
-                    self.metadata.fill(EMPTY_META);
+                    self.timeline.discontinuity(offset)?;
                 }
                 self.joc_sequence = Some(sequence);
                 check_shape(
@@ -202,14 +212,16 @@ impl DdpDecoder {
                         pcm.core.lfe_channel.is_some(),
                     ),
                 )?;
-                if offset == 0 {
-                    read_object_metadata(&pcm, &mut self.metadata)?;
-                }
-                write_objects(&mut self.buffers, &pcm, &self.metadata, offset, samples)?;
+                self.timeline.schedule(&pcm, offset)?;
+                write_objects(&mut self.buffers, &pcm, offset, samples)?;
             }
             offset += samples;
         }
-        self.buffers.emit(FRAMES, epoch, rate, qpc, out);
+        if shape.is_some_and(|s| s.0) {
+            self.timeline.emit(&mut self.buffers, epoch, rate, qpc, out);
+        } else {
+            self.buffers.emit(FRAMES, epoch, rate, qpc, out);
+        }
         Ok(())
     }
 
@@ -219,7 +231,7 @@ impl DdpDecoder {
             decoder.reset();
         }
         self.objects.reset();
-        self.metadata.fill(EMPTY_META);
+        self.timeline.reset();
         self.epoch = None;
         self.joc_sequence = None;
         self.buffers.set_layout(0, false);
@@ -293,6 +305,39 @@ fn has_joc(info: &eac3::AccessUnitInfo) -> bool {
         .any(|p| matches!(p.parsed, ParsedEmdfPayloadData::Joc(_)))
 }
 
+fn joc_channel_count(info: &eac3::AccessUnitInfo) -> Option<usize> {
+    info.payloads().find_map(|p| match &p.parsed {
+        ParsedEmdfPayloadData::Joc(joc) => Some(joc.channel_count),
+        _ => None,
+    })
+}
+
+fn validate_joc_bed(core: &CorePcmFrame, channels: usize) -> Result<(), DecodeError> {
+    if channels == 5 {
+        // TS 103 420 §8.1 requires the merged presentation; table 47 requires
+        // five inputs. A dependent may simply replace those same five channels.
+        // An expanded bed is different: eac3 does not expose the fold-down
+        // coefficients/phase data needed to restore the specified 5.X input.
+        let required = [
+            BedChannel::FrontLeft,
+            BedChannel::FrontRight,
+            BedChannel::Center,
+            BedChannel::SurroundLeft,
+            BedChannel::SurroundRight,
+        ];
+        if core.fullband_channel_order.len() != required.len()
+            || required
+                .iter()
+                .any(|c| !core.fullband_channel_order.contains(c))
+        {
+            return Err(unsupported(
+                "five-channel JOC with an expanded bed needs unavailable fold-down metadata",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn check_shape(
     shape: &mut Option<(bool, usize, bool)>,
     current: (bool, usize, bool),
@@ -350,101 +395,18 @@ fn write_lfe(
 fn write_objects(
     buffers: &mut SceneBuffers,
     pcm: &ObjectPcmFrame,
-    metadata: &[ObjectMeta; MAX_OBJECTS],
     offset: usize,
     samples: usize,
 ) -> Result<(), DecodeError> {
     buffers.set_layout(pcm.object_channels.len(), pcm.core.lfe_channel.is_some());
     for (i, channel) in pcm.object_channels.iter().enumerate() {
-        if channel.len() != samples || !metadata[i].known {
+        if channel.len() != samples {
             return Err(corrupt());
         }
-        let m = metadata[i];
-        buffers.set_object(i, m.position, m.gain, m.spread);
         // Preserve QMF tails even when JocObject.active becomes false.
         buffers.signal_mut(i, FRAMES)[offset..offset + samples].copy_from_slice(channel);
     }
     write_lfe(buffers, &pcm.core, offset, samples)
-}
-
-fn read_object_metadata(
-    pcm: &ObjectPcmFrame,
-    metadata: &mut [ObjectMeta; MAX_OBJECTS],
-) -> Result<(), DecodeError> {
-    if pcm.object_channels.len() > MAX_OBJECTS {
-        return Err(corrupt());
-    }
-    // A scene samples only the first payload, not a future metadata update.
-    if let Some((payload, _)) = pcm.oamd_payloads.first() {
-        // Pure-bed JOC reconstructs the assigned speakers, excluding bypass LFE.
-        if payload.dynamic_objects == 0 {
-            let mut count = 0;
-            for &bed in payload.bed_assignment.iter().flatten() {
-                if let Some(position) = bed_position(bed) {
-                    let slot = metadata.get_mut(count).ok_or_else(corrupt)?;
-                    *slot = ObjectMeta {
-                        position,
-                        known: true,
-                        ..EMPTY_META
-                    };
-                    count += 1;
-                }
-            }
-            if count != pcm.object_channels.len() {
-                return Err(corrupt());
-            }
-            return Ok(());
-        }
-        if payload.dynamic_objects != pcm.object_channels.len() {
-            // Mixed reconstructed beds/ISF need an explicit channel mapping.
-            return Err(unsupported("mixed reconstructed beds and dynamic objects"));
-        }
-        for element in &payload.elements {
-            let OamdElementKind::Object(element) = &element.kind else {
-                continue;
-            };
-            for (i, blocks) in element
-                .object_blocks
-                .iter()
-                .skip(payload.bed_or_isf_objects)
-                .take(pcm.object_channels.len())
-                .enumerate()
-            {
-                let Some(block) = blocks.first() else {
-                    continue;
-                };
-                if block.anchor == ObjectAnchor::Speaker {
-                    return Err(corrupt());
-                }
-                let slot = &mut metadata[i];
-                if block.valid_position {
-                    let position = block.position.ok_or_else(corrupt)?;
-                    if block.differential_position {
-                        // The parser preserves differential flags. First metadata
-                        // blocks are absolute in supported OAMD presentations.
-                        return Err(unsupported(
-                            "a first OAMD block with a differential position",
-                        ));
-                    }
-                    slot.position = oamd_position(position).ok_or_else(corrupt)?;
-                    slot.known = true;
-                }
-                if let Some(gain) = block.gain {
-                    if !gain.is_finite() || gain < 0.0 {
-                        return Err(corrupt());
-                    }
-                    slot.gain = gain;
-                }
-                if let Some(size) = block.size {
-                    if size.iter().any(|v| !v.is_finite()) {
-                        return Err(corrupt());
-                    }
-                    slot.spread = size.into_iter().fold(0.0_f32, f32::max).clamp(0.0, 1.0);
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// OAMD room coordinates are x=0 left / 1 right, y=0 front / 1 back,
@@ -456,7 +418,7 @@ fn oamd_position(p: Vec3) -> Option<Position> {
     if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
         return None;
     }
-    Some(Position::new(
+    Some(room_to_direction(
         2.0 * p.x.clamp(0.0, 1.0) - 1.0,
         1.0 - 2.0 * p.y.clamp(0.0, 1.0),
         p.z.clamp(-1.0, 1.0),
@@ -465,31 +427,37 @@ fn oamd_position(p: Vec3) -> Option<Position> {
 
 fn bed_position(bed: BedChannel) -> Option<Position> {
     use BedChannel::*;
-    let (az, el) = match bed {
-        FrontLeft => (30.0, 0.0),
-        FrontRight => (-30.0, 0.0),
-        Center => (0.0, 0.0),
-        SurroundLeft => (110.0, 0.0),
-        SurroundRight => (-110.0, 0.0),
-        RearCenter => (180.0, 0.0),
-        RearLeft => (150.0, 0.0),
-        RearRight => (-150.0, 0.0),
-        WideLeft => (60.0, 0.0),
-        WideRight => (-60.0, 0.0),
-        TopFrontLeft => (45.0, 45.0),
-        TopFrontRight => (-45.0, 45.0),
-        TopSurroundLeft => (90.0, 45.0),
-        TopSurroundRight => (-90.0, 45.0),
-        TopRearLeft => (135.0, 45.0),
-        TopRearRight => (-135.0, 45.0),
-        LowFrequencyEffects | LowFrequencyEffects2 => return None,
+    let speaker = match bed {
+        FrontLeft => Speaker::L,
+        FrontRight => Speaker::R,
+        Center => Speaker::C,
+        SurroundLeft => Speaker::Ls,
+        SurroundRight => Speaker::Rs,
+        RearCenter => Speaker::Cs,
+        RearLeft => Speaker::Lrs,
+        RearRight => Speaker::Rrs,
+        WideLeft => Speaker::Lw,
+        WideRight => Speaker::Rw,
+        TopFrontLeft => Speaker::Tfl,
+        TopFrontRight => Speaker::Tfr,
+        TopSurroundLeft => Speaker::Tsl,
+        TopSurroundRight => Speaker::Tsr,
+        TopRearLeft => Speaker::Trl,
+        TopRearRight => Speaker::Trr,
+        LowFrequencyEffects => Speaker::Lfe,
+        LowFrequencyEffects2 => Speaker::Lfe2,
     };
-    Some(Position::from_angles(az, el))
+    speaker.position()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eac3::OamdElementKind;
+
+    #[cfg(debug_assertions)]
+    #[global_allocator]
+    static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
     #[test]
     fn access_unit_groups_short_frames_and_matching_dependents() {
@@ -527,7 +495,7 @@ mod tests {
             let [x, y, z] = input;
             assert_eq!(
                 oamd_position(Vec3 { x, y, z }),
-                Some(Position::new(expected[0], expected[1], expected[2]))
+                Some(room_to_direction(expected[0], expected[1], expected[2]))
             );
         }
         assert_eq!(
@@ -576,7 +544,10 @@ mod tests {
                         byte_length: 0,
                         kind: OamdElementKind::Object(eac3::OamdObjectElement {
                             sample_offset: 0,
-                            block_updates: vec![],
+                            block_updates: vec![eac3::OamdBlockUpdate {
+                                offset: 0,
+                                ramp_duration: 0,
+                            }],
                             object_blocks: vec![
                                 vec![eac3::OamdObjectBlock::default()],
                                 vec![eac3::OamdObjectBlock {
@@ -602,14 +573,14 @@ mod tests {
     #[test]
     fn object_mapping_skips_oamd_beds_and_does_not_duplicate_downmix() {
         let pcm = synthetic_objects();
-        let mut metadata = [EMPTY_META; MAX_OBJECTS];
-        read_object_metadata(&pcm, &mut metadata).unwrap();
+        let mut timeline = Timeline::new();
+        timeline.schedule(&pcm, 0).unwrap();
         let mut buffers = SceneBuffers::new(FRAMES);
-        write_objects(&mut buffers, &pcm, &metadata, 0, FRAMES).unwrap();
-        buffers.emit(FRAMES, 1, 48_000, 2, &mut |scene| {
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        timeline.emit(&mut buffers, 1, 48_000, 2, &mut |scene| {
             assert_eq!(scene.objects.len(), 1);
             let object = scene.objects[0];
-            assert_eq!(object.position, Position::new(-0.5, 1.0, 0.5));
+            assert_eq!(object.position, room_to_direction(-0.5, 1.0, 0.5));
             assert_eq!((object.gain, object.spread), (0.75, 0.3));
             assert_eq!(object.signal, &[0.25; FRAMES]);
             assert_eq!(scene.lfe.unwrap(), &[0.1; FRAMES]);
@@ -625,21 +596,570 @@ mod tests {
             BedChannel::LowFrequencyEffects,
             BedChannel::TopFrontLeft,
         ]];
-        let mut metadata = [EMPTY_META; MAX_OBJECTS];
-        read_object_metadata(&pcm, &mut metadata).unwrap();
-        assert_eq!(metadata[0].position, Position::from_angles(45.0, 45.0));
-        assert!(metadata[0].known);
-        assert!(!metadata[1].known);
+        payload.beds = 2;
+        payload.bed_or_isf_objects = 2;
+        let mut timeline = Timeline::new();
+        timeline.schedule(&pcm, 0).unwrap();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        timeline.emit(&mut buffers, 1, 48_000, 2, &mut |scene| {
+            assert_eq!(scene.objects.len(), 1);
+            assert_eq!(scene.objects[0].position, Position::from_angles(45.0, 45.0));
+        });
     }
 
     #[test]
     fn unknown_object_position_is_not_silently_rendered_at_front() {
         let mut pcm = synthetic_objects();
         pcm.oamd_payloads.clear();
-        let mut metadata = [EMPTY_META; MAX_OBJECTS];
-        read_object_metadata(&pcm, &mut metadata).unwrap();
+        let mut timeline = Timeline::new();
+        timeline.schedule(&pcm, 0).unwrap();
         let mut buffers = SceneBuffers::new(FRAMES);
-        assert!(write_objects(&mut buffers, &pcm, &metadata, 0, FRAMES).is_err());
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        timeline.emit(&mut buffers, 1, 48_000, 2, &mut |scene| {
+            let object = scene.objects[0];
+            assert_eq!(object.position, Position::default());
+            assert_eq!(object.position.direction(), None);
+            assert_eq!(object.spread, 1.0);
+            assert_eq!(object.signal, &[0.25; FRAMES]);
+        });
+    }
+
+    fn element(pcm: &mut ObjectPcmFrame) -> &mut eac3::OamdObjectElement {
+        let OamdElementKind::Object(element) = &mut pcm.oamd_payloads[0].0.elements[0].kind else {
+            panic!("object element")
+        };
+        element
+    }
+
+    fn add_block(
+        pcm: &mut ObjectPcmFrame,
+        offset: i16,
+        ramp: i16,
+        position: Vec3,
+        differential: bool,
+    ) {
+        let element = element(pcm);
+        element.block_updates.push(eac3::OamdBlockUpdate {
+            offset,
+            ramp_duration: ramp,
+        });
+        element.object_blocks[0].push(eac3::OamdObjectBlock::default());
+        element.object_blocks[1].push(eac3::OamdObjectBlock {
+            valid_position: true,
+            differential_position: differential,
+            position: Some(position),
+            ..eac3::OamdObjectBlock::default()
+        });
+    }
+
+    #[test]
+    fn two_oamd_blocks_emit_two_scenes_and_preserve_every_sample() {
+        let mut pcm = synthetic_objects();
+        let target = Vec3 {
+            x: 1.0,
+            y: 1.0,
+            z: 0.0,
+        };
+        add_block(&mut pcm, 24, 0, target, false); // factor 24 -> sample 768.
+        for (i, s) in pcm.object_channels[0].iter_mut().enumerate() {
+            *s = i as f32;
+        }
+        for (i, s) in pcm
+            .core
+            .lfe_channel
+            .as_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            *s = -(i as f32);
+        }
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        let mut frames = 0;
+        let mut scenes = 0;
+        assert_no_alloc::assert_no_alloc(|| {
+            timeline.schedule(&pcm, 0).unwrap();
+            write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+            timeline.emit(&mut buffers, 9, 48_000, 123, &mut |scene| {
+                assert_eq!(scene.frames, 768);
+                assert_eq!(
+                    (scene.epoch, scene.rate, scene.source_qpc),
+                    (9, 48_000, 123)
+                );
+                assert_eq!(
+                    scene.objects[0].position,
+                    if scenes == 0 {
+                        room_to_direction(-0.5, 1.0, 0.5)
+                    } else {
+                        oamd_position(target).unwrap()
+                    }
+                );
+                assert_eq!(
+                    scene.objects[0].signal,
+                    &pcm.object_channels[0][frames..frames + scene.frames]
+                );
+                assert_eq!(
+                    scene.lfe.unwrap(),
+                    &pcm.core.lfe_channel.as_ref().unwrap()[frames..frames + scene.frames]
+                );
+                frames += scene.frames;
+                scenes += 1;
+            });
+        });
+        assert_eq!((scenes, frames), (2, FRAMES));
+    }
+
+    #[test]
+    fn long_oamd_ramp_is_interpolated_in_room_coordinates() {
+        let mut pcm = synthetic_objects();
+        let start = Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        element(&mut pcm).object_blocks[1][0].position = Some(start);
+        add_block(
+            &mut pcm,
+            8,
+            1024,
+            Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 1.0,
+            },
+            false,
+        );
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        timeline.schedule(&pcm, 0).unwrap();
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        let mut frames = 0;
+        let mut scenes = 0;
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |scene| {
+            assert_eq!(scene.frames, 256);
+            let t = (frames as f32 - 256.0).clamp(0.0, 1024.0) / 1024.0;
+            assert_eq!(
+                scene.objects[0].position,
+                oamd_position(Vec3 { x: t, y: 0.0, z: t }).unwrap()
+            );
+            frames += scene.frames;
+            scenes += 1;
+        });
+        assert_eq!((frames, scenes), (FRAMES, 6));
+    }
+
+    #[test]
+    fn oamd_offsets_and_ramps_continue_across_access_units() {
+        let mut pcm = synthetic_objects();
+        element(&mut pcm).object_blocks[1][0].position = Some(Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        add_block(
+            &mut pcm,
+            40,
+            1024,
+            Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            false,
+        );
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        timeline.schedule(&pcm, 0).unwrap();
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |_| {});
+        let mut frames = 0;
+        timeline.emit(&mut buffers, 1, 48_000, 1, &mut |scene| {
+            let t = ((256 + frames) as f32 / 1024.0).min(1.0);
+            assert_eq!(
+                scene.objects[0].position,
+                oamd_position(Vec3 {
+                    x: t,
+                    y: 0.0,
+                    z: 0.0
+                })
+                .unwrap()
+            );
+            frames += scene.frames;
+        });
+        assert_eq!(frames, FRAMES);
+
+        timeline.reset();
+        element(&mut pcm).block_updates.truncate(1);
+        for blocks in &mut element(&mut pcm).object_blocks {
+            blocks.truncate(1);
+        }
+        pcm.oamd_payloads[0].1 = Some(1536);
+        let element = element(&mut pcm);
+        element.sample_offset = 7;
+        element.block_updates[0].offset = 9; // 7 + factor 2, NOT sample 9.
+        timeline.schedule(&pcm, 0).unwrap();
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            assert_eq!(s.objects[0].spread, 1.0)
+        });
+        let mut lengths = Vec::new();
+        timeline.emit(&mut buffers, 1, 48_000, 1, &mut |s| {
+            lengths.push(s.frames);
+            assert_eq!(
+                s.objects[0].spread,
+                if lengths.len() == 1 { 1.0 } else { 0.3 }
+            );
+        });
+        assert_eq!(lengths, [71, FRAMES - 71]);
+    }
+
+    #[test]
+    fn unknown_differential_stays_diffuse_until_absolute_then_adds_delta() {
+        let mut pcm = synthetic_objects();
+        element(&mut pcm).object_blocks[1][0].differential_position = true;
+        add_block(
+            &mut pcm,
+            8,
+            0,
+            Vec3 {
+                x: 0.5,
+                y: 0.0,
+                z: 0.0,
+            },
+            false,
+        );
+        add_block(
+            &mut pcm,
+            16,
+            0,
+            Vec3 {
+                x: 1.0 / 62.0,
+                y: -1.0 / 62.0,
+                z: 1.0 / 15.0,
+            },
+            true,
+        );
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        timeline.schedule(&pcm, 0).unwrap();
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        let mut scene_index = 0;
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            match scene_index {
+                0 => {
+                    assert_eq!(s.objects[0].position, Position::default());
+                    assert_eq!(s.objects[0].spread, 1.0);
+                }
+                1 => assert_eq!(s.objects[0].position, Position::FRONT),
+                2 => assert_eq!(
+                    s.objects[0].position,
+                    oamd_position(Vec3 {
+                        x: 0.5 + 1.0 / 62.0,
+                        y: 0.0,
+                        z: 1.0 / 15.0,
+                    })
+                    .unwrap()
+                ),
+                _ => panic!("unexpected scene"),
+            }
+            scene_index += 1;
+        });
+        assert_eq!(scene_index, 3);
+    }
+
+    #[test]
+    fn differential_uses_previous_target_not_interpolated_position() {
+        let mut pcm = synthetic_objects();
+        element(&mut pcm).object_blocks[1][0].position = Some(Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        add_block(
+            &mut pcm,
+            8,
+            1024,
+            Vec3 {
+                x: 0.5,
+                y: 0.0,
+                z: 0.0,
+            },
+            false,
+        );
+        add_block(
+            &mut pcm,
+            16,
+            0,
+            Vec3 {
+                x: 1.0 / 62.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            true,
+        );
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        timeline.schedule(&pcm, 0).unwrap();
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        let mut frames = 0;
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            if frames == 512 {
+                assert_eq!(
+                    s.objects[0].position,
+                    oamd_position(Vec3 {
+                        x: 0.5 + 1.0 / 62.0,
+                        y: 0.0,
+                        z: 0.0
+                    })
+                    .unwrap()
+                );
+            }
+            frames += s.frames;
+        });
+        assert_eq!(frames, FRAMES);
+    }
+
+    #[test]
+    fn indexed_2048_sample_ramp_and_short_syncframes_preserve_timing() {
+        let mut pcm = synthetic_objects();
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        for part in 0..6 {
+            element(&mut pcm).object_blocks[1][0].position = Some(Vec3 {
+                x: part as f32 / 5.0,
+                y: 0.0,
+                z: 0.0,
+            });
+            timeline.schedule(&pcm, part * 256).unwrap();
+            for channel in &mut pcm.object_channels {
+                channel.truncate(256);
+            }
+            pcm.core.lfe_channel.as_mut().unwrap().truncate(256);
+            write_objects(&mut buffers, &pcm, part * 256, 256).unwrap();
+        }
+        let mut scenes = 0;
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            assert_eq!(s.frames, 256);
+            assert_eq!(
+                s.objects[0].position,
+                oamd_position(Vec3 {
+                    x: scenes as f32 / 5.0,
+                    y: 0.0,
+                    z: 0.0,
+                })
+                .unwrap()
+            );
+            scenes += 1;
+        });
+        assert_eq!(scenes, 6);
+        // Table 25 permits 2048 even though the explicit 11-bit field stops at 2047.
+        element(&mut pcm).block_updates[0].ramp_duration = 2048;
+        element(&mut pcm).object_blocks[1][0].position = Some(Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        timeline.schedule(&pcm, 0).unwrap();
+        let mut frames = 0;
+        assert_no_alloc::assert_no_alloc(|| {
+            timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+                assert_eq!(s.frames, 256);
+                assert_eq!(
+                    s.objects[0].position,
+                    oamd_position(Vec3 {
+                        x: 1.0 - frames as f32 / 2048.0,
+                        y: 0.0,
+                        z: 0.0,
+                    })
+                    .unwrap()
+                );
+                frames += s.frames;
+            });
+        });
+        assert_eq!(frames, FRAMES);
+    }
+
+    #[test]
+    fn discontinuity_discards_future_updates_and_reset_forgets_positions() {
+        let mut pcm = synthetic_objects();
+        pcm.oamd_payloads[0].1 = Some(1600);
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        timeline.schedule(&pcm, 0).unwrap();
+        timeline.discontinuity(0).unwrap();
+        for _ in 0..2 {
+            timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+                assert_eq!(s.objects[0].position, Position::default());
+                assert_eq!(s.objects[0].spread, 1.0);
+                assert_eq!(s.frames, FRAMES);
+            });
+        }
+        pcm.oamd_payloads[0].1 = None;
+        timeline.schedule(&pcm, 0).unwrap();
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            assert_ne!(s.objects[0].position, Position::default())
+        });
+        timeline.reset();
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            assert_eq!(s.objects[0].spread, 1.0)
+        });
+    }
+
+    #[test]
+    fn mixed_reconstructed_beds_and_dynamic_objects_follow_oamd_order() {
+        let mut pcm = synthetic_objects();
+        pcm.object_channels.insert(0, vec![0.6; FRAMES]);
+        pcm.joc.object_count = 2;
+        pcm.object_active.push(true);
+        let payload = &mut pcm.oamd_payloads[0].0;
+        payload.object_count = 3;
+        payload.beds = 2;
+        payload.bed_or_isf_objects = 2;
+        payload.bed_assignment[0].insert(0, BedChannel::FrontLeft);
+        element(&mut pcm)
+            .object_blocks
+            .insert(0, vec![eac3::OamdObjectBlock::default()]);
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        timeline.schedule(&pcm, 0).unwrap();
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            assert_eq!(s.objects.len(), 2);
+            assert_eq!(s.objects[0].position, Speaker::L.position().unwrap());
+            assert_eq!(s.objects[0].signal, &[0.6; FRAMES]);
+            assert_eq!(s.objects[1].position, room_to_direction(-0.5, 1.0, 0.5));
+            assert_eq!(s.objects[1].signal, &[0.25; FRAMES]);
+            assert_eq!(s.lfe.unwrap(), &[0.1; FRAMES]);
+        });
+    }
+
+    #[test]
+    fn reused_metadata_does_not_reapply_delta_or_stale_gain() {
+        let mut pcm = synthetic_objects();
+        add_block(
+            &mut pcm,
+            8,
+            0,
+            Vec3 {
+                x: 1.0 / 62.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            true,
+        );
+        add_block(
+            &mut pcm,
+            16,
+            0,
+            Vec3 {
+                x: 1.0 / 62.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            true,
+        );
+        let reuse = &mut element(&mut pcm).object_blocks[1][2];
+        reuse.render_info_status = 2;
+        reuse.basic_info_status = 2;
+        reuse.gain = Some(0.1); // Upstream's cached value, not an update.
+        let mut timeline = Timeline::new();
+        let mut buffers = SceneBuffers::new(FRAMES);
+        timeline.schedule(&pcm, 0).unwrap();
+        write_objects(&mut buffers, &pcm, 0, FRAMES).unwrap();
+        let mut index = 0;
+        timeline.emit(&mut buffers, 1, 48_000, 0, &mut |s| {
+            if index > 0 {
+                assert_eq!(
+                    s.objects[0].position,
+                    oamd_position(Vec3 {
+                        x: 0.25 + 1.0 / 62.0,
+                        y: 0.0,
+                        z: 0.5,
+                    })
+                    .unwrap()
+                );
+                assert_eq!(s.objects[0].gain, 0.75);
+            }
+            index += 1;
+        });
+        assert_eq!(index, 3);
+    }
+
+    #[test]
+    fn malformed_oamd_and_queue_overflow_fail_without_allocating() {
+        let mut pcm = synthetic_objects();
+        let mut timeline = Timeline::new();
+        for _ in 0..128 {
+            timeline.schedule(&pcm, 0).unwrap();
+        }
+        assert_no_alloc::assert_no_alloc(|| assert!(timeline.schedule(&pcm, 0).is_err()));
+        timeline.reset();
+        element(&mut pcm).sample_offset = 1;
+        assert_no_alloc::assert_no_alloc(|| assert!(timeline.schedule(&pcm, 0).is_err()));
+        element(&mut pcm).sample_offset = 0;
+        element(&mut pcm).object_blocks[1][0]
+            .position
+            .as_mut()
+            .unwrap()
+            .x = f32::NAN;
+        assert_no_alloc::assert_no_alloc(|| assert!(timeline.schedule(&pcm, 0).is_err()));
+        element(&mut pcm).object_blocks[1][0]
+            .position
+            .as_mut()
+            .unwrap()
+            .x = 0.0;
+        pcm.oamd_payloads[0].0.isf_in_use = true;
+        assert_no_alloc::assert_no_alloc(|| assert!(timeline.schedule(&pcm, 0).is_err()));
+    }
+
+    #[test]
+    fn five_channel_joc_accepts_replacement_bed_but_refuses_expanded_bed() {
+        let mut core = synthetic_objects().core;
+        core.fullband_channel_order = vec![
+            BedChannel::FrontLeft,
+            BedChannel::Center,
+            BedChannel::FrontRight,
+            BedChannel::SurroundLeft,
+            BedChannel::SurroundRight,
+        ];
+        assert_no_alloc::assert_no_alloc(|| validate_joc_bed(&core, 5).unwrap());
+        core.fullband_channel_order
+            .extend([BedChannel::RearLeft, BedChannel::RearRight]);
+        assert_no_alloc::assert_no_alloc(|| {
+            assert!(matches!(
+                validate_joc_bed(&core, 5),
+                Err(DecodeError::Unsupported { .. })
+            ));
+            validate_joc_bed(&core, 7).unwrap();
+        });
+    }
+
+    #[test]
+    fn ddp_and_pcm_use_the_same_nominal_speaker_table() {
+        for (bed, bit, speaker) in [
+            (BedChannel::FrontLeft, 1, Speaker::L),
+            (BedChannel::FrontRight, 2, Speaker::R),
+            (BedChannel::Center, 4, Speaker::C),
+            (BedChannel::RearLeft, 0x10, Speaker::Lrs),
+            (BedChannel::RearRight, 0x20, Speaker::Rrs),
+            (BedChannel::RearCenter, 0x100, Speaker::Cs),
+            (BedChannel::TopFrontLeft, 0x1000, Speaker::Tfl),
+            (BedChannel::TopFrontRight, 0x4000, Speaker::Tfr),
+            (BedChannel::TopRearLeft, 0x8000, Speaker::Trl),
+            (BedChannel::TopRearRight, 0x20000, Speaker::Trr),
+            (BedChannel::LowFrequencyEffects, 8, Speaker::Lfe),
+        ] {
+            assert_eq!(bed_position(bed), speaker.position());
+            assert_eq!(crate::pcm::speaker_position(bit), speaker.position());
+        }
+        // Preserve the existing distinction, rather than moving PCM sides 20°.
+        assert_eq!(
+            bed_position(BedChannel::SurroundLeft),
+            Speaker::Ls.position()
+        );
+        assert_eq!(crate::pcm::speaker_position(0x200), Speaker::Lss.position());
     }
 
     #[test]

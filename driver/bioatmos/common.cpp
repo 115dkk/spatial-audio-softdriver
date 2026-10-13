@@ -47,14 +47,15 @@ void CAdapterCommon::Stop() {
 NTSTATUS CAdapterCommon::RegisterStream(USHORT endpoint, CMiniportWaveRTStream* stream) {
     KIRQL irql; Lock(&irql);
     NTSTATUS status = STATUS_SUCCESS;
-    if (!active_) status = STATUS_DEVICE_NOT_READY;
+    if (endpoint >= BIO_MAX_ENDPOINTS) status = STATUS_INVALID_PARAMETER;
+    else if (!active_) status = STATUS_DEVICE_NOT_READY;
     else if (streams_[endpoint]) status = STATUS_DEVICE_BUSY;
     else streams_[endpoint] = stream;
     Unlock(irql); return status;
 }
 void CAdapterCommon::UnregisterStream(USHORT endpoint, CMiniportWaveRTStream* stream) {
     KIRQL irql; Lock(&irql);
-    if (streams_[endpoint] == stream) streams_[endpoint] = nullptr;
+    if (endpoint < BIO_MAX_ENDPOINTS && streams_[endpoint] == stream) streams_[endpoint] = nullptr;
     Unlock(irql);
 }
 LONG CAdapterCommon::Trim() {

@@ -52,6 +52,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(ring_fuzz PRIVATE ${BIO_WARNINGS} -fsanitize=fuzzer,address,undefined
         -fno-omit-frame-pointer)
     target_link_options(ring_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    # Compile the classifier into this target so libFuzzer sees its branches,
+    # not just the harness calls into an uninstrumented static library.
+    add_executable(format_fuzz fuzz/format_fuzz.cpp bio_format.cpp)
+    target_include_directories(format_fuzz PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../crates/bio-abi/include)
+    target_compile_options(format_fuzz PRIVATE ${BIO_WARNINGS} -fsanitize=fuzzer,address,undefined
+        -fno-omit-frame-pointer)
+    target_link_options(format_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
     add_executable(clock_fuzz fuzz/clock_fuzz.cpp)
     target_link_libraries(clock_fuzz PRIVATE bio_core)
     target_compile_options(clock_fuzz PRIVATE ${BIO_WARNINGS} -fsanitize=fuzzer,address,undefined

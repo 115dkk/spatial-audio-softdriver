@@ -12,3 +12,17 @@ static PCPROPERTY_ITEM HdmiProperties[] = {
     {&KSPROPSETID_Jack, KSPROPERTY_JACK_SINK_INFO, KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_BASICSUPPORT, CMiniportTopologyHdmi::Property},
 };
 DEFINE_PCAUTOMATION_TABLE_PROP(HdmiAutomation, HdmiProperties);
+
+// BIO serial volume/mute nodes; the property handler follows SysVAD kshelper.cpp.
+static PCPROPERTY_ITEM BioVolumeProperties[] = {
+    {&KSPROPSETID_Audio, KSPROPERTY_AUDIO_VOLUMELEVEL, KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_SET | KSPROPERTY_TYPE_BASICSUPPORT, CMiniportTopologyHdmi::AudioProperty},
+};
+static PCPROPERTY_ITEM BioMuteProperties[] = {
+    {&KSPROPSETID_Audio, KSPROPERTY_AUDIO_MUTE, KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_SET | KSPROPERTY_TYPE_BASICSUPPORT, CMiniportTopologyHdmi::AudioProperty},
+};
+DEFINE_PCAUTOMATION_TABLE_PROP(BioVolumeAutomation, BioVolumeProperties);
+DEFINE_PCAUTOMATION_TABLE_PROP(BioMuteAutomation, BioMuteProperties);
+static PCNODE_DESCRIPTOR BioVolumeNodes[] = {
+    {0, &BioVolumeAutomation, &KSNODETYPE_VOLUME, &KSAUDFNAME_VOLUME_CONTROL},
+    {0, &BioMuteAutomation, &KSNODETYPE_MUTE, &KSAUDFNAME_MASTER_MUTE},
+};

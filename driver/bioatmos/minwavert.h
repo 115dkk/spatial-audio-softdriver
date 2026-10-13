@@ -17,7 +17,7 @@ public:
     static NTSTATUS Property(PPCPROPERTY_REQUEST request);
     CAdapterCommon* Adapter() const { return adapter_; }
     USHORT Endpoint() const { return endpoint_; }
-    ULONGLONG Mask() const { return adapter_->Settings().FormatMask[endpoint_]; }
+    const BIO_ENDPOINT_FORMATS& Formats() const { return adapter_->Settings().Formats[endpoint_]; }
 private:
     LONG references_ = 1;
     CAdapterCommon* adapter_;

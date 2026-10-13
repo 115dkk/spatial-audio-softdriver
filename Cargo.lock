@@ -112,6 +112,7 @@ dependencies = [
 name = "bio-live"
 version = "0.5.2"
 dependencies = [
+ "assert_no_alloc",
  "bio-abi",
  "bio-sys",
  "bio-types",
@@ -120,6 +121,7 @@ dependencies = [
  "engine",
  "rtrb",
  "serde_json",
+ "speakers",
 ]
 
 [[package]]
@@ -144,6 +146,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "speakers",
 ]
 
 [[package]]
@@ -164,6 +167,7 @@ dependencies = [
  "thiserror",
  "wasapi",
  "windows",
+ "zerocopy",
 ]
 
 [[package]]
@@ -246,6 +250,7 @@ dependencies = [
  "bio-types",
  "convolver",
  "hound",
+ "realfft",
  "rubato",
  "serde",
  "thiserror",
@@ -435,7 +440,9 @@ dependencies = [
  "render",
  "rtrb",
  "rubato",
+ "speakers",
  "thiserror",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -830,6 +837,20 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "speakers"
+version = "0.5.2"
+dependencies = [
+ "bio-types",
+ "convolver",
+ "hound",
+ "render",
+ "rubato",
+ "serde",
+ "thiserror",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]

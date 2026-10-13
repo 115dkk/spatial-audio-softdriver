@@ -1,6 +1,6 @@
 //! The SpatialAudioLab (SAL) capture ring as its driver exposes it, and the
 //! translation of its READ results into the `bio_abi` record stream, so the
-//! engine sees SAL exactly as it will see `bioatmos.sys`.
+//! engine sees SAL exactly as it sees `spatialsoftreceiver.sys`.
 //!
 //! Interface facts (from the build-log author's own `apple_bridge.py` and
 //! `ring_dump.py`, which use the driver as a black box; ADR 0005, ADR 0008):
@@ -19,13 +19,17 @@
 //!   engine wrote (IEC 61937 or PCM). Observed: version 3; DD+ arrives as
 //!   subformat {0000000a-0cea-...}, 192 kHz, 2 ch, 16 bit, block align 4.
 
-use bio_abi::RecordWriter;
+use bio_abi::{MAX_DATA_PAYLOAD, RecordWriter, record_size};
 use bio_types::SourceFormat;
 
 pub const SAL_DEVICE_PATH: &str = r"\\.\DolbyDecoderMat";
 pub const SAL_IOCTL_READ: u32 = (0x22 << 16) | (1 << 14) | (0x800 << 2);
 pub const SAL_IOCTL_RESET: u32 = (0x22 << 16) | (2 << 14) | (0x802 << 2);
 pub const SAL_HEADER_LEN: usize = 80;
+/// SAL has no stop indication. Five missing 20 ms game blocks is long enough
+/// to distinguish a stopped stream from normal scheduling jitter while keeping
+/// restart latency bounded. Elapsed time is measured only between READ QPCs.
+pub const SAL_STOP_IDLE_MS: u64 = 100;
 
 /// One parsed READ header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +52,7 @@ pub struct SalHeader {
     pub block_align: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SalError {
     #[error("a SAL READ result is {have} bytes; the header alone needs {need}")]
     Truncated { need: usize, have: usize },
@@ -153,16 +157,43 @@ impl SalHeader {
     }
 }
 
-/// Turns successive READ results into records: a stream-start and a
-/// format-change record first and whenever the format changes (epoch + 1),
-/// a data record per non-empty payload with the running byte position, and an
-/// overrun record whenever `dropped_bytes` grows.
-#[derive(Debug, Default)]
+/// Turns successive READ results into the record stream consumed by the engine.
+#[derive(Debug)]
 pub struct SalTranslator {
     epoch: u32,
     previous: Option<SalHeader>,
     position: u64,
     dropped: u64,
+    active: bool,
+    last_payload_qpc: Option<u64>,
+    qpc_frequency: u64,
+    pending: Option<PendingRead>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingStage {
+    Start,
+    Format,
+    Overrun,
+    Data,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingRead {
+    header: SalHeader,
+    qpc: u64,
+    stage: PendingStage,
+    payload_offset: usize,
+    lost: u64,
+    format_repeat: bool,
+    stop: bool,
+}
+
+impl Default for SalTranslator {
+    fn default() -> Self {
+        Self::with_qpc_frequency(u64::MAX)
+    }
 }
 
 impl SalTranslator {
@@ -170,69 +201,242 @@ impl SalTranslator {
         Self::default()
     }
 
-    /// Translates one READ result taken at `qpc`; returns the number of
-    /// records written. Does not allocate unless the format changed.
+    pub fn with_qpc_frequency(qpc_frequency: u64) -> Self {
+        Self {
+            epoch: 0,
+            previous: None,
+            position: 0,
+            dropped: 0,
+            active: false,
+            last_payload_qpc: None,
+            qpc_frequency: qpc_frequency.max(1),
+            pending: None,
+        }
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// A newly opened SAL device can report an idle ring before its first
+    /// format negotiation. Nothing has been published yet, so this READ is
+    /// waited out: no invalid WAVEFORMATEXTENSIBLE, no epoch. Once anything
+    /// was published, normal validation applies.
+    fn idle_before_first_format(&self, h: &SalHeader) -> bool {
+        self.previous.is_none()
+            && h.payload_bytes == 0
+            && h.format_changes == 0
+            && h.total_bytes == 0
+            && h.dropped_bytes == 0
+    }
+
+    /// Stages one READ; `false` when it carries nothing to translate.
+    fn prepare(&mut self, read: &[u8], qpc: u64) -> Result<bool, SalError> {
+        let h = parse_header(read)?;
+        if self.idle_before_first_format(&h) {
+            return Ok(false);
+        }
+        let changed = self.previous.is_none_or(|old| !old.same_format(&h));
+        let restarting = !self.active && h.payload_bytes > 0;
+        let stop_ticks = self.qpc_frequency.saturating_mul(SAL_STOP_IDLE_MS) / 1_000;
+        let stop = self.active
+            && h.payload_bytes == 0
+            && self
+                .last_payload_qpc
+                .is_some_and(|last| qpc.saturating_sub(last) >= stop_ticks);
+        if changed {
+            h.source_format()?;
+        }
+        let stage = if stop || changed || restarting {
+            PendingStage::Start
+        } else if h.dropped_bytes > self.dropped {
+            PendingStage::Overrun
+        } else if h.payload_bytes > 0 {
+            PendingStage::Data
+        } else {
+            PendingStage::Done
+        };
+        self.pending = Some(PendingRead {
+            header: h,
+            qpc,
+            stage,
+            payload_offset: 0,
+            lost: h.dropped_bytes.saturating_sub(self.dropped),
+            format_repeat: restarting && !changed,
+            stop,
+        });
+        Ok(true)
+    }
+
+    fn payload_record_bytes(payload_bytes: usize) -> usize {
+        let full = payload_bytes / MAX_DATA_PAYLOAD as usize;
+        let tail = payload_bytes % MAX_DATA_PAYLOAD as usize;
+        full * record_size(MAX_DATA_PAYLOAD as usize) + if tail > 0 { record_size(tail) } else { 0 }
+    }
+
+    fn whole_read_size(&self, read: &[u8], qpc: u64) -> Result<usize, SalError> {
+        let h = parse_header(read)?;
+        if self.idle_before_first_format(&h) {
+            return Ok(0);
+        }
+        let changed = self.previous.is_none_or(|old| !old.same_format(&h));
+        let restarting = !self.active && h.payload_bytes > 0;
+        let stop_ticks = self.qpc_frequency.saturating_mul(SAL_STOP_IDLE_MS) / 1_000;
+        let stop = self.active
+            && h.payload_bytes == 0
+            && self
+                .last_payload_qpc
+                .is_some_and(|last| qpc.saturating_sub(last) >= stop_ticks);
+        let (_, wave_len) = h.wave_bytes();
+        Ok(if stop {
+            record_size(0)
+        } else {
+            (if changed || restarting {
+                record_size(0) + record_size(wave_len)
+            } else {
+                0
+            }) + if h.dropped_bytes > self.dropped {
+                record_size(8)
+            } else {
+                0
+            } + Self::payload_record_bytes(h.payload_bytes as usize)
+        })
+    }
+
+    /// Translates one complete READ transactionally. This compatibility path
+    /// keeps the old all-or-nothing contract; capture uses `translate_chunked`.
     pub fn translate(
         &mut self,
         read: &[u8],
         qpc: u64,
         out: &mut RecordWriter<'_>,
     ) -> Result<usize, SalError> {
-        let h = parse_header(read)?;
-        // A newly opened SAL device can report an idle ring before its first
-        // format negotiation. No audio or format has been published yet; do
-        // not turn that state into an invalid WAVEFORMATEXTENSIBLE or commit
-        // an epoch. Once anything was published, normal validation applies.
-        if self.previous.is_none()
-            && h.payload_bytes == 0
-            && h.format_changes == 0
-            && h.total_bytes == 0
-            && h.dropped_bytes == 0
-        {
-            return Ok(0);
-        }
-        let changed = self.previous.is_none_or(|old| !old.same_format(&h));
-        let lost = h.dropped_bytes.saturating_sub(self.dropped);
-        let (wave, wave_len) = h.wave_bytes();
-        if changed {
-            h.source_format()?;
-        }
-        let needed = if changed {
-            bio_abi::record_size(0) + bio_abi::record_size(wave_len)
-        } else {
-            0
-        } + if lost > 0 { bio_abi::record_size(8) } else { 0 }
-            + if h.payload_bytes > 0 {
-                bio_abi::record_size(h.payload_bytes as usize)
-            } else {
-                0
-            };
-        // Capacity and format checks precede any output or state changes. A
-        // caller can retry an entire READ without duplicating earlier records.
-        if out.remaining() < needed {
+        if self.pending.is_some() || out.remaining() < self.whole_read_size(read, qpc)? {
             return Err(SalError::BufferFull);
         }
+        self.translate_chunked(read, qpc, out)
+    }
+
+    /// Translates as many whole records as fit. A large data payload is split
+    /// into records and retained internally until later calls drain it.
+    pub fn translate_chunked(
+        &mut self,
+        read: &[u8],
+        qpc: u64,
+        out: &mut RecordWriter<'_>,
+    ) -> Result<usize, SalError> {
+        if self.pending.is_none() && !self.prepare(read, qpc)? {
+            return Ok(0);
+        }
         let mut count = 0;
-        if changed {
-            self.epoch = self.epoch.wrapping_add(1);
-            out.stream_start(self.epoch, qpc);
-            out.format_change(self.epoch, qpc, &wave[..wave_len]);
-            count += 2;
+        loop {
+            let pending = self.pending.as_mut().expect("prepared above");
+            match pending.stage {
+                PendingStage::Start if pending.stop => {
+                    if !out.stream_stop(self.epoch, pending.qpc) {
+                        break;
+                    }
+                    self.active = false;
+                    pending.stage = PendingStage::Done;
+                    count += 1;
+                }
+                PendingStage::Start => {
+                    if !out.stream_start(
+                        if self
+                            .previous
+                            .is_none_or(|old| !old.same_format(&pending.header))
+                        {
+                            self.epoch.wrapping_add(1)
+                        } else {
+                            self.epoch
+                        },
+                        pending.qpc,
+                    ) {
+                        break;
+                    }
+                    if self
+                        .previous
+                        .is_none_or(|old| !old.same_format(&pending.header))
+                    {
+                        self.epoch = self.epoch.wrapping_add(1);
+                    }
+                    self.position = 0;
+                    self.active = true;
+                    pending.stage = PendingStage::Format;
+                    count += 1;
+                }
+                PendingStage::Format => {
+                    let (wave, wave_len) = pending.header.wave_bytes();
+                    let written = if pending.format_repeat {
+                        out.format_repeat(self.epoch, pending.qpc, &wave[..wave_len])
+                    } else {
+                        out.format_change(self.epoch, pending.qpc, &wave[..wave_len])
+                    };
+                    if !written {
+                        break;
+                    }
+                    pending.stage = if pending.lost > 0 {
+                        PendingStage::Overrun
+                    } else if pending.header.payload_bytes > 0 {
+                        PendingStage::Data
+                    } else {
+                        PendingStage::Done
+                    };
+                    count += 1;
+                }
+                PendingStage::Overrun => {
+                    if !out.overrun(self.position, pending.qpc, pending.lost) {
+                        break;
+                    }
+                    self.position = self.position.saturating_add(pending.lost);
+                    pending.stage = if pending.header.payload_bytes > 0 {
+                        PendingStage::Data
+                    } else {
+                        PendingStage::Done
+                    };
+                    count += 1;
+                }
+                PendingStage::Data => {
+                    let remaining = pending.header.payload_bytes as usize - pending.payload_offset;
+                    let header_bytes = record_size(0);
+                    if out.remaining() <= header_bytes {
+                        break;
+                    }
+                    let chunk = remaining
+                        .min(MAX_DATA_PAYLOAD as usize)
+                        .min(out.remaining() - header_bytes);
+                    if chunk == 0 {
+                        break;
+                    }
+                    let start = pending.header.header_bytes as usize + pending.payload_offset;
+                    if !out.data(
+                        self.epoch,
+                        self.position,
+                        pending.qpc,
+                        &read[start..start + chunk],
+                    ) {
+                        break;
+                    }
+                    pending.payload_offset += chunk;
+                    self.position = self.position.saturating_add(chunk as u64);
+                    self.last_payload_qpc = Some(pending.qpc);
+                    if pending.payload_offset == pending.header.payload_bytes as usize {
+                        pending.stage = PendingStage::Done;
+                    }
+                    count += 1;
+                }
+                PendingStage::Done => {
+                    let finished = self.pending.take().expect("matched pending read");
+                    self.previous = Some(finished.header);
+                    self.dropped = finished.header.dropped_bytes;
+                    return Ok(count);
+                }
+            }
         }
-        if lost > 0 {
-            out.overrun(self.position, qpc, lost);
-            self.position = self.position.saturating_add(lost);
-            count += 1;
+        if count == 0 && out.is_empty() {
+            Err(SalError::BufferFull)
+        } else {
+            Ok(count)
         }
-        if h.payload_bytes > 0 {
-            let start = h.header_bytes as usize;
-            let end = start + h.payload_bytes as usize;
-            out.data(self.epoch, self.position, qpc, &read[start..end]);
-            self.position = self.position.saturating_add(u64::from(h.payload_bytes));
-            count += 1;
-        }
-        self.previous = Some(h);
-        self.dropped = h.dropped_bytes;
-        Ok(count)
     }
 }

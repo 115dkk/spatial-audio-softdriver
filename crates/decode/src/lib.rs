@@ -6,7 +6,7 @@
 //! | --- | --- | --- |
 //! | [`pcm::PcmDecoder`] | interleaved PCM bytes | `rate / 100` frames (10 ms) |
 //! | [`mat::MatDecoder`] | MAT bursts | 480 frames (half a 20 ms burst) |
-//! | [`ddp::DdpDecoder`] | E-AC-3 bursts | 1536 frames (one access unit) |
+//! | [`ddp::DdpDecoder`] | E-AC-3 bursts | 1536 frames total, split at OAMD updates/ramps |
 //!
 //! [`Decoders`] holds all of them, created once with every buffer they will
 //! need, and switches between them on a format change without allocating.
@@ -14,6 +14,7 @@
 //! until the callback returns.
 
 pub mod ddp;
+pub mod direct;
 pub mod mat;
 pub mod pcm;
 mod scene;
@@ -23,17 +24,24 @@ use bitstream::Burst;
 
 pub use scene::SceneBuffers;
 
+/// Largest supported PCM scene block: 192 kHz x 10 ms.
+pub const MAX_SCENE_FRAMES: usize = 1920;
+
 /// Sizes every adapter allocates for up front.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecodeConfig {
     /// Largest scene block any adapter may emit, in frames.
     pub max_frames: usize,
+    /// Channel orders used when PCM has a zero WAVE channel mask.
+    pub direct: direct::DirectLayouts,
 }
 
 impl Default for DecodeConfig {
     fn default() -> Self {
-        // DD+ access units are the largest block: 6 audio blocks x 256.
-        Self { max_frames: 1536 }
+        Self {
+            max_frames: MAX_SCENE_FRAMES,
+            direct: direct::DirectLayouts::default(),
+        }
     }
 }
 
@@ -55,6 +63,10 @@ pub enum DecodeError {
         codec: &'static str,
         detail: &'static str,
     },
+    /// PCM with channel mask zero whose channel count has no direct layout
+    /// ([`direct::DirectLayouts`]); the caller can set one for that count.
+    #[error("PCM with channel mask 0 has no direct layout for {0} channels")]
+    NoDirectLayout(u16),
     #[error("data arrived before any format was selected")]
     NoFormat,
     /// Data of the wrong kind for the selected route (PCM in a bitstream epoch
@@ -139,6 +151,10 @@ impl Decoders {
         }
     }
 
+    /// Decodes a complete burst. `qpc` is the source-clock time of its first
+    /// carrier byte (the IEC 61937 Pa preamble at [`Burst::start`]), not the
+    /// payload completion time or the enclosing ABI record's end timestamp.
+    /// The adapter carries this timestamp into the emitted scene.
     pub fn push_burst(
         &mut self,
         burst: &Burst<'_>,
@@ -150,6 +166,15 @@ impl Decoders {
             Active::Ddp => self.ddp.push(burst, qpc, self.epoch, out),
             Active::None => Err(DecodeError::NoFormat),
             Active::Pcm => Err(DecodeError::WrongRoute("a burst in a PCM epoch")),
+        }
+    }
+
+    /// Emits buffered complete input at an orderly stream end. Only PCM holds
+    /// a sub-block remainder; burst decoders have already emitted complete bursts.
+    pub fn flush(&mut self, out: &mut dyn FnMut(&SceneBlock<'_>)) -> Result<(), DecodeError> {
+        match self.active {
+            Active::Pcm => self.pcm.flush(out),
+            Active::Mat | Active::Ddp | Active::None => Ok(()),
         }
     }
 

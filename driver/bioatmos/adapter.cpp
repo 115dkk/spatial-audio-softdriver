@@ -39,23 +39,68 @@ static void RegistryValue(HANDLE key, PCWSTR name, ULONG type, PVOID output, ULO
         if (information->Type == type && information->DataLength == bytes) RtlCopyMemory(output, information->Data, bytes);
     }
 }
+static void RegistryName(HANDLE key, ULONG endpoint) {
+    WCHAR name[] = L"EndpointName0";
+    name[ARRAYSIZE(name) - 2] = static_cast<WCHAR>(L'0' + endpoint);
+    UNICODE_STRING value; RtlInitUnicodeString(&value, name);
+    alignas(8) BYTE storage[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) +
+        bio::kEndpointNameCapacity * sizeof(WCHAR)]{};
+    ULONG needed = 0;
+    NTSTATUS status = ZwQueryValueKey(key, &value, KeyValuePartialInformation, storage, sizeof(storage), &needed);
+    if (!NT_SUCCESS(status)) return; // Missing/oversized values keep the default.
+    auto information = reinterpret_cast<PKEY_VALUE_PARTIAL_INFORMATION>(storage);
+    if (information->DataLength > sizeof(storage) - FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data)) return;
+    bio::EndpointName(endpoint, information->Type == REG_SZ,
+        reinterpret_cast<const WCHAR*>(information->Data), information->DataLength, Settings.EndpointName[endpoint]);
+}
 static void LoadSettings() {
-    Settings = {2, {BioDefaultFormats, BioDefaultFormats}, FALSE};
+    PAGED_CODE();
+    Settings = {0x7, {BioDefaultFormats, BioDefaultFormats, BioDefaultFormats, BioDefaultFormats}, FALSE, {}};
+    for (ULONG i = 0; i < BIO_MAX_ENDPOINTS; ++i)
+        bio::EndpointName<WCHAR>(i, false, nullptr, 0, Settings.EndpointName[i]);
     UNICODE_STRING parameters; RtlInitUnicodeString(&parameters, L"Parameters");
     OBJECT_ATTRIBUTES attributes;
     InitializeObjectAttributes(&attributes, &parameters, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, ServiceKey, nullptr);
     HANDLE key;
-    if (!NT_SUCCESS(ZwOpenKey(&key, KEY_QUERY_VALUE, &attributes))) return;
-    ULONG second = 1, packet = 0;
-    RegistryValue(key, L"SecondEndpoint", REG_DWORD, &second, sizeof(second));
-    RegistryValue(key, L"WritePacket", REG_DWORD, &packet, sizeof(packet));
-    RegistryValue(key, L"FormatMask0", REG_QWORD, &Settings.FormatMask[0], sizeof(ULONGLONG));
-    RegistryValue(key, L"FormatMask1", REG_QWORD, &Settings.FormatMask[1], sizeof(ULONGLONG));
-    ZwClose(key);
-    Settings.EndpointCount = second ? 2 : 1;
+    ULONG packet = 0;
+    if (NT_SUCCESS(ZwOpenKey(&key, KEY_QUERY_VALUE, &attributes))) {
+        for (ULONG i = 0; i < BIO_MAX_ENDPOINTS; ++i) RegistryName(key, i);
+        RegistryValue(key, L"EndpointMask", REG_DWORD, &Settings.EndpointMask, sizeof(Settings.EndpointMask));
+        RegistryValue(key, L"WritePacket", REG_DWORD, &packet, sizeof(packet));
+        for (ULONG i = 0; i < BIO_MAX_ENDPOINTS; ++i) {
+            WCHAR codec[] = L"CodecMask0", rates[] = L"PcmRateMask0", shapes[] = L"PcmShapeMask0";
+            WCHAR masked[] = L"PcmMaxMaskedChannels0", direct[] = L"PcmDirectChannels0";
+            codec[ARRAYSIZE(codec) - 2] += static_cast<WCHAR>(i);
+            rates[ARRAYSIZE(rates) - 2] += static_cast<WCHAR>(i);
+            shapes[ARRAYSIZE(shapes) - 2] += static_cast<WCHAR>(i);
+            masked[ARRAYSIZE(masked) - 2] += static_cast<WCHAR>(i);
+            direct[ARRAYSIZE(direct) - 2] += static_cast<WCHAR>(i);
+            auto& f = Settings.Formats[i];
+            RegistryValue(key, codec, REG_QWORD, &f.codecs, sizeof(f.codecs));
+            RegistryValue(key, rates, REG_DWORD, &f.pcm.rates, sizeof(f.pcm.rates));
+            RegistryValue(key, shapes, REG_DWORD, &f.pcm.shapes, sizeof(f.pcm.shapes));
+            RegistryValue(key, masked, REG_DWORD, &f.pcm.max_masked_channels, sizeof(f.pcm.max_masked_channels));
+            RegistryValue(key, direct, REG_DWORD, &f.pcm.direct_channels, sizeof(f.pcm.direct_channels));
+        }
+        ZwClose(key);
+    }
+    // Normalize defaults too: the absent reserved endpoint must report mask 0
+    // even when the Parameters key could not be opened.
     Settings.WritePacket = packet != 0;
-    Settings.FormatMask[0] &= BioCompiledFormats;
-    Settings.FormatMask[1] = second ? Settings.FormatMask[1] & BioCompiledFormats : 0;
+    constexpr ULONG available = (1UL << ARRAYSIZE(BioMiniPairs)) - 1UL;
+    Settings.EndpointMask &= available;
+    if (!Settings.EndpointMask) Settings.EndpointMask = 0x7 & available;
+    for (ULONG i = 0; i < BIO_MAX_ENDPOINTS; ++i) {
+        auto& f = Settings.Formats[i];
+        if (!(Settings.EndpointMask & (1UL << i))) { f = {}; continue; }
+        f.codecs &= BIO_COMPILED_CODECS;
+        f.pcm.rates &= BIO_COMPILED_PCM.rates;
+        f.pcm.shapes &= BIO_COMPILED_PCM.shapes;
+        // This field is a ceiling, not a bit mask: intersect by minimum.
+        if (f.pcm.max_masked_channels > BIO_COMPILED_PCM.max_masked_channels)
+            f.pcm.max_masked_channels = BIO_COMPILED_PCM.max_masked_channels;
+        f.pcm.direct_channels &= BIO_COMPILED_PCM.direct_channels;
+    }
 }
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryPath) {
     OBJECT_ATTRIBUTES attributes;
@@ -108,7 +153,7 @@ static NTSTATUS AddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo) {
     PAGED_CODE();
     if (InterlockedCompareExchange(&AdapterPresent, 1, 0)) return STATUS_DEVICE_BUSY;
     LoadSettings();
-    NTSTATUS status = PcAddAdapterDevice(driver, pdo, StartDevice, 4, 0);
+    NTSTATUS status = PcAddAdapterDevice(driver, pdo, StartDevice, 2 * ARRAYSIZE(BioMiniPairs), 0);
     if (!NT_SUCCESS(status)) { InterlockedExchange(&AdapterPresent, 0); return status; }
     PDEVICE_OBJECT fdo = IoGetAttachedDeviceReference(pdo);
     while (fdo && fdo->DriverObject != driver) {
@@ -161,8 +206,10 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resou
     if (!adapter) return STATUS_INSUFFICIENT_RESOURCES;
     NTSTATUS status = adapter->Start();
     if (NT_SUCCESS(status)) status = PcRegisterAdapterPowerManagement(adapter, device);
-    for (ULONG i = 0; NT_SUCCESS(status) && i < adapter->Settings().EndpointCount; ++i)
-        status = Install(device, irp, resources, adapter, BioMiniPairs[i]);
+    for (ULONG i = 0; NT_SUCCESS(status) && i < BIO_MAX_ENDPOINTS; ++i) {
+        if ((adapter->Settings().EndpointMask & (1UL << i)) && i < ARRAYSIZE(BioMiniPairs))
+            status = Install(device, irp, resources, adapter, BioMiniPairs[i]);
+    }
     if (NT_SUCCESS(status)) extension->Common = adapter;
     else { adapter->Stop(); adapter->Release(); }
     return status;
