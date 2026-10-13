@@ -55,6 +55,18 @@ SHIP = (
     "tools/ci/driver_flow_check.py",
     "tools/ci/ring_record.py",
     "tools/ci/requirements.txt",
+    "tools/ci/endpoints.ps1",
+    "tools/ci/endpoints.py",
+    "tools/ci/package-identities.ps1",
+    "tools/ci/volume_check.py",
+    "tools/ci/volume_check.ps1",
+    "tools/ci/endpoint-volume.ps1",
+    "tools/ci/exclusive-policy.ps1",
+    "tools/ci/exclusive_policy_check.ps1",
+    "tools/ci/loopback_check.py",
+    "tools/ci/ioctl_fuzz.py",
+    # The example profiles in the tools zip (release.yml build-windows).
+    "docs/profiles/*",
 )
 # Shipped although they match NOT_SHIPPED: the kit's README.
 SHIP_ALWAYS = ("docs/testing/test-signed-pc.md",)

@@ -8,8 +8,7 @@
 #include <stdint.h>
 
 /**
- * Bumped only by a frozen-contract revision; v1 is what the signed driver
- * ships with.
+ * Bumped only by a frozen-contract revision; the current v1 is not frozen yet.
  */
 #define BIO_ABI_VERSION 1
 
@@ -24,7 +23,7 @@
  * input: [`ReadRequest`], output: a record stream of whole records, at most
  * [`READ_MAX_BYTES`] whatever the buffer. Pends until `min_bytes` of records
  * are queued (clamped to the buffer and to [`READ_MAX_BYTES`]), a
- * format-change or stream-stop record arrives, or `timeout_ms` passes.
+ * format-change, volume or stream-stop record arrives, or `timeout_ms` passes.
  * Cancellable.
  */
 #define IOCTL_BIO_READ ((((34 << 16) | (1 << 14)) | (2305 << 2)) | 2)
@@ -52,32 +51,68 @@
 
 #define BIO_RECORD_KIND_OVERRUN 5
 
+#define BIO_RECORD_KIND_VOLUME 6
+
+#define BIO_MAX_VOLUME_CHANNELS 32
+
+#define BIO_VOLUME_MIN_Q16 -6291456
+
+#define BIO_VOLUME_MAX_Q16 0
+
+#define BIO_VOLUME_STEP_Q16 32768
+
+/**
+ * Record kinds at or above this value belong to dump recorders, never the
+ * driver contract. The driver must not emit them into a READ stream.
+ */
+#define BIO_RECORD_KIND_RECORDER_MIN 32768
+
+/**
+ * Dump-format-2 marker written after every READ returned to a recorder.
+ */
+#define BIO_RECORD_KIND_READ_END 32769
+
+/**
+ * Dump recorder marker reporting READ bytes the recorder could not retain.
+ */
+#define BIO_RECORD_KIND_RECORDER_GAP 32770
+
+/**
+ * Marker records do not belong to a render endpoint.
+ */
+#define BIO_RECORD_ENDPOINT_RECORDER 65535
+
 /**
  * Endpoint numbers in [`RecordHeader::endpoint`] and the per-endpoint arrays.
+ * ADR 0028 assigns 0 to primary, 1 to music, 2 to passthrough, and reserves 3.
  */
 #define BIO_ENDPOINT_PRIMARY 0
 
 #define BIO_ENDPOINT_SECOND 1
 
 /**
- * Render endpoints the v1 driver can expose; sizes the per-endpoint arrays.
+ * ADR 0028: exclusive streams only (bitstreams and exclusive PCM).
  */
-#define BIO_MAX_ENDPOINTS 2
+#define BIO_ENDPOINT_PASSTHROUGH 2
 
 /**
- * Data record flag: the bytes do not follow the previous data record
- * (the stream restarted or an overrun dropped bytes in between).
+ * Contract slots for render endpoints, including reserved endpoint 3.
+ */
+#define BIO_MAX_ENDPOINTS 4
+
+/**
+ * Data record flag: the bytes do not follow the previous data record. The
+ * kernel sets it after an overrun, a source gap, and on the first data returned
+ * to a newly opened handle.
  */
 #define BIO_RECORD_FLAG_DISCONTINUITY 1
 
 /**
- * Format-change record flag: the record restates the endpoint's current
- * format after an overrun and carries the current epoch instead of a new one.
- * The ring may have overwritten the format change that opened the epoch, so
- * the driver repeats it before the endpoint's next data; user mode treats it
- * like any format change (reset the decoder, select by format).
+ * State-record flag: this is not a new event; it restates the endpoint's
+ * current format, volume or streaming state. A repeated format carries the current
+ * epoch instead of incrementing it.
  */
-#define BIO_RECORD_FLAG_FORMAT_REPEAT 2
+#define BIO_RECORD_FLAG_REPEAT 2
 
 /**
  * Every record starts at a multiple of this many bytes; the gap after a
@@ -102,11 +137,15 @@
 #define BIO_TRIM_LIMIT_PPM 2000
 
 /**
- * Format bits for [`AbiInfo::compiled_formats`] and `enabled_formats` (the
- * registry mask bio-setup writes).
+ * The 18 ksmedia.h speaker positions, FRONT_LEFT through TOP_BACK_RIGHT.
  */
-#define BIO_FORMAT_PCM (1 << 0)
+#define BIO_PCM_SPEAKER_BITS 262143
 
+#define BIO_MAX_PCM_CHANNELS 32
+
+/**
+ * Codec mask: bits 1..8 retain their values; bit 0 and bits 9..63 are reserved.
+ */
 #define BIO_FORMAT_AC3 (1 << 1)
 
 #define BIO_FORMAT_EAC3 (1 << 2)
@@ -123,6 +162,10 @@
 
 #define BIO_FORMAT_DTS_HD (1 << 8)
 
+#define BIO_COMPILED_CODECS 510
+
+#define BIO_DEFAULT_ENABLED_CODECS 108
+
 /**
  * Feature bits for [`AbiInfo::features`].
  */
@@ -136,9 +179,38 @@
 
 /**
  * 0: recorded before records carried an endpoint (every record is the primary's).
- * 1: records carry `endpoint`.
+ * 1: records carry `endpoint` but not READ boundaries.
+ * 2: each READ's bytes are followed by a [`RECORD_KIND_READ_END`] marker.
+ * 3: volume records carry up to 32 channels (136-byte payload). A volume
+ *    record in an older dump has the 72-byte, 16-channel payload; readers
+ *    still accept it and zero the remaining levels.
  */
-#define BIO_DUMP_FORMAT_VERSION 1
+#define BIO_DUMP_FORMAT_VERSION 3
+
+typedef struct BIO_PCM_FORMATS {
+  /**
+   * Bit i selects `PCM_RATES[i]`.
+   */
+  uint32_t rates;
+  /**
+   * Bit i selects PcmShape i.
+   */
+  uint32_t shapes;
+  /**
+   * Nonzero masks use only PCM_SPEAKER_BITS, have nChannels set bits,
+   * and no more than this many channels (zero disables masked PCM).
+   */
+  uint32_t max_masked_channels;
+  /**
+   * Bit c-1 permits c channels with mask zero (direct out, no speaker meaning).
+   */
+  uint32_t direct_channels;
+} BIO_PCM_FORMATS;
+
+typedef struct BIO_ENDPOINT_FORMATS {
+  uint64_t codecs;
+  struct BIO_PCM_FORMATS pcm;
+} BIO_ENDPOINT_FORMATS;
 
 /**
  * Header of one record. The payload (`len` bytes) follows immediately.
@@ -147,13 +219,14 @@
  * * FormatChange: the WAVEFORMATEX(TENSIBLE) Windows negotiated, verbatim.
  * * StreamStart / StreamStop: no payload.
  * * Overrun: [`OverrunPayload`].
+ * * Volume: [`VolumePayload`].
  */
 typedef struct BIO_RECORD_HEADER {
   uint16_t kind;
   uint16_t flags;
   /**
    * +1 with every format-change record (the record carries the new
-   * epoch), except one flagged [`RECORD_FLAG_FORMAT_REPEAT`], which keeps it.
+   * epoch), except one flagged [`RECORD_FLAG_REPEAT`], which keeps it.
    */
   uint32_t epoch;
   /**
@@ -179,6 +252,9 @@ typedef struct BIO_RECORD_HEADER {
    * records have zero here and therefore belong to the primary endpoint.
    */
   uint16_t endpoint;
+  /**
+   * Writers write zero; readers ignore this field for forward compatibility.
+   */
   uint16_t reserved;
 } BIO_RECORD_HEADER;
 
@@ -188,6 +264,18 @@ typedef struct BIO_RECORD_HEADER {
 typedef struct BIO_OVERRUN_PAYLOAD {
   uint64_t lost_bytes;
 } BIO_OVERRUN_PAYLOAD;
+
+/**
+ * Endpoint hardware volume state. Little-endian, 136 bytes; records and their
+ * payloads start at 8-byte boundaries. Unused levels and mute bits are zero.
+ * `channel_count` is the endpoint's default device-format channel count (1..=32),
+ * not the currently negotiated stream's channel count. Levels are dB * 65536.
+ */
+typedef struct BIO_VOLUME_PAYLOAD {
+  uint32_t channel_count;
+  uint32_t mute_mask;
+  int32_t level_q16[BIO_MAX_VOLUME_CHANNELS];
+} BIO_VOLUME_PAYLOAD;
 
 typedef struct BIO_READ_REQUEST {
   uint32_t min_bytes;
@@ -213,21 +301,22 @@ typedef struct BIO_ABI_INFO {
    */
   uint32_t driver_version;
   uint32_t ring_bytes;
-  uint64_t compiled_formats;
+  struct BIO_ENDPOINT_FORMATS compiled;
   uint64_t features;
   /**
    * `KeQueryPerformanceCounter` frequency, so records' QPCs convert to time.
    */
   uint64_t qpc_frequency;
   /**
-   * Endpoints exposed now: 1, or 2 when the service's Parameters key enables the second.
+   * Bit i is one when the driver exposes endpoint i.
    */
-  uint32_t endpoint_count;
+  uint32_t endpoint_mask;
   uint32_t reserved;
   /**
-   * The registry format mask per endpoint, indexed by endpoint number; 0 past `endpoint_count`.
+   * Registry capabilities per endpoint, indexed by endpoint number; zero
+   * for endpoints absent from [`Self::endpoint_mask`].
    */
-  uint64_t enabled_formats[BIO_MAX_ENDPOINTS];
+  struct BIO_ENDPOINT_FORMATS endpoints[BIO_MAX_ENDPOINTS];
 } BIO_ABI_INFO;
 
 typedef struct BIO_ENDPOINT_STATS {
@@ -248,7 +337,7 @@ typedef struct BIO_STATS {
   uint32_t struct_size;
   uint32_t open_count;
   /**
-   * Worst lateness of the virtual DMA timer, microseconds; both endpoints share the timer.
+   * Worst lateness of the virtual DMA timer, microseconds; all endpoints share the timer.
    */
   uint32_t max_timer_lateness_us;
   uint32_t reserved;
@@ -256,8 +345,8 @@ typedef struct BIO_STATS {
 } BIO_STATS;
 
 /**
- * Header of a diagnostic recording. The record stream follows, exactly as
- * READ returned it.
+ * Header of a diagnostic recording. The record stream follows; format 2 adds
+ * recorder-only boundary and loss markers that the driver never emits.
  */
 typedef struct BIO_DUMP_HEADER {
   uint8_t magic[8];
@@ -271,6 +360,20 @@ typedef struct BIO_DUMP_HEADER {
   uint32_t reserved;
 } BIO_DUMP_HEADER;
 
+/**
+ * PCM sample rates; bit i of `PcmFormats::rates` is `PCM_RATES[i]`.
+ */
+static const uint32_t BIO_PCM_RATES[6] = { 44100, 48000, 88200, 96000, 176400, 192000, };
+
+#define BIO_DEFAULT_PCM_INIT { 63, 31, 18, 4294967295U }
+
+static const BIO_PCM_FORMATS BIO_DEFAULT_PCM = BIO_DEFAULT_PCM_INIT;
+
+#define BIO_COMPILED_PCM_INIT { 63, 31, 18, 4294967295U }
+
+static const BIO_PCM_FORMATS BIO_COMPILED_PCM = BIO_COMPILED_PCM_INIT;
+
+#define BIO_CONTROL_DEVICE_PATH "\\\\.\\SpatialSoftReceiver"
 
 #if defined(__cplusplus)
 #define BIO_STATIC_ASSERT(e, m) static_assert(e, m)
@@ -292,6 +395,11 @@ BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, qpc_written) == 24, "BIO_RECORD_HE
 BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, len) == 32, "BIO_RECORD_HEADER.len offset");
 BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, endpoint) == 36, "BIO_RECORD_HEADER.endpoint offset");
 BIO_STATIC_ASSERT(offsetof(BIO_RECORD_HEADER, reserved) == 38, "BIO_RECORD_HEADER.reserved offset");
+BIO_STATIC_ASSERT(sizeof(BIO_VOLUME_PAYLOAD) == 136, "BIO_VOLUME_PAYLOAD size");
+BIO_STATIC_ASSERT(offsetof(BIO_VOLUME_PAYLOAD, channel_count) == 0, "BIO_VOLUME_PAYLOAD.channel_count offset");
+BIO_STATIC_ASSERT(offsetof(BIO_VOLUME_PAYLOAD, mute_mask) == 4, "BIO_VOLUME_PAYLOAD.mute_mask offset");
+BIO_STATIC_ASSERT(offsetof(BIO_VOLUME_PAYLOAD, level_q16) == 8, "BIO_VOLUME_PAYLOAD.level_q16 offset");
+BIO_STATIC_ASSERT(BIO_MAX_VOLUME_CHANNELS == 32, "volume channels");
 BIO_STATIC_ASSERT(sizeof(BIO_OVERRUN_PAYLOAD) == 8, "BIO_OVERRUN_PAYLOAD size");
 BIO_STATIC_ASSERT(offsetof(BIO_OVERRUN_PAYLOAD, lost_bytes) == 0, "BIO_OVERRUN_PAYLOAD.lost_bytes offset");
 BIO_STATIC_ASSERT(sizeof(BIO_READ_REQUEST) == 8, "BIO_READ_REQUEST size");
@@ -300,24 +408,32 @@ BIO_STATIC_ASSERT(offsetof(BIO_READ_REQUEST, timeout_ms) == 4, "BIO_READ_REQUEST
 BIO_STATIC_ASSERT(sizeof(BIO_RATE_TRIM) == 8, "BIO_RATE_TRIM size");
 BIO_STATIC_ASSERT(offsetof(BIO_RATE_TRIM, ppm_q16) == 0, "BIO_RATE_TRIM.ppm_q16 offset");
 BIO_STATIC_ASSERT(offsetof(BIO_RATE_TRIM, reserved) == 4, "BIO_RATE_TRIM.reserved offset");
-BIO_STATIC_ASSERT(sizeof(BIO_ABI_INFO) == 64, "BIO_ABI_INFO size");
+BIO_STATIC_ASSERT(sizeof(BIO_PCM_FORMATS) == 16, "BIO_PCM_FORMATS size");
+BIO_STATIC_ASSERT(offsetof(BIO_PCM_FORMATS, rates) == 0, "BIO_PCM_FORMATS.rates offset");
+BIO_STATIC_ASSERT(offsetof(BIO_PCM_FORMATS, shapes) == 4, "BIO_PCM_FORMATS.shapes offset");
+BIO_STATIC_ASSERT(offsetof(BIO_PCM_FORMATS, max_masked_channels) == 8, "BIO_PCM_FORMATS.max_masked_channels offset");
+BIO_STATIC_ASSERT(offsetof(BIO_PCM_FORMATS, direct_channels) == 12, "BIO_PCM_FORMATS.direct_channels offset");
+BIO_STATIC_ASSERT(sizeof(BIO_ENDPOINT_FORMATS) == 24, "BIO_ENDPOINT_FORMATS size");
+BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_FORMATS, codecs) == 0, "BIO_ENDPOINT_FORMATS.codecs offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_FORMATS, pcm) == 8, "BIO_ENDPOINT_FORMATS.pcm offset");
+BIO_STATIC_ASSERT(sizeof(BIO_ABI_INFO) == 160, "BIO_ABI_INFO size");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, abi_version) == 0, "BIO_ABI_INFO.abi_version offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, struct_size) == 4, "BIO_ABI_INFO.struct_size offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, driver_version) == 8, "BIO_ABI_INFO.driver_version offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, ring_bytes) == 12, "BIO_ABI_INFO.ring_bytes offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, compiled_formats) == 16, "BIO_ABI_INFO.compiled_formats offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, features) == 24, "BIO_ABI_INFO.features offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, qpc_frequency) == 32, "BIO_ABI_INFO.qpc_frequency offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, endpoint_count) == 40, "BIO_ABI_INFO.endpoint_count offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, reserved) == 44, "BIO_ABI_INFO.reserved offset");
-BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, enabled_formats) == 48, "BIO_ABI_INFO.enabled_formats offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, compiled) == 16, "BIO_ABI_INFO.compiled offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, features) == 40, "BIO_ABI_INFO.features offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, qpc_frequency) == 48, "BIO_ABI_INFO.qpc_frequency offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, endpoint_mask) == 56, "BIO_ABI_INFO.endpoint_mask offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, reserved) == 60, "BIO_ABI_INFO.reserved offset");
+BIO_STATIC_ASSERT(offsetof(BIO_ABI_INFO, endpoints) == 64, "BIO_ABI_INFO.endpoints offset");
 BIO_STATIC_ASSERT(sizeof(BIO_ENDPOINT_STATS) == 32, "BIO_ENDPOINT_STATS size");
 BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, total_bytes) == 0, "BIO_ENDPOINT_STATS.total_bytes offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, overruns) == 8, "BIO_ENDPOINT_STATS.overruns offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, lost_bytes) == 16, "BIO_ENDPOINT_STATS.lost_bytes offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, epoch) == 24, "BIO_ENDPOINT_STATS.epoch offset");
 BIO_STATIC_ASSERT(offsetof(BIO_ENDPOINT_STATS, state) == 28, "BIO_ENDPOINT_STATS.state offset");
-BIO_STATIC_ASSERT(sizeof(BIO_STATS) == 80, "BIO_STATS size");
+BIO_STATIC_ASSERT(sizeof(BIO_STATS) == 144, "BIO_STATS size");
 BIO_STATIC_ASSERT(offsetof(BIO_STATS, struct_size) == 0, "BIO_STATS.struct_size offset");
 BIO_STATIC_ASSERT(offsetof(BIO_STATS, open_count) == 4, "BIO_STATS.open_count offset");
 BIO_STATIC_ASSERT(offsetof(BIO_STATS, max_timer_lateness_us) == 8, "BIO_STATS.max_timer_lateness_us offset");
@@ -330,5 +446,6 @@ BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, header_size) == 12, "BIO_DUMP_HEADER
 BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, qpc_frequency) == 16, "BIO_DUMP_HEADER.qpc_frequency offset");
 BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, format_version) == 24, "BIO_DUMP_HEADER.format_version offset");
 BIO_STATIC_ASSERT(offsetof(BIO_DUMP_HEADER, reserved) == 28, "BIO_DUMP_HEADER.reserved offset");
+BIO_STATIC_ASSERT(BIO_MAX_ENDPOINTS == 4, "BIO_MAX_ENDPOINTS value");
 
 #endif /* BIOATMOS_ABI_H */

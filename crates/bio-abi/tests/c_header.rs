@@ -14,13 +14,16 @@ use std::mem::{offset_of, size_of};
 use std::path::Path;
 
 use bio_abi::{
-    AbiInfo, BioStats, DumpHeader, EndpointStats, OverrunPayload, RateTrim, ReadRequest,
-    RecordHeader,
+    AbiInfo, BioStats, DEFAULT_ENABLED_CODECS, DumpHeader, EndpointFormats, EndpointStats,
+    OverrunPayload, PcmFormats, RateTrim, ReadRequest, RecordHeader, VolumePayload,
 };
 
-const RENAMES: [(&str, &str); 8] = [
+const RENAMES: [(&str, &str); 11] = [
+    ("PcmFormats", "BIO_PCM_FORMATS"),
+    ("EndpointFormats", "BIO_ENDPOINT_FORMATS"),
     ("RecordHeader", "BIO_RECORD_HEADER"),
     ("OverrunPayload", "BIO_OVERRUN_PAYLOAD"),
+    ("VolumePayload", "BIO_VOLUME_PAYLOAD"),
     ("ReadRequest", "BIO_READ_REQUEST"),
     ("RateTrim", "BIO_RATE_TRIM"),
     ("AbiInfo", "BIO_ABI_INFO"),
@@ -33,7 +36,7 @@ macro_rules! assert_layout {
     ($out:ident, $rust:ty, $c:literal, [$($field:ident),* $(,)?]) => {
         writeln!(
             $out,
-            "BIO_STATIC_ASSERT(sizeof({c}) == {size}, \"{c} size\");",
+            r#"BIO_STATIC_ASSERT(sizeof({c}) == {size}, "{c} size");"#,
             c = $c,
             size = size_of::<$rust>()
         )
@@ -41,7 +44,7 @@ macro_rules! assert_layout {
         $(
             writeln!(
                 $out,
-                "BIO_STATIC_ASSERT(offsetof({c}, {f}) == {off}, \"{c}.{f} offset\");",
+                r#"BIO_STATIC_ASSERT(offsetof({c}, {f}) == {off}, "{c}.{f} offset");"#,
                 c = $c,
                 f = stringify!($field),
                 off = offset_of!($rust, $field)
@@ -81,9 +84,27 @@ fn layout_trailer() -> String {
             reserved
         ]
     );
+    assert_layout!(
+        t,
+        VolumePayload,
+        "BIO_VOLUME_PAYLOAD",
+        [channel_count, mute_mask, level_q16]
+    );
+    writeln!(
+        t,
+        r#"BIO_STATIC_ASSERT(BIO_MAX_VOLUME_CHANNELS == 32, "volume channels");"#
+    )
+    .unwrap();
     assert_layout!(t, OverrunPayload, "BIO_OVERRUN_PAYLOAD", [lost_bytes]);
     assert_layout!(t, ReadRequest, "BIO_READ_REQUEST", [min_bytes, timeout_ms]);
     assert_layout!(t, RateTrim, "BIO_RATE_TRIM", [ppm_q16, reserved]);
+    assert_layout!(
+        t,
+        PcmFormats,
+        "BIO_PCM_FORMATS",
+        [rates, shapes, max_masked_channels, direct_channels]
+    );
+    assert_layout!(t, EndpointFormats, "BIO_ENDPOINT_FORMATS", [codecs, pcm]);
     assert_layout!(
         t,
         AbiInfo,
@@ -93,12 +114,12 @@ fn layout_trailer() -> String {
             struct_size,
             driver_version,
             ring_bytes,
-            compiled_formats,
+            compiled,
             features,
             qpc_frequency,
-            endpoint_count,
+            endpoint_mask,
             reserved,
-            enabled_formats
+            endpoints
         ]
     );
     assert_layout!(
@@ -132,6 +153,11 @@ fn layout_trailer() -> String {
             reserved
         ]
     );
+    writeln!(
+        t,
+        r#"BIO_STATIC_ASSERT(BIO_MAX_ENDPOINTS == 4, "BIO_MAX_ENDPOINTS value");"#
+    )
+    .unwrap();
     t
 }
 
@@ -162,7 +188,13 @@ fn generate() -> String {
         no_includes: true,
         sys_includes: vec!["stddef.h".into(), "stdint.h".into()],
         style: cbindgen::Style::Both,
-        trailer: Some(format!("{}\n#endif /* BIOATMOS_ABI_H */", layout_trailer())),
+        // cbindgen omits &str constants; derive the C literal from the Rust
+        // value rather than keeping a second spelling of the device path.
+        trailer: Some(format!(
+            "#define BIO_CONTROL_DEVICE_PATH {:?}\n{}\n#endif /* BIOATMOS_ABI_H */",
+            bio_abi::CONTROL_DEVICE_PATH,
+            layout_trailer()
+        )),
         documentation: true,
         ..Default::default()
     };
@@ -185,7 +217,121 @@ fn generate() -> String {
         .generate()
         .expect("cbindgen parses src/wire.rs")
         .write(&mut out);
-    String::from_utf8(out).expect("cbindgen writes UTF-8")
+    let generated = String::from_utf8(out).expect("cbindgen writes UTF-8");
+    // C89 and C++17 share aggregate initialization, not C99 compound literals.
+    // The PCM structs also get an initializer-list macro: a `static const`
+    // struct is not a constant expression in C++, and a kernel image has no
+    // CRT to run the dynamic initializer that copying it at namespace scope
+    // would need.
+    generated
+        .lines()
+        .map(|line| {
+            if let Some(values) = line.strip_prefix("#define BIO_PCM_RATES ") {
+                format!("static const uint32_t BIO_PCM_RATES[6] = {values};")
+            } else if line.starts_with("#define BIO_DEFAULT_PCM ")
+                || line.starts_with("#define BIO_COMPILED_PCM ")
+            {
+                let (name, value) = if line.starts_with("#define BIO_DEFAULT_PCM ") {
+                    ("BIO_DEFAULT_PCM", bio_abi::DEFAULT_PCM)
+                } else {
+                    ("BIO_COMPILED_PCM", bio_abi::COMPILED_PCM)
+                };
+                format!(
+                    "#define {name}_INIT {{ {}, {}, {}, {}U }}\n\n\
+                     static const BIO_PCM_FORMATS {name} = {name}_INIT;",
+                    value.rates, value.shapes, value.max_masked_channels, value.direct_channels
+                )
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn parse_c_decimal_define(header: &str, name: &str) -> u64 {
+    let prefix = format!("#define {name} ");
+    header
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("header lacks {name}"))
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid {name}: {e}"))
+}
+
+fn parse_inf_qword(inf: &str, name: &str) -> u64 {
+    let prefix = format!("HKR,Parameters,{name},0x000B0001,");
+    let bytes = inf
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("INF lacks {name}"))
+        .split(',')
+        .map(|byte| u8::from_str_radix(byte.trim(), 16).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bytes.len(), 8, "{name} must contain one QWORD");
+    u64::from_le_bytes(bytes.try_into().unwrap())
+}
+
+#[test]
+fn default_capabilities_match_header_and_inf() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let header = generate();
+    assert_eq!(
+        parse_c_decimal_define(&header, "BIO_DEFAULT_ENABLED_CODECS"),
+        DEFAULT_ENABLED_CODECS
+    );
+    let bytes = std::fs::read(root.join("driver/bioatmos/spatialsoftreceiver.inx")).unwrap();
+    assert!(
+        bytes.starts_with(&[0xff, 0xfe]),
+        "INF requires UTF-16 LE BOM"
+    );
+    assert_eq!(bytes.len() % 2, 0);
+    let units: Vec<_> = bytes[2..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    let inf = String::from_utf16(&units).unwrap();
+    for index in 0..4 {
+        let name = format!("CodecMask{index}");
+        assert_eq!(parse_inf_qword(&inf, &name), DEFAULT_ENABLED_CODECS);
+        for (field, expected) in [
+            ("PcmRateMask", bio_abi::DEFAULT_PCM.rates),
+            ("PcmShapeMask", bio_abi::DEFAULT_PCM.shapes),
+            (
+                "PcmMaxMaskedChannels",
+                bio_abi::DEFAULT_PCM.max_masked_channels,
+            ),
+            ("PcmDirectChannels", bio_abi::DEFAULT_PCM.direct_channels),
+        ] {
+            let prefix = format!("HKR,Parameters,{field}{index},0x00010001,");
+            let raw = inf
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap_or_else(|| panic!("INF lacks {field}{index}"));
+            let actual = if let Some(hex) = raw.strip_prefix("0x") {
+                u32::from_str_radix(hex, 16).unwrap()
+            } else {
+                raw.parse().unwrap()
+            };
+            assert_eq!(actual, expected, "{field}{index}");
+        }
+    }
+}
+
+#[test]
+fn control_device_path_matches_generated_header() {
+    assert_eq!(bio_abi::DEVICE_PATH, bio_abi::CONTROL_DEVICE_PATH);
+    let header = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("include/bioatmos_abi.h"),
+    )
+    .unwrap();
+    assert!(header.contains(&format!(
+        "#define BIO_CONTROL_DEVICE_PATH {:?}",
+        bio_abi::CONTROL_DEVICE_PATH
+    )));
 }
 
 #[test]

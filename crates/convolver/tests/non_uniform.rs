@@ -217,6 +217,55 @@ fn reset_clears_partially_scheduled_large_window() {
 }
 
 #[test]
+fn quiet_bound_never_precedes_the_last_nonzero_output() {
+    let partition = 480;
+    for ir_length in [1, 1_000, 20_000, 120_000] {
+        let mut left_ir = vec![0.0; ir_length];
+        let mut right_ir = vec![0.0; ir_length];
+        left_ir[ir_length - 1] = 1.0;
+        right_ir[ir_length - 1] = -1.0;
+        let borrowed = [[left_ir.as_slice(), right_ir.as_slice()]];
+        let bank = Arc::new(FilterBank::new(&borrowed, partition).unwrap());
+        let mut convolver = Binauralizer::new(bank, partition);
+        let mut feeds = Feeds::new(1, partition);
+        let mut left = vec![0.0; partition];
+        let mut right = vec![0.0; partition];
+
+        feeds.channel_mut(0)[0] = 1.0;
+        convolver.note_active_input();
+        convolver.process(&feeds, &mut left, &mut right);
+        feeds.clear();
+
+        let mut hop = 0_usize;
+        let mut quiet_hop = None;
+        let mut last_nonzero_hop = left
+            .iter()
+            .chain(&right)
+            .any(|sample| *sample != 0.0)
+            .then_some(hop);
+        let observation_hops = ir_length.div_ceil(partition) + 2 * 64 + 4;
+        for _ in 0..observation_hops {
+            hop += 1;
+            convolver.process(&feeds, &mut left, &mut right);
+            if left.iter().chain(&right).any(|sample| *sample != 0.0) {
+                last_nonzero_hop = Some(hop);
+            }
+            convolver.note_silent_input(partition);
+            if quiet_hop.is_none() && convolver.is_quiet() {
+                quiet_hop = Some(hop);
+            }
+        }
+
+        let quiet_hop = quiet_hop.expect("the quiet bound is reached");
+        let last_nonzero_hop = last_nonzero_hop.expect("the delayed impulse is audible");
+        assert!(
+            quiet_hop > last_nonzero_hop,
+            "IR {ir_length}: quiet hop {quiet_hop} does not follow final output hop {last_nonzero_hop}"
+        );
+    }
+}
+
+#[test]
 fn repeated_runs_are_bit_identical() {
     let partition = 480;
     let ir_length = 120_000;

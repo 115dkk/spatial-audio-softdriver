@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MS-PL
 // Copyright (c) 2026 115dkk
 #include "control.h"
+#include "hdmiwavtable.h"
 #include <wdmsec.h>
 
 static const GUID BioControlClass = {0x26be775d,0x821e,0x41ad,{0xbc,0x82,0x74,0x51,0x29,0xc1,0x29,0x42}};
@@ -105,8 +106,12 @@ void BioPumpRead(BioControlState* state) {
     ULONG bytes = 0;
     if (state->Removed || !state->Started || read->Generation != state->Generation) status = STATUS_DEVICE_NOT_READY;
     else if (read->File->Cleaned) status = STATUS_CANCELLED;
-    else if (state->Ring.FirstRecordBytes() > read->Capacity) status = STATUS_BUFFER_TOO_SMALL;
-    else bytes = state->Ring.Read(read->Output, read->Capacity);
+    else {
+        const ULONGLONG qpc = BioQpc();
+        state->Ring.PrepareRead(qpc);
+        if (state->Ring.FirstRecordBytes() > read->Capacity) status = STATUS_BUFFER_TOO_SMALL;
+        else bytes = state->Ring.Read(read->Output, read->Capacity, qpc);
+    }
     KeReleaseSpinLock(&state->Lock, irql);
     FinishRead(state, irp, status, bytes);
 }
@@ -123,8 +128,8 @@ static VOID DeadlineTick(PEX_TIMER, PVOID context) {
 NTSTATUS BioCreateControl(PDRIVER_OBJECT driver, const BioSettings& settings, PDEVICE_OBJECT* device) {
     PAGED_CODE();
     *device = nullptr;
-    UNICODE_STRING name; RtlInitUnicodeString(&name, L"\\Device\\BioAtmos");
-    RtlInitUnicodeString(&BioLink, L"\\DosDevices\\BioAtmos");
+    UNICODE_STRING name; RtlInitUnicodeString(&name, L"\\Device\\SpatialSoftReceiver");
+    RtlInitUnicodeString(&BioLink, L"\\DosDevices\\SpatialSoftReceiver");
     UNICODE_STRING sddl; RtlInitUnicodeString(&sddl, L"D:P(A;;GA;;;SY)(A;;GRGW;;;BA)(A;;GRGW;;;IU)");
     PDEVICE_OBJECT created = nullptr;
     NTSTATUS status = IoCreateDeviceSecure(driver, sizeof(BioControlState), &name,
@@ -156,6 +161,9 @@ NTSTATUS BioStartControl(BioControlState* state) {
     if (state->Removed || state->Started) status = STATUS_INVALID_DEVICE_STATE;
     else if (!state->Ring.Init(storage, BioRingBytes)) status = STATUS_INVALID_PARAMETER;
     else {
+        for (USHORT ep = 0; ep < BIO_MAX_ENDPOINTS; ++ep)
+            if (state->Settings.EndpointMask & (1UL << ep))
+                state->Ring.ConfigureVolume(ep, BioVolumeChannels(ep));
         state->Storage = storage;
         state->DeadlineTimer = timer;
         state->Trim = 0;
@@ -209,7 +217,7 @@ static void CleanFile(BioControlState* state, BioFileContext* file) {
     KeAcquireSpinLock(&state->Lock, &irql);
     file->Cleaned = TRUE;
     state->Trim = 0;
-    if (state->Started) state->Ring.DiscardQueued();
+    if (state->Started) state->Ring.DiscardQueued(BioQpc());
     KeReleaseSpinLock(&state->Lock, irql);
     BioPeek peek{FALSE, file};
     PIRP pending;
@@ -250,7 +258,7 @@ NTSTATUS BioControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
             else if (state->OpenCount) status = STATUS_SHARING_VIOLATION;
             else {
                 state->OpenCount = 1; stack->FileObject->FsContext = file;
-                if (state->Started) state->Ring.DiscardQueued();
+                if (state->Started) state->Ring.DiscardQueued(BioQpc());
             }
             KeReleaseSpinLock(&state->Lock, irql);
             if (!NT_SUCCESS(status)) ExFreePoolWithTag(file, BioPoolTag);
@@ -298,13 +306,15 @@ NTSTATUS BioControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
                     info.struct_size = sizeof(info);
                     info.driver_version = 1u << 16;
                     info.ring_bytes = BioRingBytes;
-                    info.compiled_formats = BioCompiledFormats;
+                    info.compiled = BioCompiledFormats;
                     info.features = BIO_FEATURE_PENDING_READ | BIO_FEATURE_RATE_TRIM |
                         (state->Settings.WritePacket ? BIO_FEATURE_WRITE_PACKET : 0);
                     info.qpc_frequency = state->Frequency;
-                    info.endpoint_count = state->Settings.EndpointCount;
-                    for (ULONG i = 0; i < info.endpoint_count && i < BIO_MAX_ENDPOINTS; ++i)
-                        info.enabled_formats[i] = state->Settings.FormatMask[i];
+                    info.endpoint_mask = state->Settings.EndpointMask;
+                    for (ULONG i = 0; i < BIO_MAX_ENDPOINTS; ++i) {
+                        if (info.endpoint_mask & (1UL << i))
+                            info.endpoints[i] = state->Settings.Formats[i];
+                    }
                     RtlCopyMemory(buffer, &info, sizeof(info));
                     information = sizeof(info);
                 }
@@ -326,14 +336,17 @@ NTSTATUS BioControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
                     state->Trim = trim < -limit ? -limit : (trim > limit ? limit : trim);
                 }
                 break;
-            case IOCTL_BIO_READ:
+            case IOCTL_BIO_READ: {
                 read->Generation = state->Generation;
+                const ULONGLONG qpc = BioQpc();
+                state->Ring.PrepareRead(qpc);
                 if (state->Pending || state->DetachedReads) status = STATUS_DEVICE_BUSY;
                 else if (state->Ring.FirstRecordBytes() > read->Capacity) status = STATUS_BUFFER_TOO_SMALL;
-                else if (bio::ReadGate::ShouldComplete(state->Ring, read->Minimum, read->Capacity, BioQpc(), read->Deadline))
-                    information = state->Ring.Read(read->Output, read->Capacity);
+                else if (bio::ReadGate::ShouldComplete(state->Ring, read->Minimum, read->Capacity, qpc, read->Deadline))
+                    information = state->Ring.Read(read->Output, read->Capacity, qpc);
                 else status = STATUS_PENDING;
                 break;
+            }
             default: status = STATUS_INVALID_DEVICE_REQUEST; break;
             }
             KeReleaseSpinLock(&state->Lock, irql);

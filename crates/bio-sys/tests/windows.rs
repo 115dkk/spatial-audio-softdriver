@@ -44,6 +44,64 @@ fn render_endpoints_include_a_default() {
 }
 
 #[test]
+#[ignore = "requires VB-CABLE with a supported multichannel render format; plays silence"]
+fn wasapi_opens_multichannel_layouts_on_the_cable() {
+    // The runners name the cable's render endpoint "Speakers (VB-Audio Virtual
+    // Cable)"; the job that runs this installs it, so its absence is a failure
+    // rather than a skip that would pass without testing anything.
+    let cable = devices::render_endpoint_formats()
+        .unwrap()
+        .into_iter()
+        .find(|formats| {
+            formats
+                .endpoint
+                .name
+                .to_lowercase()
+                .contains("vb-audio virtual cable")
+        })
+        .expect("the VB-CABLE render endpoint is installed");
+    let mut tested = 0;
+    for layout in [
+        bio_types::OutputLayout {
+            channels: 6,
+            channel_mask: 0x3f,
+        },
+        bio_types::OutputLayout {
+            channels: 8,
+            channel_mask: 0x63f,
+        },
+    ] {
+        let supported = cable
+            .layouts
+            .iter()
+            .any(|candidate| candidate.channels == layout.channels && candidate.exclusive);
+        if !supported {
+            eprintln!("skipped: {} channels are unsupported", layout.channels);
+            continue;
+        }
+        let mut sink = WasapiOpener {
+            endpoint: Some(cable.endpoint.id.clone()),
+            rate: 48_000,
+            shared_fallback: true,
+            exclusive: true,
+            period: exclusive_period(),
+        }
+        .open(layout)
+        .unwrap();
+        let format = sink.format();
+        assert_eq!(format.channels, layout.channels);
+        assert_eq!(format.channel_mask, layout.channel_mask);
+        for _ in 0..4 {
+            sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+        }
+        tested += 1;
+    }
+    if tested == 0 {
+        eprintln!("skipped: the cable supports neither tested layout");
+    }
+}
+
+#[test]
 #[ignore = "requires access to Windows devices; opens and resets SAL if installed"]
 fn sal_open_reports_present_or_not_present() {
     match SalRing::open() {
@@ -68,10 +126,11 @@ fn exclusive_or_shared_fallback_plays_silence() {
     let mut sink = WasapiOpener {
         endpoint: None,
         rate: 48_000,
+        shared_fallback: true,
         exclusive: true,
         period: None,
     }
-    .open()
+    .open(bio_types::OutputLayout::STEREO)
     .unwrap();
     println!("Opened {sink:?}");
     let format = sink.format();
@@ -88,9 +147,10 @@ fn assert_real_time_cadence(exclusive: bool) {
         endpoint: None,
         rate: 48_000,
         exclusive,
+        shared_fallback: true,
         period: if exclusive { exclusive_period() } else { None },
     }
-    .open()
+    .open(bio_types::OutputLayout::STEREO)
     .unwrap();
     println!("exclusive requested: {exclusive}; opened {sink:?}");
     let format = sink.format();
@@ -138,10 +198,11 @@ fn exclusive_sink_recovers_its_cadence_after_a_missed_deadline() {
     let mut sink = WasapiOpener {
         endpoint: None,
         rate: 48_000,
+        shared_fallback: true,
         exclusive: true,
         period: exclusive_period(),
     }
-    .open()
+    .open(bio_types::OutputLayout::STEREO)
     .unwrap();
     let format = sink.format();
     for _ in 0..200 {
@@ -186,10 +247,11 @@ fn exclusive_cadence_at_each_period() {
         let mut sink = WasapiOpener {
             endpoint: None,
             rate: 48_000,
+            shared_fallback: true,
             exclusive: true,
             period: (period_ms > 0).then(|| std::time::Duration::from_millis(period_ms)),
         }
-        .open()
+        .open(bio_types::OutputLayout::STEREO)
         .unwrap();
         let format = sink.format();
         let started = qpc::now();
@@ -221,10 +283,11 @@ fn shared_silence_has_period_spaced_playback_qpcs() {
     let mut sink = WasapiOpener {
         endpoint: None,
         rate: 48_000,
+        shared_fallback: true,
         exclusive: false,
         period: None,
     }
-    .open()
+    .open(bio_types::OutputLayout::STEREO)
     .unwrap();
     let format = sink.format();
     assert_eq!((format.rate, format.channels), (48_000, 2));

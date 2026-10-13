@@ -1,7 +1,8 @@
 //! Active Windows render endpoints. Enumeration is not a real-time operation.
 
-use bio_types::OutputError;
-use wasapi::{DeviceEnumerator, Direction, WasapiError};
+use crate::output::Encoding;
+use bio_types::{OutputError, OutputLayout};
+use wasapi::{Device, DeviceEnumerator, Direction, ShareMode, WasapiError};
 use windows::Win32::{
     Foundation::ERROR_NOT_FOUND,
     Media::Audio::{
@@ -15,6 +16,27 @@ pub struct Endpoint {
     pub id: String,
     pub name: String,
     pub is_default: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MixFormat {
+    pub rate: u32,
+    pub channels: u16,
+    pub channel_mask: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayoutSupport {
+    pub channels: u16,
+    pub channel_mask: u32,
+    pub exclusive: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EndpointFormats {
+    pub endpoint: Endpoint,
+    pub mix: MixFormat,
+    pub layouts: Vec<LayoutSupport>,
 }
 
 pub fn render_endpoints() -> Result<Vec<Endpoint>, OutputError> {
@@ -41,6 +63,78 @@ pub fn render_endpoints() -> Result<Vec<Endpoint>, OutputError> {
         });
     }
     Ok(endpoints)
+}
+
+const STANDARD_LAYOUTS: [OutputLayout; 5] = [
+    OutputLayout::STEREO,
+    OutputLayout {
+        channels: 4,
+        channel_mask: 0x33,
+    },
+    OutputLayout {
+        channels: 6,
+        channel_mask: 0x3f,
+    },
+    OutputLayout {
+        channels: 8,
+        channel_mask: 0x63f,
+    },
+    OutputLayout {
+        channels: 12,
+        channel_mask: 0x2d63f,
+    },
+];
+
+fn supports_layout(device: &Device, layout: OutputLayout) -> bool {
+    Encoding::ALL.into_iter().any(|encoding| {
+        device.get_iaudioclient().is_ok_and(|client| {
+            client
+                .is_supported(&encoding.wave(48_000, layout), &ShareMode::Exclusive)
+                .is_ok_and(|closest| closest.is_none())
+        })
+    })
+}
+
+pub fn render_endpoint_formats() -> Result<Vec<EndpointFormats>, OutputError> {
+    let _com = ComGuard::new()?;
+    let enumerator = DeviceEnumerator::new().map_err(output_error)?;
+    let default = enumerator
+        .get_default_device(&Direction::Render)
+        .ok()
+        .and_then(|device| device.get_id().ok());
+    let devices = enumerator
+        .get_device_collection(&Direction::Render)
+        .map_err(output_error)?;
+    let mut formats = Vec::new();
+    for index in 0..devices.get_nbr_devices().map_err(output_error)? {
+        let device = devices.get_device_at_index(index).map_err(output_error)?;
+        let id = device.get_id().map_err(output_error)?;
+        let wave = device
+            .get_iaudioclient()
+            .and_then(|client| client.get_mixformat())
+            .map_err(output_error)?;
+        formats.push(EndpointFormats {
+            endpoint: Endpoint {
+                is_default: default.as_ref() == Some(&id),
+                id,
+                name: device.get_friendlyname().map_err(output_error)?,
+            },
+            mix: MixFormat {
+                rate: wave.get_samplespersec(),
+                channels: wave.get_nchannels(),
+                channel_mask: wave.get_dwchannelmask(),
+            },
+            layouts: STANDARD_LAYOUTS
+                .into_iter()
+                .map(|layout| LayoutSupport {
+                    channels: layout.channels,
+                    channel_mask: layout.channel_mask,
+                    exclusive: supports_layout(&device, layout),
+                })
+                .collect(),
+        });
+    }
+    Ok(formats)
 }
 
 pub fn find(pattern: Option<&str>) -> Result<Endpoint, OutputError> {

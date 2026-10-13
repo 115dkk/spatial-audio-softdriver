@@ -3,15 +3,12 @@
 //! Every decoder's output and the renderer's only input. Bed channels arrive as
 //! objects at fixed positions, so the renderer never sees a channel.
 
-/// A point in the room, each axis normalised to `[-1, 1]`.
+/// A rendering direction vector: x right, y front, z up.
 ///
-/// * `x`: left (-1) to right (+1)
-/// * `y`: back (-1) to front (+1)
-/// * `z`: below the listener (-1), ear level (0), ceiling (+1)
-///
-/// Decoders convert their format's own convention into this one. The renderer
-/// treats the vector from the centre as a direction, so `(0, 1, 0)` and
-/// `(0, 0.5, 0)` pan to the same place.
+/// This is not a room-cube coordinate. Decoders with room coordinates use
+/// [`crate::room_to_direction`] (ITU-R BS.2127); nominal speaker directions use
+/// [`Position::from_angles`]. The renderer ignores vector length, so `(0, 1, 0)`
+/// and `(0, 0.5, 0)` pan to the same place. Zero has no direction.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Position {
     pub x: f32,
@@ -76,13 +73,17 @@ pub struct Object<'a> {
 pub struct SceneBlock<'a> {
     /// Bumps with every format change (see `bio_abi::Record::FormatChange`).
     pub epoch: u32,
-    /// Block length chosen by the source: 480 for a MAT half burst, 1536 for DD+.
+    /// Block length chosen by the source: 480 for a MAT half burst; DD+ emits
+    /// 1536 in total, possibly split into shorter OAMD update/ramp intervals.
     pub frames: usize,
     pub rate: u32,
     /// QPC of the first sample's arrival at the virtual device, for latency.
     pub source_qpc: u64,
     pub objects: &'a [Object<'a>],
     pub lfe: Option<&'a [f32]>,
+    /// Bit `i` stops interpolation from the previous gain of lane-local object
+    /// index `i` for this block.
+    pub new_objects: u64,
 }
 
 impl Object<'static> {
@@ -148,6 +149,7 @@ mod tests {
             source_qpc: 0,
             objects: &objects,
             lfe: Some(&short),
+            new_objects: 0,
         };
         assert!(!block.is_consistent());
         assert!(SceneBlock { lfe: None, ..block }.is_consistent());

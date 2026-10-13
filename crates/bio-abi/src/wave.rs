@@ -5,6 +5,8 @@
 //! SDK 10.0.26100): the PCM family is `{tag-0000-0010-8000-00aa00389b71}`,
 //! the IEC 61937 family `{id-0cea-0010-8000-00aa00389b71}`.
 
+use core::fmt;
+
 use bio_types::{BitstreamCodec, BitstreamFormat, PcmFormat, SampleType, SourceFormat};
 
 const WAVE_FORMAT_PCM: u16 = 0x0001;
@@ -22,16 +24,39 @@ const WFX_LEN: usize = 18;
 const EXTENSIBLE_LEN: usize = 40;
 const IEC61937_LEN: usize = 52;
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum WaveFormatError {
     #[error("the format is {have} bytes; at least {need} are needed")]
     Truncated { need: usize, have: usize },
     #[error("wave format tag {0:#06x} is not one this app decodes")]
     UnknownTag(u16),
-    #[error("subformat GUID {0} is not one this app knows")]
-    UnknownSubformat(String),
+    #[error("subformat GUID {} is not one this app knows", GuidDisplay(.0))]
+    UnknownSubformat([u8; 16]),
     #[error("the format is inconsistent: {0}")]
     Inconsistent(&'static str),
+}
+
+struct GuidDisplay<'a>(&'a [u8; 16]);
+
+impl fmt::Display for GuidDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let g = self.0;
+        write!(
+            f,
+            "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
+            u32_at(g, 0),
+            u16_at(g, 4),
+            u16_at(g, 6),
+            g[8],
+            g[9],
+            g[10],
+            g[11],
+            g[12],
+            g[13],
+            g[14],
+            g[15]
+        )
+    }
 }
 
 fn u16_at(b: &[u8], i: usize) -> u16 {
@@ -79,9 +104,14 @@ pub fn parse_wave_format(b: &[u8]) -> Result<SourceFormat, WaveFormatError> {
             encoded_channels,
         }))
     };
+    let plain_mask = match channels {
+        1 => 0x4,
+        2 => 0x3,
+        _ => 0,
+    };
     match tag {
-        WAVE_FORMAT_PCM => pcm(SampleType::Int, bits, 0),
-        WAVE_FORMAT_IEEE_FLOAT => pcm(SampleType::Float, bits, 0),
+        WAVE_FORMAT_PCM => pcm(SampleType::Int, bits, plain_mask),
+        WAVE_FORMAT_IEEE_FLOAT => pcm(SampleType::Float, bits, plain_mask),
         WAVE_FORMAT_DOLBY_AC3_SPDIF => bitstream(BitstreamCodec::Ac3, 0, 0),
         WAVE_FORMAT_DTS => bitstream(BitstreamCodec::Dts, 0, 0),
         WAVE_FORMAT_EXTENSIBLE => {
@@ -99,11 +129,11 @@ pub fn parse_wave_format(b: &[u8]) -> Result<SourceFormat, WaveFormatError> {
             }
             let valid_bits = u16_at(b, 18);
             let mask = u32_at(b, 20);
-            let guid = &b[24..40];
-            let id = u32_at(guid, 0);
-            let family = u16_at(guid, 4);
+            let guid: [u8; 16] = b[24..40].try_into().expect("slice length checked above");
+            let id = u32_at(&guid, 0);
+            let family = u16_at(&guid, 4);
             if guid[6..16] != GUID_TAIL {
-                return Err(WaveFormatError::UnknownSubformat(guid_string(guid)));
+                return Err(WaveFormatError::UnknownSubformat(guid));
             }
             let (encoded_rate, encoded_channels) =
                 if cb_size >= IEC61937_LEN - WFX_LEN && b.len() >= IEC61937_LEN {
@@ -136,28 +166,11 @@ pub fn parse_wave_format(b: &[u8]) -> Result<SourceFormat, WaveFormatError> {
                     };
                     bitstream(codec, encoded_rate, encoded_channels)
                 }
-                _ => Err(WaveFormatError::UnknownSubformat(guid_string(guid))),
+                _ => Err(WaveFormatError::UnknownSubformat(guid)),
             }
         }
         other => Err(WaveFormatError::UnknownTag(other)),
     }
-}
-
-fn guid_string(g: &[u8]) -> String {
-    format!(
-        "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
-        u32_at(g, 0),
-        u16_at(g, 4),
-        u16_at(g, 6),
-        g[8],
-        g[9],
-        g[10],
-        g[11],
-        g[12],
-        g[13],
-        g[14],
-        g[15]
-    )
 }
 
 /// The WAVEFORMATEXTENSIBLE Windows would negotiate for `format`: 40 bytes for
@@ -302,7 +315,7 @@ mod tests {
         let SourceFormat::Pcm(p) = parse_wave_format(&b).unwrap() else {
             panic!("not PCM");
         };
-        assert_eq!((p.channels, p.valid_bits, p.channel_mask), (2, 16, 0));
+        assert_eq!((p.channels, p.valid_bits, p.channel_mask), (2, 16, 3));
         b[0..2].copy_from_slice(&WAVE_FORMAT_DOLBY_AC3_SPDIF.to_le_bytes());
         assert!(matches!(
             parse_wave_format(&b),
@@ -347,10 +360,13 @@ mod tests {
         ));
         let mut odd = wave_format_bytes(&all_formats()[0]);
         odd[34] ^= 0xff;
-        assert!(matches!(
-            parse_wave_format(&odd),
-            Err(WaveFormatError::UnknownSubformat(_))
-        ));
+        let expected_guid: [u8; 16] = odd[24..40].try_into().unwrap();
+        let error = parse_wave_format(&odd).unwrap_err();
+        assert_eq!(error, WaveFormatError::UnknownSubformat(expected_guid));
+        assert_eq!(
+            error.to_string(),
+            "subformat GUID {00000001-0000-0010-8000-ffaa00389b71} is not one this app knows"
+        );
         let mut tag = wave_format_bytes(&all_formats()[0]);
         tag[0] = 0x55;
         tag[1] = 0x00;

@@ -7,7 +7,7 @@ version = "0.5.2"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
-repository = "https://github.com/115dkk/spatial-audio-softdriver"
+repository = "https://github.com/115dkk/spatial-audio-softreceiver"
 publish = false
 
 # Every crate opts in with `[lints] workspace = true`. bio-sys is the one crate
@@ -32,6 +32,7 @@ decode = { path = "crates/decode" }
 render = { path = "crates/render" }
 convolver = { path = "crates/convolver" }
 brir = { path = "crates/brir" }
+speakers = { path = "crates/speakers" }
 engine = { path = "crates/engine" }
 supervisor = { path = "crates/supervisor" }
 bio-sys = { path = "crates/bio-sys" }

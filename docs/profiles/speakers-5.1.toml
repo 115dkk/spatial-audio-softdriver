@@ -1,0 +1,47 @@
+kind = "speakers"
+name = "Example 5.1 room"
+device_channels = 6
+channel_mask = "5.1"
+gain_db = 0.0
+limiter_ceiling_dbfs = -1.0
+crossover_hz = 80.0
+lfe_gain_db = 10.0
+
+[[speaker]]
+name = "L"
+channel = 0
+distance_m = 3.0
+trim_db = 0.0
+range = "small"
+
+[[speaker]]
+name = "R"
+channel = 1
+distance_m = 3.0
+trim_db = 0.0
+range = "small"
+
+[[speaker]]
+name = "C"
+channel = 2
+distance_m = 2.8
+trim_db = -1.0
+range = "small"
+
+[[speaker]]
+name = "Ls"
+channel = 4
+distance_m = 2.4
+trim_db = -1.5
+range = "small"
+
+[[speaker]]
+name = "Rs"
+channel = 5
+distance_m = 2.4
+trim_db = -1.5
+range = "small"
+
+[[subwoofer]]
+channel = 3
+distance_m = 3.0

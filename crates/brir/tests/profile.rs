@@ -129,6 +129,7 @@ fn profile(source: BrirSource) -> Profile {
         angles: AnglePreset::Standard,
         angle_overrides: Vec::new(),
         truncate: None,
+        trim_leading_delay: false,
     }
 }
 
@@ -137,6 +138,20 @@ fn render_impulses(prepared: &brir::PreparedBrir, frames: usize) -> [Vec<f32>; 2
     for direction in 0..prepared.layout.len() {
         feeds.channel_mut(direction)[direction] = 1.0;
     }
+    let mut binauralizer = Binauralizer::new(Arc::clone(&prepared.bank), frames);
+    let mut left = vec![0.0; frames];
+    let mut right = vec![0.0; frames];
+    binauralizer.process(&feeds, &mut left, &mut right);
+    [left, right]
+}
+
+fn render_direction(
+    prepared: &brir::PreparedBrir,
+    direction: usize,
+    frames: usize,
+) -> [Vec<f32>; 2] {
+    let mut feeds = Feeds::new(prepared.layout.len(), frames);
+    feeds.channel_mut(direction)[0] = 1.0;
     let mut binauralizer = Binauralizer::new(Arc::clone(&prepared.bank), frames);
     let mut left = vec![0.0; frames];
     let mut right = vec![0.0; frames];
@@ -259,6 +274,40 @@ fn extended_hesuvi_drops_unmeasured_silent_speakers() {
         .map(|direction| direction.name.as_str())
         .collect();
     assert_eq!(names, ["FL", "FR", "WL", "WR"]);
+    assert_eq!(
+        prepared.omitted_silent_directions,
+        ["SL", "BL", "FC", "SR", "BR"]
+    );
+}
+
+#[test]
+fn direction_files_drop_and_report_silent_directions() {
+    let directory = TestDirectory::new("directions-silent");
+    let audible = directory.join("audible.wav");
+    let silent = directory.join("silent.wav");
+    write_wav(&audible, 48_000, &[vec![1.0], vec![0.5]]);
+    write_wav(&silent, 48_000, &[vec![0.0; 4], vec![0.0; 4]]);
+    let prepared = prepare(
+        &profile(BrirSource::Directions(vec![
+            DirectionFile {
+                name: "Audible".into(),
+                azimuth_deg: 0.0,
+                elevation_deg: 0.0,
+                path: audible,
+            },
+            DirectionFile {
+                name: "Silent".into(),
+                azimuth_deg: 30.0,
+                elevation_deg: 0.0,
+                path: silent,
+            },
+        ])),
+        48_000,
+        64,
+    )
+    .unwrap();
+    assert_eq!(prepared.layout.len(), 1);
+    assert_eq!(prepared.omitted_silent_directions, ["Silent"]);
 }
 
 #[test]
@@ -350,29 +399,37 @@ fn mono_headphone_fir_applies_to_both_ears() {
 }
 
 #[test]
-fn resampling_44100_to_48000_preserves_impulse_time_and_gain() {
-    let directory = TestDirectory::new("resample");
-    let path = directory.join("direction.wav");
-    let mut impulse = vec![0.0; 512];
-    let input_delay = 100;
-    impulse[input_delay] = 0.5;
-    write_wav(&path, 44_100, &[impulse.clone(), impulse]);
-    let source = BrirSource::Directions(vec![DirectionFile {
-        name: "X".into(),
-        azimuth_deg: 0.0,
-        elevation_deg: 0.0,
-        path,
-    }]);
-    let prepared = prepare(&profile(source), 48_000, 64).unwrap();
-    let output = render_impulses(&prepared, 1024);
-    let expected_delay = (input_delay as f64 * 48_000.0 / 44_100.0).round() as usize;
-    let (delay, gain) = strongest_at(&output[0]);
-    assert!(
-        delay.abs_diff(expected_delay) <= 1,
-        "{delay} vs {expected_delay}"
-    );
-    let gain_error_db = 20.0 * (gain.abs() / 0.5).log10().abs();
-    assert!(gain_error_db < 0.5, "gain error was {gain_error_db} dB");
+fn resampling_preserves_impulse_time_and_response_gain() {
+    // An impulse response keeps its frequency response across rates, so its
+    // DC gain (the sum of its taps) stays put while its peak does not.
+    for (input_rate, input_delay) in [(44_100_u32, 100_usize), (96_000, 200)] {
+        let directory = TestDirectory::new(&format!("resample-{input_rate}"));
+        let path = directory.join("direction.wav");
+        let mut impulse = vec![0.0; 1024];
+        impulse[input_delay] = 0.5;
+        write_wav(&path, input_rate, &[impulse.clone(), impulse]);
+        let source = BrirSource::Directions(vec![DirectionFile {
+            name: "X".into(),
+            azimuth_deg: 0.0,
+            elevation_deg: 0.0,
+            path,
+        }]);
+        let prepared = prepare(&profile(source), 48_000, 64).unwrap();
+        let output = render_impulses(&prepared, 2048);
+        let expected_delay =
+            (input_delay as f64 * 48_000.0 / f64::from(input_rate)).round() as usize;
+        let (delay, _) = strongest_at(&output[0]);
+        assert!(
+            delay.abs_diff(expected_delay) <= 1,
+            "{input_rate}: {delay} vs {expected_delay}"
+        );
+        let dc: f64 = output[0].iter().map(|sample| f64::from(*sample)).sum();
+        let gain_error_db = 20.0 * (dc.abs() / 0.5).log10().abs();
+        assert!(
+            gain_error_db < 0.05,
+            "{input_rate}: DC gain error {gain_error_db} dB"
+        );
+    }
 }
 
 #[test]
@@ -402,6 +459,7 @@ headphone_fir = "filters/headphone.wav"
         Some(directory.join("filters/headphone.wav"))
     );
     assert_eq!(loaded.lfe, LfePolicy::Mute);
+    assert!(loaded.trim_leading_delay);
 
     fs::write(
         &profile_path,
@@ -459,6 +517,78 @@ fn bad_track_count_and_unknown_lfe_direction_are_errors() {
         prepare(&bad_lfe, 48_000, 64),
         Err(BrirError::BadLfeDirection(name)) if name == "Missing"
     ));
+}
+
+#[test]
+fn common_leading_delay_is_trimmed_without_changing_relative_delays() {
+    let directory = TestDirectory::new("leading-trim");
+    let first = directory.join("first.wav");
+    let second = directory.join("second.wav");
+    let impulse = |delay: usize, gain: f32| {
+        let mut samples = vec![0.0; 1_200];
+        samples[delay] = gain;
+        samples
+    };
+    write_wav(&first, 48_000, &[impulse(912, 1.0), impulse(917, 0.8)]);
+    write_wav(&second, 48_000, &[impulse(920, 0.7), impulse(931, 0.6)]);
+    let source = BrirSource::Directions(vec![
+        DirectionFile {
+            name: "A".into(),
+            azimuth_deg: 0.0,
+            elevation_deg: 0.0,
+            path: first,
+        },
+        DirectionFile {
+            name: "B".into(),
+            azimuth_deg: 30.0,
+            elevation_deg: 0.0,
+            path: second,
+        },
+    ]);
+    let mut input = profile(source.clone());
+    input.trim_leading_delay = true;
+    let prepared = prepare(&input, 48_000, 64).unwrap();
+    assert_eq!(prepared.trimmed_leading_frames, 864);
+    let a = render_impulses(&prepared, 1_024);
+    assert_eq!(strongest_at(&a[0]).0, 48);
+    assert_eq!(strongest_at(&a[1]).0, 53);
+    let b = render_direction(&prepared, 1, 1_024);
+    assert_eq!(strongest_at(&b[0]).0, 56);
+    assert_eq!(strongest_at(&b[1]).0, 67);
+
+    let untrimmed = prepare(&profile(source.clone()), 48_000, 64).unwrap();
+    assert_eq!(untrimmed.trimmed_leading_frames, 0);
+    assert_eq!(
+        strongest_at(&render_direction(&untrimmed, 0, 1_024)[0]).0,
+        912
+    );
+    let explicit_false = prepare(&profile(source), 48_000, 64).unwrap();
+    for direction in 0..2 {
+        assert_eq!(
+            render_direction(&untrimmed, direction, 1_024),
+            render_direction(&explicit_false, direction, 1_024)
+        );
+    }
+}
+
+#[test]
+fn leading_delay_before_margin_is_not_trimmed() {
+    let directory = TestDirectory::new("leading-no-trim");
+    let path = directory.join("direction.wav");
+    let mut left = vec![0.0; 64];
+    let mut right = vec![0.0; 64];
+    left[47] = 1.0;
+    right[50] = 1.0;
+    write_wav(&path, 48_000, &[left, right]);
+    let mut input = profile(BrirSource::Directions(vec![DirectionFile {
+        name: "X".into(),
+        azimuth_deg: 0.0,
+        elevation_deg: 0.0,
+        path,
+    }]));
+    input.trim_leading_delay = true;
+    let prepared = prepare(&input, 48_000, 64).unwrap();
+    assert_eq!(prepared.trimmed_leading_frames, 0);
 }
 
 #[test]

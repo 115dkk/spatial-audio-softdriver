@@ -110,9 +110,9 @@ Invoke-Native -FilePath $msbuild -ArgumentList @(
 
 $buildDirectory = Join-Path $repositoryRoot "target/driver-build/$Configuration/$Platform"
 $artifacts = @(
-    Join-Path $buildDirectory 'bioatmos.sys'
-    Join-Path $buildDirectory 'bioatmos.inf'
-    Join-Path $buildDirectory 'bioatmos.pdb'
+    Join-Path $buildDirectory 'spatialsoftreceiver.sys'
+    Join-Path $buildDirectory 'spatialsoftreceiver.inf'
+    Join-Path $buildDirectory 'spatialsoftreceiver.pdb'
 )
 
 foreach ($artifact in $artifacts) {
@@ -138,7 +138,7 @@ if (-not $infverif) {
     throw "InfVerif.exe was not found beneath restored WDK packages at $packagesDirectory"
 }
 
-Invoke-Native -FilePath $infverif.FullName -ArgumentList @('/w', '/v', (Join-Path $buildDirectory 'bioatmos.inf'))
+Invoke-Native -FilePath $infverif.FullName -ArgumentList @('/w', '/v', (Join-Path $buildDirectory 'spatialsoftreceiver.inf'))
 
 # ApiValidator: the driver may call only the DDIs of the Universal target
 # platform (the vcxproj's DriverTargetPlatform).
@@ -153,7 +153,7 @@ if (-not $apiValidator -or -not $universalDdis) {
     throw "ApiValidator ($hostToolArchitecture) or UniversalDDIs.xml ($ddiFolder) was not found beneath $packagesDirectory"
 }
 $moduleWhiteList = Join-Path $universalDdis.DirectoryName 'ModuleWhiteList.xml'
-& $apiValidator.FullName "-DriverPackagePath:$(Join-Path $buildDirectory 'bioatmos.sys')" `
+& $apiValidator.FullName "-DriverPackagePath:$(Join-Path $buildDirectory 'spatialsoftreceiver.sys')" `
     "-SupportedApiXmlFiles:$($universalDdis.FullName)" "-ModuleWhiteListXmlFiles:$moduleWhiteList" `
     "-ApiExtractorExePath:$($apiValidator.DirectoryName)"
 if ($LASTEXITCODE -ne 0) {

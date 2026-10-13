@@ -6,4 +6,5 @@ struct BioMiniPair { PCWSTR Wave; PCWSTR Topology; USHORT Endpoint; };
 static const BioMiniPair BioMiniPairs[] = {
     {L"WaveHdmi0", L"TopologyHdmi0", BIO_ENDPOINT_PRIMARY},
     {L"WaveHdmi1", L"TopologyHdmi1", BIO_ENDPOINT_SECOND},
+    {L"WaveHdmi2", L"TopologyHdmi2", BIO_ENDPOINT_PASSTHROUGH},
 };

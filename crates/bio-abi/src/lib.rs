@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! The driver contract (ADR 0011): the only thing `bioatmos.sys` and user mode
+//! The driver contract (ADR 0011): the only thing `spatialsoftreceiver.sys` and user mode
 //! share.
 //!
 //! The kernel side is mechanism only: it receives a format, then hands over
@@ -20,11 +20,12 @@
 //!   not know and an older app survives a newer driver;
 //! * the epoch rises only with a format-change record, and all data within one
 //!   epoch has the same format;
-//! * on overrun the kernel does not wait: it overwrites whole records, then,
-//!   before the affected endpoint's next data, reports the lost byte count in
-//!   an overrun record and restates the current format in a format-change
-//!   record flagged [`RECORD_FLAG_FORMAT_REPEAT`]; user mode resets the
-//!   affected decoder and resumes at the next sync;
+//! * on overrun the kernel does not wait: it overwrites whole records, then
+//!   reports the lost byte count, restates the current format and volume, then the
+//!   current streaming state with [`RECORD_FLAG_REPEAT`], even for a stopped
+//!   endpoint; the first following data is discontinuous;
+//! * a new reader receives the known format, default-or-current volume and
+//!   current Start/Stop state of each configured endpoint, all marked [`RECORD_FLAG_REPEAT`], before discontinuous data;
 //! * records carry the render endpoint that wrote them; epoch, position and
 //!   losses are counted per endpoint (ADR 0024);
 //! * structure sizes and offsets are asserted at compile time on both sides.
@@ -34,10 +35,10 @@ pub mod record;
 pub mod wave;
 pub mod wire;
 
-pub use dump::{DumpError, dump_header, dump_header_bytes, split_dump};
-pub use record::{AbiError, Record, RecordWriter, record_size, records};
+pub use dump::{DumpError, ReadChunk, Reads, dump_header, dump_header_bytes, reads, split_dump};
+pub use record::{AbiError, Record, RecordWriter, record_size, records, volume_gain};
 pub use wave::{WaveFormatError, parse_wave_format, wave_format_bytes};
 pub use wire::*;
 
-/// The control device user mode opens.
-pub const DEVICE_PATH: &str = r"\\.\BioAtmos";
+/// Compatibility alias for callers using the original constant name.
+pub const DEVICE_PATH: &str = CONTROL_DEVICE_PATH;

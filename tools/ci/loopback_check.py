@@ -73,6 +73,102 @@ def first_sound(mono, rate):
     return None
 
 
+LATENCY_CEILING_MS = 1_000
+
+
+def report_problems(figures, require_driver=False, expected_mode=None):
+    """Returns failures for missing report state and live-path losses.
+
+    `expected_mode` ("exclusive" or "shared") is the mode the run asked for;
+    the report's `output_mode` is the mode the device was actually opened in.
+    """
+    problems = []
+    for key in (
+        "underruns_while_streaming",
+        "output_restarts",
+        "output_reconnects",
+        "output_cadence_faults",
+        "output_mode",
+        "output_fell_back",
+        "dropped_frames",
+        "lane_underrun_frames",
+        "output_overflow_frames",
+        "dropped_events",
+        "faults",
+        "endpoints",
+    ):
+        if key not in figures:
+            problems.append(f"report is missing {key}")
+
+    for key in (
+        "underruns_while_streaming",
+        "output_restarts",
+        "output_reconnects",
+        "output_cadence_faults",
+        "dropped_frames",
+        "lane_underrun_frames",
+        "output_overflow_frames",
+        "dropped_events",
+    ):
+        if key in figures and figures[key] != 0:
+            problems.append(f"{key} is {figures[key]}")
+    if figures.get("output_fell_back"):
+        problems.append("exclusive output fell back to shared mode")
+    if expected_mode is not None and "output_mode" in figures \
+            and figures["output_mode"] != expected_mode:
+        problems.append(f"output opened {figures['output_mode']}, expected {expected_mode}")
+    if figures.get("faults"):
+        problems.append(f"faults: {figures['faults']}")
+    # Far above any real chain: a sample this large means a block carried a
+    # source time from another clock (silence counted up from 0 read as the
+    # machine's uptime, p99 429 s).
+    for key in ("latency_p50_ms", "latency_p99_ms"):
+        value = figures.get(key)
+        if isinstance(value, (int, float)) and value > LATENCY_CEILING_MS:
+            problems.append(f"{key} is {value} ms, above {LATENCY_CEILING_MS} ms")
+
+    endpoints = figures.get("endpoints")
+    if not isinstance(endpoints, list):
+        problems.append("report endpoints must be an array")
+    else:
+        if len(endpoints) != 4:
+            problems.append("report endpoints must contain exactly four entries")
+        for expected, endpoint in enumerate(endpoints):
+            if not isinstance(endpoint, dict):
+                problems.append(f"report endpoint {expected} must be an object")
+                continue
+            for key in ("endpoint", "format", "epoch", "unsupported"):
+                if key not in endpoint:
+                    problems.append(f"report endpoint {expected} is missing {key}")
+            if endpoint.get("endpoint") != expected:
+                problems.append(
+                    f"report endpoint slot {expected} names {endpoint.get('endpoint')}"
+                )
+            if endpoint.get("unsupported") is not None:
+                problems.append(
+                    f"endpoint {expected} has unsupported format: {endpoint['unsupported']}"
+                )
+
+    if require_driver:
+        driver = figures.get("driver")
+        if driver is None:
+            problems.append("report is missing driver statistics")
+        elif not isinstance(driver.get("endpoints"), list):
+            problems.append("driver statistics are missing endpoints")
+        else:
+            for endpoint in driver["endpoints"]:
+                if "lost_bytes" not in endpoint:
+                    problems.append(
+                        f"driver endpoint {endpoint.get('endpoint')} is missing lost_bytes"
+                    )
+                elif endpoint["lost_bytes"] != 0:
+                    problems.append(
+                        f"driver endpoint {endpoint.get('endpoint')} lost "
+                        f"{endpoint['lost_bytes']} bytes"
+                    )
+    return problems
+
+
 def compare(reference, ref_rate, captured, rate, min_correlation):
     """Windowed match of `reference` inside `captured` (both frames x 2)."""
     if ref_rate != rate:
@@ -235,14 +331,9 @@ def main():
     if args.report:
         with open(args.report, encoding="utf-8") as report:
             figures = json.load(report)
-        summary["underruns_while_streaming"] = figures["underruns_while_streaming"]
-        summary["output_restarts"] = figures["output_restarts"]
-        if figures["underruns_while_streaming"]:
-            problems.append(f"{figures['underruns_while_streaming']} underruns while streaming")
-        if figures["output_restarts"]:
-            problems.append(f"{figures['output_restarts']} device restarts")
-        if figures["faults"]:
-            problems.append(f"faults: {figures['faults']}")
+        summary["underruns_while_streaming"] = figures.get("underruns_while_streaming")
+        summary["output_restarts"] = figures.get("output_restarts")
+        problems.extend(report_problems(figures, expected_mode=args.mode))
     if summary["windows"] == 0 or summary["matched"] < args.min_matched:
         problems.append(f"only {summary['matched']:.1%} of windows matched")
     with open(args.summary, "w", encoding="utf-8") as out:

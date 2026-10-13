@@ -5,7 +5,8 @@ name: Driver
 #
 #   core       driver/core (the ring, READ gate, DMA clock and format checks
 #              that call no kernel API) built with clang and gcc under ASan
-#              and UBSan, its tests, libFuzzer for two minutes, and the record
+#              and UBSan, its tests, libFuzzer on the ring, the DMA clock and
+#              the format classifier for two minutes each, and the record
 #              stream it writes parsed back by bio-abi
 #   core-msvc  the same core with MSVC and /fsanitize=address on Windows
 #   kcheck     every kernel source compiled by clang in MSVC mode against the
@@ -18,10 +19,14 @@ name: Driver
 #              private key thrown away) installed on windows-2022 and
 #              windows-2025 runners by the kit's own install.ps1: driver store,
 #              root device node, service and Parameters defaults. The driver
-#              loads, the audio stack must build both render endpoints,
+#              loads, the audio stack must build all three render endpoints,
 #              tools/ci/driver_flow_check.py plays a tone into each and reads
-#              the ring back, and the kit's collect.ps1 and uninstall.ps1 run
-#              as a tester would run them
+#              the ring back, bio-live then renders the ring to VB-CABLE while
+#              a tone plays into each endpoint and both tones must come back
+#              out (tools/ci/driver_e2e_check.py), an IOCTL fuzzer attacks
+#              the control device (tools/ci/ioctl_fuzz.py), all under Driver
+#              Verifier where the image allows it, and the kit's collect.ps1
+#              and uninstall.ps1 run as a tester would run them
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
 #   sysvad-build, sysvad-control  diagnosis only: SysVAD itself built on
@@ -90,6 +95,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/ring-artifacts"
           "$RUNNER_TEMP/core-clang/clock_fuzz" -max_total_time=120 -print_final_stats=1 \
             -artifact_prefix="$RUNNER_TEMP/ring-artifacts/clock-"
+
+      # Untrusted WAVEFORMATEX bytes from SetFormat and the format-supported
+      # property reach this classifier at PASSIVE_LEVEL in the kernel.
+      - name: libFuzzer on the PCM and codec format classifier (120 s)
+        run: |
+          mkdir -p "$RUNNER_TEMP/ring-artifacts"
+          "$RUNNER_TEMP/core-clang/format_fuzz" -max_total_time=120 -print_final_stats=1 \
+            -artifact_prefix="$RUNNER_TEMP/ring-artifacts/format-"
 
       - name: Keep the crashing input
         if: failure()
@@ -174,6 +187,9 @@ jobs:
     name: driver package (test-signed install, x64, ${{ matrix.os }})
     needs: build
     runs-on: ${{ matrix.os }}
+    # The whole job takes about ten minutes. A request the driver never
+    # completes hangs the step that made it, so fail well before six hours.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -208,6 +224,25 @@ jobs:
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start
 
+      # Driver Verifier watches the driver from the moment it loads, without
+      # a reboot (volatile settings apply to drivers loaded afterwards): pool,
+      # IRQL, I/O and deadlock checks. A violation bugchecks the runner, which
+      # fails the job. Whether a hosted image accepts volatile verification is
+      # printed below; until a run shows it does, a refusal is a warning, not
+      # a failure.
+      - name: Driver Verifier for spatialsoftreceiver.sys, volatile (standard checks)
+        id: verifier
+        shell: pwsh
+        run: |
+          & verifier.exe /volatile /flags 0x209BB /adddriver spatialsoftreceiver.sys
+          $code = $LASTEXITCODE
+          Write-Host "verifier /volatile exited $code"
+          & verifier.exe /querysettings
+          "requested=$code" | Out-File -Append $env:GITHUB_OUTPUT
+          # Actions ends a pwsh step with the last native exit code; a refusal
+          # here is reported by the next check, not by failing this step.
+          exit 0
+
       # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
       # by the tester's own install.ps1.
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
@@ -230,9 +265,9 @@ jobs:
           Start-Sleep -Seconds 10
           ./tools/ci/audio-diagnostics.ps1 -InstanceId 'ROOT\MEDIA\0000'
 
-      # Users get no service restart either: both render endpoints must be
+      # Users get no service restart either: all three render endpoints must be
       # active as the device arrives.
-      - name: Both render endpoints are active after install (tools/ci/endpoint-states.ps1)
+      - name: All three render endpoints are active after install (tools/ci/endpoint-states.ps1)
         id: endpoints
         if: steps.install.outputs.loaded == 'true'
         shell: pwsh
@@ -276,19 +311,125 @@ jobs:
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start -Label flow
 
-      # Both endpoints at once, each with its own tone, read back from the
+      # Every endpoint in the expected mask, each with its own tone, read back from the
       # ring: records, byte continuity, DMA rate and content per endpoint.
-      - name: Play through both endpoints and read the ring (tools/ci/driver_flow_check.py)
+      - name: Play through the default endpoint mask and read the ring (tools/ci/driver_flow_check.py)
         if: steps.install.outputs.loaded == 'true'
         shell: pwsh
         run: |
           python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
-          python tools/ci/driver_flow_check.py --summary (Join-Path $env:RUNNER_TEMP 'driver-flow.json')
+          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'driver-flow.json')
+
+      # ADR 0028: Spatial SoftReceiver and Spatial SoftReceiver Music refuse exclusive streams, and
+      # Spatial SoftReceiver PASS takes them with priority. The kit's install.ps1
+      # wrote the policy; this reads it back and tries a real exclusive open
+      # on each endpoint (refused on 0 and 1, granted on 2).
+      - name: Exclusive-mode policy per endpoint (tools/ci/exclusive_policy_check.ps1)
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ci/exclusive_policy_check.ps1 -ExpectMask 7 -Summary (Join-Path $env:RUNNER_TEMP 'exclusive-policy.json')
+          if ($LASTEXITCODE -ne 0) { throw "exclusive_policy_check.ps1 exited $LASTEXITCODE" }
+
+      # The endpoints carry hardware volume and mute nodes, so Windows hands
+      # the master volume to the driver instead of applying it in software
+      # (where exclusive bitstreams never meet it). Each change must reach the
+      # ring as a VOLUME record; the original levels are restored. Windows
+      # PowerShell 5.1, as a tester runs the kit's copy.
+      - name: Volume and mute reach the ring as VOLUME records (tools/ci/volume_check.ps1)
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ci/volume_check.ps1 -Summary (Join-Path $env:RUNNER_TEMP 'volume.json')
+          if ($LASTEXITCODE -ne 0) { throw "volume_check.ps1 exited $LASTEXITCODE" }
 
       - name: What the audio engine asked our filters during the flow check (tools/ci/ks-trace.ps1)
         if: always() && steps.install.outputs.loaded == 'true'
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Stop -Label flow
+
+      # The whole path a listener uses: applications play into the three Spatial
+      # SoftReceiver endpoints, bio-live reads the driver's ring, renders through the
+      # fixture BRIR and plays to VB-CABLE, which is recorded back. Each
+      # endpoint's tone must stand 20 dB above its neighbourhood, and the
+      # report must show no underrun, dropped frame, lane underrun or lost
+      # ring byte. Runs when the endpoints came up, even after the flow check
+      # failed, so one round reports on both.
+      - name: Install the pinned toolchain for the end-to-end check (rust-toolchain.toml)
+        id: e2e-toolchain
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' && steps.endpoints.outcome == 'success' }}
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
+        with:
+          shared-key: audio
+
+      - name: VB-CABLE, a 1 ms system timer and MMCSS for the end-to-end check (tools/ci/install-virtual-cable.ps1, timer-resolution.ps1)
+        if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          ./tools/ci/install-virtual-cable.ps1
+          ./tools/ci/timer-resolution.ps1
+          Start-Service -Name MMCSS
+
+      - name: Build bio-live; write the fixture profile
+        id: e2e-build
+        if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p bio-live -p bio-replay
+          cargo run --locked --release -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
+          target/release/bio-live.exe devices
+
+      - name: All three endpoints through bio-live to VB-CABLE (tools/ci/driver_e2e_check.py)
+        if: ${{ !cancelled() && steps.e2e-build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
+          python tools/ci/driver_e2e_check.py --bio-live target/release/bio-live.exe \
+            --profile "$RUNNER_TEMP/fx/profile.toml" --seconds 8 \
+            --report "$RUNNER_TEMP/driver-e2e-report.json" --summary "$RUNNER_TEMP/driver-e2e.json" \
+            --record "$RUNNER_TEMP/driver-e2e.biodump"
+
+      - name: Is Driver Verifier checking spatialsoftreceiver.sys
+        id: verified
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
+        shell: pwsh
+        run: |
+          $query = (& verifier.exe /query) -join "`n"
+          Write-Host $query
+          $active = $query -match '(?im)^\s*Name:\s*spatialsoftreceiver\.sys'
+          "active=$($active.ToString().ToLower())" | Out-File -Append $env:GITHUB_OUTPUT
+          if ($active) {
+            Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: checking spatialsoftreceiver.sys (${{ matrix.os }})`n"
+          } else {
+            Write-Host '::warning::Driver Verifier is not checking spatialsoftreceiver.sys on this image; the IOCTL fuzzer runs without it'
+            Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: NOT active on ${{ matrix.os }}`n"
+          }
+          exit 0
+
+      # The control device under hostile callers: wrong sizes, extreme fields,
+      # unknown codes, cancel and close racing a pending READ, a second open.
+      # The device must still answer correctly afterwards, and no malformed
+      # request may succeed (tools/ci/ioctl_fuzz.py). The seed comes from the
+      # run so a failure can be replayed with --seed.
+      - name: IOCTL fuzzer on the control device for 60 s (tools/ci/ioctl_fuzz.py)
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
+        # Pending READs are cancelled after 100 ms and must complete within
+        # 5 s of the cancel; a driver that never completes one hangs here.
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python tools/ci/ioctl_fuzz.py --seconds 60 --seed ${{ github.run_id }}${{ github.run_attempt }} --summary (Join-Path $env:RUNNER_TEMP 'ioctl-fuzz.json')
+          if ($LASTEXITCODE -ne 0) { throw "ioctl_fuzz.py exited $LASTEXITCODE" }
+
+      - name: Driver Verifier counters after the fuzzer
+        if: ${{ !cancelled() && steps.verified.outputs.active == 'true' }}
+        shell: pwsh
+        run: '& verifier.exe /query'
 
       - name: The audio stack after the flow check
         if: failure() && steps.install.outputs.loaded == 'true'
@@ -316,6 +457,12 @@ jobs:
           name: driver-flow-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/driver-flow.json
+            ${{ runner.temp }}/driver-e2e.json
+            ${{ runner.temp }}/driver-e2e-report.json
+            ${{ runner.temp }}/driver-e2e.biodump
+            ${{ runner.temp }}/ioctl-fuzz.json
+            ${{ runner.temp }}/volume.json
+            ${{ runner.temp }}/exclusive-policy.json
             ${{ runner.temp }}/aeb-trace
             ${{ runner.temp }}/bioatmos-ks-*.etl
             ${{ runner.temp }}/bioatmos-ks-*.xml

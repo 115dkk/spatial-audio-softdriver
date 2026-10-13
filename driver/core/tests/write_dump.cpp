@@ -57,28 +57,36 @@ int main(int argc, char** argv) {
     if (!ring.Init(storage, sizeof(storage))) {
         return 1;
     }
+    if (!ring.ConfigureVolume(0, 12) || !ring.ConfigureVolume(1, 2) || !ring.ConfigureVolume(2, 8) ||
+        !ring.SetVolume(0, -1, -20 * 65536, 1) || !ring.SetMute(1, -1, true, 1)) return 1;
     uint8_t format[52];
     Mat21(format);
     uint8_t data0[4096];
     uint8_t data1[4096];
+    uint8_t data2[4096];
     memset(data0, 1, sizeof(data0));
     memset(data1, 2, sizeof(data1));
-    if (!ring.StreamStart(0, 1) || !ring.StreamStart(1, 2) ||
+    memset(data2, 3, sizeof(data2));
+    if (!ring.StreamStart(0, 1) || !ring.StreamStart(1, 2) || !ring.StreamStart(2, 2) ||
         !ring.FormatChange(0, 3, format, sizeof(format)) ||
-        !ring.FormatChange(1, 4, format, sizeof(format))) {
+        !ring.FormatChange(1, 4, format, sizeof(format)) ||
+        !ring.FormatChange(2, 5, format, sizeof(format))) {
         return 1;
     }
     ring.DiscardQueued();
-    for (uint32_t i = 0; i < 20; ++i) {
-        if (!ring.Data(static_cast<uint16_t>(i & 1U), 10U + i, 100U + i,
-                       (i & 1U) == 0 ? data0 : data1, sizeof(data0), nullptr, 0)) {
+    for (uint32_t i = 0; i < 30; ++i) {
+        if (!ring.Data(static_cast<uint16_t>(i % 3U), 10U + i, 100U + i,
+                       i % 3U == 0 ? data0 : i % 3U == 1 ? data1 : data2, sizeof(data0), nullptr, 0)) {
             return 1;
         }
     }
     if (!ring.Data(0, 100, 200, data0, 19, nullptr, 0) ||
         !ring.SourceGap(1, 101, 777) ||
         !ring.Data(1, 102, 201, data1, 23, nullptr, 0) ||
-        !ring.StreamStop(1, 103)) {
+        !ring.StreamStop(1, 103) ||
+        !ring.SourceGap(2, 104, 123) ||
+        !ring.Data(2, 105, 202, data2, 31, nullptr, 0) ||
+        !ring.StreamStop(2, 106)) {
         return 1;
     }
     const uint32_t bytes = ring.Read(stream, sizeof(stream));

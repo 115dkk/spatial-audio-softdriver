@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
-use bio_types::{PcmFormat, Position, SampleType, SceneBlock};
+use bio_types::{PcmFormat, Position, SampleType, SceneBlock, Speaker};
 use decode::{
     DecodeConfig, DecodeError,
+    direct::{DirectLayout, DirectLayoutOverride, DirectLayouts, parse_speaker, preset},
     pcm::{PcmDecoder, default_mask, speaker_position},
 };
 use proptest::prelude::*;
@@ -172,6 +173,116 @@ fn default_masks_follow_documented_windows_order() {
 }
 
 #[test]
+fn ffmpeg_native_direct_defaults_and_presets_have_the_documented_order() {
+    use Speaker::*;
+    let defaults = DirectLayouts::default();
+    for (channels, expected) in [
+        (1, &[C][..]),
+        (2, &[L, R]),
+        (3, &[L, R, C]),
+        (4, &[L, R, Lrs, Rrs]),
+        (5, &[L, R, C, Lrs, Rrs]),
+        (6, &[L, R, C, Lfe, Lrs, Rrs]),
+        (8, &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss]),
+        (10, &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss, Tfl, Tfr]),
+        (12, &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss, Tfl, Tfr, Trl, Trr]),
+        (
+            14,
+            &[L, R, C, Lfe, Lrs, Rrs, Lc, Rc, Lss, Rss, Tfl, Tfr, Trl, Trr],
+        ),
+        (
+            16,
+            &[
+                L, R, C, Lfe, Lrs, Rrs, Lc, Rc, Lss, Rss, Tfl, Tfr, Trl, Trr, Tsl, Tsr,
+            ],
+        ),
+    ] {
+        assert_eq!(defaults.get(channels).unwrap().speakers(), expected);
+    }
+    for channels in [7, 9, 11, 13, 15, 17, 32] {
+        assert_eq!(defaults.get(channels), None);
+    }
+    // Where Windows assumes a mask for mask zero, the direct default is that
+    // mask in bit order, so both readings of the same stream agree.
+    for channels in 1..=8 {
+        let Some(mut mask) = default_mask(channels) else {
+            continue;
+        };
+        let mut from_mask = Vec::new();
+        while mask != 0 {
+            from_mask.push(Speaker::from_wave_bit(mask.isolate_lowest_one()).unwrap());
+            mask &= mask - 1;
+        }
+        assert_eq!(defaults.get(channels).unwrap().speakers(), from_mask);
+    }
+    assert_eq!(
+        preset("5.1.4").unwrap().speakers(),
+        &[L, R, C, Lfe, Lrs, Rrs, Tfl, Tfr, Trl, Trr]
+    );
+}
+
+#[test]
+fn direct_layout_argument_validates_count_names_and_duplicates() {
+    let value: DirectLayoutOverride = "16=9.1.6".parse().unwrap();
+    assert_eq!(value.channels, 16);
+    assert_eq!(value.layout, preset("9.1.6").unwrap());
+    let value: DirectLayoutOverride = "3=l,R,c".parse().unwrap();
+    assert_eq!(
+        value.layout.speakers(),
+        &[Speaker::L, Speaker::R, Speaker::C]
+    );
+    for bad in [
+        "0=mono",
+        "33=stereo",
+        "3=stereo",
+        "2=L,L",
+        "2=L,nope",
+        "2",
+        "2=FL,l",
+        "2=LFE,LFE2",
+    ] {
+        assert!(bad.parse::<DirectLayoutOverride>().is_err(), "{bad}");
+    }
+    // FFmpeg's channel names, as Impulcifer users write them, for a 9.1.6
+    // whose extra front pair is the wides rather than FFmpeg's FLC/FRC.
+    use Speaker::*;
+    let value: DirectLayoutOverride = "16=FL,FR,FC,LFE,BL,BR,WL,WR,SL,SR,TFL,TFR,TBL,TBR,TSL,TSR"
+        .parse()
+        .unwrap();
+    assert_eq!(
+        value.layout.speakers(),
+        &[
+            L, R, C, Lfe, Lrs, Rrs, Lw, Rw, Lss, Rss, Tfl, Tfr, Trl, Trr, Tsl, Tsr
+        ]
+    );
+    let value: DirectLayoutOverride = "6=flc,frc,bc,tbc,tc,tfc".parse().unwrap();
+    assert_eq!(value.layout.speakers(), &[Lc, Rc, Cs, Trc, Tc, Tfc]);
+    // Every alias names the position of the FFmpeg channel bit that shares
+    // the WAVE bit, where one exists.
+    for (alias, bit) in [
+        ("FL", 0x1),
+        ("FR", 0x2),
+        ("FC", 0x4),
+        ("BL", 0x10),
+        ("BR", 0x20),
+        ("FLC", 0x40),
+        ("FRC", 0x80),
+        ("BC", 0x100),
+        ("SL", 0x200),
+        ("SR", 0x400),
+        ("TC", 0x800),
+        ("TFL", 0x1000),
+        ("TFC", 0x2000),
+        ("TFR", 0x4000),
+        ("TBL", 0x8000),
+        ("TBC", 0x10000),
+        ("TBR", 0x20000),
+    ] {
+        assert_eq!(parse_speaker(alias), Speaker::from_wave_bit(bit), "{alias}");
+    }
+}
+
+#[test]
 fn speaker_bits_cover_standard_positions_only() {
     for (bit, az, el) in [
         (1, 30.0, 0.0),
@@ -304,9 +415,174 @@ fn seven_one_four_pcm_preserves_height_channels_and_lfe_across_fragments() {
 }
 
 #[test]
+fn direct_pcm_routes_sixteen_channels_and_lfe_in_ffmpeg_native_order() {
+    let mut decoder = PcmDecoder::new(DecodeConfig::default());
+    let f = format(16, 16, SampleType::Int, 16);
+    decoder.configure(f).unwrap();
+    let input: Vec<u8> = (0..480)
+        .flat_map(|_| (1_i16..=16).flat_map(|value| (value * 1024).to_le_bytes()))
+        .collect();
+    decoder
+        .push(&input, 3, 9, &mut |scene| {
+            assert_eq!(scene.objects.len(), 15);
+            assert_eq!(scene.lfe.unwrap(), &[0.125; 480]);
+            for (object, speaker) in scene.objects.iter().zip(
+                preset("9.1.6")
+                    .unwrap()
+                    .speakers()
+                    .iter()
+                    .copied()
+                    .filter(|speaker| *speaker != Speaker::Lfe),
+            ) {
+                assert_eq!(object.position, speaker.position().unwrap());
+            }
+        })
+        .unwrap();
+}
+
+#[test]
+fn custom_direct_layout_enables_eleven_and_thirty_two_channels() {
+    let mut speakers = Vec::new();
+    let all = [
+        Speaker::L,
+        Speaker::R,
+        Speaker::C,
+        Speaker::Lfe,
+        Speaker::Lrs,
+        Speaker::Rrs,
+        Speaker::Lc,
+        Speaker::Rc,
+        Speaker::Cs,
+        Speaker::Lss,
+        Speaker::Rss,
+        Speaker::Tc,
+        Speaker::Tfl,
+        Speaker::Tfc,
+        Speaker::Tfr,
+        Speaker::Trl,
+        Speaker::Trc,
+        Speaker::Trr,
+        Speaker::Ls,
+        Speaker::Rs,
+        Speaker::Lw,
+        Speaker::Rw,
+        Speaker::Tsl,
+        Speaker::Tsr,
+    ];
+    speakers.extend(all.iter().copied());
+    speakers.extend(
+        [
+            Speaker::L,
+            Speaker::R,
+            Speaker::C,
+            Speaker::Lrs,
+            Speaker::Rrs,
+            Speaker::Lc,
+            Speaker::Rc,
+            Speaker::Cs,
+        ]
+        .iter()
+        .copied(),
+    );
+    // Duplicate positions are legal in the programmatic type, which lets a
+    // caller describe all 32 direct channels; the CLI rejects duplicates.
+    let mut direct = DirectLayouts::empty();
+    direct
+        .set(32, DirectLayout::new(&speakers).unwrap())
+        .unwrap();
+    direct
+        .set(11, DirectLayout::new(&speakers[..11]).unwrap())
+        .unwrap();
+    for channels in [11, 32] {
+        let mut decoder = PcmDecoder::new(DecodeConfig {
+            direct,
+            ..DecodeConfig::default()
+        });
+        decoder
+            .configure(format(32, 32, SampleType::Int, channels))
+            .unwrap();
+    }
+    let mut defaults = PcmDecoder::new(DecodeConfig::default());
+    let error = defaults
+        .configure(format(16, 16, SampleType::Int, 11))
+        .unwrap_err();
+    assert!(matches!(error, DecodeError::NoDirectLayout(11)), "{error}");
+    assert!(
+        defaults
+            .configure(format(16, 16, SampleType::Int, 33))
+            .is_err()
+    );
+}
+
+#[test]
+fn every_wave_speaker_bit_and_common_masks_route_in_bit_order() {
+    for (channels, mask) in [(18, 0x3ffff), (7, 0x70f), (6, 0x60f), (8, 0xff)] {
+        let mut decoder = PcmDecoder::new(DecodeConfig::default());
+        decoder
+            .configure(PcmFormat {
+                channel_mask: mask,
+                ..format(16, 16, SampleType::Int, channels)
+            })
+            .unwrap();
+        let input: Vec<u8> = (0..480)
+            .flat_map(|_| {
+                (1_i16..=channels as i16).flat_map(|channel| (channel * 1024).to_le_bytes())
+            })
+            .collect();
+        let ordered: Vec<Speaker> = (0..18)
+            .filter_map(|bit| {
+                let value = 1_u32 << bit;
+                (mask & value != 0).then(|| Speaker::from_wave_bit(value).unwrap())
+            })
+            .collect();
+        let mut seen = 0;
+        decoder
+            .push(&input, 11, 7, &mut |scene| {
+                seen += 1;
+                let expected_objects = ordered
+                    .iter()
+                    .copied()
+                    .filter(|speaker| *speaker != Speaker::Lfe);
+                assert_eq!(
+                    scene.objects.len(),
+                    channels as usize - usize::from(mask & 8 != 0)
+                );
+                for (object, (channel, speaker)) in scene.objects.iter().zip(
+                    ordered
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .filter(|(_, speaker)| *speaker != Speaker::Lfe),
+                ) {
+                    assert_eq!(object.position, speaker.position().unwrap());
+                    assert!(
+                        object
+                            .signal
+                            .iter()
+                            .all(|&sample| sample == (channel + 1) as f32 / 32.0)
+                    );
+                }
+                assert_eq!(
+                    scene.lfe.map(|signal| signal[0]),
+                    ordered
+                        .iter()
+                        .position(|speaker| *speaker == Speaker::Lfe)
+                        .map(|channel| (channel + 1) as f32 / 32.0)
+                );
+                assert_eq!(expected_objects.count(), scene.objects.len());
+            })
+            .unwrap();
+        assert_eq!(seen, 1);
+    }
+}
+
+#[test]
 fn configure_rejects_invalid_shapes_and_deselects_old_format() {
     let good = format(16, 16, SampleType::Int, 2);
-    let mut decoder = PcmDecoder::new(DecodeConfig { max_frames: 480 });
+    let mut decoder = PcmDecoder::new(DecodeConfig {
+        max_frames: 480,
+        ..DecodeConfig::default()
+    });
     for bad in [
         PcmFormat {
             channels: 0,
@@ -317,8 +593,7 @@ fn configure_rejects_invalid_shapes_and_deselects_old_format() {
             ..good
         },
         PcmFormat {
-            channels: 13,
-            channel_mask: 0x1fff,
+            channels: 33,
             ..good
         },
         PcmFormat {
@@ -372,7 +647,9 @@ fn configure_rejects_invalid_shapes_and_deselects_old_format() {
         assert!(
             matches!(
                 decoder.configure(bad),
-                Err(DecodeError::Unsupported { codec: "PCM", .. })
+                // Mask zero with a count that has no direct layout (9, 7).
+                Err(DecodeError::Unsupported { codec: "PCM", .. }
+                    | DecodeError::NoDirectLayout(7 | 9))
             ),
             "{bad:?}"
         );
@@ -408,6 +685,98 @@ fn partial_first_frame_keeps_its_first_byte_qpc() {
         scenes.iter().map(|s| s.qpc).collect::<Vec<_>>(),
         [11, 33, 33]
     );
+}
+
+/// The chain emits a lane's complete frames after every chunk, so the lane's
+/// placed audio never trails the bytes it received by part of a block.
+#[test]
+fn emit_buffered_emits_complete_frames_and_keeps_a_partial_frame() {
+    let mut decoder = PcmDecoder::new(DecodeConfig::default());
+    let f = format(16, 16, SampleType::Int, 2);
+    decoder.configure(f).unwrap();
+    let frame = |value: i16| [value.to_le_bytes(), value.to_le_bytes()].concat();
+    let mut scenes = Vec::new();
+    let mut out = |s: &SceneBlock<'_>| scenes.push(OwnedScene::from(s));
+
+    decoder.emit_buffered(&mut out);
+    let mut first = (0..100).flat_map(|i| frame(i * 10)).collect::<Vec<_>>();
+    first.push(0x34);
+    decoder.push(&first, 7, 5, &mut out).unwrap();
+    decoder.emit_buffered(&mut out);
+    // The half frame from the QPC-7 record starts the next scene.
+    let mut second = vec![0x12, 0x34, 0x12];
+    second.extend((101..480).flat_map(|i| frame(i * 10)));
+    decoder.push(&second, 9, 5, &mut out).unwrap();
+    decoder.emit_buffered(&mut out);
+    decoder.emit_buffered(&mut out);
+
+    assert_eq!(
+        scenes
+            .iter()
+            .map(|s| (s.signals[0].len(), s.qpc, s.epoch))
+            .collect::<Vec<_>>(),
+        [(100, 7, 5), (380, 7, 5)]
+    );
+    let samples = scenes
+        .iter()
+        .flat_map(|s| s.signals[0].iter().copied())
+        .collect::<Vec<_>>();
+    let expected = (0..480)
+        .map(|i| {
+            let value = if i == 100 { 0x1234 } else { i * 10 };
+            f32::from(value as i16) / 32_768.0
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(samples, expected);
+}
+
+#[test]
+fn flush_emits_complete_pcm_residuals_and_discards_partial_frames() {
+    for frames in [96, 479, 481, 576] {
+        let mut decoder = PcmDecoder::new(DecodeConfig::default());
+        let f = format(16, 16, SampleType::Int, 2);
+        decoder.configure(f).unwrap();
+        let mut input = vec![0_u8; frames * f.bytes_per_frame() + 1];
+        for frame in 0..frames {
+            let value = (frame as i16).wrapping_mul(17);
+            let offset = frame * f.bytes_per_frame();
+            input[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            input[offset + 2..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        input[frames * f.bytes_per_frame()] = 0xff;
+
+        let mut scenes = Vec::new();
+        decoder
+            .push(&input, 123, 9, &mut |scene| {
+                scenes.push(OwnedScene::from(scene))
+            })
+            .unwrap();
+        decoder
+            .flush(&mut |scene| scenes.push(OwnedScene::from(scene)))
+            .unwrap();
+
+        let emitted = scenes
+            .iter()
+            .map(|scene| scene.signals[0].len())
+            .sum::<usize>();
+        assert_eq!(emitted, frames);
+        assert!(
+            scenes
+                .iter()
+                .all(|scene| { scene.epoch == 9 && scene.qpc == 123 && scene.rate == 48_000 })
+        );
+        assert!(
+            scenes
+                .last()
+                .is_some_and(|scene| scene.signals[0].len() <= 480)
+        );
+
+        let before = scenes.len();
+        decoder
+            .flush(&mut |scene| scenes.push(OwnedScene::from(scene)))
+            .unwrap();
+        assert_eq!(scenes.len(), before);
+    }
 }
 
 #[test]

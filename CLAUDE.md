@@ -13,7 +13,9 @@
 - 실시간 스레드에서는 할당, 잠금, 파일 입출력을 하지 않습니다.
 - 클린룸(ADR 0005): SpatialAudioLab의 소스와 그 소스에서 나온 패치는 읽지 않고, 작업자에게도 넘기지 않습니다. 구축기 공유 zip의 `sal-cli-bio-game.patch`가 여기에 해당합니다.
 - 드라이버 계약(`crates/bio-abi/src/wire.rs`)을 바꾸면 `BIO_ABI_BLESS=1`로 C 헤더를 다시 생성해 함께 커밋합니다.
-- 사용자에게 보이는 이름(Windows 엔드포인트 이름이 되는 싱크 설명과 장치 설명, INF의 FriendlyName, 화면과 안내 문구)은 번호가 아니라 용도로 구분합니다. 이름만 보고 무엇에 쓰는지 알 수 있어야 합니다. 지금의 "BIO Atmos Virtual HDMI 2" 같은 번호 이름은 시험판 것이고, 릴리스 전에 용도 이름으로 바꾸면서 그 이름으로 엔드포인트를 찾는 시험(`tools/ci/driver_flow_check.py`)도 함께 고칩니다. 코드와 계약 안의 엔드포인트 번호(0, 1)는 식별자라 그대로 둡니다.
+- 사용자에게 보이는 이름(Windows 엔드포인트 이름이 되는 싱크 설명과 장치 설명, INF의 FriendlyName, 화면과 안내 문구)은 번호가 아니라 용도로 구분합니다. 이름만 보고 무엇에 쓰는지 알 수 있어야 합니다. 제품 이름은 `Spatial SoftReceiver`(한국어 `공간 소프트리시버`)이고, 엔드포인트는 `Spatial SoftReceiver`, `Spatial SoftReceiver Music`, `Spatial SoftReceiver PASS`(한국어 `공간 소프트리시버`, `공간 소프트리시버 음악`, `공간 소프트리시버 PASS`)입니다. 싱크 설명은 31자 안이어야 합니다.
+- 엔드포인트 이름은 데이터입니다. INF가 설치할 때 언어에 맞는 이름(`[Strings]`, `[Strings.0412]`)을 서비스 `Parameters`의 `EndpointName0`~`EndpointName3`에 쓰고, 드라이버는 그 값을 읽습니다(없거나 31자를 넘으면 컴파일된 영어 이름). 그래서 도구와 앱은 이름으로 엔드포인트를 찾지 않습니다. 고정 식별자(엔드포인트 번호와 KS 필터 참조 문자열)로 찾는 공용 도우미 `tools/ci/endpoints.ps1`, `endpoints.py`를 씁니다. 코드와 계약 안의 엔드포인트 번호(0, 1, 2)는 식별자라 그대로 둡니다.
+- 제품, 드라이버, 엔드포인트, 서비스, 파일, 앱의 이름에 남의 상표(Dolby, Atmos 등)나 사람 이름을 쓰지 않습니다. 호환되는 형식은 README와 안내서에 사실로만 적고, 상표 고지를 함께 둡니다.
 
 ## 검사
 

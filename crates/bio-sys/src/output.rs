@@ -1,4 +1,4 @@
-//! Event-driven stereo WASAPI output, opened and used on the output thread.
+//! Event-driven WASAPI output, opened and used on the output thread.
 //!
 //! Playback timestamps use the audio clock's correlated (position, QPC) pair.
 //! GetPosition's QPC is in 100 ns units, NOT raw performance-counter ticks.
@@ -7,16 +7,21 @@
 //! Adding GetStreamLatency again would count latency twice. wasapi 0.25 does
 //! not expose GetStreamLatency; no raw COM access is needed here.
 
+#[cfg(windows)]
 use crate::{
     devices::{ComGuard, output_error},
     qpc,
 };
-use bio_types::{OutputError, OutputFormat, OutputOpener, OutputSink};
+#[cfg(windows)]
+use bio_types::{OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener, OutputSink};
+#[cfg(windows)]
 use std::{fmt, time::Duration};
+#[cfg(windows)]
 use wasapi::{
     AudioClient, AudioClock, AudioRenderClient, Device, DeviceEnumerator, Direction, Handle,
     SampleType, StreamMode, WasapiError, WaveFormat,
 };
+#[cfg(windows)]
 use windows::Win32::{
     Foundation::E_INVALIDARG,
     Media::Audio::{
@@ -26,14 +31,100 @@ use windows::Win32::{
     },
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExclusiveFailurePolicy {
+    Fail,
+    FallBackToShared,
+}
+
+fn exclusive_failure_policy(exclusive: bool, shared_fallback: bool) -> ExclusiveFailurePolicy {
+    if exclusive && shared_fallback {
+        ExclusiveFailurePolicy::FallBackToShared
+    } else {
+        ExclusiveFailurePolicy::Fail
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ClockReading {
+    position: u64,
+    qpc_100ns: u64,
+}
+
+#[derive(Debug, Default)]
+struct PlaybackClock {
+    last_qpc: Option<u64>,
+}
+
+impl PlaybackClock {
+    #[allow(clippy::too_many_arguments)]
+    fn next(
+        &mut self,
+        first_frame: u64,
+        reading: Option<ClockReading>,
+        started_qpc: u64,
+        stream_rate: u32,
+        clock_frequency: u64,
+        qpc_frequency: u64,
+        period_frames: usize,
+    ) -> u64 {
+        let candidate = reading.map_or_else(
+            || {
+                started_qpc.saturating_add(scale(
+                    first_frame,
+                    qpc_frequency,
+                    u64::from(stream_rate),
+                ))
+            },
+            |reading| {
+                playback_qpc(
+                    reading.qpc_100ns,
+                    reading.position,
+                    clock_frequency,
+                    first_frame,
+                    stream_rate,
+                    qpc_frequency,
+                )
+            },
+        );
+        let next = self.last_qpc.map_or(candidate, |last| match reading {
+            Some(_) => candidate.max(last),
+            None => {
+                let period_ticks =
+                    scale(period_frames as u64, qpc_frequency, u64::from(stream_rate));
+                candidate.max(last.saturating_add(period_ticks))
+            }
+        });
+        self.last_qpc = Some(next);
+        next
+    }
+}
+
+#[cfg(windows)]
 #[derive(Debug, Clone)]
 pub struct WasapiOpener {
     pub endpoint: Option<String>,
     pub rate: u32,
     pub exclusive: bool,
+    /// Permit an explicit exclusive request to fall back to shared mode.
+    pub shared_fallback: bool,
     pub period: Option<Duration>,
 }
 
+#[cfg(windows)]
+impl Default for WasapiOpener {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            rate: 48_000,
+            exclusive: true,
+            shared_fallback: false,
+            period: None,
+        }
+    }
+}
+
+#[cfg(windows)]
 pub struct WasapiSink {
     client: AudioClient,
     render: AudioRenderClient,
@@ -56,10 +147,13 @@ pub struct WasapiSink {
     clock_frequency: u64,
     qpc_frequency: u64,
     started_qpc: u64,
+    playback_clock: PlaybackClock,
+    latest_played_frames: u64,
     // Must be last: interface fields are released before CoUninitialize.
     _com: ComGuard,
 }
 
+#[cfg(windows)]
 impl fmt::Debug for WasapiSink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WasapiSink")
@@ -70,23 +164,34 @@ impl fmt::Debug for WasapiSink {
     }
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug)]
-enum Encoding {
+pub(crate) enum Encoding {
     Float32,
     Int32,
     Int24In32,
     Int16,
 }
 
+#[cfg(windows)]
 impl Encoding {
-    fn wave(self, rate: u32) -> WaveFormat {
+    pub(crate) const ALL: [Self; 4] = [Self::Float32, Self::Int32, Self::Int24In32, Self::Int16];
+
+    pub(crate) fn wave(self, rate: u32, layout: OutputLayout) -> WaveFormat {
         let (bits, valid, kind) = match self {
             Self::Float32 => (32, 32, SampleType::Float),
             Self::Int32 => (32, 32, SampleType::Int),
             Self::Int24In32 => (32, 24, SampleType::Int),
             Self::Int16 => (16, 16, SampleType::Int),
         };
-        WaveFormat::new(bits, valid, &kind, rate as usize, 2, Some(3))
+        WaveFormat::new(
+            bits,
+            valid,
+            &kind,
+            rate as usize,
+            usize::from(layout.channels),
+            Some(layout.channel_mask),
+        )
     }
 
     fn sample_bytes(self) -> usize {
@@ -122,13 +227,28 @@ impl Encoding {
     }
 }
 
+#[cfg(windows)]
 impl OutputOpener for WasapiOpener {
     type Sink = WasapiSink;
 
-    fn open(self) -> Result<WasapiSink, OutputError> {
-        if self.rate == 0 || self.rate > u32::MAX / 8 {
+    fn open(&mut self, layout: OutputLayout) -> Result<WasapiSink, OutputError> {
+        if layout.channels == 0 || layout.channels > 32 {
+            return Err(OutputError::FormatRejected(format!(
+                "output channel count {} is outside 1..=32",
+                layout.channels
+            )));
+        }
+        if layout.channel_mask != 0
+            && layout.channel_mask.count_ones() != u32::from(layout.channels)
+        {
+            return Err(OutputError::FormatRejected(format!(
+                "{} channels do not match mask {:#x}",
+                layout.channels, layout.channel_mask
+            )));
+        }
+        if self.rate == 0 || self.rate > u32::MAX / (u32::from(layout.channels) * 4) {
             return Err(OutputError::FormatRejected(
-                "invalid stereo sample rate".into(),
+                "invalid output sample rate".into(),
             ));
         }
         let com = ComGuard::new()?;
@@ -138,16 +258,36 @@ impl OutputOpener for WasapiOpener {
             None => enumerator.get_default_device(&Direction::Render),
         }
         .map_err(output_error)?;
-        let opened = if self.exclusive {
-            match self.open_exclusive(&device) {
-                Ok(opened) => opened,
+        let (opened, fell_back, mix_channels) = if self.exclusive {
+            match self.open_exclusive(&device, layout) {
+                Ok(opened) => (opened, false, layout.channels),
+                Err(error)
+                    if mode_error(&error)
+                        && exclusive_failure_policy(self.exclusive, self.shared_fallback)
+                            == ExclusiveFailurePolicy::FallBackToShared =>
+                {
+                    let mix_channels = device
+                        .get_iaudioclient()
+                        .and_then(|client| client.get_mixformat())
+                        .map_err(output_error)?
+                        .get_nchannels();
+                    (
+                        self.open_shared(&device, layout).map_err(output_error)?,
+                        true,
+                        mix_channels,
+                    )
+                }
                 Err(error) if mode_error(&error) => {
-                    self.open_shared(&device).map_err(output_error)?
+                    return Err(OutputError::ExclusiveUnavailable(error.to_string()));
                 }
                 Err(error) => return Err(output_error(error)),
             }
         } else {
-            self.open_shared(&device).map_err(output_error)?
+            (
+                self.open_shared(&device, layout).map_err(output_error)?,
+                false,
+                layout.channels,
+            )
         };
         let (client, encoding, exclusive, period_frames) = opened;
         let buffer_frames = client.get_buffer_size().map_err(output_error)? as usize;
@@ -166,9 +306,10 @@ impl OutputOpener for WasapiOpener {
         // The stream starts on the first `next_period`, not here: whatever the
         // caller sets up between open and its first period must not count
         // against the device (see `start`).
-        let silence = vec![0; buffer_frames * 2 * encoding.sample_bytes()];
-        let bytes = vec![0; period_frames * 2 * encoding.sample_bytes()];
-        let samples = vec![0.0; period_frames * 2];
+        let channels = usize::from(layout.channels);
+        let silence = vec![0; buffer_frames * channels * encoding.sample_bytes()];
+        let bytes = vec![0; period_frames * channels * encoding.sample_bytes()];
+        let samples = vec![0.0; period_frames * channels];
         Ok(WasapiSink {
             client,
             render,
@@ -176,8 +317,16 @@ impl OutputOpener for WasapiOpener {
             event,
             format: OutputFormat {
                 rate: self.rate,
-                channels: 2,
+                channels: layout.channels,
+                channel_mask: layout.channel_mask,
                 period_frames,
+                mode: if exclusive {
+                    OutputMode::Exclusive
+                } else {
+                    OutputMode::Shared
+                },
+                fell_back,
+                mix_channels,
             },
             encoding,
             exclusive,
@@ -192,13 +341,22 @@ impl OutputOpener for WasapiOpener {
             clock_frequency,
             qpc_frequency: qpc::frequency(),
             started_qpc: 0,
+            playback_clock: PlaybackClock::default(),
+            latest_played_frames: 0,
             _com: com,
         })
     }
+
+    fn set_period(&mut self, period: Duration) -> bool {
+        self.period = Some(period);
+        true
+    }
 }
 
+#[cfg(windows)]
 type Opened = (AudioClient, Encoding, bool, usize);
 
+#[cfg(windows)]
 impl WasapiOpener {
     fn period_hns(&self, default: i64) -> Result<i64, WasapiError> {
         match self.period {
@@ -210,24 +368,38 @@ impl WasapiOpener {
         }
     }
 
-    fn open_exclusive(&self, device: &Device) -> Result<Opened, WasapiError> {
+    fn open_exclusive(&self, device: &Device, layout: OutputLayout) -> Result<Opened, WasapiError> {
         let mut last_error = WasapiError::UnsupportedFormat;
-        for encoding in [
-            Encoding::Float32,
-            Encoding::Int32,
-            Encoding::Int24In32,
-            Encoding::Int16,
-        ] {
+        for encoding in Encoding::ALL {
             let mut client = device.get_iaudioclient()?;
             // Older WDM drivers accept a stereo format only as a plain
             // WAVEFORMATEX or only with another channel mask, and fail
             // Initialize with AUDCLNT_E_ENDPOINT_CREATE_FAILED when handed
             // one they did not accept, so ask for the form they take first.
-            let wave = match client.is_supported_exclusive_with_quirks(&encoding.wave(self.rate)) {
-                Ok(wave) => wave,
-                Err(error) => {
-                    last_error = error;
-                    continue;
+            let requested = encoding.wave(self.rate, layout);
+            // Preserve the old stereo quirk negotiation. Multichannel layouts
+            // are exact contracts: a different mask would route samples to the
+            // wrong physical outputs, so query and initialize the requested
+            // WAVEFORMATEXTENSIBLE unchanged.
+            let wave = if layout == OutputLayout::STEREO {
+                match client.is_supported_exclusive_with_quirks(&requested) {
+                    Ok(wave) => wave,
+                    Err(error) => {
+                        last_error = error;
+                        continue;
+                    }
+                }
+            } else {
+                match client.is_supported(&requested, &wasapi::ShareMode::Exclusive) {
+                    Ok(None) => requested,
+                    Ok(Some(_)) | Err(WasapiError::UnsupportedFormat) => {
+                        last_error = WasapiError::UnsupportedFormat;
+                        continue;
+                    }
+                    Err(error) => {
+                        last_error = error;
+                        continue;
+                    }
                 }
             };
             let (_, minimum) = client.get_device_period()?;
@@ -264,14 +436,14 @@ impl WasapiOpener {
         Err(last_error)
     }
 
-    fn open_shared(&self, device: &Device) -> Result<Opened, WasapiError> {
+    fn open_shared(&self, device: &Device, layout: OutputLayout) -> Result<Opened, WasapiError> {
         let mut client = device.get_iaudioclient()?;
         let (default, _) = client.get_device_period()?;
         let buffer = self.period_hns(default)?;
         // The shared engine controls event cadence; the optional duration is
         // a buffer request, not a promise that its processing period changes.
         client.initialize_client(
-            &Encoding::Float32.wave(self.rate),
+            &Encoding::Float32.wave(self.rate, layout),
             &Direction::Render,
             &StreamMode::EventsShared {
                 autoconvert: true,
@@ -283,6 +455,7 @@ impl WasapiOpener {
     }
 }
 
+#[cfg(windows)]
 fn mode_error(error: &WasapiError) -> bool {
     match error {
         WasapiError::UnsupportedFormat | WasapiError::UnsupportedSubformat(_) => true,
@@ -300,6 +473,7 @@ fn mode_error(error: &WasapiError) -> bool {
     }
 }
 
+#[cfg(windows)]
 impl WasapiSink {
     /// Primes the whole buffer with silence and starts the stream. The silence
     /// belongs to the stream position like every later frame.
@@ -351,6 +525,7 @@ impl WasapiSink {
     }
 }
 
+#[cfg(windows)]
 impl OutputSink for WasapiSink {
     fn format(&self) -> OutputFormat {
         self.format
@@ -358,6 +533,10 @@ impl OutputSink for WasapiSink {
 
     fn restarts(&self) -> u64 {
         self.restarts
+    }
+
+    fn played_frames(&self) -> Option<u64> {
+        Some(self.latest_played_frames)
     }
 
     fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError> {
@@ -379,6 +558,7 @@ impl OutputSink for WasapiSink {
         self.encoding.convert(&self.samples, &mut self.bytes);
         let (position, clock_qpc) = self.clock.get_position().map_err(output_error)?;
         let played_frames = self.played_frames(position);
+        self.latest_played_frames = played_frames;
         // GetPosition continues across underruns. Do not timestamp new audio
         // in the past merely because fewer frames were submitted than played.
         self.submitted = self.submitted.max(played_frames);
@@ -389,26 +569,23 @@ impl OutputSink for WasapiSink {
         self.submitted = self
             .submitted
             .saturating_add(self.format.period_frames as u64);
-        if position == 0 && clock_qpc == 0 {
-            // Some endpoints have no correlated reading during startup. This
-            // estimate cannot include their unreported initial hardware delay.
-            return Ok(self.started_qpc.saturating_add(scale(
-                first_frame,
-                self.qpc_frequency,
-                u64::from(self.format.rate),
-            )));
-        }
-        Ok(playback_qpc(
-            clock_qpc,
+        let reading = (position != 0 || clock_qpc != 0).then_some(ClockReading {
             position,
-            self.clock_frequency,
+            qpc_100ns: clock_qpc,
+        });
+        Ok(self.playback_clock.next(
             first_frame,
+            reading,
+            self.started_qpc,
             self.format.rate,
+            self.clock_frequency,
             self.qpc_frequency,
+            self.format.period_frames,
         ))
     }
 }
 
+#[cfg(windows)]
 impl Drop for WasapiSink {
     fn drop(&mut self) {
         let _ = self.client.stop_stream();
@@ -418,6 +595,7 @@ impl Drop for WasapiSink {
 /// Two periods, and at least 10 ms. A healthy wait is about one period: 3.0 to
 /// 4.3 ms at a 3 ms period and 10.0 to 10.9 ms at 10 ms were measured, while
 /// the stalls lasted 28 to 43 ms.
+#[cfg(windows)]
 fn stall_ticks(period_frames: usize, rate: u32, qpc_frequency: u64) -> u64 {
     let two_periods = scale(2 * period_frames as u64, qpc_frequency, u64::from(rate));
     two_periods.max(qpc_frequency / 100)
@@ -447,6 +625,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exclusive_failure_requires_an_explicit_shared_fallback() {
+        assert_eq!(
+            exclusive_failure_policy(true, false),
+            ExclusiveFailurePolicy::Fail
+        );
+        assert_eq!(
+            exclusive_failure_policy(true, true),
+            ExclusiveFailurePolicy::FallBackToShared
+        );
+        assert_eq!(
+            exclusive_failure_policy(false, true),
+            ExclusiveFailurePolicy::Fail
+        );
+    }
+
+    #[test]
     fn playback_timestamp_uses_clock_units_and_queue_distance() {
         // A 24 MHz QPC, 192 kHz device clock, 48 kHz stream: 10 ms queued.
         assert_eq!(
@@ -455,6 +649,121 @@ mod tests {
         );
     }
 
+    #[test]
+    fn playback_clock_is_monotonic_across_estimates_measurements_and_restarts() {
+        #[derive(Clone, Copy, Debug)]
+        struct Row {
+            first_frame: u64,
+            reading: Option<ClockReading>,
+            started_qpc: u64,
+        }
+
+        for qpc_frequency in [10_000_000, 24_000_000] {
+            let period = qpc_frequency / 100;
+            let base = 7 * qpc_frequency;
+            let rows = [
+                // Startup estimate.
+                Row {
+                    first_frame: 480,
+                    reading: None,
+                    started_qpc: base,
+                },
+                // First correlation reports the hardware delay and moves ahead.
+                Row {
+                    first_frame: 960,
+                    reading: Some(ClockReading {
+                        position: 480,
+                        qpc_100ns: 70_200_000,
+                    }),
+                    started_qpc: base,
+                },
+                // A regressing correlation is clamped by one whole period.
+                Row {
+                    first_frame: 1_440,
+                    reading: Some(ClockReading {
+                        position: 960,
+                        qpc_100ns: 70_150_000,
+                    }),
+                    started_qpc: base,
+                },
+                // Correlation can disappear temporarily after it existed.
+                Row {
+                    first_frame: 1_920,
+                    reading: None,
+                    started_qpc: base,
+                },
+                // Reset rewinds submitted frames and changes the estimate base.
+                Row {
+                    first_frame: 480,
+                    reading: None,
+                    started_qpc: base - qpc_frequency,
+                },
+                // Large device positions must not overflow intermediate math.
+                Row {
+                    first_frame: u64::MAX - 480,
+                    reading: Some(ClockReading {
+                        position: u64::MAX - 960,
+                        qpc_100ns: 80_000_000,
+                    }),
+                    started_qpc: base,
+                },
+            ];
+            let mut clock = PlaybackClock::default();
+            let mut actual = Vec::new();
+            for row in rows {
+                actual.push(clock.next(
+                    row.first_frame,
+                    row.reading,
+                    row.started_qpc,
+                    48_000,
+                    48_000,
+                    qpc_frequency,
+                    480,
+                ));
+            }
+            assert!(
+                actual.windows(2).all(|pair| pair[1] >= pair[0]),
+                "qpc_frequency={qpc_frequency}, rows={rows:#?}, actual={actual:?}"
+            );
+            assert!(
+                actual[1] > base + 2 * period,
+                "forward measurement was not accepted: qpc_frequency={qpc_frequency}, rows={rows:#?}, actual={actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_dac_measurements_do_not_accumulate_nominal_period_error() {
+        let qpc_frequency = 10_000_000;
+        let rate = 48_000;
+        let period_frames = 480;
+        let periods = 360_000_u64;
+        let period_100ns = 100_000_u64;
+        let mut clock = PlaybackClock::default();
+        let mut last = 0;
+        for period in 0..periods {
+            let first_frame = (period + 1) * period_frames as u64;
+            let position = period * period_frames as u64;
+            let qpc_100ns = 50_000_000 + period * period_100ns * 9_999 / 10_000;
+            last = clock.next(
+                first_frame,
+                Some(ClockReading {
+                    position,
+                    qpc_100ns,
+                }),
+                5 * qpc_frequency,
+                rate,
+                u64::from(rate),
+                qpc_frequency,
+                period_frames,
+            );
+        }
+        let expected =
+            5 * qpc_frequency + (periods - 1) * period_100ns * 9_999 / 10_000 + qpc_frequency / 100;
+        assert_eq!(last, expected);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn integer_samples_clip_and_left_align() {
         let input = [-2.0, -1.0, 0.0, 1.0, 2.0, f32::NAN];

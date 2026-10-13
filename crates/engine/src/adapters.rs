@@ -11,12 +11,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bio_types::{
-    CaptureError, CaptureSource, OutputError, OutputFormat, OutputOpener, OutputSink,
+    CaptureError, CaptureSource, OutputError, OutputFormat, OutputLayout, OutputOpener, OutputSink,
     TrimUnsupported,
 };
 
 const RECORD_HEADER_BYTES: usize = size_of::<bio_abi::RecordHeader>();
 const RECORD_LENGTH_OFFSET: usize = std::mem::offset_of!(bio_abi::RecordHeader, len);
+const RECORD_QPC_OFFSET: usize = std::mem::offset_of!(bio_abi::RecordHeader, qpc);
 const QPC_FREQUENCY: u64 = 10_000_000;
 
 /// Replays a dump's record stream, handing out whole records only.
@@ -24,13 +25,24 @@ const QPC_FREQUENCY: u64 = 10_000_000;
 pub struct DumpCapture {
     stream: Vec<u8>,
     offset: usize,
+    format_version: u32,
+    last_read_qpc: Option<u64>,
 }
 
 impl DumpCapture {
-    /// `stream` is the record stream after the dump header
-    /// (`bio_abi::split_dump`).
+    /// Constructs a legacy capture without recorded READ boundaries.
     pub fn new(stream: Vec<u8>) -> Self {
-        Self { stream, offset: 0 }
+        Self::with_format(stream, 1)
+    }
+
+    /// `stream` and `format_version` come from [`bio_abi::split_dump`].
+    pub fn with_format(stream: Vec<u8>, format_version: u32) -> Self {
+        Self {
+            stream,
+            offset: 0,
+            format_version,
+            last_read_qpc: None,
+        }
     }
 }
 
@@ -42,6 +54,7 @@ impl CaptureSource for DumpCapture {
             return Err(CaptureError::Ended);
         }
 
+        self.last_read_qpc = None;
         let mut source = self.offset;
         let mut written = 0;
         while source < self.stream.len() {
@@ -51,6 +64,7 @@ impl CaptureSource for DumpCapture {
                     "record at offset {source} has a truncated header"
                 )));
             }
+            let kind = u16::from_le_bytes(rest[..2].try_into().expect("two bytes were sliced"));
             let payload_len = u32::from_le_bytes(
                 rest[RECORD_LENGTH_OFFSET..RECORD_LENGTH_OFFSET + 4]
                     .try_into()
@@ -62,6 +76,21 @@ impl CaptureSource for DumpCapture {
                     "record at offset {source} needs {size} bytes, but only {} remain",
                     rest.len()
                 )));
+            }
+            if self.format_version >= 2
+                && (kind == bio_abi::RECORD_KIND_READ_END
+                    || kind == bio_abi::RECORD_KIND_RECORDER_GAP)
+            {
+                source += size;
+                if kind == bio_abi::RECORD_KIND_READ_END {
+                    self.last_read_qpc = Some(u64::from_le_bytes(
+                        rest[RECORD_QPC_OFFSET..RECORD_QPC_OFFSET + 8]
+                            .try_into()
+                            .expect("eight bytes were sliced"),
+                    ));
+                    break;
+                }
+                continue;
             }
             if size > buf.len() && written == 0 {
                 return Err(CaptureError::Io(format!(
@@ -78,6 +107,12 @@ impl CaptureSource for DumpCapture {
         }
         self.offset = source;
         Ok(written)
+    }
+
+    fn now_qpc(&self) -> Option<u64> {
+        (self.format_version >= 2)
+            .then_some(self.last_read_qpc)
+            .flatten()
     }
 
     fn set_rate_trim(&mut self, _ppm: f64) -> Result<(), TrimUnsupported> {
@@ -97,11 +132,11 @@ pub struct WavOpener {
 impl OutputOpener for WavOpener {
     type Sink = WavSink;
 
-    fn open(self) -> Result<Self::Sink, OutputError> {
+    fn open(&mut self, layout: OutputLayout) -> Result<Self::Sink, OutputError> {
         let writer = hound::WavWriter::create(
             &self.path,
             hound::WavSpec {
-                channels: 2,
+                channels: layout.channels,
                 sample_rate: self.rate,
                 bits_per_sample: 32,
                 sample_format: hound::SampleFormat::Float,
@@ -112,16 +147,24 @@ impl OutputOpener for WavOpener {
             writer: Some(writer),
             format: OutputFormat {
                 rate: self.rate,
-                channels: 2,
+                channels: layout.channels,
+                channel_mask: layout.channel_mask,
                 period_frames: self.period_frames,
+                mode: bio_types::OutputMode::Exclusive,
+                fell_back: false,
+                mix_channels: layout.channels,
             },
-            interleaved: vec![0.0; self.period_frames.saturating_mul(2)],
+            interleaved: vec![
+                0.0;
+                self.period_frames
+                    .saturating_mul(usize::from(layout.channels))
+            ],
             frames_written: 0,
         })
     }
 }
 
-/// A 32-bit float stereo WAV output sink.
+/// A 32-bit float WAV output sink with the opened layout's channel count.
 pub struct WavSink {
     writer: Option<hound::WavWriter<BufWriter<File>>>,
     format: OutputFormat,
@@ -195,14 +238,22 @@ pub struct NullOpener {
 impl OutputOpener for NullOpener {
     type Sink = NullSink;
 
-    fn open(self) -> Result<Self::Sink, OutputError> {
+    fn open(&mut self, layout: OutputLayout) -> Result<Self::Sink, OutputError> {
         Ok(NullSink {
             format: OutputFormat {
                 rate: self.rate,
-                channels: 2,
+                channels: layout.channels,
+                channel_mask: layout.channel_mask,
                 period_frames: self.period_frames,
+                mode: bio_types::OutputMode::Exclusive,
+                fell_back: false,
+                mix_channels: layout.channels,
             },
-            interleaved: vec![0.0; self.period_frames.saturating_mul(2)],
+            interleaved: vec![
+                0.0;
+                self.period_frames
+                    .saturating_mul(usize::from(layout.channels))
+            ],
             frames_written: 0,
         })
     }
@@ -266,6 +317,53 @@ mod tests {
     }
 
     #[test]
+    fn dump_capture_format_two_returns_one_recorded_read_at_a_time() {
+        let mut stream = vec![0; 512];
+        let mut writer = RecordWriter::new(&mut stream);
+        assert!(writer.stream_start(1, 0));
+        let first = writer.len();
+        assert!(writer.read_end(1));
+        assert!(writer.data(1, 0, 2, &[3; 8]));
+        let second = bio_abi::record_size(8);
+        assert!(writer.read_end(3));
+        let len = writer.len();
+        stream.truncate(len);
+        let mut capture = DumpCapture::with_format(stream, 2);
+        let mut buffer = [0; 256];
+        assert_eq!(capture.read(&mut buffer, Duration::ZERO), Ok(first));
+        assert_eq!(capture.now_qpc(), Some(1));
+        assert_eq!(capture.read(&mut buffer, Duration::ZERO), Ok(second));
+        assert_eq!(capture.now_qpc(), Some(3));
+        assert_eq!(
+            capture.read(&mut buffer, Duration::ZERO),
+            Err(CaptureError::Ended)
+        );
+    }
+
+    #[test]
+    fn dump_capture_clears_qpc_when_the_next_read_fails() {
+        let mut stream = vec![0; 128];
+        let mut writer = RecordWriter::new(&mut stream);
+        assert!(writer.stream_start(1, 0));
+        let first = writer.len();
+        assert!(writer.read_end(7));
+        let mut len = writer.len();
+        stream[len..len + 3].copy_from_slice(&[1, 2, 3]);
+        len += 3;
+        stream.truncate(len);
+
+        let mut capture = DumpCapture::with_format(stream, 2);
+        let mut buffer = [0; 64];
+        assert_eq!(capture.read(&mut buffer, Duration::ZERO), Ok(first));
+        assert_eq!(capture.now_qpc(), Some(7));
+        assert!(matches!(
+            capture.read(&mut buffer, Duration::ZERO),
+            Err(CaptureError::Io(_))
+        ));
+        assert_eq!(capture.now_qpc(), None);
+    }
+
+    #[test]
     fn dump_capture_reports_end_after_the_last_record() {
         let mut stream = vec![0; 128];
         let mut writer = RecordWriter::new(&mut stream);
@@ -275,6 +373,7 @@ mod tests {
         let mut capture = DumpCapture::new(stream);
         let mut buffer = [0; 64];
         assert_eq!(capture.read(&mut buffer, Duration::ZERO), Ok(len));
+        assert_eq!(capture.now_qpc(), None);
         assert_eq!(
             capture.read(&mut buffer, Duration::ZERO),
             Err(CaptureError::Ended)
@@ -293,7 +392,7 @@ mod tests {
             rate: 48_000,
             period_frames: 4,
         }
-        .open()
+        .open(OutputLayout::STEREO)
         .unwrap();
         let mut fill = |samples: &mut [f32]| {
             for (index, sample) in samples.iter_mut().enumerate() {

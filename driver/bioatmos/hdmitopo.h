@@ -12,13 +12,15 @@ public:
     BIO_UNKNOWN_METHODS;
     IMP_IMiniportTopology;
     static NTSTATUS Property(PPCPROPERTY_REQUEST request);
+    static NTSTATUS AudioProperty(PPCPROPERTY_REQUEST request);
 private:
     LONG references_ = 1;
     CAdapterCommon* adapter_;
     USHORT endpoint_;
+    ULONG channels_;
     PCFILTER_DESCRIPTOR descriptor_{};
     PCPIN_DESCRIPTOR pins_[2]{};
     KSDATARANGE ranges_[BioFormatCount]{};
     PKSDATARANGE pointers_[BioFormatCount]{};
-    PCCONNECTION_DESCRIPTOR connection_{};
+    PCCONNECTION_DESCRIPTOR connections_[3]{};
 };

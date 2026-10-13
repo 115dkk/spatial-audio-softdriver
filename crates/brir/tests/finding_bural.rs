@@ -88,6 +88,7 @@ fn profile(source: BrirSource) -> Profile {
         angles: AnglePreset::Standard,
         angle_overrides: Vec::new(),
         truncate: None,
+        trim_leading_delay: false,
     }
 }
 
@@ -230,6 +231,22 @@ fn mapped_channels_sidecar_preserves_every_track_delay_and_level() {
 }
 
 #[test]
+fn mapped_wav_drops_and_reports_silent_directions() {
+    let directory = TestDirectory::new("mapped-silent");
+    let wav = directory.join("set.wav");
+    let map = directory.join("channels.csv");
+    write_wav(&wav, 48_000, &[vec![1.0], vec![0.5], vec![0.0], vec![0.0]]);
+    fs::write(
+        &map,
+        "speaker,BRIR_left_1based,BRIR_right_1based\nFL,1,2\nTC,3,4\n",
+    )
+    .unwrap();
+    let prepared = prepare(&profile(BrirSource::Mapped { wav, map }), 48_000, 64).unwrap();
+    assert_eq!(prepared.layout.len(), 1);
+    assert_eq!(prepared.omitted_silent_directions, ["TC"]);
+}
+
+#[test]
 fn mapped_reaverb_sidecar_uses_its_track_columns() {
     let directory = TestDirectory::new("mapped-reaverb");
     let wav = directory.join("set.wav");
@@ -331,6 +348,25 @@ fn folder_aliases_are_canonical_and_follow_documented_order() {
         .map(|direction| direction.name.as_str())
         .collect();
     assert_eq!(names, ["FL", "FC", "WL", "HBL", "TSL", "TC"]);
+}
+
+#[test]
+fn folder_drops_and_reports_silent_directions() {
+    let directory = TestDirectory::new("folder-silent");
+    write_wav(&directory.join("FL.wav"), 48_000, &[vec![1.0], vec![0.5]]);
+    write_wav(
+        &directory.join("TC.wav"),
+        48_000,
+        &[vec![0.0; 4], vec![0.0; 4]],
+    );
+    let prepared = prepare(
+        &profile(BrirSource::Folder(directory.0.clone())),
+        48_000,
+        64,
+    )
+    .unwrap();
+    assert_eq!(prepared.layout.len(), 1);
+    assert_eq!(prepared.omitted_silent_directions, ["TC"]);
 }
 
 #[test]

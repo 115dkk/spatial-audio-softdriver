@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use bio_types::{Direction, DirectionId, Layout};
 use convolver::FilterBank;
+use realfft::RealFftPlanner;
 use rubato::audioadapter::Adapter;
 use rubato::audioadapter_buffers::owned::InterleavedOwned;
 use rubato::{Fft, FixedSync, Resampler, WindowFunction};
@@ -166,6 +167,10 @@ pub struct Profile {
     /// Per-direction (canonical name, azimuth_deg, elevation_deg) overriding the preset.
     pub angle_overrides: Vec<(String, f32, f32)>,
     pub truncate: Option<Truncation>,
+    /// Remove delay common to every direction and ear, retaining 1 ms of margin.
+    /// Profile TOML defaults this to `true`; set `trim_leading_delay = false` for
+    /// the previous bit-identical prepared IRs.
+    pub trim_leading_delay: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -229,6 +234,10 @@ pub struct PreparedBrir {
     pub limiter_ceiling: f32,
     /// Length in frames of the longest filter after folding and resampling.
     pub ir_frames: usize,
+    /// Direction names omitted because both ears were exactly silent.
+    pub omitted_silent_directions: Vec<String>,
+    /// Frames removed equally from the front of every direction and ear.
+    pub trimmed_leading_frames: usize,
 }
 
 const CANONICAL_ORDER: [&str; 21] = [
@@ -346,6 +355,8 @@ struct ProfileToml {
     angles: AnglePresetToml,
     truncate_ms: Option<f32>,
     fade_ms: Option<f32>,
+    #[serde(default = "default_true")]
+    trim_leading_delay: bool,
     #[serde(default)]
     angle_overrides: BTreeMap<String, [f32; 2]>,
     brir: BrirToml,
@@ -369,6 +380,10 @@ impl From<AnglePresetToml> for AnglePreset {
             AnglePresetToml::Room21 => Self::Room21,
         }
     }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -406,6 +421,7 @@ struct LfeToml {
 /// name = "demo"
 /// gain_db = 0.0
 /// limiter_ceiling_dbfs = -1.0
+/// trim_leading_delay = true       # default; retain 1 ms before the earliest onset
 ///
 /// [brir]
 /// hesuvi = "hesuvi.wav"          # or: hrir = "hrir.wav"
@@ -515,6 +531,7 @@ pub fn load_profile(path: &Path) -> Result<Profile, BrirError> {
         angles: parsed.angles.into(),
         angle_overrides,
         truncate,
+        trim_leading_delay: parsed.trim_leading_delay,
     })
 }
 
@@ -572,6 +589,12 @@ pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<Prepare
         }
     }
 
+    let trimmed_leading_frames = if profile.trim_leading_delay {
+        trim_common_leading_delay(&mut loaded.irs, rate)
+    } else {
+        0
+    };
+
     if let Some(truncation) = profile.truncate {
         truncate_irs(&mut loaded.irs, rate, truncation);
     }
@@ -609,6 +632,8 @@ pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<Prepare
         gain: db_to_linear(profile.gain_db),
         limiter_ceiling: db_to_linear(profile.limiter_ceiling_dbfs),
         ir_frames,
+        omitted_silent_directions: loaded.omitted_silent_directions,
+        trimmed_leading_frames,
     })
 }
 
@@ -628,10 +653,28 @@ struct LoadedBrir {
     rate: u32,
     directions: Vec<Direction>,
     irs: Vec<[Vec<f32>; 2]>,
+    omitted_silent_directions: Vec<String>,
+}
+
+impl LoadedBrir {
+    fn omit_silent_directions(&mut self) {
+        let mut kept_directions = Vec::with_capacity(self.directions.len());
+        let mut kept_irs = Vec::with_capacity(self.irs.len());
+        for (direction, ears) in self.directions.drain(..).zip(self.irs.drain(..)) {
+            if is_silent(&ears[0]) && is_silent(&ears[1]) {
+                self.omitted_silent_directions.push(direction.name);
+            } else {
+                kept_directions.push(direction);
+                kept_irs.push(ears);
+            }
+        }
+        self.directions = kept_directions;
+        self.irs = kept_irs;
+    }
 }
 
 fn load_brir_source(source: &BrirSource, profile: &Profile) -> Result<LoadedBrir, BrirError> {
-    match source {
+    let mut loaded = match source {
         BrirSource::Hesuvi(path) => {
             load_ordered_wav(path, &HESUVI_TRACK_ORDER, 14, "HeSuVi", profile)
         }
@@ -639,7 +682,12 @@ fn load_brir_source(source: &BrirSource, profile: &Profile) -> Result<LoadedBrir
         BrirSource::Directions(files) => load_direction_files(files),
         BrirSource::Mapped { wav, map } => load_mapped_wav(wav, map, profile),
         BrirSource::Folder(path) => load_folder(path, profile),
+    }?;
+    loaded.omit_silent_directions();
+    if loaded.directions.is_empty() {
+        return Err(BrirError::Layout(bio_types::LayoutError::Empty));
     }
+    Ok(loaded)
 }
 
 fn load_ordered_wav(
@@ -693,9 +741,6 @@ fn load_ordered_wav(
                 format,
             });
         };
-        if is_silent(&left) && is_silent(&right) {
-            continue;
-        }
         let (azimuth, elevation) = angles_for(profile, name)?;
         directions.push(Direction::new(name, azimuth, elevation));
         irs.push([left, right]);
@@ -712,6 +757,7 @@ fn load_ordered_wav(
         rate: wav.rate,
         directions,
         irs,
+        omitted_silent_directions: Vec::new(),
     })
 }
 
@@ -738,6 +784,7 @@ fn load_direction_files(files: &[DirectionFile]) -> Result<LoadedBrir, BrirError
             rate: 0,
             directions: Vec::new(),
             irs: Vec::new(),
+            omitted_silent_directions: Vec::new(),
         });
     }
     let mut rate = None;
@@ -781,6 +828,7 @@ fn load_direction_files(files: &[DirectionFile]) -> Result<LoadedBrir, BrirError
         rate: rate.expect("nonempty files set a rate"),
         directions,
         irs,
+        omitted_silent_directions: Vec::new(),
     })
 }
 
@@ -867,6 +915,7 @@ fn load_mapped_wav(
         rate: wav.rate,
         directions,
         irs,
+        omitted_silent_directions: Vec::new(),
     })
 }
 
@@ -984,6 +1033,7 @@ fn load_folder(path: &Path, profile: &Profile) -> Result<LoadedBrir, BrirError> 
         rate: rate.unwrap_or(0),
         directions,
         irs,
+        omitted_silent_directions: Vec::new(),
     })
 }
 
@@ -1112,13 +1162,64 @@ fn map_wav_error(path: &Path, error: hound::Error) -> BrirError {
 }
 
 fn convolve(signal: &[f32], filter: &[f32]) -> Vec<f32> {
-    let mut output = vec![0.0; signal.len() + filter.len() - 1];
-    for (signal_index, signal_sample) in signal.iter().enumerate() {
-        for (filter_index, filter_sample) in filter.iter().enumerate() {
-            output[signal_index + filter_index] += signal_sample * filter_sample;
-        }
+    debug_assert!(!signal.is_empty() && !filter.is_empty());
+    let output_len = signal.len() + filter.len() - 1;
+    let fft_len = output_len.next_power_of_two();
+    let mut planner = RealFftPlanner::<f32>::new();
+    let forward = planner.plan_fft_forward(fft_len);
+    let inverse = planner.plan_fft_inverse(fft_len);
+    let mut signal_time = forward.make_input_vec();
+    let mut filter_time = forward.make_input_vec();
+    signal_time[..signal.len()].copy_from_slice(signal);
+    filter_time[..filter.len()].copy_from_slice(filter);
+    let mut signal_spectrum = forward.make_output_vec();
+    let mut filter_spectrum = forward.make_output_vec();
+    forward
+        .process(&mut signal_time, &mut signal_spectrum)
+        .expect("planner-sized signal buffers are valid");
+    forward
+        .process(&mut filter_time, &mut filter_spectrum)
+        .expect("planner-sized filter buffers are valid");
+    for (signal_bin, filter_bin) in signal_spectrum.iter_mut().zip(filter_spectrum) {
+        *signal_bin *= filter_bin;
+    }
+    let mut output = inverse.make_output_vec();
+    inverse
+        .process(&mut signal_spectrum, &mut output)
+        .expect("planner-sized inverse buffers are valid");
+    let scale = 1.0 / fft_len as f32;
+    output.truncate(output_len);
+    for sample in &mut output {
+        *sample *= scale;
     }
     output
+}
+
+fn trim_common_leading_delay(irs: &mut [[Vec<f32>; 2]], rate: u32) -> usize {
+    let earliest = irs
+        .iter()
+        .flat_map(|ears| ears.iter())
+        .map(|samples| {
+            let peak = samples
+                .iter()
+                .map(|sample| sample.abs())
+                .fold(0.0, f32::max);
+            let threshold = peak * 10.0_f32.powf(-60.0 / 20.0);
+            samples
+                .iter()
+                .position(|sample| sample.abs() > threshold)
+                .unwrap_or(0)
+        })
+        .min()
+        .unwrap_or(0);
+    let margin = (u64::from(rate) / 1_000) as usize;
+    let trim = earliest.saturating_sub(margin);
+    if trim != 0 {
+        for samples in irs.iter_mut().flat_map(|ears| ears.iter_mut()) {
+            samples.drain(..trim.min(samples.len()));
+        }
+    }
+    trim
 }
 
 fn resample_channels(
@@ -1161,15 +1262,67 @@ fn resample_channels(
     let output = resampler
         .process_all(&input, input_frames, None)
         .map_err(|error| BrirError::Resample(error.to_string()))?;
+    // The resampler keeps sample amplitude, but an impulse response sampled
+    // at a higher rate has proportionally more taps: scaling by the rate ratio
+    // keeps its frequency response (DC gain included) instead of its peak, so
+    // a set measured at 96 kHz plays as loud as the same set at 48 kHz.
+    let scale = input_rate as f32 / output_rate as f32;
     let mut deinterleaved = vec![Vec::with_capacity(output.frames()); channel_count];
     for frame in 0..output.frames() {
         for (channel, destination) in deinterleaved.iter_mut().enumerate() {
             destination.push(
                 output
                     .read_sample(channel, frame)
-                    .expect("channel and frame are within the output adapter"),
+                    .expect("channel and frame are within the output adapter")
+                    * scale,
             );
         }
     }
     Ok(deinterleaved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct_convolve(signal: &[f32], filter: &[f32]) -> Vec<f32> {
+        let mut output = vec![0.0; signal.len() + filter.len() - 1];
+        for (signal_index, signal_sample) in signal.iter().enumerate() {
+            for (filter_index, filter_sample) in filter.iter().enumerate() {
+                output[signal_index + filter_index] += signal_sample * filter_sample;
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn fft_convolution_matches_direct_reference() {
+        let cases = [(1, 1), (3, 7), (31, 257), (70_000, 3), (3, 70_000)];
+        let mut state = 0x243f_6a88_u32;
+        let mut maximum_ratio = 0.0_f32;
+        for (signal_len, filter_len) in cases {
+            let mut next = || {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state as f32 / u32::MAX as f32 - 0.5) * 0.25
+            };
+            let signal: Vec<f32> = (0..signal_len).map(|_| next()).collect();
+            let filter: Vec<f32> = (0..filter_len).map(|_| next()).collect();
+            let actual = convolve(&signal, &filter);
+            let expected = direct_convolve(&signal, &filter);
+            let scale = signal.iter().map(|sample| sample.abs()).sum::<f32>()
+                * filter.iter().map(|sample| sample.abs()).fold(0.0, f32::max);
+            let tolerance = 1.0e-6 * scale.max(f32::MIN_POSITIVE);
+            let maximum_error = actual
+                .iter()
+                .zip(expected)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f32::max);
+            maximum_ratio = maximum_ratio.max(maximum_error / scale.max(f32::MIN_POSITIVE));
+            assert!(
+                maximum_error <= tolerance,
+                "{signal_len}x{filter_len}: error {maximum_error}, tolerance {tolerance}"
+            );
+        }
+        eprintln!("maximum FFT convolution normalized error: {maximum_ratio:e}");
+    }
 }

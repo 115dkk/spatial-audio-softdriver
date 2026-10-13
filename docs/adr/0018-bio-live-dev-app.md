@@ -24,3 +24,11 @@ SAL 링은 관리자 권한이 있어야 열리므로 `record`와 `play`는 관�
 - 릴리스 워크플로는 bio-live를 패키징하지 않습니다. SAL 드라이버를 가진 개발 PC에서만 의미가 있기 때문입니다. 필요하면 CI 산출물로만 받습니다.
   - 2026-10-12 고침: SAL을 깐 시험서명 PC를 가진 분이 릴리스를 받아 M2의 남은 시험(SAL 링 녹화, 듣기, 지연)을 맡습니다(`docs/testing/test-signed-pc.md`). 그래서 릴리스의 Windows 도구 zip에 bio-live를 싣습니다. SAL이 없는 PC에서는 `record`와 `play`가 SAL 장치를 찾지 못했다고 끝나므로 다른 사람에게 해가 없습니다.
 - M4에서 Tauri 앱이 생기면 bio-live의 엔진 배선은 supervisor로 옮겨 가고, `record`는 앱의 진단 녹화가 대신합니다. 그때 이 앱을 지울지 다시 정합니다.
+- 2026-10-13 고침: 우리 드라이버가 생겼으므로 `record`와 `play`는 `--source driver|sal`을 받고, 기본은 `driver`(`\\.\SpatialSoftReceiver`, `bio-sys::bio_ring`)입니다. SAL은 `--source sal`일 때만 엽니다. 시험 안내서의 SAL 명령도 이것을 씁니다.
+  - `--endpoints`는 엔드포인트의 임의 부분집합을 받습니다(예: `0,2`).
+  - `devices`는 드라이버의 엔드포인트 마스크와 QPC 주파수, 그리고 엔드포인트마다 켜진 코덱과 PCM 규칙(표본율, 표본 모양, 마스크 채널 상한, 직접 출력 채널 수)도 보여 줍니다(ADR 0024).
+  - `play`는 `--direct-layout <채널 수>=<프리셋|이름,...>`으로 채널 마스크가 0인 PCM의 직접 배치를 정합니다. 여러 번 줄 수 있습니다(ADR 0029의 2026-10-13 고침).
+  - 녹화는 덤프 형식 2로 READ 경계를 남깁니다(ADR 0024). 지금은 볼륨 기록이 32채널인 형식 3으로 씁니다.
+  - `play --record`의 녹음 고리가 차서 버린 READ는 `RECORDER_GAP`과 보고의 손실 바이트로 드러납니다.
+  - 보고 JSON에는 드라이버 통계(`GET_STATS`)의 처음과 끝 차이가 들어갑니다.
+

@@ -17,6 +17,7 @@ pub mod feeds;
 pub mod format;
 pub mod layout;
 pub mod ports;
+pub mod position;
 pub mod scene;
 pub mod status;
 
@@ -24,11 +25,15 @@ pub use feeds::Feeds;
 pub use format::{BitstreamCodec, BitstreamFormat, PcmFormat, SampleType, SourceFormat};
 pub use layout::{Direction, DirectionId, Layout, LayoutError};
 pub use ports::{
-    CaptureError, CaptureSource, Host, OutputError, OutputFormat, OutputOpener, OutputSink,
-    TrimUnsupported,
+    CaptureError, CaptureSource, Host, OutputError, OutputFormat, OutputLayout, OutputMode,
+    OutputOpener, OutputSink, TrimUnsupported,
 };
+pub use position::{Speaker, direction_to_room, room_to_direction};
 pub use scene::{MAX_OBJECTS, Object, Position, SceneBlock};
-pub use status::{EngineFault, EngineStatus, LatencyStats};
+pub use status::{
+    ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault, EngineStatus, LatencyStats,
+    UnderrunSnapshot,
+};
 
 /// The scene sample rate every decoder produces unless the source says otherwise.
 pub const SCENE_RATE: u32 = 48_000;

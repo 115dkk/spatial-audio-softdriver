@@ -14,7 +14,9 @@ public:
     IMP_IMiniportWaveRTOutputStream;
     NTSTATUS Initialize(PKSDATAFORMAT format);
     // All below execute under adapter's stream lock, including destruction.
-    void UpdatePosition(ULONGLONG qpc);
+    // UpdatePosition also needs the control lock: only
+    // CAdapterCommon::UpdatePositions calls it, for every stream at once.
+    void UpdatePosition(ULONGLONG qpc, LONG trim);
     void PowerResume(ULONGLONG qpc);
     void AdapterStop(ULONGLONG qpc);
 private:

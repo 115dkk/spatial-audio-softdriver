@@ -6,12 +6,16 @@ use zerocopy::{FromBytes, IntoBytes};
 
 use crate::wave::{WaveFormatError, parse_wave_format};
 use crate::wire::{
-    ENDPOINT_PRIMARY, OverrunPayload, RECORD_ALIGN, RECORD_FLAG_FORMAT_REPEAT, RECORD_KIND_DATA,
-    RECORD_KIND_FORMAT_CHANGE, RECORD_KIND_OVERRUN, RECORD_KIND_STREAM_START,
-    RECORD_KIND_STREAM_STOP, RecordHeader,
+    ENDPOINT_PRIMARY, MAX_VOLUME_CHANNELS, OverrunPayload, RECORD_ALIGN, RECORD_ENDPOINT_RECORDER,
+    RECORD_FLAG_REPEAT, RECORD_KIND_DATA, RECORD_KIND_FORMAT_CHANGE, RECORD_KIND_OVERRUN,
+    RECORD_KIND_READ_END, RECORD_KIND_RECORDER_GAP, RECORD_KIND_STREAM_START,
+    RECORD_KIND_STREAM_STOP, RECORD_KIND_VOLUME, RecordHeader, VOLUME_MAX_Q16, VOLUME_MIN_Q16,
+    VolumePayload,
 };
 
 const HEADER: usize = size_of::<RecordHeader>();
+const LEGACY_VOLUME_CHANNELS: usize = 16;
+const LEGACY_VOLUME_BYTES: usize = 8 + LEGACY_VOLUME_CHANNELS * size_of::<i32>();
 
 /// One parsed record. Borrowed slices point into the buffer given to
 /// [`records`]; nothing allocates.
@@ -29,21 +33,31 @@ pub enum Record<'a> {
     FormatChange {
         endpoint: u16,
         epoch: u32,
-        /// [`crate::RECORD_FLAG_FORMAT_REPEAT`] when the record restates the
-        /// current format after an overrun (the epoch does not change).
-        flags: u16,
+        /// True when this restates the current format and does not increment the
+        /// epoch.
+        repeat: bool,
         qpc: u64,
         format: SourceFormat,
     },
     StreamStart {
         endpoint: u16,
         epoch: u32,
+        repeat: bool,
         qpc: u64,
     },
     StreamStop {
         endpoint: u16,
         epoch: u32,
+        repeat: bool,
         qpc: u64,
+    },
+    Volume {
+        endpoint: u16,
+        repeat: bool,
+        qpc: u64,
+        channel_count: u32,
+        mute_mask: u32,
+        levels: [i32; MAX_VOLUME_CHANNELS],
     },
     Overrun {
         endpoint: u16,
@@ -60,12 +74,13 @@ impl Record<'_> {
             | Self::FormatChange { endpoint, .. }
             | Self::StreamStart { endpoint, .. }
             | Self::StreamStop { endpoint, .. }
+            | Self::Volume { endpoint, .. }
             | Self::Overrun { endpoint, .. } => endpoint,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AbiError {
     /// The buffer ends inside a header or payload. A READ never returns a cut
     /// record, so this means a damaged buffer or a truncated dump.
@@ -87,6 +102,8 @@ pub enum AbiError {
         kind: u16,
         len: u32,
     },
+    #[error("invalid volume state at offset {offset} from endpoint {endpoint}")]
+    BadVolume { offset: usize, endpoint: u16 },
     #[error("format-change record at offset {offset} from endpoint {endpoint}: {source}")]
     BadFormat {
         offset: usize,
@@ -173,7 +190,7 @@ impl<'a> Iterator for Records<'a> {
                         .map(|format| Record::FormatChange {
                             endpoint: header.endpoint,
                             epoch: header.epoch,
-                            flags: header.flags,
+                            repeat: header.flags & RECORD_FLAG_REPEAT != 0,
                             qpc: header.qpc,
                             format,
                         })
@@ -187,13 +204,58 @@ impl<'a> Iterator for Records<'a> {
                 RECORD_KIND_STREAM_START => Some(Ok(Record::StreamStart {
                     endpoint: header.endpoint,
                     epoch: header.epoch,
+                    repeat: header.flags & RECORD_FLAG_REPEAT != 0,
                     qpc: header.qpc,
                 })),
                 RECORD_KIND_STREAM_STOP => Some(Ok(Record::StreamStop {
                     endpoint: header.endpoint,
                     epoch: header.epoch,
+                    repeat: header.flags & RECORD_FLAG_REPEAT != 0,
                     qpc: header.qpc,
                 })),
+                RECORD_KIND_VOLUME => {
+                    let parsed = if let Ok(p) = VolumePayload::read_from_bytes(payload) {
+                        Some(p)
+                    } else if payload.len() == LEGACY_VOLUME_BYTES {
+                        let channel_count = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+                        if channel_count as usize > LEGACY_VOLUME_CHANNELS {
+                            return Some(Err(AbiError::BadVolume {
+                                offset,
+                                endpoint: header.endpoint,
+                            }));
+                        }
+                        let mut p = VolumePayload {
+                            channel_count,
+                            mute_mask: u32::from_le_bytes(payload[4..8].try_into().unwrap()),
+                            level_q16: [0; MAX_VOLUME_CHANNELS],
+                        };
+                        let (levels, remainder) = payload[8..].as_chunks::<4>();
+                        debug_assert!(remainder.is_empty());
+                        for (level, bytes) in
+                            p.level_q16[..LEGACY_VOLUME_CHANNELS].iter_mut().zip(levels)
+                        {
+                            *level = i32::from_le_bytes(*bytes);
+                        }
+                        Some(p)
+                    } else {
+                        None
+                    };
+                    match parsed {
+                        Some(p) if volume_valid(&p) => Some(Ok(Record::Volume {
+                            endpoint: header.endpoint,
+                            repeat: header.flags & RECORD_FLAG_REPEAT != 0,
+                            qpc: header.qpc,
+                            channel_count: p.channel_count,
+                            mute_mask: p.mute_mask,
+                            levels: p.level_q16,
+                        })),
+                        Some(_) => Some(Err(AbiError::BadVolume {
+                            offset,
+                            endpoint: header.endpoint,
+                        })),
+                        None => bad_length(),
+                    }
+                }
                 RECORD_KIND_OVERRUN => match OverrunPayload::read_from_bytes(payload) {
                     Ok(p) => Some(Ok(Record::Overrun {
                         endpoint: header.endpoint,
@@ -207,6 +269,38 @@ impl<'a> Iterator for Records<'a> {
             };
         }
     }
+}
+
+fn volume_valid(payload: &VolumePayload) -> bool {
+    let count = payload.channel_count as usize;
+    (1..=MAX_VOLUME_CHANNELS).contains(&count)
+        && (count == 32 || payload.mute_mask >> count == 0)
+        && payload.level_q16[..count]
+            .iter()
+            .all(|level| (VOLUME_MIN_Q16..=VOLUME_MAX_Q16).contains(level))
+        && payload.level_q16[count..].iter().all(|level| *level == 0)
+}
+
+/// RMS of the channel gains, including muted channels as zero power. No channel
+/// represents a master. Invalid payloads fail closed (zero gain); the parser
+/// rejects them. Quantization is a driver constraint, not a gain approximation.
+pub fn volume_gain(payload: &VolumePayload) -> f32 {
+    if !volume_valid(payload) {
+        return 0.0;
+    }
+    let count = payload.channel_count as usize;
+    let power: f64 = payload.level_q16[..count]
+        .iter()
+        .enumerate()
+        .map(|(i, level)| {
+            if payload.mute_mask & (1 << i) != 0 {
+                0.0
+            } else {
+                10_f64.powf(f64::from(*level) / (65536.0 * 10.0))
+            }
+        })
+        .sum();
+    (power / count as f64).sqrt() as f32
 }
 
 fn padded(n: usize) -> usize {
@@ -296,7 +390,7 @@ impl<'a> RecordWriter<'a> {
     /// ring may have dropped the format change that opened it.
     pub fn format_repeat(&mut self, epoch: u32, qpc: u64, wave_format: &[u8]) -> bool {
         let mut header = header(self.endpoint, RECORD_KIND_FORMAT_CHANGE, epoch, 0, qpc);
-        header.flags = RECORD_FLAG_FORMAT_REPEAT;
+        header.flags = RECORD_FLAG_REPEAT;
         self.push(header, wave_format)
     }
 
@@ -307,6 +401,12 @@ impl<'a> RecordWriter<'a> {
         )
     }
 
+    pub fn stream_start_repeat(&mut self, epoch: u32, qpc: u64) -> bool {
+        let mut header = header(self.endpoint, RECORD_KIND_STREAM_START, epoch, 0, qpc);
+        header.flags = RECORD_FLAG_REPEAT;
+        self.push(header, &[])
+    }
+
     pub fn stream_stop(&mut self, epoch: u32, qpc: u64) -> bool {
         self.push(
             header(self.endpoint, RECORD_KIND_STREAM_STOP, epoch, 0, qpc),
@@ -314,9 +414,46 @@ impl<'a> RecordWriter<'a> {
         )
     }
 
+    pub fn stream_stop_repeat(&mut self, epoch: u32, qpc: u64) -> bool {
+        let mut header = header(self.endpoint, RECORD_KIND_STREAM_STOP, epoch, 0, qpc);
+        header.flags = RECORD_FLAG_REPEAT;
+        self.push(header, &[])
+    }
+
+    pub fn volume(&mut self, qpc: u64, repeat: bool, payload: &VolumePayload) -> bool {
+        if !volume_valid(payload) {
+            return false;
+        }
+        let mut h = header(self.endpoint, RECORD_KIND_VOLUME, 0, 0, qpc);
+        h.flags = if repeat { RECORD_FLAG_REPEAT } else { 0 };
+        self.push(h, payload.as_bytes())
+    }
+
     pub fn overrun(&mut self, pos: u64, qpc: u64, lost_bytes: u64) -> bool {
         self.push(
             header(self.endpoint, RECORD_KIND_OVERRUN, 0, pos, qpc),
+            OverrunPayload { lost_bytes }.as_bytes(),
+        )
+    }
+
+    /// Appends the recorder-only marker terminating one captured READ.
+    pub fn read_end(&mut self, qpc: u64) -> bool {
+        self.push(
+            header(RECORD_ENDPOINT_RECORDER, RECORD_KIND_READ_END, 0, 0, qpc),
+            &[],
+        )
+    }
+
+    /// Appends the recorder-only count of READ bytes dropped by the recorder.
+    pub fn recorder_gap(&mut self, qpc: u64, lost_bytes: u64) -> bool {
+        self.push(
+            header(
+                RECORD_ENDPOINT_RECORDER,
+                RECORD_KIND_RECORDER_GAP,
+                0,
+                0,
+                qpc,
+            ),
             OverrunPayload { lost_bytes }.as_bytes(),
         )
     }
@@ -553,18 +690,21 @@ mod tests {
             Ok(Record::StreamStart {
                 endpoint: ENDPOINT_PRIMARY,
                 epoch: 0,
+                repeat: false,
                 qpc: 2
             })
         ));
     }
 
     #[test]
-    fn a_format_repeat_keeps_the_epoch_and_carries_its_flag() {
+    fn repeated_state_exposes_repeat_and_keeps_the_epoch() {
         let mut buf = vec![0; 512];
         let mut w = RecordWriter::new(&mut buf);
         w.set_endpoint(crate::ENDPOINT_SECOND);
         assert!(w.format_change(4, 1, &wave_format_bytes(&mat21())));
         assert!(w.format_repeat(4, 2, &wave_format_bytes(&mat21())));
+        assert!(w.stream_start_repeat(4, 3));
+        assert!(w.stream_stop_repeat(4, 4));
         let n = w.len();
         let parsed: Vec<_> = records(&buf[..n]).collect::<Result<_, _>>().unwrap();
         assert_eq!(
@@ -573,19 +713,48 @@ mod tests {
                 Record::FormatChange {
                     endpoint: crate::ENDPOINT_SECOND,
                     epoch: 4,
-                    flags: 0,
+                    repeat: false,
                     qpc: 1,
                     format: mat21()
                 },
                 Record::FormatChange {
                     endpoint: crate::ENDPOINT_SECOND,
                     epoch: 4,
-                    flags: crate::RECORD_FLAG_FORMAT_REPEAT,
+                    repeat: true,
                     qpc: 2,
                     format: mat21()
                 },
+                Record::StreamStart {
+                    endpoint: crate::ENDPOINT_SECOND,
+                    epoch: 4,
+                    repeat: true,
+                    qpc: 3,
+                },
+                Record::StreamStop {
+                    endpoint: crate::ENDPOINT_SECOND,
+                    epoch: 4,
+                    repeat: true,
+                    qpc: 4,
+                },
             ]
         );
+    }
+
+    #[test]
+    fn volume_32_channels_round_trips() {
+        let payload = VolumePayload {
+            channel_count: 32,
+            mute_mask: 0x8000_0001,
+            level_q16: [-65536; MAX_VOLUME_CHANNELS],
+        };
+        let mut buf = [0; 176];
+        let mut writer = RecordWriter::new(&mut buf);
+        assert!(writer.volume(42, false, &payload));
+        assert_eq!(writer.len(), 176);
+        assert!(matches!(records(&buf).next(), Some(Ok(Record::Volume {
+            channel_count: 32, mute_mask: 0x8000_0001, levels, ..
+        })) if levels == payload.level_q16));
+        assert!(volume_gain(&payload) > 0.0);
     }
 
     #[test]
@@ -646,6 +815,7 @@ mod tests {
                         Record::StreamStart { .. } => 2,
                         Record::StreamStop { .. } => 3,
                         Record::Overrun { .. } => 4,
+                        Record::Volume { .. } => 5,
                     };
                     (record.endpoint(), kind)
                 })

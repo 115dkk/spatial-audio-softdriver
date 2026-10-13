@@ -53,6 +53,7 @@ tests = [
   "bio-abi::a_payload_on_a_stop_record_is_an_error_but_not_the_end",
   "bio-abi::arbitrary_bytes_never_panic",
   "bio-abi::the_largest_data_record_fits_one_read",
+  "bio-abi::repeated_state_exposes_repeat_and_keeps_the_epoch",
 ]
 
 [[feature]]
@@ -87,7 +88,14 @@ id = "abi.dump_file"
 kind = "abi"
 milestone = "M0"
 status = "implemented"
-tests = ["bio-abi::header_round_trips_and_guards_the_magic"]
+tests = [
+  "bio-abi::header_round_trips_and_guards_the_magic",
+  "bio-abi::format_two_reads_round_trip_boundaries_empty_reads_tail_and_gaps",
+  "bio-abi::formats_zero_and_one_are_one_unbounded_read",
+  "bio-abi::old_records_iterator_skips_recorder_markers",
+  "bio-abi::recorder_gap_inside_a_read_keeps_the_bytes_before_it",
+]
+note = "dump format 3 (format 2 plus 136-byte, 32-channel volume records) preserves each READ with recorder-only READ_END markers and reports recorder loss with RECORDER_GAP; formats 0 to 2 remain readable, including their 72-byte, 16-channel volume records"
 
 [[feature]]
 id = "types.scene"
@@ -157,12 +165,23 @@ tests = [
   "decode::speaker_bits_cover_standard_positions_only",
   "decode::seven_one_mask_routes_in_bit_order_and_separates_lfe",
   "decode::seven_one_four_pcm_preserves_height_channels_and_lfe_across_fragments",
+  "decode::ffmpeg_native_direct_defaults_and_presets_have_the_documented_order",
+  "decode::direct_layout_argument_validates_count_names_and_duplicates",
+  "decode::direct_pcm_routes_sixteen_channels_and_lfe_in_ffmpeg_native_order",
+  "decode::custom_direct_layout_enables_eleven_and_thirty_two_channels",
+  "decode::every_wave_speaker_bit_and_common_masks_route_in_bit_order",
+  "decode::thirty_two_channel_direct_configure_push_and_reset_do_not_allocate",
   "decode::configure_rejects_invalid_shapes_and_deselects_old_format",
   "decode::partial_first_frame_keeps_its_first_byte_qpc",
   "decode::reset_reconfigure_and_epoch_change_discard_remainders",
+  "decode::flush_emits_complete_pcm_residuals_and_discards_partial_frames",
+  "decode::emit_buffered_emits_complete_frames_and_keeps_a_partial_frame",
+  "decode::pcm_emit_buffered_does_not_allocate",
   "decode::arbitrary_byte_chunking_preserves_blocks",
   "decode::pcm_configure_push_reset_do_not_allocate",
   "decode::emitted_scene_borrows_the_written_signals",
+  "engine::default_chain_decodes_all_six_pcm_rates_through_record_stream",
+  "engine::plain_stereo_ignores_direct_override_but_zero_mask_extensible_uses_it",
 ]
 
 [[feature]]
@@ -184,9 +203,10 @@ tests = [
   "decode::ddp_rejects_bad_access_units_without_emitting_and_recovers",
   "decode::access_unit_groups_short_frames_and_matching_dependents",
   "decode::bed_table_uses_left_positive_angles",
+  "decode::ddp_and_pcm_use_the_same_nominal_speaker_table",
   "decode::rejected_pushes_do_not_allocate_error_strings",
 ]
-note = "bed channels and LFE from harletty-bridge eac3 (pinned commit); fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. The eac3 crate allocates per frame upstream"
+note = "bed channels and LFE from pinned harletty-bridge eac3; shared bio-types::Speaker nominal positions preserve PCM/DD+ angles and exclude measured BRIR presets. Fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. Upstream eac3 allocates per frame; adapter buffers and OAMD timeline are preallocated"
 
 [[feature]]
 id = "decode.ddp_joc"
@@ -198,8 +218,23 @@ tests = [
   "decode::object_mapping_skips_oamd_beds_and_does_not_duplicate_downmix",
   "decode::pure_bed_joc_uses_assignments_without_lfe_object",
   "decode::unknown_object_position_is_not_silently_rendered_at_front",
+  "bio-types::room_corners_follow_bs2127_reference_layout",
+  "bio-types::room_conversion_is_symmetric_and_invertible_on_dense_grid",
+  "bio-types::room_conversion_is_continuous_away_from_directionless_centre",
+  "bio-types::room_conversion_handles_nonfinite_and_clamped_inputs",
+  "decode::two_oamd_blocks_emit_two_scenes_and_preserve_every_sample",
+  "decode::long_oamd_ramp_is_interpolated_in_room_coordinates",
+  "decode::oamd_offsets_and_ramps_continue_across_access_units",
+  "decode::indexed_2048_sample_ramp_and_short_syncframes_preserve_timing",
+  "decode::discontinuity_discards_future_updates_and_reset_forgets_positions",
+  "decode::unknown_differential_stays_diffuse_until_absolute_then_adds_delta",
+  "decode::differential_uses_previous_target_not_interpolated_position",
+  "decode::reused_metadata_does_not_reapply_delta_or_stale_gain",
+  "decode::malformed_oamd_and_queue_overflow_fail_without_allocating",
+  "decode::mixed_reconstructed_beds_and_dynamic_objects_follow_oamd_order",
+  "decode::five_channel_joc_accepts_replacement_bed_but_refuses_expanded_bed",
 ]
-note = "JOC objects are mapped from eac3's OAMD output, but no real Atmos sample has been decoded yet: ddp_joc_external_sample_has_positioned_objects is ignored until BIO_DDP_JOC_SAMPLE points at one, and the result is checked against Omniphony"
+note = "BS.2127-1 section 10.1 room-to-direction conversion; ETSI TS 103 420 OAMD block timing, room-coordinate ramps in <=256-sample scenes, differential targets and diffuse unknown positions. Mixed reconstructed beds/dynamic objects and five-channel replacement dependent beds supported by synthetic tests only: 실제 스트림으로 확인 안 됨. Five-channel JOC on an expanded bed is refused because upstream omits fold-down metadata; ISF/alternate mapping and extended-precision OAMD remain unsupported/upstream limitations. No real Atmos sample verified: ddp_joc_external_sample_has_positioned_objects remains ignored pending BIO_DDP_JOC_SAMPLE and Omniphony comparison"
 
 [[feature]]
 id = "decode.truehd"
@@ -214,6 +249,14 @@ kind = "pipeline"
 milestone = "M1"
 status = "implemented"
 tests = [
+  "render::hull_search_matches_the_brute_force_reference",
+  "render::spread_zero_matches_point_vbap_exactly",
+  "render::spread_keeps_unit_power",
+  "render::wider_spread_reaches_more_directions",
+  "render::full_spread_is_nearly_diffuse",
+  "render::spread_is_mirror_symmetric",
+  "render::spread_is_continuous",
+  "render::spread_is_continuous_across_the_zenith",
   "render::random_3d_gains_are_non_negative_and_unit_power",
   "render::random_3d_gains_stay_unit_power_for_many_samples",
   "render::seven_one_four_is_exact_on_every_measured_direction",
@@ -224,13 +267,10 @@ tests = [
   "render::horizontal_five_one_uses_at_most_two_directions",
   "render::near_horizontal_layout_projects_measured_elevations_to_azimuth",
   "render::two_direction_arc_pans_between_endpoints",
-  "render::moving_object_ramps_across_the_block_boundary_and_reset_skips_it",
-  "render::returning_object_index_starts_without_a_ramp",
-  "render::lfe_route_and_object_gain_are_applied",
-  "render::degenerate_layout_and_bad_lfe_route_are_rejected",
-  "render::steady_state_render_of_thirty_one_objects_into_twenty_two_directions_does_not_allocate",
+  "render::degenerate_layouts_are_rejected",
+  "render::pan_geometry_gains_do_not_allocate",
 ]
-note = "spread is ignored; the hull is built by brute force (O(n^4)) when the panner is created"
+note = "VBAP over the directions' convex hull (pairs on a horizontal ring, one direction alone); spread renders as MDAP over the object axis and three rings of virtual sources with sin-weighted power averaging; the hull is the brute-force plane search, stopped per plane as soon as points lie on both sides, which for at most 66 points (64 directions and two virtual poles) is a few million plane tests at preparation on the control thread, and hull_search_matches_the_brute_force_reference guards that the optimisation keeps every face"
 
 [[feature]]
 id = "convolver.partitioned"
@@ -258,15 +298,21 @@ tests = [
   "brir::synthetic_hesuvi_maps_every_direction_and_ear",
   "brir::sixteen_track_hrir_drops_silent_lfe_placeholders",
   "brir::extended_hesuvi_drops_unmeasured_silent_speakers",
+  "brir::direction_files_drop_and_report_silent_directions",
+  "brir::mapped_wav_drops_and_reports_silent_directions",
+  "brir::folder_drops_and_reports_silent_directions",
   "brir::directions_profile_keeps_file_order_and_angles",
   "brir::headphone_fir_folding_equals_filtering_the_binaural_output",
+  "brir::fft_convolution_matches_direct_reference",
   "brir::mono_headphone_fir_applies_to_both_ears",
-  "brir::resampling_44100_to_48000_preserves_impulse_time_and_gain",
+  "brir::resampling_preserves_impulse_time_and_response_gain",
+  "brir::common_leading_delay_is_trimmed_without_changing_relative_delays",
+  "brir::leading_delay_before_margin_is_not_trimmed",
   "brir::profile_toml_resolves_paths_defaults_lfe_and_parses_route",
   "brir::bad_track_count_and_unknown_lfe_direction_are_errors",
   "brir::gains_and_lfe_route_become_linear",
 ]
-note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs, headphone FIR folded at load (ADR 0016), rubato resampling with delay compensation, no level normalisation"
+note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs; all loaders omit and report directions silent in both ears; headphone FIR folded by one-shot FFT convolution at load (ADR 0016); rubato resampling with delay compensation; common leading delay trimmed to a 1 ms margin by default; no level normalisation"
 
 [[feature]]
 id = "brir.finding_bural_sets"
@@ -302,17 +348,43 @@ tests = [
   "engine::scene_shape_matches_decoder_output",
   "engine::limiter_never_exceeds_ceiling",
   "engine::limiter_is_transparent_below_ceiling",
+  "engine::limiter_is_bit_exact_below_ceiling_across_block_boundaries",
+  "engine::limiter_is_bit_exact_after_release_recovers",
   "engine::limiter_applies_output_gain",
   "engine::pcm_dump_renders_pans_convolves_and_applies_gain",
   "engine::ddp_burst_produces_a_nonzero_binaural_block",
+  "engine::unknown_encoded_rates_reach_the_selected_bitstream_decoders",
+  "engine::decode_error_clears_ddp_recut_remainder_before_recovery",
   "engine::overrun_and_discontinuity_reset_without_panicking",
-  "engine::needs_brir_is_emitted_once_for_repeated_rate_mismatch",
+  "engine::sound_before_the_first_brir_is_counted_as_dropped",
+  "engine::needs_brir_is_emitted_once_for_repeated_common_shape_mismatch",
+  "engine::oversized_arrival_slack_is_clamped",
+  "engine::endpoint_mask_selects_only_low_endpoint_bits",
+  "engine::endpoint_mask_allocates_no_slots_for_excluded_lane",
   "engine::steady_state_pcm_push_records_does_not_allocate",
+  "engine::push_record_matches_one_record_push_records_for_fixed_seed_records",
+  "engine::chain_idle_does_not_allocate",
+  "engine::quiet_fast_path_is_sample_exact",
+  "engine::idle_lets_the_brir_tail_play_out",
+  "engine::silent_idle_blocks_play_the_brir_tail_to_completion",
+  "engine::a_new_sound_after_long_idle_has_no_old_brir_tail",
+  "engine::first_idle_only_sets_the_anchor",
+  "engine::idle_is_a_noop_while_a_lane_is_clocked",
+  "engine::idle_progress_places_a_late_start_at_the_anchor_position",
+  "engine::clocked_progress_invalidates_an_older_idle_anchor",
+  "engine::format_change_and_bitstream_decode_error_do_not_allocate",
   "engine::dump_capture_keeps_record_boundaries",
   "engine::dump_capture_reports_end_after_the_last_record",
+  "engine::dump_capture_format_two_returns_one_recorded_read_at_a_time",
+  "engine::dump_capture_clears_qpc_when_the_next_read_fails",
+  "engine::repeated_format_initializes_once_and_subsequent_restatements_are_noops",
+  "engine::repeated_unsupported_format_is_reported_only_once",
+  "engine::repeated_stream_start_is_state_dependent_and_sample_exact",
+  "engine::repeated_stream_stop_is_state_dependent_and_sample_exact",
+  "engine::stopped_tail_survives_overrun_restatement_and_idle_sample_exactly",
   "engine::wav_sink_writes_readable_float_stereo",
 ]
-note = "records to binaural blocks: deframe, decode, VBAP, convolve, gain, linked peak limiter without look-ahead. Each burst carries its record's QPC (the wire has no per-burst time)"
+note = "records to binaural blocks: deframe, decode, VBAP, convolve, gain, linked peak limiter without look-ahead. One-record push follows READ chunk/start semantics, endpoint masks select low endpoint bits, arrival slack is bounded, and idle QPC advancement keeps BRIR and limiter state moving after capture stops"
 
 [[feature]]
 id = "replay.render"
@@ -321,7 +393,11 @@ milestone = "M1"
 status = "implemented"
 tests = [
   "bio-replay::render_is_deterministic_and_inspect_still_works",
+  "bio-replay::endpoint_all_mixes_both_and_endpoint_zero_matches_primary_only",
+  "bio-replay::equivalent_qpc_frequencies_render_identically",
   "bio-replay::missing_profile_fails_with_a_readable_message",
+  "bio-replay::replay_feeds_each_recorded_read_as_one_read",
+  "bio-replay::arrival_slack_above_two_hundred_ms_is_rejected_before_file_creation",
 ]
 note = "bio-replay render prepares the BRIR for each format before its first record, so no block is dropped; output_sha256 covers the interleaved f32 samples. The hash is stable within one OS but differs between Linux and Windows (platform libm), so CI compares it per OS"
 
@@ -347,9 +423,44 @@ tests = [
   "engine::stop_and_drop_join_threads_promptly",
   "engine::output_open_failure_is_returned_from_start",
   "engine::capture_and_output_steady_state_do_not_allocate",
+  "engine::volume_record_and_ramp_do_not_allocate",
+  "engine::twelve_channel_output_steady_state_does_not_allocate",
+  "engine::capture_reconnect_and_layout_change_stay_outside_the_allocation_free_scope",
+  "engine::a_stopped_source_lets_the_brir_tail_play_and_counts_no_underrun",
   "engine::format_seqlock_round_trips_formats",
+  "engine::endpoint_format_support_and_volume_share_one_seqlock_generation",
+  "engine::idle_blocks_are_dropped_silently_when_the_ring_is_full",
+  "engine::a_full_ring_counts_overflowed_frames",
+  "engine::an_overflow_burst_reports_its_frames_without_flooding_the_event_queue",
+  "engine::priming_never_discards_sound",
+  "engine::priming_covers_a_decoder_sized_delivery",
+  "engine::unsupported_format_on_one_endpoint_is_not_a_global_fault",
+  "engine::a_supported_format_clears_only_its_endpoints_unsupported_state",
+  "engine::first_sound_after_start_is_not_dropped",
+  "engine::default_start_options_use_the_default_qpc_frequency",
+  "engine::fault_transitions_emit_once_and_clear_only_the_matching_fault",
+  "engine::capture_loss_reconnects_and_clears_the_fault",
+  "engine::target_change_is_observed_at_the_next_output_period",
+  "engine::target_change_rejects_values_outside_crossing_capacity",
+  "engine::boundary_fades_are_frame_common_end_at_zero_and_leave_normal_flow_exact",
+  "engine::layout_boundary_fades_out_the_old_sink_without_dropping_its_remainder",
+  "engine::repeated_unsupported_format_publishes_support_each_time_but_one_error",
+  "engine::queued_volume_transitions_preserve_the_gain_before_each_reservation",
+  "engine::full_volume_transition_queue_merges_the_newest_two_without_changing_earlier_gain",
+  "engine::starvation_counts_an_underrun_and_installs_a_resume_fade",
+  "engine::partial_period_consumes_existing_fade_before_installing_resume_fade",
+  "engine::zero_frame_starvation_fades_from_the_previous_output_frame",
+  "engine::rejected_layout_discards_only_that_layout_and_counts_overflow",
+  "engine::stop_interrupts_output_reconnect_backoff_promptly",
+  "engine::target_change_moves_the_ring_controller_toward_the_new_target",
+  "engine::reconnect_at_44_1_khz_switches_to_asrc_and_fades_audio_back_in",
+  "engine::output_failure_discards_mixed_layout_crossing_audio_and_recovers",
+  "engine::retry_observes_a_return_to_the_current_layout",
+  "engine::partially_consumed_marker_is_discarded_from_its_remaining_frame",
+  "engine::ended_input_drains_a_thirty_two_channel_ring_below_the_priming_threshold",
+  "engine::zero_budget_finish_completes_an_already_quiet_chain",
 ]
-note = "capture/DSP and output threads joined by a two-channel rtrb ring; lock-free control queues; retired BRIR sets are freed on the control thread. The output primes (silence until the ring holds target + one block + one period, then drops what lies beyond target + one block) at start, after an underrun and after a device restart"
+note = "capture/DSP and output threads joined by an output-width rtrb ring; lock-free control queues; retired BRIR sets are freed on the control thread. The output primes with exact-zero frames only and never discards a nonzero sample, and waits for target + the largest recent capture delivery (a whole DD+ sync frame arrives as several mixer blocks in one step) + one period; startup can install the first Prepared before capture begins. Full idle-silent blocks are omitted, while any other crossing overflow is counted exactly and reported as events: a burst's first block at once, then at most one event a second, then the rest when a block fits again, so a stalled output cannot flood the event queue. Lockstep tests use a virtual QPC rather than wall time. After warmup, allocation guards wrap each complete capture iteration (changes, trim, read, record processing, idle and EOF draining) and output iteration (fill, device period, period accounting, cadence and latency); reconnect waits, device opens, layout/format recovery and ASRC reconfiguration are structurally outside those scopes. Status carries four endpoint-local format/epoch/unsupported slots; each parsed format atomically publishes its support result independently of duplicate diagnostic suppression"
 
 [[feature]]
 id = "engine.clock_asrc"
@@ -360,12 +471,17 @@ tests = [
   "engine::asrc_converts_48_khz_to_44_1_khz_over_ten_seconds",
   "engine::clock_holds_the_trough_without_chasing_the_block_sawtooth",
   "engine::clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim",
-  "engine::clock_with_a_long_period_stays_bounded",
+  "engine::a_period_as_long_as_a_block_survives_phase_slips_and_late_blocks",
+  "engine::trough_setpoint_keeps_one_late_delivery_beyond_the_target",
+  "engine::trough_is_the_ring_left_after_the_period",
+  "engine::audible_priming_excess_drains_without_winding_up_the_clock",
   "engine::a_period_longer_than_a_block_plays_after_priming",
   "engine::the_end_of_a_source_drains_without_underruns",
   "engine::pi_controller_clamps_and_integrates",
+  "engine::auto_selects_trim_only_when_capture_and_output_support_it",
+  "engine::format_change_does_not_change_the_startup_clock_or_mix_rate",
 ]
-note = "rubato Async sinc on the binaural pair. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms, 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation. When the device period equals the source block (shared mode with 10 ms PCM or MAT) the trough jumps by a block as the phase drifts and is held less tightly. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun. Priming keeps target plus the larger of a block and the period's take (the ASRC's includes its filter lookahead before the first render); keeping only target + block left a 20 ms exclusive period short on every first render, so it never played (found by the VB-CABLE soak, ADR 0026)"
+note = "rubato Async sinc on the binaural pair. Auto chooses Trim only when the capture supports trim and the output is 48 kHz; otherwise it chooses ASRC at startup, and a device-loss reconnect that changes the output rate reselects ASRC. Source format changes never alter that choice or the fixed 48 kHz scene rate. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms plus the smaller of the period's take and the delivery, which is what one delivery landing just after a take costs it; priming fills to target + delivery + take, so the trough starts there. 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation that keeps audible priming excess and can land blocks a period late. The level is the frames the output has not taken yet, so markers a period already read do not count whole (they put the trough up to a period high and the CI soaks underran). The integral learns only within 12 ms of the setpoint and never further into a saturated output: priming keeps audible frames (ADR 0028), so a backlog or a refill after an underrun starts the trough tens of ms high, and integrating that latency as skew drained the ring dry every ~20 s in the CI soaks; 12 ms holds the one-block step a phase slip makes when the period is at least a block long, so the integral learns the skew from those slips. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
 
 [[feature]]
 id = "engine.clock_trim"
@@ -375,8 +491,9 @@ status = "partial"
 tests = [
   "engine::clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim",
   "engine::required_trim_rejects_an_unsupported_capture",
+  "engine::required_trim_rejects_a_non_mix_rate_output_before_any_endpoint_data",
 ]
-note = "the controller and the strategy choice are tested, but no capture source accepts a trim yet: SAL does not, and the driver's rate-trim IOCTL arrives in M3"
+note = "the controller and strategy choice are tested; the driver source accepts trim through SET_RATE_TRIM while SAL and dump sources fall back to ASRC"
 
 [[feature]]
 id = "engine.latency"
@@ -385,9 +502,17 @@ milestone = "M2"
 status = "implemented"
 tests = [
   "engine::latency_uses_playback_qpc_and_source_qpc",
-  "engine::latency_window_publishes_percentiles_without_heap_storage",
+  "engine::latency_writer_matches_previous_percentiles_and_resets_by_generation",
+  "engine::latency_slot_sequences_do_not_alias_across_the_u32_wrap",
+  "engine::latency_status_never_observes_a_slot_while_its_value_is_being_published",
+  "engine::latency_status_never_mixes_samples_across_concurrent_resets",
+  "engine::any_endpoint_epoch_requests_an_output_owned_latency_reset",
+  "engine::requested_reset_racing_with_output_reset_never_republishes_old_samples",
+  "engine::zero_qpc_tail_marker_does_not_enter_latency_statistics",
+  "engine::incremental_finish_matches_the_offline_one_shot_tail",
+  "engine::silence_has_no_source_time_until_audio_gives_one",
 ]
-note = "record QPC to the device's playback QPC (correlated GetPosition), p50 and p99 over the last 1,024 blocks. From a paced dump on the dev PC: 13-16 ms p50 in exclusive mode (3 ms period, 10 ms target), 47 ms in shared mode. The SAL figure needs the SAL PC"
+note = "record QPC to the device's playback QPC (correlated GetPosition), p50 and p99 over the last 1,024 blocks. Silence before any audio carries source time 0 and stays out of the statistics; counted up from 0 it read as the machine's uptime (p99 429 s in the CI loopback), and the CI checks now fail any p50 or p99 above 1 s. The output thread only publishes into a fixed atomic ring; Engine::status copies and sorts it on the control thread, and an output reopen advances an odd/even generation seqlock so concurrent status calls cannot mix old samples with new ones. From a paced dump on the dev PC: 13-16 ms p50 in exclusive mode (3 ms period, 10 ms target), 47 ms in shared mode. The SAL figure needs the SAL PC"
 
 [[feature]]
 id = "convolver.non_uniform"
@@ -398,11 +523,12 @@ tests = [
   "convolver::non_uniform_segments_match_direct_convolution",
   "convolver::impulses_at_segment_boundaries_are_sample_accurate",
   "convolver::reset_clears_partially_scheduled_large_window",
+  "convolver::quiet_bound_never_precedes_the_last_nonzero_output",
   "convolver::repeated_runs_are_bit_identical",
   "convolver::partitions_reports_total_across_segments",
   "convolver::three_segment_process_and_reset_do_not_allocate",
 ]
-note = "segments [0,16P) at P, [16P,128P) at 8P and [128P,end) at 64P, the large FFTs spread over fixed slots; 21 inputs x 310,144 taps measured 0.47-0.49 ms mean and 1.0-1.2 ms max per 480-frame block in release"
+note = "segments [0,16P) at P, [16P,128P) at 8P and [128P,end) at 64P, the large FFTs spread over fixed slots; the quiet bound includes two complete windows at the largest scheduled ratio and is tested to follow the last nonzero output; 21 inputs x 310,144 taps measured 0.47-0.49 ms mean and 1.0-1.2 ms max per 480-frame block in release"
 
 [[feature]]
 id = "sys.sal_ring"
@@ -417,12 +543,13 @@ tests = [
   "bio-sys::sal_records_parse_back_with_positions_qpc_and_drops",
   "bio-sys::sal_format_change_bumps_epoch_for_each_format_field",
   "bio-sys::sal_buffer_full_retry_is_transactional",
+  "bio-sys::sal_large_read_drains_in_order_across_output_buffers",
+  "bio-sys::sal_idle_stop_restart_resets_position_and_repeats_format",
   "bio-sys::sal_invalid_format_does_not_commit_state",
   "bio-sys::sal_idle_before_first_format_waits_without_committing_an_epoch",
   "bio-sys::sal_translation_does_not_allocate_in_steady_state",
-  "bio-sys::sal_open_errors_keep_missing_denied_and_busy_distinct",
 ]
-note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). Windows 2025 CI captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. Initial idle READs and the decoder's 8-channel limit were fixed. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
+note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). Translation drains a large SAL READ as whole records over multiple engine reads. SAL exposes no stop signal, so 100 ms without payload by READ QPC emits StreamStop; later data emits StreamStart, resets byte_pos to zero, and repeats the unchanged format without changing epoch. READs before the first format negotiation are waited out without an epoch. Windows 2025 CI (the opt-in SAL runner) captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
 
 [[feature]]
 id = "sys.wasapi_output"
@@ -430,7 +557,10 @@ kind = "platform"
 milestone = "M2"
 status = "implemented"
 tests = [
+  "bio-sys::exclusive_failure_requires_an_explicit_shared_fallback",
   "bio-sys::playback_timestamp_uses_clock_units_and_queue_distance",
+  "bio-sys::playback_clock_is_monotonic_across_estimates_measurements_and_restarts",
+  "bio-sys::fast_dac_measurements_do_not_accumulate_nominal_period_error",
   "bio-sys::integer_samples_clip_and_left_align",
   "bio-sys::device_errors_keep_removed_busy_and_not_found_distinct",
   "bio-sys::render_endpoints_include_a_default",
@@ -440,9 +570,11 @@ tests = [
   "bio-sys::exclusive_sink_recovers_its_cadence_after_a_missed_deadline",
   "bio-sys::shared_silence_has_period_spaced_playback_qpcs",
   "bio-sys::wasapi_shared_periods_do_not_allocate",
+  "bio-sys::wasapi_multichannel_periods_do_not_allocate",
   "bio-sys::wasapi_exclusive_periods_and_a_restart_do_not_allocate",
+  "bio-sys::wasapi_opens_multichannel_layouts_on_the_cable",
 ]
-note = "exclusive event-driven (Float32, Int32, Int24in32, Int16) with a shared fallback; the stream starts on the first period. An exclusive stream restarts after a stall (a wait over two periods and 10 ms): after one missed deadline a TOPPING USB DAC otherwise signalled only every ~33 ms for good. Device tests pass on the dev PC and run explicitly in the opt-in SAL runner experiment"
+note = "event-driven WAVEFORMATEXTENSIBLE output for 1..=32 channels (Float32, Int32, Int24in32, Int16), with exact masks for multichannel exclusive streams and shared autoconvert fallback; stereo retains its device-quirk negotiation. The stream starts on the first period and an exclusive stream restarts after a stall. Playback QPC never regresses and advances by at least one period across estimated/correlated readings, temporary zero correlations, and stream resets; the calculation remains frame-based and channel-independent. Device enumeration reports shared mix formats and exact exclusive support for standard speaker layouts; ignored Windows tests probe VB-CABLE and verify allocation-free N-channel periods"
 
 [[feature]]
 id = "sys.realtime_threads"
@@ -465,8 +597,13 @@ tests = [
   "bio-live::paced_dump_loops_with_continuous_positions_and_times",
   "bio-live::a_dump_that_ends_on_data_keeps_looping",
   "bio-live::looping_needs_two_data_records",
+  "bio-live::format_two_loop_span_uses_whole_recorded_reads",
+  "bio-live::tee_capture_preserves_reads_and_records_dropped_bytes",
+  "bio-live::tee_capture_stop_idle_restart_replays_like_the_live_chain",
+  "bio-live::tee_capture_read_does_not_allocate",
+  "bio-live::endpoint_parser_accepts_arbitrary_subsets_and_rejects_bad_masks",
 ]
-note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace (--loop repeats it, --report writes the run's figures), so the whole live path runs on the dev PC and, through a virtual cable, on the Windows CI runners (ADR 0026). The opt-in SAL runner experiment also records and plays actual SAL 7.1.4 PCM into VB-CABLE and keeps the far-end stereo WAV. Game/MAT and Apple Music/JOC source and listening checks remain"
+note = "bio-live record, play and devices (ADR 0018). devices --formats reports each render endpoint's shared mix format and exact standard-layout exclusive support, with JSON for CI. play accepts headphone and physical-speaker profiles and reports output kind, channel count and mask; it accepts arbitrary endpoint subsets, installs its initial Prepared before capture starts, and reports the actual startup clock strategy plus four endpoint-local states and explicit idle/overflow/event-loss counters. play --from-dump replays a dump at its recorded pace (--loop repeats it: whole recorded READs, or only the data records when the recorder did not close a READ after the last one, as in the tool-written CI fixtures, so format and stream records play once (unrecorded_reads_loop_the_data_records); --report writes the run's figures), so the whole live path runs through a virtual cable on Windows CI (ADR 0026); record and play --record preserve READ boundaries and report recorder_lost_bytes. Game/MAT and Apple Music/JOC source and listening checks remain"
 
 [[feature]]
 id = "ci.sal_runner"
@@ -482,16 +619,24 @@ note = "Opt-in GitHub-hosted Windows experiment: VB-CABLE, opaque pinned SAL dri
 id = "sys.output_cadence_guard"
 kind = "platform"
 milestone = "M2"
-status = "planned"
-tests = []
-note = "the WASAPI sink measures the frames it is asked for per second and, when a device keeps a slower event cadence than its period (VB-CABLE in exclusive mode signals at the 15.6 ms system timer: 65 % of the nominal rate at a 10 ms period, with no single stall long enough to trigger a restart), moves to a period the device keeps instead of underfeeding it; found by the CI audio job (ADR 0026)"
+status = "partial"
+tests = [
+  "engine::cadence_guard_accepts_normal_rejects_sustained_slow_and_ignores_a_blip",
+  "engine::sustained_slow_cadence_grows_the_period_and_reopens_once",
+]
+note = "the WASAPI sink exposes its latest audio-clock position and the runtime compares position deltas with playback-QPC deltas over two-second windows. A ratio outside 0.9..=1.1 for at least three seconds increments output_cadence_faults and emits one fault event; exclusive output then requests one doubled period, capped at 20 ms, and reports the reopen result. Failed cadence reopens use the same stop-aware unbounded retry policy as device loss. VB-CABLE in exclusive mode was observed at 65 % of nominal at a 10 ms period (ADR 0026)"
 
 [[feature]]
 id = "sys.driver_ring"
 kind = "platform"
 milestone = "M3"
-status = "planned"
-tests = []
+status = "implemented"
+tests = [
+  "bio-sys::ppm_to_q16_rounds_clamps_and_rejects_non_finite_values",
+  "bio-sys::installed_driver_opens_reads_and_accepts_trim",
+  "bio-abi::control_device_path_matches_generated_header",
+]
+note = "BioRing opens the bio-abi CONTROL_DEVICE_PATH (SpatialSoftReceiver), validates QUERY_INFO, reads whole bio_abi records, trims the driver clock and reports driver stats. The conversion test runs on Linux; the ignored Windows device test and tools/ci/driver_e2e_check.py run after the test-signed driver is installed in the CI end-to-end stage"
 
 [[feature]]
 id = "supervisor.state_machine"
@@ -567,19 +712,44 @@ milestone = "M3"
 status = "partial"
 tests = [
   "bio-abi::endpoint_numbers_are_distinct_and_in_range",
+  "bio-abi::endpoint_mask_helpers_reject_out_of_range_values",
   "bio-abi::writer_defaults_to_primary_and_preserves_mixed_endpoint_order",
   "bio-abi::old_zero_reserved_bytes_are_the_primary_endpoint",
   "bio-abi::errors_report_the_endpoint_when_a_header_is_available",
   "bio-abi::arbitrary_endpoint_kind_length_sequences_round_trip",
   "bio-abi::old_dump_format_is_primary_and_newer_format_is_rejected",
-  "bio-abi::a_format_repeat_keeps_the_epoch_and_carries_its_flag",
+  "bio-abi::repeated_state_exposes_repeat_and_keeps_the_epoch",
   "bio-abi::c_header_matches_the_rust_layout",
-  "engine::other_endpoint_records_are_skipped_without_affecting_primary_output",
-  "bio-replay::default_render_ignores_second_endpoint_records",
+  "bio-abi::default_capabilities_match_header_and_inf",
+  "bio-abi::query_info_round_trips",
+  "bio-sys::query_info_preserves_pcm_rules_and_rejects_old_layout",
+  "engine::endpoint_filter_ignores_unselected_endpoint_without_counting_it_invalid",
+  "engine::endpoint_format_and_overrun_reset_only_their_front",
+  "bio-replay::endpoint_all_mixes_both_and_endpoint_zero_matches_primary_only",
 ]
-note = "the contract, parser, dump format and C header carry endpoint numbers, and a single Chain filters one endpoint; per-endpoint engine chains and the common-rate scene mixer (engine.two_endpoints) are not implemented, and the driver writes both endpoints only in the hosted-runner flow check (driver.kernel), not yet on a test-signed PC"
+note = "the unfrozen ABI v1 carries four EndpointFormats slots and EndpointMask in a 160-byte QUERY_INFO; codec bits 1..8 stay fixed (compiled 0x1fe, default 0x6c), PCM is rates 0x3f x shapes 0x1f x channel rules (18 speaker bits or direct out 1..32); defaults and offsets are checked against the C header and INF; the driver defaults to endpoint mask 0x7 and purpose names Spatial SoftReceiver, Spatial SoftReceiver Music, and Spatial SoftReceiver PASS; driver.passthrough_endpoint owns the third mini-pair"
 
 # ---- Driver (M3, ADR 0027) ----
+
+[[feature]]
+id = "driver.volume"
+kind = "driver"
+milestone = "M3"
+status = "implemented"
+tests = [
+  "bio-abi::volume_gain_is_power_average_not_channel_zero",
+  "bio-abi::volume_records_round_trip_and_old_reader_skips_them",
+  "bio-abi::volume_32_channels_round_trips",
+  "bio-abi::invalid_volume_rejects_but_iteration_continues",
+  "bio-abi::legacy_16_channel_volume_parses_and_other_lengths_are_rejected",
+  "bio-abi::driver_core_dump_matches_expectations",
+  "engine::legacy_volume_record_attenuates_rendered_output",
+  "engine::endpoint_volume_ramps_only_its_lane_at_emission",
+  "engine::volume_repeat_with_the_same_value_is_a_noop",
+  "engine::every_channel_muted_publishes_muted_up_to_32_channels",
+]
+note = "Hardware volume/mute topology and VOLUME kind 6 state/repeats use a 136-byte payload with 32 level slots; node channels follow the default device format (0:8, 1/2:2), not the largest accepted stream. The engine applies the endpoint gain once at lane emission with a 64-frame ramp; native VolumeStateAndRecovery/Volume32, ring_fuzz state model, Python test_volume_check.py and Windows volume_check.ps1 cover the driver contract and path."
+
 
 [[feature]]
 id = "driver.core"
@@ -590,7 +760,7 @@ tests = [
   "bio-abi::driver_core_dump_matches_expectations",
   "bio-abi::the_largest_data_record_fits_one_read",
 ]
-note = "driver/core (record ring, READ gate, DMA clock, format bits; no kernel API) is tested by driver/core/tests/core_tests.cpp under ASan and UBSan with clang, gcc and MSVC and fuzzed with libFuzzer in driver.yml, which also sets BIO_DRIVER_CORE_DUMP so bio-abi parses the stream the core writes (without it the Rust test returns early); partial until the kernel wrapper runs it on a test-signed PC"
+note = "driver/core (record ring, READ gate, DMA clock, PcmAllowed rule-based classification (six rates, five shapes, all 18 speaker bits and direct out 1..32); no kernel API or allocation) is tested by driver/core/tests/core_tests.cpp (including PcmIntersectionOrder) under ASan and UBSan with clang, gcc and MSVC. New handles receive repeated known FormatChange and current StreamStart; every lost-record endpoint receives Overrun, repeated format, and repeated current Start/Stop before later records, with the next data discontinuous. An endpoint that never had a format keeps no format-repeat request, so overwriting it never makes PrepareRead fail or READ return nothing while records are queued (FormatlessOverwriteKeepsReading). The libFuzzer model reconstructs per-endpoint format, streaming and volume state solely from consumed records. driver.yml also sets BIO_DRIVER_CORE_DUMP so bio-abi parses the stream and verifies reserved=0; partial until the kernel wrapper runs it on a test-signed PC"
 
 [[feature]]
 id = "driver.kernel"
@@ -598,15 +768,149 @@ kind = "driver"
 milestone = "M3"
 status = "partial"
 tests = []
-note = "bioatmos.sys: SysVAD HDMI render x2 and the \\\\.\\BioAtmos control device; compile-checked on Linux (tools/kcheck.py), built for x64 and ARM64 with /W4 /WX and code analysis, InfVerif, CodeQL driver suites, and installed test-signed on windows-2022 and windows-2025 runners in driver.yml, where the kernel loads it, both render endpoints turn active, and a tone played into each comes back through the ring (tools/ci/driver_flow_check.py); Driver Verifier, HVCI, IOCTL fuzzing and Atmos negotiation need a test-signed PC"
+note = "spatialsoftreceiver.sys: SysVAD HDMI render x3 (EndpointMask=0x7; endpoint 2 is Spatial SoftReceiver PASS) and the \\\\.\\SpatialSoftReceiver control device; CodecMask0..3 compile 0x1fe and default to 0x6c (EAC3/EAC3 Atmos/MAT20/MAT21); PcmRateMask/PcmShapeMask/PcmMaxMaskedChannels/PcmDirectChannels default to 0x3f/0x1f/18/0xffffffff. Two sparse PCM ranges use exact core PcmAllowed validation, tested by PcmRules and the coverage-instrumented format_fuzz target. Endpoint 0 requests shared float32 7.1 48 kHz and endpoints 1/2 float32 stereo 48 kHz through serialized VT_BLOB OEMFormat. Compile-checked on Linux (tools/kcheck.py). Windows gates in driver.yml build x64/ARM64 with /W4 /WX and code analysis, InfVerif and CodeQL, then install test-signed on windows-2022/windows-2025. The earlier two-endpoint version loaded and passed ring flow there; the new third endpoint and post-install private-key policy have not yet run on Windows. driver_flow_check.py now tests the default three-endpoint mask, and tools/ci/ioctl_fuzz.py attacks the control device (malformed lengths, fields, unknown codes, cancellation/close races, exclusive open, post-fuzz health) under Driver Verifier where the image allows it. Exact OEM property placement, the DeviceFormat result, HVCI and Atmos negotiation need a test-signed PC"
 
 [[feature]]
 id = "engine.two_endpoints"
 kind = "pipeline"
 milestone = "M3"
+status = "implemented"
+tests = [
+  "engine::one_48_khz_interval_passes_sample_for_sample",
+  "engine::ddp_sized_blocks_are_recut_without_changing_the_signal",
+  "engine::recut_source_qpc_uses_the_configured_clock_frequency",
+  "engine::every_lane_places_all_objects_without_folding",
+  "engine::two_regular_lanes_match_their_solo_sample_streams",
+  "engine::discontinuity_and_stalled_lane_do_not_change_the_other",
+  "engine::sustained_fast_lane_is_counted_and_faded_without_changing_the_other",
+  "engine::overfull_lane_crossfades_across_dropped_frames",
+  "engine::lfe_crossfade_uses_the_discarded_interval_tail",
+  "engine::metadata_change_inside_one_interval_takes_effect",
+  "engine::ramp_direction_updates_stop_after_active_prefix",
+  "engine::fixed_seed_panning_matches_dense_reference_matrix",
+  "engine::new_objects_only_breaks_the_lane_local_object_ramp",
+  "engine::restart_does_not_inherit_the_previous_panning_state",
+  "engine::objects_beyond_the_precision_limit_are_ignored_without_statistics",
+  "engine::a_lanes_ramp_is_independent_of_other_lanes",
+  "engine::overlapping_generations_never_fold",
+  "engine::tail_collision_preserves_current_then_tail_addition_order",
+  "engine::transferred_tail_is_not_counted_as_an_underrun_again",
+  "engine::pending_tail_is_converted_lazily_after_a_layout_change",
+  "engine::layout_change_converts_pending_frames",
+  "engine::layout_changes_beyond_the_conversion_ring",
+  "engine::no_geometry_keeps_the_timeline_and_emits_needs_brir",
+  "engine::mismatched_geometry_counts_exact_dropped_frames_without_panicking",
+  "engine::mixing_two_endpoints_does_not_allocate",
+  "engine::layout_change_and_lazy_pending_conversion_do_not_allocate",
+  "engine::endpoints_two_and_three_mix_as_the_sum_of_their_solos",
+  "engine::driver_like_reads_with_late_ticks_lose_no_lane_audio",
+  "engine::unknown_subformat_format_change_does_not_allocate",
+  "engine::resampler_meets_passband_and_stopband_specification",
+  "engine::legacy_rates_keep_fixed_sample_hashes",
+  "engine::eighty_eight_two_khz_pcm_endpoint_produces_audio",
+  "engine::equal_clocks_with_ddp_bursts_do_not_drop_but_fast_secondary_does",
+  "engine::stop_pads_and_emits_the_final_partial_interval",
+  "engine::orderly_stop_flushes_the_same_fir_tail_as_explicit_zero_input",
+  "engine::rate_change_restart_preserves_the_previous_fir_tail",
+  "engine::stopping_one_lane_does_not_drain_the_other_lane",
+  "engine::data_less_lane_holds_a_stop_tail_only_until_the_idle_clock",
+  "engine::a_data_less_lane_places_its_first_data_after_the_frontier",
+  "engine::resample_recut_drop_stop_and_reset_paths_do_not_allocate",
+  "engine::a_lone_lane_leaves_its_filled_interval_without_waiting_for_the_slack",
+  "engine::an_interval_waits_up_to_the_slack_for_an_active_lane_that_has_not_filled_it",
+]
+note = "per-endpoint deframer, decoder, epoch and byte-clock state feed the ADR 0028 absolute 48 kHz timeline; rational polyphase Kaiser-sinc banks accept 44.1/48/88.2/96/176.4/192 kHz, retain bit-stable 44.1/48/96 output hashes, and use 512 taps for 176.4/192 kHz; each lane independently pans every scene into a planar speaker bed, with a fixed-seed 44.1/48/96 kHz, 22/64-direction, 64-object dense reference matrix covering spread and object-count changes; data-less Active lanes neither cover nor hold the clock, per-frame occupancy distinguishes filled, dropped and empty positions, and QPC idle advancement can emit silent beds after capture stops"
+
+[[feature]]
+id = "engine.no_drop"
+kind = "pipeline"
+milestone = "M3"
+status = "implemented"
+tests = [
+  "engine::two_regular_lanes_match_their_solo_sample_streams",
+  "engine::ten_seconds_all_seven_one_and_stereo_signals_match_exact_solo_outputs",
+  "engine::twenty_seven_one_starts_and_stops_do_not_change_stereo",
+  "engine::discontinuity_and_stalled_lane_do_not_change_the_other",
+  "engine::sustained_fast_lane_is_counted_and_faded_without_changing_the_other",
+  "engine::every_lane_places_all_objects_without_folding",
+  "engine::representative_normal_paths_do_not_allocate",
+  "engine::emitted_frontier_remains_monotonic_after_last_lane_stops",
+  "engine::one_4800_frame_pcm_record_matches_one_ms_records",
+  "engine::pcm_residuals_survive_stream_stop_and_eof",
+  "engine::iec_192_khz_transport_time_comes_from_carrier_bytes_not_decoded_frames",
+  "engine::second_endpoint_first_block_from_finish_reaches_runtime_output",
+  "engine::real_ddp_and_pcm_match_their_solo_sum_at_twenty_fixed_seed_phases",
+  "engine::format_decode_error_overrun_and_discontinuity_do_not_change_the_other_lane",
+  "engine::ddp_latency_uses_playback_qpc_and_source_qpc",
+  "engine::push_records_interleaves_large_and_one_ms_pcm_by_dma_time",
+  "engine::separated_endpoint_comparison_observes_lfe",
+  "engine::same_read_stop_and_first_data_match_second_endpoint_solo",
+  "engine::last_lane_stop_then_late_start_matches_solo",
+  "engine::stale_start_offset_is_clamped_inside_the_ahead_limit",
+  "engine::large_arrival_slack_start_offset_keeps_the_first_scene",
+  "engine::restart_after_a_stall_with_the_largest_slack_keeps_its_first_scene",
+  "engine::resampled_restarts_beside_an_active_lane_do_not_creep_ahead",
+  "engine::ddp_restarts_beside_an_active_lane_keep_every_burst",
+  "engine::an_idle_lanes_estimated_origin_does_not_hold_back_its_later_start",
+  "engine::a_format_change_after_stop_keeps_the_stopped_streams_end",
+  "engine::nonempty_discontinuity_does_not_move_other_endpoint",
+  "engine::filtered_endpoint_does_not_create_a_start_step",
+  "engine::unknown_kind_is_not_allowed_to_consume_the_next_record",
+  "engine::unknown_kind_does_not_end_its_endpoints_records",
+  "engine::repeated_twenty_ms_records_interleave_by_dma_time",
+  "engine::malformed_records_report_once_and_other_endpoint_continues",
+  "engine::a_lanes_ramp_is_independent_of_other_lanes",
+  "engine::last_lane_drain_moves_new_lane_origin_to_output_boundary",
+  "engine::fir_flush_is_consumed_and_finish_is_idempotent",
+  "engine::internal_unfilled_run_counts_only_the_current_occupied_generation",
+  "engine::fixed_seed_schedules_conserve_every_occupied_frame",
+  "engine::more_than_eight_separated_ahead_drops_are_counted_once",
+  "engine::pending_drop_beyond_the_current_ring_slot_is_not_an_underrun",
+  "engine::discontinuity_cut_counts_each_discarded_frame_once",
+  "engine::mixer_statistics_are_visible_before_capture_stops",
+  "engine::pcm_chunk_source_qpc_is_each_chunks_first_byte_time",
+  "engine::bitstream_source_qpc_reanchors_to_later_record_observations",
+  "engine::low_rate_pcm_chunking_always_makes_progress",
+  "engine::zero_and_backward_qpc_records_are_deterministic",
+  "engine::stream_stop_then_eof_matches_stream_stop_for_fir_pcm",
+  "engine::zero_rate_bitstream_burst_qpc_does_not_panic",
+  "engine::dropped_frames_are_not_counted_again_as_lane_underruns",
+  "engine::metadata_change_inside_one_interval_takes_effect",
+  "bio-replay::replay_merges_a_large_record_with_small_records_by_dma_time",
+]
+note = "ADR 0028: what one entrance does never changes a speaker-bed sample another entrance places; each occupied frame is exactly filled, explicitly dropped or counted once as underrun, discontinuity cuts are drops, and one pending ahead-drop range replaces the former eight-range accounting limit"
+
+[[feature]]
+id = "driver.passthrough_endpoint"
+kind = "driver"
+milestone = "M3"
+status = "partial"
+tests = ["bio-abi::driver_core_dump_matches_expectations"]
+note = "Spatial SoftReceiver PASS (Korean: 공간 소프트리시버 PASS) WaveRT/topology minipair and hardware volume/mute implemented; default mask 0x7, CodecMask2 and the PCM rules (PcmRateMask2/PcmShapeMask2/PcmMaxMaskedChannels2/PcmDirectChannels2) default like endpoint 0 (0x6c; 0x3f/0x1f/18/0xffffffff), OEM stereo 48 kHz. Native PassthroughStateAndIsolation and tools/ci/test_exclusive_policy.py verify contracts; driver_flow_check.py covers three distinct shared tones. Windows load, endpoint-mask restart, exclusive PCM/bitstreams and spatial audio still need test-signed validation. Exclusive-only is a routing policy, not a shared-mode prohibition."
+
+[[feature]]
+id = "sys.exclusive_policy"
+kind = "platform"
+milestone = "M3"
+status = "partial"
+tests = []
+note = "tools/ci/exclusive-policy.ps1 writes private MMDevice properties {b3f8fa53-0004-438e-9003-51a46e139bfc} 3/4 through IPropertyStore after endpoint creation: 0/1 = 0/0, 2 = 1/1. install invokes exclusive_policy_check.ps1 (supported PCM negotiation plus Initialize HRESULT), collect reads policy, uninstall clears it. Static package tests: tools/ci/test_exclusive_policy.py. Windows enforcement, priority preemption and persistence are unverified; INF support for these keys is not documented. No global audio-service restart. Supervisor re-enforcement and shared-session routing remain M4."
+
+[[feature]]
+id = "sys.ks_output"
+kind = "platform"
+milestone = "M4"
 status = "planned"
 tests = []
-note = "per-endpoint deframer, decoder and epoch state and the 10 ms common-rate scene mixer of ADR 0024; one trim controller after mixing"
+note = "ADR 0028: BIO opens the DAC's render pin through kernel streaming while the DAC endpoint is disabled, so no app can pick the DAC; falls back to WASAPI exclusive when the pin does not open; bio-guard re-enables the endpoint"
+
+[[feature]]
+id = "supervisor.entrance_routing"
+kind = "app"
+milestone = "M4"
+status = "planned"
+tests = []
+note = "ADR 0028: sends known exclusive and bitstream players to the passthrough entrance with the per-app output device setting, and moves shared sessions off it"
 
 [[feature]]
 id = "ring.streamring"
@@ -623,3 +927,50 @@ milestone = "M4"
 status = "planned"
 tests = []
 note = "bioasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Only asio-sys touches the ASIO SDK and carries GPL-3.0-or-later SPDX headers; releases that ship bioasio.dll are GPLv3 as a whole (ADR 0003, 0025)"
+
+[[feature]]
+id = "driver.endpoint_identity"
+kind = "driver"
+milestone = "M3"
+status = "partial"
+tests = ["bio-abi::control_device_path_matches_generated_header", "bio-abi::c_header_matches_the_rust_layout"]
+note = "Spatial SoftReceiver package names and ROOT hardware/service/control identifiers; English/Korean INF labels in UTF-16LE BOM, Parameters EndpointName0..3 loaded at PASSIVE_LEVEL with allocation-free 31-code-unit fallback. Native core_tests::EndpointNames and tools/ci/test_endpoints.py test malformed names, INF/core English parity, Rust/C/Python/PowerShell path parity, JSON and actual C# KS-reference mapping. Tools use owned TopologyHdmi0..2/WaveHdmi0..2 identities, never display names; legacy removal identities are centralized. Real Windows topology, InfVerif, Korean install and registry-to-sink changes remain to be verified."
+
+[[feature]]
+id = "output.speakers"
+kind = "pipeline"
+milestone = "M2"
+status = "implemented"
+tests = [
+  "speakers::example_profiles_load_and_prepare",
+  "speakers::lr4_sum_is_flat_and_crosses_at_minus_six_db",
+  "speakers::lr4_stays_exact_at_the_extreme_crossover_and_rate",
+  "speakers::mask_order_follows_windows_channel_order",
+  "speakers::channel_masks_accept_names_numbers_and_hex",
+  "speakers::subwoofers_align_trim_and_default_to_no_delay",
+  "speakers::values_outside_their_ranges_are_rejected_before_any_allocation",
+  "speakers::no_speaker_may_sit_on_the_mask_lfe_channel",
+  "speakers::resampled_room_fir_keeps_its_response_gain",
+  "speakers::a_room_fir_longer_than_four_seconds_is_refused",
+  "engine::one_overloaded_channel_drives_the_shared_detector",
+  "engine::speaker_output_routes_delays_trims_and_keeps_fir_mono",
+  "engine::speaker_output_routes_lfe_and_fallback_bass",
+  "engine::speaker_output_crosses_low_frequency_energy_to_subwoofer",
+  "engine::subwoofers_take_their_own_fir_delay_and_trim",
+  "engine::crossover_tails_reach_the_room_fir_after_the_bed_falls_silent",
+  "engine::speaker_preparation_rejects_output_channel_counts_outside_the_bound",
+  "engine::multichannel_blocks_enter_the_crossing_ring_with_their_layout",
+  "engine::asrc_keeps_channels_apart_with_twelve_channels",
+  "engine::a_speaker_profile_opens_its_layout_at_start",
+  "engine::a_layout_change_reopens_the_output_after_the_old_blocks_play",
+  "engine::a_failed_reopen_recovers_and_clears_the_output_fault",
+  "engine::output_failure_discards_mixed_layout_crossing_audio_and_recovers",
+  "engine::ddp_and_speaker_paths_apply_the_same_volume_gain",
+  "engine::start_rejects_a_sink_with_another_channel_count",
+  "engine::twelve_channel_output_steady_state_does_not_allocate",
+  "engine::steady_state_speaker_output_does_not_allocate",
+  "bio-replay::speaker_render_writes_extensible_channels_mask_and_report",
+  "bio-replay::direct_speaker_render_writes_zero_channel_mask",
+]
+note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional mono room FIR (subwoofers included), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). bio-live and bio-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
+

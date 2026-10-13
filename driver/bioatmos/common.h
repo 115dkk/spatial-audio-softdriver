@@ -20,9 +20,16 @@ public:
     void Unlock(KIRQL irql) { KeReleaseSpinLock(&streamLock_, irql); }
     bool Active() const { return active_ && power_ == PowerDeviceD0; }
     // Called with streamLock held; lock order is streamLock -> control Lock.
-    LONG Trim();
-    void SourceGap(USHORT ep, ULONGLONG qpc, ULONGLONG bytes);
-    void Data(USHORT ep, ULONGLONG qpc, ULONGLONG written, const BYTE* a, ULONG an, const BYTE* b, ULONG bn);
+    // Every position update comes here: it brings every running stream to
+    // `qpc` under one hold of the control Lock, so no READ holds one
+    // endpoint's audio up to qpc and another's only up to an earlier tick
+    // (the mixer counts such a gap as a lane underrun once it passes the
+    // arrival slack).
+    void UpdatePositions(ULONGLONG qpc);
+    // Called with streamLock and the control Lock held (UpdatePositions).
+    void SourceGapLocked(USHORT ep, ULONGLONG qpc, ULONGLONG bytes);
+    void DataLocked(USHORT ep, ULONGLONG qpc, ULONGLONG written, const BYTE* a, ULONG an, const BYTE* b, ULONG bn);
+    // Called with streamLock held; lock order is streamLock -> control Lock.
     void Format(USHORT ep, ULONGLONG qpc, const WAVEFORMATEX* format);
     void StreamState(USHORT ep, ULONGLONG qpc, bool running);
 private:
