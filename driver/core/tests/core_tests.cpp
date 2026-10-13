@@ -738,7 +738,6 @@ void Formats() {
 }
 
 void Volume32() {
-    alignas(8) uint8_t storage[65536];
     bio::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     CHECK(ring.ConfigureVolume(0, 32));
