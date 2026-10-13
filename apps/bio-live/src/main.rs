@@ -1457,6 +1457,7 @@ mod platform {
         let mut next_report = Duration::from_secs(1);
         let mut ended_at: Option<Instant> = None;
         let mut figures = RunFigures::default();
+        let mut reported_underruns = 0;
         while !stop.load(Ordering::Acquire)
             && options
                 .seconds
@@ -1547,6 +1548,20 @@ mod platform {
                         .map(|f| format!("  FAULT {f:?}"))
                         .unwrap_or_default()
                 );
+                if s.underruns > reported_underruns
+                    && let Some(u) = s.last_underrun
+                {
+                    eprintln!(
+                        "      underrun: ring {} frames, markers {}, layout {}, needed {}, produced {}, last block {:.1} ms ago",
+                        u.ring_frames,
+                        u.marker_frames,
+                        u.layout_frames,
+                        u.needed_frames,
+                        u.produced_frames,
+                        u.since_block_ms
+                    );
+                }
+                reported_underruns = s.underruns;
                 next_report += Duration::from_secs(1);
             }
             thread::sleep(Duration::from_millis(33));
@@ -1634,6 +1649,14 @@ mod platform {
                 "blocks": report.blocks,
                 "underruns": report.underruns,
                 "underruns_while_streaming": underruns_while_streaming,
+                "last_underrun": report.final_status.last_underrun.map(|u| serde_json::json!({
+                    "ring_frames": u.ring_frames,
+                    "marker_frames": u.marker_frames,
+                    "layout_frames": u.layout_frames,
+                    "needed_frames": u.needed_frames,
+                    "produced_frames": u.produced_frames,
+                    "since_block_ms": u.since_block_ms,
+                })),
                 "output_restarts": report.final_status.output_restarts,
                 "output_reopens": report.final_status.output_reopens,
                 "output_reconnects": report.final_status.output_reconnects,

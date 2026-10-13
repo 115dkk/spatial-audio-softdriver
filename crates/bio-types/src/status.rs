@@ -49,6 +49,26 @@ pub struct EndpointStatus {
     pub unsupported: Option<String>,
 }
 
+/// What the output saw in the period that last found the crossing ring short,
+/// to tell an empty ring from one the output could not take from. Frame
+/// counts are in scene frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UnderrunSnapshot {
+    /// Frames in the ring's audio samples when the period began.
+    pub ring_frames: u32,
+    /// Frames the timing markers accounted for (what priming and the clock
+    /// controller see).
+    pub marker_frames: u32,
+    /// Frames of the current output layout the period could take.
+    pub layout_frames: u32,
+    /// Frames the period needed (for the resampler, its whole take).
+    pub needed_frames: u32,
+    /// Output frames the period produced before it ran short.
+    pub produced_frames: u32,
+    /// Milliseconds since the capture side last put a block into the ring.
+    pub since_block_ms: f32,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EngineStatus {
     pub endpoints: [EndpointStatus; ENGINE_ENDPOINTS],
@@ -59,6 +79,8 @@ pub struct EngineStatus {
     pub ring_level_ms: f32,
     /// Times the output found the crossing ring empty.
     pub underruns: u64,
+    /// The last of those times, as the output saw it.
+    pub last_underrun: Option<UnderrunSnapshot>,
     /// Times the output device's stream was restarted after it stalled.
     pub output_restarts: u64,
     /// Layout of the currently open output sink.

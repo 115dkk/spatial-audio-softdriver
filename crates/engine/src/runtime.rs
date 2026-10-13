@@ -30,12 +30,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bio_types::{
     BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ClockStatus, ENGINE_ENDPOINTS,
     EndpointStatus, EngineFault, EngineStatus, LatencyStats, OutputError, OutputFormat,
     OutputLayout, OutputMode, OutputOpener, OutputSink, PcmFormat, SampleType, SourceFormat,
+    UnderrunSnapshot,
 };
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use rubato::audioadapter::AdapterMut;
@@ -718,6 +719,14 @@ struct Shared {
     mute: AtomicBool,
     blocks: AtomicU64,
     underruns: AtomicU64,
+    /// Origin of the nanosecond stamps below.
+    started: Instant,
+    /// When the capture side last put a block into the crossing ring.
+    last_block_ns: AtomicU64,
+    /// The last underrun as the output saw it ([`UnderrunSnapshot`]). The
+    /// output thread is the only writer; the sequence is odd while it writes.
+    underrun_sequence: AtomicU64,
+    underrun_fields: [AtomicU32; 6],
     output_restarts: AtomicU64,
     output_channels: AtomicU32,
     output_channel_mask: AtomicU32,
@@ -768,6 +777,10 @@ impl Shared {
             mute: AtomicBool::new(false),
             blocks: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            started: Instant::now(),
+            last_block_ns: AtomicU64::new(0),
+            underrun_sequence: AtomicU64::new(0),
+            underrun_fields: std::array::from_fn(|_| AtomicU32::new(0)),
             output_restarts: AtomicU64::new(0),
             output_channels: AtomicU32::new(0),
             output_channel_mask: AtomicU32::new(0),
@@ -955,12 +968,71 @@ impl Shared {
         }
     }
 
+    fn elapsed_ns(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    fn note_block(&self) {
+        self.last_block_ns
+            .store(self.elapsed_ns(), Ordering::Release);
+    }
+
+    fn publish_underrun(&self, mut snapshot: UnderrunSnapshot) {
+        let since = self
+            .elapsed_ns()
+            .saturating_sub(self.last_block_ns.load(Ordering::Acquire));
+        snapshot.since_block_ms = since as f32 / 1.0e6;
+        let sequence = self.underrun_sequence.load(Ordering::Relaxed);
+        self.underrun_sequence
+            .store(sequence.wrapping_add(1), Ordering::Release);
+        let fields = [
+            snapshot.ring_frames,
+            snapshot.marker_frames,
+            snapshot.layout_frames,
+            snapshot.needed_frames,
+            snapshot.produced_frames,
+            snapshot.since_block_ms.to_bits(),
+        ];
+        for (slot, value) in self.underrun_fields.iter().zip(fields) {
+            slot.store(value, Ordering::Release);
+        }
+        self.underrun_sequence
+            .store(sequence.wrapping_add(2), Ordering::Release);
+    }
+
+    fn last_underrun(&self) -> Option<UnderrunSnapshot> {
+        for _ in 0..4 {
+            let before = self.underrun_sequence.load(Ordering::Acquire);
+            if before == 0 {
+                return None;
+            }
+            let fields = self
+                .underrun_fields
+                .each_ref()
+                .map(|slot| slot.load(Ordering::Acquire));
+            if before.is_multiple_of(2) && self.underrun_sequence.load(Ordering::Acquire) == before
+            {
+                return Some(UnderrunSnapshot {
+                    ring_frames: fields[0],
+                    marker_frames: fields[1],
+                    layout_frames: fields[2],
+                    needed_frames: fields[3],
+                    produced_frames: fields[4],
+                    since_block_ms: f32::from_bits(fields[5]),
+                });
+            }
+            std::hint::spin_loop();
+        }
+        None
+    }
+
     fn status(&self) -> EngineStatus {
         EngineStatus {
             endpoints: std::array::from_fn(|endpoint| self.read_endpoint(endpoint)),
             latency: self.latency(),
             ring_level_ms: f32::from_bits(self.ring_level_bits.load(Ordering::Acquire)),
             underruns: self.underruns.load(Ordering::Acquire),
+            last_underrun: self.last_underrun(),
             output_restarts: self.output_restarts.load(Ordering::Acquire),
             output_channels: self.output_channels.load(Ordering::Acquire) as u16,
             output_channel_mask: self.output_channel_mask.load(Ordering::Acquire),
@@ -1431,6 +1503,7 @@ fn push_block(
     } else {
         shared.blocks.fetch_add(1, Ordering::Relaxed);
     }
+    shared.note_block();
 }
 
 fn drain_changes(
@@ -2010,8 +2083,20 @@ impl OutputState {
 
         let frames = buffer.len() / self.channels;
         let layout_frames = self.current_layout_frames();
-        let at_layout_boundary = layout_frames < self.queued_frames();
+        let marker_frames = self.queued_frames();
+        let at_layout_boundary = layout_frames < marker_frames;
         self.asrc.input_limit = layout_frames;
+        let seen = UnderrunSnapshot {
+            ring_frames: (self.audio.slots() / self.channels) as u32,
+            marker_frames: marker_frames as u32,
+            layout_frames: layout_frames as u32,
+            needed_frames: match mode {
+                ClockMode::Trim => frames,
+                ClockMode::Asrc => self.asrc.frames_needed(),
+            } as u32,
+            produced_frames: 0,
+            since_block_ms: 0.0,
+        };
         let produced = match mode {
             ClockMode::Trim => {
                 let output_frames = frames.min(layout_frames);
@@ -2046,6 +2131,10 @@ impl OutputState {
             }
             if !layout_ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
+                self.shared.publish_underrun(UnderrunSnapshot {
+                    produced_frames: produced.output_frames as u32,
+                    ..seen
+                });
                 self.priming = true;
                 self.fade_in_remaining = boundary_fade_frames(self.device_rate);
             }
@@ -4192,12 +4281,29 @@ mod tests {
         output.fade_in_remaining = 0;
         let mut period = vec![1.0; 960];
 
+        assert_eq!(shared.status().last_underrun, None);
         output.fill(&mut period);
 
         assert_eq!(shared.underruns.load(Ordering::Acquire), 1);
         assert!(output.priming);
         assert_eq!(output.fade_in_remaining, boundary_fade_frames(48_000));
         assert!(period.iter().all(|sample| *sample == 0.0));
+        // The status says what the period saw: an empty ring, not a limit.
+        let seen = shared
+            .status()
+            .last_underrun
+            .expect("the underrun is published");
+        assert_eq!(
+            (
+                seen.ring_frames,
+                seen.marker_frames,
+                seen.layout_frames,
+                seen.needed_frames,
+                seen.produced_frames
+            ),
+            (0, 0, 0, 480, 0)
+        );
+        assert!(seen.since_block_ms >= 0.0);
     }
 
     #[test]

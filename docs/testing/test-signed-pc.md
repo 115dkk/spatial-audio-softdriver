@@ -184,7 +184,7 @@ Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 �
 - 게임에서 소리가 화면보다 늦게 느껴지는지
 
 **합격 기준**
-- 재생 중 `underruns` 0
+- 재생 중 `underruns` 0. 언더런이 나면 bio-live가 그 초의 줄 아래에 `underrun: ring … frames, markers …, layout …, needed …, produced …, last block … ms ago`를 찍고, `--report`의 JSON에도 `last_underrun`으로 남깁니다. 이 줄을 결과에 그대로 붙여 주십시오. 링이 비었는지(`ring`), 캡처가 멈췄는지(`last block`)를 가를 수 있습니다
 - `output_restarts` 0. 아니면 그 DAC 이름과 함께 적습니다(ADR 0019)
 - 들리는 문제 없음
 
