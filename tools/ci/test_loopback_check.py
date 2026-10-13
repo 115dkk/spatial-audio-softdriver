@@ -125,6 +125,16 @@ class ReportProblems(unittest.TestCase):
     def test_accepts_complete_loss_free_report(self):
         self.assertEqual(report_problems(self.clean_report()), [])
 
+    def test_rejects_a_latency_no_chain_has(self):
+        report = self.clean_report()
+        report.update(latency_p50_ms=118.2, latency_p99_ms=429384.7)
+        self.assertEqual(
+            report_problems(report),
+            ["latency_p99_ms is 429384.7 ms, above 1000 ms"],
+        )
+        report.update(latency_p99_ms=134.0)
+        self.assertEqual(report_problems(report), [])
+
     def test_rejects_missing_and_nonzero_new_counters(self):
         report = self.clean_report()
         del report["dropped_events"]

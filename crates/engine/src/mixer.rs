@@ -1896,14 +1896,21 @@ impl SceneMixer {
                 .retire_volume_transitions(start.saturating_add(MIX_FRAMES as u64));
         }
 
+        // Silence carries the last source time on. Before any audio, or after
+        // audio without one, it has none and is stamped 0 (unknown); counting
+        // up from 0 made the output read the machine's uptime as latency.
         let (source_qpc, epoch) = if let Some((_, _, qpc, epoch)) = chosen {
+            self.last_source_qpc = (qpc != 0).then_some(qpc);
             (qpc, epoch)
-        } else {
+        } else if let Some(last) = self.last_source_qpc {
             let step = (MIX_FRAMES as u128 * u128::from(self.config.qpc_frequency)
                 / u128::from(MIX_RATE)) as u64;
-            (self.last_source_qpc.unwrap_or(0).saturating_add(step), 0)
+            let qpc = last.saturating_add(step);
+            self.last_source_qpc = Some(qpc);
+            (qpc, 0)
+        } else {
+            (0, 0)
         };
-        self.last_source_qpc = Some(source_qpc);
         out(&BedBlock {
             epoch,
             rate: MIX_RATE,

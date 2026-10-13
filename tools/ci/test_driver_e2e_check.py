@@ -43,6 +43,13 @@ class DriverE2eCheckTests(unittest.TestCase):
     def test_report_check_accepts_zero_discontinuity_counters(self):
         self.assertEqual(check_report(self.clean_report()), [])
 
+    def test_rejects_a_latency_no_chain_has(self):
+        report = self.clean_report()
+        report.update(latency_p50_ms=60.0, latency_p99_ms=429384.7)
+        self.assertEqual(
+            check_report(report), ["latency_p99_ms is 429384.7 ms, above 1000 ms"]
+        )
+
     def test_report_check_rejects_a_missing_required_counter(self):
         report = self.clean_report()
         del report["output_overflow_frames"]

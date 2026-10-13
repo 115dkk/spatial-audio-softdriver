@@ -95,6 +95,11 @@ if ($r.PSObject.Properties['endpoints']) {
 }
 if ($r.PSObject.Properties['seconds'] -and $r.seconds -lt 0.98 * $seconds) { $problems += "ran $($r.seconds) s of $seconds s" }
 if ($r.PSObject.Properties['blocks'] -and $r.blocks -eq 0) { $problems += 'no blocks rendered' }
+# Far above any real chain: such a sample means a block carried a source
+# time from another clock (see loopback_check.py).
+foreach ($key in @('latency_p50_ms', 'latency_p99_ms')) {
+    if ($r.PSObject.Properties[$key] -and $r.$key -gt 1000) { $problems += "$key is $($r.$key) ms, above 1000 ms" }
+}
 
 $row = "| $Name | $([math]::Round($r.seconds)) s | $($r.underruns_while_streaming) | $($r.output_restarts) | " +
     "$([math]::Round($r.latency_p50_ms, 1)) / $([math]::Round($r.latency_p99_ms, 1)) ms | " +

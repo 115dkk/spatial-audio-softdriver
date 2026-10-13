@@ -73,6 +73,9 @@ def first_sound(mono, rate):
     return None
 
 
+LATENCY_CEILING_MS = 1_000
+
+
 def report_problems(figures, require_driver=False, expected_mode=None):
     """Returns failures for missing report state and live-path losses.
 
@@ -116,6 +119,13 @@ def report_problems(figures, require_driver=False, expected_mode=None):
         problems.append(f"output opened {figures['output_mode']}, expected {expected_mode}")
     if figures.get("faults"):
         problems.append(f"faults: {figures['faults']}")
+    # Far above any real chain: a sample this large means a block carried a
+    # source time from another clock (silence counted up from 0 read as the
+    # machine's uptime, p99 429 s).
+    for key in ("latency_p50_ms", "latency_p99_ms"):
+        value = figures.get(key)
+        if isinstance(value, (int, float)) and value > LATENCY_CEILING_MS:
+            problems.append(f"{key} is {value} ms, above {LATENCY_CEILING_MS} ms")
 
     endpoints = figures.get("endpoints")
     if not isinstance(endpoints, list):

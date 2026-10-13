@@ -1112,3 +1112,52 @@ fn stop_pads_and_emits_the_final_partial_interval() {
     assert!(actual[..576].iter().all(|sample| *sample == 0.5));
     assert!(actual[576..].iter().all(|sample| *sample == 0.0));
 }
+
+#[test]
+fn silence_has_no_source_time_until_audio_gives_one() {
+    // Before any lane has played, the idle clock's silent intervals have no
+    // source time and are stamped 0 (unknown). Counted up from 0 instead, the
+    // output took them for sound recorded at boot and reported the machine's
+    // uptime as latency (p99 429 s in the CI loopback with DD+ and a warm
+    // shared endpoint).
+    let mut mixer = SceneMixer::new(config());
+    let mut before = Vec::new();
+    mixer.idle_to(0, &mut |_| {});
+    mixer.idle_to(4 * MIX_FRAMES as u64, &mut |bed| {
+        before.push((bed.silent, bed.source_qpc));
+    });
+    assert_eq!(before.len(), 4);
+    assert!(
+        before.iter().all(|&(silent, qpc)| silent && qpc == 0),
+        "{before:?}"
+    );
+
+    // After audio, silence carries the last source time on, block by block.
+    let geometry = PanGeometry::new(&layout(&[0.0])).unwrap();
+    let signal = vec![0.5; MIX_FRAMES];
+    let mut objects = [Object::SILENT; MAX_OBJECTS];
+    let scene = one(
+        1,
+        MIX_RATE,
+        5_000_000,
+        &signal,
+        Position::FRONT,
+        1.0,
+        &mut objects,
+    );
+    let mut mixer = SceneMixer::new(config());
+    mixer.lane_start(0, 0);
+    mixer.push_scene(0, &scene, Some(&geometry)).unwrap();
+    let mut stamps = Vec::new();
+    mixer.advance(0, MIX_FRAMES as u64, &mut |bed| stamps.push(bed.source_qpc));
+    mixer.lane_stop(0, &mut |bed| stamps.push(bed.source_qpc));
+    let until = mixer.now() + 3 * MIX_FRAMES as u64;
+    mixer.idle_to(until, &mut |bed| stamps.push(bed.source_qpc));
+    assert_eq!(stamps.first(), Some(&5_000_000));
+    assert!(stamps.len() >= 3, "{stamps:?}");
+    // 10 ms of the configured 1 MHz clock per block.
+    assert!(
+        stamps.windows(2).all(|pair| pair[1] == pair[0] + 10_000),
+        "{stamps:?}"
+    );
+}

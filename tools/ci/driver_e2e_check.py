@@ -52,6 +52,9 @@ LOSS_COUNTERS = (
 )
 
 
+LATENCY_CEILING_MS = 1_000
+
+
 def check_report(report):
     """Returns failures for missing state and discontinuities in a bio-live report."""
     problems = []
@@ -62,6 +65,12 @@ def check_report(report):
             problems.append(f"{key} is {report[key]}")
     if report.get("output_fell_back"):
         problems.append("exclusive output fell back to shared mode")
+    # As loopback_check.LATENCY_CEILING_MS: no chain is this slow, so such a
+    # sample is a block stamped with a source time from another clock.
+    for key in ("latency_p50_ms", "latency_p99_ms"):
+        value = report.get(key)
+        if isinstance(value, (int, float)) and value > LATENCY_CEILING_MS:
+            problems.append(f"{key} is {value} ms, above {LATENCY_CEILING_MS} ms")
 
     endpoints = report.get("endpoints")
     if not isinstance(endpoints, list) or len(endpoints) != 4:

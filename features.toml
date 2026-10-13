@@ -509,8 +509,9 @@ tests = [
   "engine::requested_reset_racing_with_output_reset_never_republishes_old_samples",
   "engine::zero_qpc_tail_marker_does_not_enter_latency_statistics",
   "engine::incremental_finish_matches_the_offline_one_shot_tail",
+  "engine::silence_has_no_source_time_until_audio_gives_one",
 ]
-note = "record QPC to the device's playback QPC (correlated GetPosition), p50 and p99 over the last 1,024 blocks. The output thread only publishes into a fixed atomic ring; Engine::status copies and sorts it on the control thread, and an output reopen advances an odd/even generation seqlock so concurrent status calls cannot mix old samples with new ones. From a paced dump on the dev PC: 13-16 ms p50 in exclusive mode (3 ms period, 10 ms target), 47 ms in shared mode. The SAL figure needs the SAL PC"
+note = "record QPC to the device's playback QPC (correlated GetPosition), p50 and p99 over the last 1,024 blocks. Silence before any audio carries source time 0 and stays out of the statistics; counted up from 0 it read as the machine's uptime (p99 429 s in the CI loopback), and the CI checks now fail any p50 or p99 above 1 s. The output thread only publishes into a fixed atomic ring; Engine::status copies and sorts it on the control thread, and an output reopen advances an odd/even generation seqlock so concurrent status calls cannot mix old samples with new ones. From a paced dump on the dev PC: 13-16 ms p50 in exclusive mode (3 ms period, 10 ms target), 47 ms in shared mode. The SAL figure needs the SAL PC"
 
 [[feature]]
 id = "convolver.non_uniform"
