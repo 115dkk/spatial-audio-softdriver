@@ -1,0 +1,101 @@
+name: M2 SAL runner experiment
+
+on:
+  push:
+    branches: [codex/m2-sal-runner]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sal-package:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and test-sign SAL with the installed WDK
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/runner | Out-Null
+          ./tools/ci/install-audio-drivers.ps1 -BuildOnly
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sal-test-package
+          path: out/sal-package/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sal-build-diagnostics
+          path: out/runner/
+          if-no-files-found: error
+          retention-days: 30
+  audio:
+    needs: sal-package
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: sal-test-package
+          path: ${{ runner.temp }}/sal-test-package
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: m2-sal-runner
+          cache-on-failure: true
+      - name: Prepare evidence directory
+        run: |
+          New-Item -ItemType Directory -Force out/runner | Out-Null
+          foreach ($script in Get-ChildItem tools/ci/*.ps1) {
+            $tokens = $null
+            $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors) { throw $parseErrors }
+          }
+      - name: Install VB-CABLE and build the SAL black box
+        id: drivers
+        timeout-minutes: 25
+        run: ./tools/ci/install-audio-drivers.ps1 -PackagePath "$env:RUNNER_TEMP/sal-test-package"
+      - name: Preserve driver diagnostics before the BIO build
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m2-install-${{ github.run_attempt }}
+          path: out/runner/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Build BIO tools and fixtures
+        if: always() && !cancelled()
+        run: |
+          cargo build --locked --release -p bio-live -p bio-replay
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo run --locked --release -p bio-replay --example replay_fixtures -- out/runner/fixtures
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked --release -p bio-sys --examples
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Exercise audio devices and SAL ring
+        if: always() && !cancelled()
+        timeout-minutes: 5
+        run: ./tools/ci/test-audio-runner.ps1
+      - name: Collect installation and device diagnostics
+        if: always()
+        run: |
+          Copy-Item "$env:windir/inf/setupapi.dev.log" out/runner/setupapi.dev.log -ErrorAction Continue
+          Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in 'MEDIA','AudioEndpoint' } |
+            Select-Object Name,PNPDeviceID,Status,ConfigManagerErrorCode | ConvertTo-Json -Depth 4 > out/runner/pnp.json
+          Get-Service AudioEndpointBuilder,Audiosrv | Format-List * > out/runner/audio-services.txt
+          $hashes = Get-ChildItem out/runner -Recurse -File | Where-Object Name -NE 'sha256.json' | Get-FileHash -Algorithm SHA256
+          $hashes | Select-Object Path,Hash | ConvertTo-Json > out/runner/sha256.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: m2-sal-windows-2025-${{ github.run_attempt }}
+          path: out/runner/
+          if-no-files-found: error
+          retention-days: 30

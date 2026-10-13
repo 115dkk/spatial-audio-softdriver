@@ -156,6 +156,7 @@ tests = [
   "decode::default_masks_follow_documented_windows_order",
   "decode::speaker_bits_cover_standard_positions_only",
   "decode::seven_one_mask_routes_in_bit_order_and_separates_lfe",
+  "decode::seven_one_four_pcm_preserves_height_channels_and_lfe_across_fragments",
   "decode::configure_rejects_invalid_shapes_and_deselects_old_format",
   "decode::partial_first_frame_keeps_its_first_byte_qpc",
   "decode::reset_reconfigure_and_epoch_change_discard_remainders",
@@ -417,10 +418,11 @@ tests = [
   "bio-sys::sal_format_change_bumps_epoch_for_each_format_field",
   "bio-sys::sal_buffer_full_retry_is_transactional",
   "bio-sys::sal_invalid_format_does_not_commit_state",
+  "bio-sys::sal_idle_before_first_format_waits_without_committing_an_epoch",
   "bio-sys::sal_translation_does_not_allocate_in_steady_state",
   "bio-sys::sal_open_errors_keep_missing_denied_and_busy_distinct",
 ]
-note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). The translation is tested on synthetic READ results; the device itself has not been opened (NotPresent on the dev PC), so real reads wait for the SAL PC. Development only; release builds leave it out"
+note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). Windows 2025 CI captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. Initial idle READs and the decoder's 8-channel limit were fixed. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
 
 [[feature]]
 id = "sys.wasapi_output"
@@ -440,7 +442,7 @@ tests = [
   "bio-sys::wasapi_shared_periods_do_not_allocate",
   "bio-sys::wasapi_exclusive_periods_and_a_restart_do_not_allocate",
 ]
-note = "exclusive event-driven (Float32, Int32, Int24in32, Int16) with a shared fallback; the stream starts on the first period. An exclusive stream restarts after a stall (a wait over two periods and 10 ms): after one missed deadline a TOPPING USB DAC otherwise signalled only every ~33 ms for good. Device tests are ignored in CI and pass on the dev PC"
+note = "exclusive event-driven (Float32, Int32, Int24in32, Int16) with a shared fallback; the stream starts on the first period. An exclusive stream restarts after a stall (a wait over two periods and 10 ms): after one missed deadline a TOPPING USB DAC otherwise signalled only every ~33 ms for good. Device tests pass on the dev PC and run explicitly in the opt-in SAL runner experiment"
 
 [[feature]]
 id = "sys.realtime_threads"
@@ -464,7 +466,15 @@ tests = [
   "bio-live::a_dump_that_ends_on_data_keeps_looping",
   "bio-live::looping_needs_two_data_records",
 ]
-note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace (--loop repeats it, --report writes the run's figures), so the whole live path runs on the dev PC and, through a virtual cable, on the Windows CI runners (ADR 0026); record and play from the SAL ring wait for the SAL PC"
+note = "bio-live record, play and devices (ADR 0018). play --from-dump replays a dump at its recorded pace (--loop repeats it, --report writes the run's figures), so the whole live path runs on the dev PC and, through a virtual cable, on the Windows CI runners (ADR 0026). The opt-in SAL runner experiment also records and plays actual SAL 7.1.4 PCM into VB-CABLE and keeps the far-end stereo WAV. Game/MAT and Apple Music/JOC source and listening checks remain"
+
+[[feature]]
+id = "ci.sal_runner"
+kind = "tool"
+milestone = "M2"
+status = "partial"
+tests = []
+note = "Opt-in GitHub-hosted Windows experiment: VB-CABLE, opaque pinned SAL driver build, synthetic PCM stimulus and retained diagnostic artifacts. Does not replace game/Apple Music listening or the latency baseline. See docs/experiments/m2-sal-runner.md."
 
 # ---- Driver and app (M3, M4) ----
 

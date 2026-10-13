@@ -160,6 +160,7 @@ dependencies = [
  "assert_no_alloc",
  "bio-abi",
  "bio-types",
+ "hound",
  "thiserror",
  "wasapi",
  "windows",

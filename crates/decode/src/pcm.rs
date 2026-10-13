@@ -5,6 +5,8 @@ use bio_types::{PcmFormat, Position, SampleType, SceneBlock};
 
 use crate::{DecodeConfig, DecodeError, SceneBuffers};
 
+const MAX_PCM_CHANNELS: usize = 12;
+
 /// Position of one `dwChannelMask` speaker bit (`SPEAKER_FRONT_LEFT` = 0x1 ...),
 /// or `None` for LFE (0x8) and bits with no standard position.
 ///
@@ -57,8 +59,8 @@ pub struct PcmDecoder {
     buffers: SceneBuffers,
     format: Option<PcmFormat>,
     // None is LFE; all other channels index the object buffers.
-    channels: [Option<usize>; 8],
-    frame: [u8; 32],
+    channels: [Option<usize>; MAX_PCM_CHANNELS],
+    frame: [u8; MAX_PCM_CHANNELS * 4],
     pending: usize,
     frames: usize,
     source_qpc: u64,
@@ -70,8 +72,8 @@ impl PcmDecoder {
         Self {
             buffers: SceneBuffers::new(config.max_frames),
             format: None,
-            channels: [None; 8],
-            frame: [0; 32],
+            channels: [None; MAX_PCM_CHANNELS],
+            frame: [0; MAX_PCM_CHANNELS * 4],
             pending: 0,
             frames: 0,
             source_qpc: 0,
@@ -79,7 +81,7 @@ impl PcmDecoder {
         }
     }
 
-    /// Accepts the epoch's format: 1 to 8 channels, 16/24/32-bit integer or
+    /// Accepts the epoch's format: 1 to 12 channels, 16/24/32-bit integer or
     /// 32-bit float, any rate whose nonempty 10 ms block fits `max_frames`.
     /// Integer valid bits must be in `1..=bits_per_sample` and are left aligned
     /// as in WAVEFORMATEXTENSIBLE; floats require 32 valid bits.
@@ -93,7 +95,7 @@ impl PcmDecoder {
             detail,
         };
         let frames = (format.sample_rate / 100) as usize;
-        if !(1..=8).contains(&format.channels)
+        if !(1..=MAX_PCM_CHANNELS as u16).contains(&format.channels)
             || frames == 0
             || frames > self.buffers.max_frames()
             || !matches!(format.bits_per_sample, 16 | 24 | 32)
@@ -103,7 +105,7 @@ impl PcmDecoder {
                 && (format.bits_per_sample != 32 || format.valid_bits != 32))
         {
             return Err(invalid(
-                "channels, rate or sample width outside 1-8 ch, 16/24/32-bit int or 32-bit float",
+                "channels, rate or sample width outside 1-12 ch, 16/24/32-bit int or 32-bit float",
             ));
         }
         let mask = if format.channel_mask == 0 {

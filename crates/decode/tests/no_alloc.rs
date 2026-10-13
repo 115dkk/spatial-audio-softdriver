@@ -12,7 +12,7 @@ static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisable
 #[test]
 fn pcm_configure_push_reset_do_not_allocate() {
     let mut decoder = PcmDecoder::new(DecodeConfig::default());
-    let bytes = [0_u8; 480 * 8 * 4 + 3];
+    let bytes = [0_u8; 480 * 12 * 4 + 3];
     let mut count = 0;
     assert_no_alloc(|| {
         for (bits, valid, kind) in [
@@ -24,12 +24,12 @@ fn pcm_configure_push_reset_do_not_allocate() {
         ] {
             decoder
                 .configure(PcmFormat {
-                    channels: 8,
+                    channels: 12,
                     sample_rate: 48_000,
                     bits_per_sample: bits,
                     valid_bits: valid,
                     sample_type: kind,
-                    channel_mask: 0x63f,
+                    channel_mask: 0x2d63f,
                 })
                 .unwrap();
             for _ in 0..8 {
