@@ -45,6 +45,8 @@ pub struct PcmDecoder {
     pending: usize,
     frames: usize,
     source_qpc: u64,
+    /// QPC of the record that held the first byte of the frame in `frame`.
+    frame_qpc: u64,
     epoch: Option<u32>,
 }
 
@@ -59,6 +61,7 @@ impl PcmDecoder {
             pending: 0,
             frames: 0,
             source_qpc: 0,
+            frame_qpc: 0,
             epoch: None,
         }
     }
@@ -162,8 +165,8 @@ impl PcmDecoder {
         let frame_bytes = format.bytes_per_frame();
         let width = usize::from(format.bits_per_sample / 8);
         while !bytes.is_empty() {
-            if self.frames == 0 && self.pending == 0 {
-                self.source_qpc = qpc;
+            if self.pending == 0 {
+                self.frame_qpc = qpc;
             }
             let take = (frame_bytes - self.pending).min(bytes.len());
             self.frame[self.pending..self.pending + take].copy_from_slice(&bytes[..take]);
@@ -171,6 +174,9 @@ impl PcmDecoder {
             bytes = &bytes[take..];
             if self.pending != frame_bytes {
                 continue;
+            }
+            if self.frames == 0 {
+                self.source_qpc = self.frame_qpc;
             }
             for channel in 0..usize::from(format.channels) {
                 let start = channel * width;
@@ -191,6 +197,27 @@ impl PcmDecoder {
         Ok(())
     }
 
+    /// Emits the complete frames held since the last block as a short scene,
+    /// keeping a partial frame for the next push. A lane's placed audio then
+    /// keeps up with the bytes it received: the mixer times lateness by bytes
+    /// received, and a held part block (up to 10 ms) behind another endpoint's
+    /// audio would be counted as that lane's underrun. Does not allocate.
+    pub fn emit_buffered(&mut self, out: &mut dyn FnMut(&SceneBlock<'_>)) {
+        let Some(format) = self.format else {
+            return;
+        };
+        if self.frames != 0 {
+            self.buffers.emit(
+                self.frames,
+                self.epoch.unwrap_or(0),
+                format.sample_rate,
+                self.source_qpc,
+                out,
+            );
+            self.frames = 0;
+        }
+    }
+
     /// Emits the final complete PCM frames as a short scene. A trailing partial
     /// interleaved frame is incomplete input and is discarded. Does not allocate.
     pub fn flush(&mut self, out: &mut dyn FnMut(&SceneBlock<'_>)) -> Result<(), DecodeError> {
@@ -207,6 +234,7 @@ impl PcmDecoder {
         self.pending = 0;
         self.frames = 0;
         self.source_qpc = 0;
+        self.frame_qpc = 0;
         Ok(())
     }
 
@@ -214,6 +242,7 @@ impl PcmDecoder {
         self.pending = 0;
         self.frames = 0;
         self.source_qpc = 0;
+        self.frame_qpc = 0;
         self.epoch = None;
     }
 }

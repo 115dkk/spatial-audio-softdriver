@@ -1218,6 +1218,153 @@ fn repeated_twenty_ms_records_interleave_by_dma_time() {
     }
 }
 
+/// xorshift64: deterministic, so a failing seed replays exactly.
+struct XorShift(u64);
+
+impl XorShift {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+/// Feeds one second of three endpoints (7.1, stereo, stereo float PCM at
+/// 48 kHz) the way the driver and the capture thread do, and returns the
+/// chain's lane underruns and drops. The driver's 1 ms timer sometimes runs
+/// up to `late_max_us` late, and the audio engine's position queries fall
+/// between ticks; every update writes all running streams up to the same QPC
+/// (CAdapterCommon::UpdatePositions). A READ ends after one to four updates,
+/// then the chain idles at its completion time. Streams start and stop at
+/// different times.
+fn driver_like_run(seed: u64, late_max_us: u64) -> (u64, u64) {
+    const RATE: u64 = 48_000;
+    let mut rng = XorShift(seed | 1);
+    let formats = [
+        pcm_format(48_000, 8, 0x63f),
+        pcm_format(48_000, 2, 3),
+        pcm_format(48_000, 2, 3),
+    ];
+    let channels = [8_u64, 2, 2];
+    let start_us = [
+        5_000 + rng.below(3_000),
+        6_000 + rng.below(5_000),
+        7_000 + rng.below(5_000),
+    ];
+    let stop_us = [
+        900_000 + rng.below(50_000),
+        880_000 + rng.below(50_000),
+        910_000 + rng.below(50_000),
+    ];
+    let mut running = [false; 3];
+    let mut started_at = [0_u64; 3];
+    let mut written = [0_u64; 3];
+    let mut chain = Chain::with_qpc_frequency(ChainConfig::default(), 1_000_000);
+    chain.set_prepared(separated_prepared("driver-like"));
+    let mut sink = |_: ChainEvent<'_>| {};
+    let mut read = vec![0_u8; 1 << 20];
+    let mut len = 0;
+    {
+        let mut writer = RecordWriter::new(&mut read);
+        for (endpoint, format) in formats.iter().enumerate() {
+            writer.set_endpoint(endpoint as u16);
+            assert!(writer.format_change(1, 0, &wave_format_bytes(format)));
+        }
+        len += writer.len();
+    }
+    let (mut now, mut next_tick, mut updates) = (0_u64, 1_000_u64, 0_u64);
+    let mut read_after = 1 + rng.below(4);
+    while now < 1_000_000 {
+        let late = if rng.below(10) == 0 {
+            rng.below(late_max_us + 1)
+        } else {
+            0
+        };
+        let query = rng.below(3) == 0;
+        now = if query {
+            now + 1 + rng.below(900)
+        } else {
+            let tick = next_tick + late;
+            next_tick = tick + 1_000 - late.min(999);
+            tick.max(now + 1)
+        };
+        let mut writer = RecordWriter::new(&mut read[len..]);
+        for endpoint in 0..3 {
+            if !running[endpoint] {
+                continue;
+            }
+            let frames = (now - started_at[endpoint]) * RATE / 1_000_000;
+            if frames == written[endpoint] {
+                continue;
+            }
+            let samples = ((frames - written[endpoint]) * channels[endpoint]) as usize;
+            writer.set_endpoint(endpoint as u16);
+            assert!(writer.push(
+                RecordHeader {
+                    kind: bio_abi::RECORD_KIND_DATA,
+                    flags: 0,
+                    epoch: 1,
+                    byte_pos: written[endpoint] * channels[endpoint] * 4,
+                    qpc: now,
+                    qpc_written: 0,
+                    len: 0,
+                    endpoint: endpoint as u16,
+                    reserved: 0,
+                },
+                &0.1_f32.to_le_bytes().repeat(samples),
+            ));
+            written[endpoint] = frames;
+        }
+        for endpoint in 0..3 {
+            writer.set_endpoint(endpoint as u16);
+            if !running[endpoint] && now >= start_us[endpoint] && now < stop_us[endpoint] {
+                assert!(writer.stream_start(1, now));
+                running[endpoint] = true;
+                started_at[endpoint] = now;
+                written[endpoint] = 0;
+            } else if running[endpoint] && now >= stop_us[endpoint] {
+                assert!(writer.stream_stop(1, now));
+                running[endpoint] = false;
+            }
+        }
+        len += writer.len();
+        updates += 1;
+        if updates >= read_after {
+            chain.push_records(&read[..len], &mut sink);
+            chain.idle(now + rng.below(200), &mut sink);
+            (len, updates, read_after) = (0, 0, 1 + rng.below(4));
+        }
+    }
+    chain.push_records(&read[..len], &mut sink);
+    chain.finish(&mut sink);
+    (chain.lane_underrun_frames(), chain.dropped_frames())
+}
+
+/// No sound of any endpoint is lost when three play at once through the
+/// driver (ADR 0028). Three faults each made this fail on the runners'
+/// end-to-end check: the PCM adapter held up to a 10 ms block behind the
+/// bytes its lane had received, a late tick's records for one endpoint moved
+/// `now` past an interval another endpoint's records in the same READ had
+/// yet to fill, and a lane started before any reference kept an older idle
+/// anchor, so idle moved `now` ahead of it.
+#[test]
+fn driver_like_reads_with_late_ticks_lose_no_lane_audio() {
+    let mut failures = Vec::new();
+    for late_max_us in [0, 1_000, 3_000, 5_000] {
+        for seed in 1..=20_u64 {
+            let (underruns, drops) = driver_like_run(seed * 7_919, late_max_us);
+            if underruns != 0 || drops != 0 {
+                failures.push((late_max_us, seed, underruns, drops));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "(late us, seed, lane underrun frames, dropped frames): {failures:?}"
+    );
+}
+
 #[test]
 fn same_read_stop_and_first_data_match_second_endpoint_solo() {
     for first_data_flags in [0, RECORD_FLAG_DISCONTINUITY] {
@@ -3351,9 +3498,10 @@ fn format_decode_error_overrun_and_discontinuity_do_not_change_the_other_lane() 
         );
         assert_eq!(overruns, usize::from(disturbance == "overrun"));
         assert_eq!(errors, usize::from(disturbance == "decode error"));
-        // Each event cuts the old primary generation after its 64-frame fade;
-        // the exact right-hand solo comparison above proves lane isolation.
-        assert_eq!(drops, MIX_FRAMES as u64 - 16);
+        // Each event cuts the old primary generation after its 64-frame fade:
+        // the one interval it had placed but not yet emitted, less the fade.
+        // The exact right-hand solo comparison above proves lane isolation.
+        assert_eq!(drops, MIX_FRAMES as u64 - 64);
     }
 }
 

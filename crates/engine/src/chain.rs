@@ -10,7 +10,7 @@ use bio_abi::{
     AbiError, MAX_ENDPOINTS, RECORD_ALIGN, RECORD_FLAG_DISCONTINUITY, Record, RecordHeader,
     VolumePayload, volume_gain,
 };
-use bio_types::{BitstreamCodec, Feeds, OutputLayout, SourceFormat};
+use bio_types::{BitstreamCodec, Feeds, OutputLayout, SceneBlock, SourceFormat};
 use brir::PreparedBrir;
 use convolver::Binauralizer;
 use decode::{DecodeConfig, DecodeError, Decoders, MAX_SCENE_FRAMES, Route};
@@ -1247,15 +1247,20 @@ impl Chain {
         self.skipped_records
     }
 
-    fn start_offset(&self, endpoint: u16, event_qpc: u64) -> i64 {
-        let reference = if self.mixer.has_clocked_lane_except(endpoint) {
+    /// The QPC and timeline frame a lane's start is placed against: another
+    /// clocked lane's latest progress, else the idle clock once it has moved.
+    fn start_reference(&self, endpoint: u16) -> Option<(u64, u64)> {
+        if self.mixer.has_clocked_lane_except(endpoint) {
             self.timeline_qpc.map(|qpc| (qpc, self.mixer.now()))
         } else if self.idle_advanced_since_clock {
             self.anchor
         } else {
             None
-        };
-        let Some((timeline_qpc, anchor_frame)) = reference else {
+        }
+    }
+
+    fn start_offset(&self, endpoint: u16, event_qpc: u64) -> i64 {
+        let Some((timeline_qpc, anchor_frame)) = self.start_reference(endpoint) else {
             return 0;
         };
         if event_qpc == 0 || timeline_qpc == 0 || self.qpc_frequency == 0 {
@@ -1277,13 +1282,30 @@ impl Chain {
     }
 
     fn lane_start_at(&mut self, endpoint: u16, event_qpc: u64) {
+        let referenced = self.start_reference(endpoint).is_some();
         self.mixer
             .lane_start(endpoint, self.start_offset(endpoint, event_qpc));
+        self.anchor_unreferenced_start(referenced, event_qpc);
     }
 
     fn lane_discontinuity_at(&mut self, endpoint: u16, event_qpc: u64) {
+        let referenced = self.start_reference(endpoint).is_some();
         self.mixer
             .lane_discontinuity(endpoint, self.start_offset(endpoint, event_qpc));
+        self.anchor_unreferenced_start(referenced, event_qpc);
+    }
+
+    /// A start with nothing to place it against begins at `now`, so its event
+    /// QPC is `now` from then on. Without this, an idle anchor taken before
+    /// the lane existed (the first idle only records one) put the same frame
+    /// at another QPC; idle then moved `now` ahead of the lane before its
+    /// first data, the lane stayed behind every later lane for good, and was
+    /// counted late whenever they drove `now`.
+    fn anchor_unreferenced_start(&mut self, referenced: bool, event_qpc: u64) {
+        if !referenced && event_qpc != 0 {
+            self.anchor = Some((event_qpc, self.mixer.now()));
+            self.idle_advanced_since_clock = false;
+        }
     }
 
     fn emit_error(
@@ -1726,7 +1748,17 @@ impl Chain {
         self.suppressed_errors
     }
 
+    /// Processes one READ: every endpoint's records, interleaved by DMA time
+    /// in chunks of at most 10 ms. A lane with data later in the READ for a
+    /// moment already processed is waited for (see
+    /// [`SceneMixer::set_waiting`]); at the READ's end nothing is.
     pub fn push_records(&mut self, stream: &[u8], out: &mut dyn FnMut(ChainEvent<'_>)) {
+        self.push_records_merged(stream, out);
+        let (mixer, back) = (&mut self.mixer, &mut self.back);
+        mixer.release_waiting(&mut |scene| back.process(scene, out));
+    }
+
+    fn push_records_merged(&mut self, stream: &[u8], out: &mut dyn FnMut(ChainEvent<'_>)) {
         let mut cursors: [RecordCursor<'_>; MAX_ENDPOINTS] = std::array::from_fn(|endpoint| {
             let mut cursor = RecordCursor {
                 stream,
@@ -1791,9 +1823,24 @@ impl Chain {
                     selected = Some((key, endpoint));
                 }
             }
-            let Some((_, endpoint)) = selected else {
+            let Some((key, endpoint)) = selected else {
                 break;
             };
+            let mut waiting = 0_u32;
+            for (other, cursor) in cursors.iter().enumerate() {
+                if other != endpoint
+                    && let Some(Ok(Record::Data { qpc, bytes, .. })) = &cursor.head
+                    && qpc_before_end(
+                        *qpc,
+                        bytes.len().saturating_sub(cursor.data_offset),
+                        self.fronts[other].byte_rate,
+                        self.qpc_frequency,
+                    ) < key
+                {
+                    waiting |= 1_u32 << other;
+                }
+            }
+            self.mixer.set_waiting(waiting);
 
             let cursor = &mut cursors[endpoint];
             let item = cursor.head.take().expect("selected cursor has a head");
@@ -1955,13 +2002,19 @@ impl Chain {
             let chunk_qpc =
                 qpc_before_end(qpc, bytes.len().saturating_sub(start), byte_rate, frequency);
             let mut scene_rate_error = None;
-            let result = fronts[index]
-                .decoders
-                .push_pcm(chunk, chunk_qpc, &mut |scene| {
-                    if let Err(rate) = mixer.push_scene(endpoint, scene, geometry) {
-                        scene_rate_error = Some(rate);
-                    }
-                });
+            let decoders = &mut fronts[index].decoders;
+            let mut place = |scene: &SceneBlock<'_>| {
+                if let Err(rate) = mixer.push_scene(endpoint, scene, geometry) {
+                    scene_rate_error = Some(rate);
+                }
+            };
+            // Every complete frame is placed before the lane's transport
+            // moves, so the lane never holds part of a 10 ms block behind the
+            // bytes it received (the mixer would count that as its underrun).
+            let result = decoders.push_pcm(chunk, chunk_qpc, &mut place);
+            if result.is_ok() {
+                decoders.emit_buffered(&mut place);
+            }
             let error = if let Some(rate) = scene_rate_error {
                 Some(ChainError::UnsupportedSceneRate(rate))
             } else {

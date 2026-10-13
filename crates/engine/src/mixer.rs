@@ -788,6 +788,9 @@ pub struct SceneMixer {
     slot_scratch: Vec<f32>,
     last_source_qpc: Option<u64>,
     pending_lanes: u32,
+    /// Lanes with data still to come in the READ being processed, starting
+    /// before the moment just processed ([`SceneMixer::set_waiting`]).
+    waiting: u32,
     lane_underrun_frames: u64,
     dropped_frames: u64,
     #[cfg(test)]
@@ -845,6 +848,7 @@ impl SceneMixer {
             slot_scratch: vec![0.0; MAX_DIRECTIONS * MIX_FRAMES],
             last_source_qpc: None,
             pending_lanes: 0,
+            waiting: 0,
             lane_underrun_frames: 0,
             dropped_frames: 0,
             #[cfg(test)]
@@ -1212,6 +1216,32 @@ impl SceneMixer {
         self.now = self.now.max(lane.origin.saturating_add(lane.transport));
         self.emit_ready(out);
         self.retire_drained();
+    }
+
+    /// Names the lanes (bit `i` for endpoint `i`) whose next data in the READ
+    /// being processed starts before the moment just processed. An interval
+    /// past its arrival slack that one of them has not filled yet waits for
+    /// it instead of counting it late: the driver writes every endpoint up to
+    /// the same QPC, and a late DMA tick puts several milliseconds of each in
+    /// one READ, processed endpoint by endpoint. A lane whose next data starts
+    /// later (it stalled) is not waited for.
+    pub fn set_waiting(&mut self, lanes: u32) {
+        self.waiting = lanes;
+    }
+
+    /// Ends a READ: nothing more is coming, so what is late leaves now.
+    pub fn release_waiting(&mut self, out: &mut dyn FnMut(&BedBlock<'_>)) {
+        self.waiting = 0;
+        self.emit_ready(out);
+        self.retire_drained();
+    }
+
+    fn waiting_lane_short_of(&self, end: u64) -> bool {
+        self.lanes.iter().enumerate().any(|(index, lane)| {
+            self.waiting & (1_u32 << index) != 0
+                && lane.state == LaneState::Active
+                && !(lane.delay.is_some() && lane.generation_end >= end)
+        })
     }
 
     pub fn idle_to(&mut self, timeline_frame: u64, out: &mut dyn FnMut(&BedBlock<'_>)) {
@@ -1685,7 +1715,8 @@ impl SceneMixer {
     fn emit_ready(&mut self, out: &mut dyn FnMut(&BedBlock<'_>)) {
         while let Some(next) = self.next_t {
             let end = next.saturating_add(MIX_FRAMES as u64);
-            let late = self.now >= end.saturating_add(self.config.arrival_slack_frames);
+            let late = self.now >= end.saturating_add(self.config.arrival_slack_frames)
+                && !self.waiting_lane_short_of(end);
             if !late && !(end <= self.now && self.active_lanes_cover(end)) {
                 break;
             }

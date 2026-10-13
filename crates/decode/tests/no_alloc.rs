@@ -62,6 +62,35 @@ fn pcm_configure_push_reset_do_not_allocate() {
 }
 
 #[test]
+fn pcm_emit_buffered_does_not_allocate() {
+    let mut decoder = PcmDecoder::new(DecodeConfig::default());
+    decoder
+        .configure(PcmFormat {
+            channels: 8,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            valid_bits: 32,
+            sample_type: SampleType::Float,
+            channel_mask: 0x63f,
+        })
+        .unwrap();
+    let bytes = [0_u8; 48 * 8 * 4 + 5];
+    let mut frames = 0;
+    assert_no_alloc(|| {
+        for _ in 0..30 {
+            decoder
+                .push(&bytes, 77, 2, &mut |scene| frames += scene.frames)
+                .unwrap();
+            decoder.emit_buffered(&mut |scene| {
+                assert!(scene.is_consistent());
+                frames += scene.frames;
+            });
+        }
+    });
+    assert_eq!(frames, 30 * (48 * 8 * 4 + 5) / (8 * 4));
+}
+
+#[test]
 fn thirty_two_channel_direct_configure_push_and_reset_do_not_allocate() {
     let speakers = [
         Speaker::L,

@@ -4,7 +4,7 @@
 //!
 //! | adapter | input | block |
 //! | --- | --- | --- |
-//! | [`pcm::PcmDecoder`] | interleaved PCM bytes | `rate / 100` frames (10 ms) |
+//! | [`pcm::PcmDecoder`] | interleaved PCM bytes | `rate / 100` frames (10 ms), or the complete frames so far on [`Decoders::emit_buffered`] |
 //! | [`mat::MatDecoder`] | MAT bursts | 480 frames (half a 20 ms burst) |
 //! | [`ddp::DdpDecoder`] | E-AC-3 bursts | 1536 frames total, split at OAMD updates/ramps |
 //!
@@ -166,6 +166,15 @@ impl Decoders {
             Active::Ddp => self.ddp.push(burst, qpc, self.epoch, out),
             Active::None => Err(DecodeError::NoFormat),
             Active::Pcm => Err(DecodeError::WrongRoute("a burst in a PCM epoch")),
+        }
+    }
+
+    /// Emits the complete PCM frames received so far as a short scene (see
+    /// [`pcm::PcmDecoder::emit_buffered`]); burst decoders emit whole bursts and
+    /// hold nothing to emit. Does not allocate.
+    pub fn emit_buffered(&mut self, out: &mut dyn FnMut(&SceneBlock<'_>)) {
+        if self.active == Active::Pcm {
+            self.pcm.emit_buffered(out);
         }
     }
 

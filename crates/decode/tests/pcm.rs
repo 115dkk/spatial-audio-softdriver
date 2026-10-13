@@ -687,6 +687,49 @@ fn partial_first_frame_keeps_its_first_byte_qpc() {
     );
 }
 
+/// The chain emits a lane's complete frames after every chunk, so the lane's
+/// placed audio never trails the bytes it received by part of a block.
+#[test]
+fn emit_buffered_emits_complete_frames_and_keeps_a_partial_frame() {
+    let mut decoder = PcmDecoder::new(DecodeConfig::default());
+    let f = format(16, 16, SampleType::Int, 2);
+    decoder.configure(f).unwrap();
+    let frame = |value: i16| [value.to_le_bytes(), value.to_le_bytes()].concat();
+    let mut scenes = Vec::new();
+    let mut out = |s: &SceneBlock<'_>| scenes.push(OwnedScene::from(s));
+
+    decoder.emit_buffered(&mut out);
+    let mut first = (0..100).flat_map(|i| frame(i * 10)).collect::<Vec<_>>();
+    first.push(0x34);
+    decoder.push(&first, 7, 5, &mut out).unwrap();
+    decoder.emit_buffered(&mut out);
+    // The half frame from the QPC-7 record starts the next scene.
+    let mut second = vec![0x12, 0x34, 0x12];
+    second.extend((101..480).flat_map(|i| frame(i * 10)));
+    decoder.push(&second, 9, 5, &mut out).unwrap();
+    decoder.emit_buffered(&mut out);
+    decoder.emit_buffered(&mut out);
+
+    assert_eq!(
+        scenes
+            .iter()
+            .map(|s| (s.signals[0].len(), s.qpc, s.epoch))
+            .collect::<Vec<_>>(),
+        [(100, 7, 5), (380, 7, 5)]
+    );
+    let samples = scenes
+        .iter()
+        .flat_map(|s| s.signals[0].iter().copied())
+        .collect::<Vec<_>>();
+    let expected = (0..480)
+        .map(|i| {
+            let value = if i == 100 { 0x1234 } else { i * 10 };
+            f32::from(value as i16) / 32_768.0
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(samples, expected);
+}
+
 #[test]
 fn flush_emits_complete_pcm_residuals_and_discards_partial_frames() {
     for frames in [96, 479, 481, 576] {
