@@ -45,6 +45,13 @@ TRIM_LIMIT_Q16 = 2000 * 65536
 ERROR_IO_PENDING = 997
 ERROR_OPERATION_ABORTED = 995
 ERROR_SHARING_VIOLATION = 32
+WAIT_TIMEOUT = 0x102
+# A READ pends until min_bytes are queued or timeout_ms passes (both may be
+# 0xFFFFFFFF in the corpus) and no audio flows while the fuzzer runs, so a
+# request still pending after PENDING_WAIT_MS is cancelled. The driver must
+# then complete it within CANCEL_WAIT_MS.
+PENDING_WAIT_MS = 100
+CANCEL_WAIT_MS = 5000
 
 KNOWN = {
     "QUERY_INFO": IOCTL_BIO_QUERY_INFO,
@@ -147,6 +154,7 @@ def new_summary(seed, seconds):
         "status_counts": {},
         "case_counts": {},
         "unexpected_successes": [],
+        "cancelled_pending": 0,
         "checks": {},
     }
 
@@ -191,6 +199,7 @@ class WindowsDevice:
             raise OSError(ctypes.get_last_error(), "CreateFileW(\\\\.\\SpatialSoftReceiver)")
         self.overlapped = overlapped
         self.closed = False
+        self.stuck = []
 
     def _bind(self):
         k = self.kernel32
@@ -209,6 +218,8 @@ class WindowsDevice:
                                           ctypes.POINTER(wintypes.DWORD), wintypes.BOOL]
         k.CreateEventW.restype = wintypes.HANDLE
         k.CloseHandle.restype = wintypes.BOOL
+        k.WaitForSingleObject.restype = wintypes.DWORD
+        k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 
     def ioctl(self, code, request, capacity):
         out = ctypes.create_string_buffer(capacity) if capacity else None
@@ -249,6 +260,23 @@ class WindowsDevice:
         self.kernel32.CloseHandle(operation["event"])
         out = operation["out"]
         return ok, error, out.raw[:returned.value] if ok and out else b"", returned.value
+
+    def bounded_ioctl(self, code, request, capacity):
+        """Issues one request on an overlapped handle. One still pending after
+        PENDING_WAIT_MS is cancelled; returns (success, status, data, returned,
+        cancelled). Returns None, leaving the operation referenced so its
+        buffers outlive the IRP, if the driver did not complete the cancel."""
+        operation = self.begin(code, request, capacity)
+        cancelled = False
+        if not operation["immediate"] and operation["error"] == ERROR_IO_PENDING:
+            if self.kernel32.WaitForSingleObject(operation["event"], PENDING_WAIT_MS) == WAIT_TIMEOUT:
+                self.cancel(operation)
+                cancelled = True
+                if self.kernel32.WaitForSingleObject(operation["event"], CANCEL_WAIT_MS) == WAIT_TIMEOUT:
+                    self.stuck.append(operation)
+                    return None
+        ok, error, data, returned = self.finish(operation)
+        return ok, error, data, returned, cancelled
 
     def cancel(self, operation=None):
         pointer = ctypes.byref(operation["ov"]) if operation else None
@@ -336,10 +364,11 @@ def run(seed, seconds):
     rng = random.Random(seed)
     summary = new_summary(seed, seconds)
     exercise_exclusive_open(summary)
-    device = WindowsDevice()
+    device = WindowsDevice(overlapped=True)
     corpus = deterministic_cases(seed)
     deadline = time.monotonic() + seconds
     index = 0
+    summary["checks"]["pending_requests_cancel"] = True
     try:
         while time.monotonic() < deadline:
             if index % 5:
@@ -351,12 +380,21 @@ def run(seed, seconds):
                     "output_size": rng.choice(OUTPUT_SIZES), "reserved": 0,
                     "expect_success": False,
                 }
-            success, status, _, returned = device.ioctl(
-                case["code"], case["input"], case["output_size"])
+            result = device.bounded_ioctl(case["code"], case["input"], case["output_size"])
+            if result is None:
+                summary["checks"]["pending_requests_cancel"] = False
+                summary["stuck_request"] = {
+                    "name": case.get("name"), "code": "0x{0:08X}".format(case["code"]),
+                    "input_size": len(case["input"]), "output_size": case["output_size"],
+                }
+                return summary
+            success, status, _, returned, cancelled = result
+            summary["cancelled_pending"] += int(cancelled)
             record_result(summary, case, success, status, returned)
             index += 1
     finally:
-        device.close()
+        if not device.stuck:
+            device.close()
     exercise_races(summary, rng)
     final_health(summary)
     return summary

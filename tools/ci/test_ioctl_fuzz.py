@@ -2,16 +2,22 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
+import ioctl_fuzz
 from ioctl_fuzz import (
     ABI_INFO_SIZE,
     BIO_STATS_SIZE,
+    ERROR_IO_PENDING,
+    ERROR_OPERATION_ABORTED,
+    WAIT_TIMEOUT,
     IOCTL_BIO_GET_STATS,
     IOCTL_BIO_QUERY_INFO,
     IOCTL_BIO_READ,
     IOCTL_BIO_SET_RATE_TRIM,
     RATE_TRIM_SIZE,
     READ_REQUEST_SIZE,
+    WindowsDevice,
     case_fingerprint,
     deterministic_cases,
     expects_success,
@@ -22,6 +28,47 @@ from ioctl_fuzz import (
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTROL = ROOT / "driver" / "bioatmos" / "control.cpp"
+
+
+class PendingKernel:
+    """kernel32 for one overlapped request that the driver pends: each wait
+    returns the next of `waits`, and the result is `completed_ok`."""
+
+    def __init__(self, waits, completed_ok=False):
+        self.waits = list(waits)
+        self.completed_ok = completed_ok
+        self.cancels = 0
+        self.closed = 0
+
+    def CreateEventW(self, *_):
+        return 1
+
+    def DeviceIoControl(self, *_):
+        return False
+
+    def WaitForSingleObject(self, _event, _milliseconds):
+        return self.waits.pop(0)
+
+    def CancelIoEx(self, *_):
+        self.cancels += 1
+        return True
+
+    def GetOverlappedResult(self, *_):
+        return self.completed_ok
+
+    def CloseHandle(self, *_):
+        self.closed += 1
+        return True
+
+
+def pending_device(kernel):
+    device = WindowsDevice.__new__(WindowsDevice)
+    device.kernel32 = kernel
+    device.handle = 1
+    device.overlapped = True
+    device.closed = False
+    device.stuck = []
+    return device
 
 
 class IoctlFuzzTests(unittest.TestCase):
@@ -49,6 +96,35 @@ class IoctlFuzzTests(unittest.TestCase):
         self.assertFalse(expects_success("unknown", 1024, 1024))
         self.assertEqual(len({IOCTL_BIO_QUERY_INFO, IOCTL_BIO_READ,
                               IOCTL_BIO_SET_RATE_TRIM, IOCTL_BIO_GET_STATS}), 4)
+
+    def bounded(self, kernel, errors):
+        device = pending_device(kernel)
+        with mock.patch.object(ioctl_fuzz.ctypes, "get_last_error",
+                               side_effect=errors, create=True):
+            return device, device.bounded_ioctl(IOCTL_BIO_READ, b"\xff" * 8, 4096)
+
+    def test_a_request_pending_past_the_wait_is_cancelled(self):
+        kernel = PendingKernel([WAIT_TIMEOUT, 0])
+        device, result = self.bounded(kernel, [ERROR_IO_PENDING, ERROR_OPERATION_ABORTED])
+        self.assertEqual(result, (False, ERROR_OPERATION_ABORTED, b"", 0, True))
+        self.assertEqual(kernel.cancels, 1)
+        self.assertEqual(kernel.closed, 1)
+        self.assertEqual(device.stuck, [])
+
+    def test_a_request_completed_within_the_wait_is_not_cancelled(self):
+        kernel = PendingKernel([0], completed_ok=True)
+        _, result = self.bounded(kernel, [ERROR_IO_PENDING])
+        self.assertEqual(result[0], True)
+        self.assertEqual(result[4], False)
+        self.assertEqual(kernel.cancels, 0)
+
+    def test_a_cancel_the_driver_never_completes_is_reported(self):
+        kernel = PendingKernel([WAIT_TIMEOUT, WAIT_TIMEOUT])
+        device, result = self.bounded(kernel, [ERROR_IO_PENDING])
+        self.assertIsNone(result)
+        self.assertEqual(kernel.cancels, 1)
+        self.assertEqual(len(device.stuck), 1)
+        self.assertEqual(kernel.closed, 0)
 
     def test_generator_is_seed_deterministic(self):
         first = deterministic_cases(0xD2D)

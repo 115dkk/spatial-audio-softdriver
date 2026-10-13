@@ -187,6 +187,9 @@ jobs:
     name: driver package (test-signed install, x64, ${{ matrix.os }})
     needs: build
     runs-on: ${{ matrix.os }}
+    # The whole job takes about ten minutes. A request the driver never
+    # completes hangs the step that made it, so fail well before six hours.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -414,6 +417,9 @@ jobs:
       # run so a failure can be replayed with --seed.
       - name: IOCTL fuzzer on the control device for 60 s (tools/ci/ioctl_fuzz.py)
         if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
+        # Pending READs are cancelled after 100 ms and must complete within
+        # 5 s of the cancel; a driver that never completes one hangs here.
+        timeout-minutes: 5
         shell: pwsh
         run: |
           python tools/ci/ioctl_fuzz.py --seconds 60 --seed ${{ github.run_id }}${{ github.run_attempt }} --summary (Join-Path $env:RUNNER_TEMP 'ioctl-fuzz.json')
