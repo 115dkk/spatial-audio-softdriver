@@ -73,8 +73,10 @@ const PI_LIMIT_PPM: f64 = 2_000.0;
 // Deliveries land in the crossing ring whole (10 ms of PCM or MAT, 32 ms of
 // E-AC-3 as several mixer blocks) while the output takes one period at a
 // time, so the level is a sawtooth whose trough, just before the next
-// delivery lands, is how close the output came to running dry. The controller holds that trough at target_ms:
-// it reads the lowest level left after each period over a window, and acts
+// delivery lands, is how close the output came to running dry. The controller
+// holds that trough at target_ms plus what one late delivery costs a take
+// (trough_setpoint_frames): it reads the lowest level left after each period
+// over a window, and acts
 // once per window. The error is in milliseconds; P turns one millisecond into
 // 60 ppm and I adds 3 ppm per millisecond-second. Larger gains chase the
 // sawtooth itself (2,000 and 200 swung the ratio between the ±2,000 ppm limits
@@ -84,12 +86,15 @@ const PI_LIMIT_PPM: f64 = 2_000.0;
 // only bounds transients.
 const PI_KP: f64 = 60.0;
 const PI_KI: f64 = 3.0;
-// The integral learns only within this many milliseconds of the target; P
-// alone drains larger errors (see PiController::update). P gives 360 ppm at
-// 6 ms, above the largest skew the simulation covers (real devices are within
-// about ±100 ppm), so every steady-state error the integral must learn lies
-// inside; a narrower band let P chase the E-AC-3 sawtooth at a 20 ms period.
-const PI_INTEGRAL_BAND_MS: f64 = 6.0;
+// The integral learns only within this many milliseconds of the setpoint; P
+// alone drains larger errors (see PiController::update). With a period at
+// least as long as a delivery the trough is flat between phase slips and
+// steps by a whole delivery at each, so the skew shows only as those steps:
+// the band holds one 10 ms block (PCM, MAT and the mixer's blocks) and 2 ms
+// of jitter. At 6 ms the integral never learned a slip, P alone took about
+// 20 s to climb back each time, and a late block in that time emptied the
+// ring. At 16 ms it learned the E-AC-3 sawtooth at a 3 ms period as skew.
+const PI_INTEGRAL_BAND_MS: f64 = 12.0;
 const CONTROL_WINDOW_SECONDS: f64 = 0.2;
 // Priming waits for the largest delivery among this many recent capture steps
 // that delivered audio (see ArrivalPeak). A DD+ sync frame is 3.2 mixer blocks,
@@ -2168,17 +2173,7 @@ impl OutputState {
     /// lookahead before its first render.
     fn priming_excess(&self, scene_rate: u32, take: usize) -> Option<usize> {
         let rate = f64::from(scene_rate);
-        let block_frames = self
-            .pending_marker
-            .map_or(0.0, |marker| {
-                let marker_rate = if marker.rate == 0 {
-                    scene_rate
-                } else {
-                    marker.rate
-                };
-                f64::from(marker.frames) * rate / f64::from(marker_rate)
-            })
-            .max(self.shared.arrival_frames.load(Ordering::Acquire) as f64);
+        let block_frames = self.delivery_frames(scene_rate);
         let target_frames = self.target_ms * rate / 1_000.0;
         let take = take as f64;
         let threshold =
@@ -2189,6 +2184,34 @@ impl OutputState {
         }
         let keep = (target_frames + block_frames + take).min(threshold);
         Some((level - keep).max(0.0) as usize)
+    }
+
+    /// The next delivery in scene frames: the head block, or the largest
+    /// recent capture step if that is larger (a DD+ sync frame lands as
+    /// several mixer blocks at once).
+    fn delivery_frames(&self, scene_rate: u32) -> f64 {
+        self.pending_marker
+            .map_or(0.0, |marker| {
+                let marker_rate = if marker.rate == 0 {
+                    scene_rate
+                } else {
+                    marker.rate
+                };
+                f64::from(marker.frames) * f64::from(scene_rate) / f64::from(marker_rate)
+            })
+            .max(self.shared.arrival_frames.load(Ordering::Acquire) as f64)
+    }
+
+    /// The trough the controller holds, in ms (see [`trough_setpoint_frames`]).
+    fn trough_setpoint_ms(&self, scene_rate: u32, take_frames: f64) -> f64 {
+        let rate = f64::from(scene_rate);
+        trough_setpoint_frames(
+            self.target_ms * rate / 1_000.0,
+            take_frames,
+            self.delivery_frames(scene_rate),
+            self.capacity_frames as f64,
+        ) * 1_000.0
+            / rate
     }
 
     /// Drops up to `frames` exact-zero frames from the head of the ring,
@@ -2302,10 +2325,12 @@ impl OutputState {
             return;
         }
         let period_seconds = self.period_frames as f64 / f64::from(self.device_rate);
+        let setpoint_ms =
+            self.trough_setpoint_ms(scene_rate, period_seconds * f64::from(scene_rate));
         if let Some((trough_ms, ppm)) = self.controller.observe(
             to_ms(self.period_trough_frames),
             period_seconds,
-            self.target_ms,
+            setpoint_ms,
             self.strategy_mode,
         ) {
             self.shared
@@ -2340,22 +2365,27 @@ impl OutputState {
             .or_else(|| self.timing.pop().ok())
     }
 
+    /// Frames of `marker` the output has not taken yet. A period that takes
+    /// more than one delivery leaves markers it already read in the queue
+    /// until `consume_markers`; counting those whole put the trough up to a
+    /// period above the ring (20 ms at a 20 ms period), so the controller held
+    /// a ring that was nearly dry and the soaks underran.
+    fn unconsumed_frames(&self, marker: TimingMarker) -> usize {
+        marker
+            .stream_frame
+            .saturating_add(u64::from(marker.frames))
+            .saturating_sub(marker.stream_frame.max(self.stream_frame)) as usize
+    }
+
     fn queued_frames(&self) -> usize {
         if self.pending_marker.is_none() && self.marker_queue.is_empty() {
             return self.audio.slots() / self.channels;
         }
-        let pending = self.pending_marker.map_or(0, |marker| {
-            marker
-                .stream_frame
-                .saturating_add(u64::from(marker.frames))
-                .saturating_sub(self.stream_frame) as usize
-        });
-        pending.saturating_add(
-            self.marker_queue
-                .iter()
-                .map(|marker| marker.frames as usize)
-                .sum::<usize>(),
-        )
+        self.pending_marker
+            .iter()
+            .chain(self.marker_queue.iter())
+            .map(|marker| self.unconsumed_frames(*marker))
+            .sum()
     }
 
     fn current_layout_frames(&self) -> usize {
@@ -2364,10 +2394,7 @@ impl OutputState {
         }
         let pending = self.pending_marker.map_or(0, |marker| {
             if marker.layout == self.layout {
-                marker
-                    .stream_frame
-                    .saturating_add(u64::from(marker.frames))
-                    .saturating_sub(self.stream_frame) as usize
+                self.unconsumed_frames(marker)
             } else {
                 0
             }
@@ -2376,7 +2403,7 @@ impl OutputState {
             self.marker_queue
                 .iter()
                 .take_while(|marker| marker.layout == self.layout)
-                .map(|marker| marker.frames as usize)
+                .map(|marker| self.unconsumed_frames(*marker))
                 .sum::<usize>(),
         )
     }
@@ -2894,6 +2921,20 @@ impl ArrivalPeak {
     }
 }
 
+/// Where the controller holds the trough, in frames: the target beyond what
+/// one delivery landing just after a take instead of just before it costs
+/// that take, which is the smaller of the take and the delivery. The trough
+/// alone cannot show that cost while every period gets its delivery: with a
+/// period at least as long as a delivery (10 ms shared on 10 ms PCM, 20 ms
+/// periods) it is flat until the arrival phase crosses the period boundary,
+/// so a controller holding it at the target kept the ring one late delivery
+/// from empty, and the period that missed its delivery underran. Priming
+/// fills to target + delivery + take, so the trough starts here. Capped where
+/// the ring still takes a delivery after the take.
+fn trough_setpoint_frames(target: f64, take: f64, delivery: f64, capacity: f64) -> f64 {
+    (target + take.min(delivery)).min((capacity - delivery - take).max(0.0))
+}
+
 /// The PI controller fed with the ring's trough: the lowest level left after
 /// an output period, taken over a [`CONTROL_WINDOW_SECONDS`] window.
 struct TroughController {
@@ -3241,9 +3282,39 @@ mod tests {
         seconds: f64,
         backlog_ms: f64,
     ) -> ClockRun {
+        simulate_clock_with(skew_ppm, block, period, trim, seconds, backlog_ms, 0.0)
+    }
+
+    /// The trough the simulation's controller holds: the runtime's setpoint
+    /// for a 10 ms target, in ms.
+    fn simulated_setpoint_ms(block: usize, period: usize) -> f64 {
+        trough_setpoint_frames(480.0, period as f64, block as f64, f64::INFINITY) / 48.0
+    }
+
+    /// As [`simulate_clock_from`], with a share `late` of the blocks landing
+    /// one period late (a capture step that misses the take it was due
+    /// before), drawn from a fixed seed.
+    fn simulate_clock_with(
+        skew_ppm: f64,
+        block: usize,
+        period: usize,
+        trim: bool,
+        seconds: f64,
+        backlog_ms: f64,
+        late: f64,
+    ) -> ClockRun {
         let rate = 48_000.0;
         let target = 10.0;
         let to_ms = |frames: f64| frames * 1_000.0 / rate;
+        let setpoint = simulated_setpoint_ms(block, period);
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut draw = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut held = 0.0_f64;
         let mode = if trim {
             ClockMode::Trim
         } else {
@@ -3266,9 +3337,15 @@ mod tests {
         for index in 0..periods {
             let source_ppm = skew_ppm + if trim { correction } else { 0.0 };
             arriving += period as f64 * (1.0 + source_ppm * 1.0e-6);
+            level += held;
+            held = 0.0;
             while arriving >= block as f64 {
                 arriving -= block as f64;
-                level += block as f64;
+                if late > 0.0 && draw() < late {
+                    held += block as f64;
+                } else {
+                    level += block as f64;
+                }
             }
             if priming {
                 if to_ms(level) < target + to_ms(block as f64) + to_ms(period as f64) {
@@ -3285,7 +3362,7 @@ mod tests {
             }
             level -= wanted;
             let Some((trough, ppm)) =
-                controller.observe(to_ms(level), period_seconds, target, mode)
+                controller.observe(to_ms(level), period_seconds, setpoint, mode)
             else {
                 continue;
             };
@@ -3433,10 +3510,11 @@ mod tests {
                 for skew in [-300.0, 300.0] {
                     let run = simulate_clock(skew, block, period, trim, 300.0);
                     let label = format!("block {block} period {period} trim {trim} skew {skew}");
+                    let setpoint = simulated_setpoint_ms(block, period);
                     assert_eq!(run.underruns, 0, "{label}");
                     assert_eq!(run.clamped, 0, "{label}");
                     assert!(
-                        run.trough.0 >= 8.0 && run.trough.1 <= 12.0,
+                        run.trough.0 >= setpoint - 2.0 && run.trough.1 <= setpoint + 2.0,
                         "{label}: trough {:?} ms",
                         run.trough
                     );
@@ -3474,10 +3552,11 @@ mod tests {
                         let label = format!(
                             "block {block} period {period} skew {skew} backlog {backlog} trim {trim}"
                         );
+                        let setpoint = simulated_setpoint_ms(block, period);
                         assert_eq!(run.underruns, 0, "{label}");
                         assert_eq!(run.late_clamped, 0, "{label}: still at the limit");
                         assert!(
-                            run.trough.0 >= 7.0 && run.trough.1 <= 13.0,
+                            run.trough.0 >= setpoint - 3.0 && run.trough.1 <= setpoint + 3.0,
                             "{label}: trough {:?} ms",
                             run.trough
                         );
@@ -3488,37 +3567,46 @@ mod tests {
     }
 
     #[test]
-    fn clock_with_a_long_period_stays_bounded() {
+    fn a_period_as_long_as_a_block_survives_phase_slips_and_late_blocks() {
         // A 10 ms shared period with 10 ms PCM blocks, and a 20 ms exclusive
-        // period with PCM or E-AC-3: as the arrival phase drifts past the
-        // period boundary the real trough moves by up to a block, so the
-        // controller cannot hold it within the 2 ms above. It must still not
-        // swing to its limit. At a real device's skew (about ±100 ppm) it may
-        // starve only now and then. At ±300 ppm a period as long as a block
-        // can starve once per phase slip (one every block / skew seconds,
-        // 33 s for 10 ms blocks): the 10 ms target holds no block of margin,
-        // and since priming keeps audible frames (ADR 0028) each underrun is
-        // followed by latency to drain rather than by a trimmed ring.
-        let seconds = 300.0;
+        // period with PCM or E-AC-3. While every period gets its block the
+        // trough is flat; as the arrival phase drifts past the period boundary
+        // one period gets none, and so does a period whose block lands late.
+        // Held at the bare target the ring was one block from empty there and
+        // starved about once per phase slip (33 s at 300 ppm for 10 ms
+        // blocks); the setpoint keeps that block as margin.
         for (block, period) in [(480, 480), (480, 960), (1_536, 960)] {
-            for skew in [-300.0, -100.0, 100.0, 300.0] {
-                let run = simulate_clock(skew, block, period, false, seconds);
-                let label = format!("block {block} period {period} skew {skew}");
-                assert_eq!(run.clamped, 0, "{label}");
-                let slips =
-                    (seconds * f64::abs(skew) * 1.0e-6 * 48_000.0 / block as f64).ceil() as u32;
-                let allowed = if f64::abs(skew) <= 100.0 {
-                    3
-                } else {
-                    slips.max(3)
-                };
-                assert!(
-                    run.underruns <= allowed,
-                    "{label}: {} underruns",
-                    run.underruns
-                );
+            for skew in [-300.0, -100.0, 0.0, 100.0, 300.0] {
+                for late in [0.0, 0.02] {
+                    for trim in [false, true] {
+                        let run = simulate_clock_with(skew, block, period, trim, 300.0, 0.0, late);
+                        let label = format!(
+                            "block {block} period {period} skew {skew} late {late} trim {trim}"
+                        );
+                        assert_eq!(run.underruns, 0, "{label}");
+                        assert_eq!(run.late_clamped, 0, "{label}: still at the limit");
+                    }
+                }
             }
         }
+    }
+
+    #[test]
+    fn trough_setpoint_keeps_one_late_delivery_beyond_the_target() {
+        // The smaller of the take and the delivery: a 3 ms period loses one
+        // take to a late 10 ms block, a 20 ms period loses one 10 ms block.
+        assert_eq!(trough_setpoint_frames(480.0, 144.0, 480.0, 9_600.0), 624.0);
+        assert_eq!(trough_setpoint_frames(480.0, 960.0, 480.0, 9_600.0), 960.0);
+        assert_eq!(
+            trough_setpoint_frames(480.0, 480.0, 1_536.0, 9_600.0),
+            960.0
+        );
+        // Never above what leaves room for a delivery after the take.
+        assert_eq!(
+            trough_setpoint_frames(480.0, 960.0, 1_536.0, 2_976.0),
+            480.0
+        );
+        assert_eq!(trough_setpoint_frames(480.0, 960.0, 1_536.0, 1_000.0), 0.0);
     }
 
     /// Drives the real output state (ring, priming, ASRC) with whole blocks
@@ -4251,6 +4339,73 @@ mod tests {
                 .iter()
                 .all(|sample| *sample == 0.0)
         );
+    }
+
+    #[test]
+    fn trough_is_the_ring_left_after_the_period() {
+        // A period that takes several deliveries reads past markers that stay
+        // queued until finish_period. The trough sampled after the render must
+        // be what the ring holds, not those markers counted whole: the soaks
+        // ran at 20 ms periods on 10 ms deliveries, saw "20 ms" while the ring
+        // held 0-10 ms, and underran.
+        for (period_frames, block_frames) in [(480, 480), (960, 480), (1_440, 480), (960, 1_536)] {
+            let label = format!("period {period_frames}, block {block_frames}");
+            let shared = Arc::new(Shared::new());
+            shared.scene_rate.store(48_000, Ordering::Release);
+            shared
+                .clock_mode
+                .store(ClockMode::Asrc.as_u32(), Ordering::Release);
+            let (mut audio_in, audio) = RingBuffer::<f32>::new(48_000 * 2);
+            let (mut timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
+            let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
+            let mut output = OutputState::new(
+                audio,
+                timing,
+                48_000,
+                period_frames,
+                10.0,
+                DEFAULT_QPC_FREQUENCY,
+                events,
+                Arc::clone(&shared),
+                OutputLayout::STEREO,
+                48_000,
+            );
+            let mut stream = 0_u64;
+            let mut delivered = 0_usize;
+            let mut deliver = |audio_in: &mut Producer<f32>,
+                               timing_in: &mut Producer<TimingMarker>,
+                               delivered: &mut usize| {
+                timing_in
+                    .push(TimingMarker {
+                        stream_frame: stream,
+                        frames: block_frames as u32,
+                        source_qpc: 1,
+                        rate: 48_000,
+                        layout: OutputLayout::STEREO,
+                    })
+                    .unwrap();
+                for _ in 0..block_frames * 2 {
+                    audio_in.push(0.25).unwrap();
+                }
+                stream += block_frames as u64;
+                *delivered += block_frames;
+            };
+            let mut period = vec![0.0; period_frames * 2];
+            let mut taken = 0_usize;
+            for n in 0..150_u64 {
+                // Deliver at the period's average rate, with the source a
+                // little fast so the controller acts on a moving level.
+                while delivered < taken + period_frames * 4 + period_frames * n as usize / 1_000 {
+                    deliver(&mut audio_in, &mut timing_in, &mut delivered);
+                }
+                output.fill(&mut period);
+                let ring = output.audio.slots() / 2;
+                assert_eq!(output.period_trough_frames, ring, "{label}, period {n}");
+                taken += output.period_source_frames;
+                output.finish_period(n * period_frames as u64);
+            }
+            assert_eq!(shared.underruns.load(Ordering::Acquire), 0, "{label}");
+        }
     }
 
     #[test]
