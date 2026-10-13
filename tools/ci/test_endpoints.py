@@ -179,13 +179,21 @@ $owners = @('ROOT\MEDIA\0000')
 $guid = '{6994ad04-93ef-11d0-a3cc-00a0c9223196}'
 foreach ($ep in 0..2) {
     foreach ($ref in "TopologyHdmi$ep", "WaveHdmi$ep") {
-        foreach ($prefix in '\\?\', '\??\') {
+        foreach ($prefix in '\\?\', '\??\', '{2}.\\?\') {
             $path = "${prefix}root#media#0000#$guid\$ref"
             if ([SpatialEndpoints]::MapFilter($path, $owners) -ne $ep) { throw "mapping failed: $path" }
         }
     }
 }
+# The exact form IConnector::GetDeviceIdConnectedTo returned on the CI runners.
+if ([SpatialEndpoints]::MapFilter('{2}.\\?\root#media#0000#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\topologyhdmi1', $owners) -ne 1) {
+    throw 'runner device-topology id did not map'
+}
 foreach ($path in @(
+    "{2}.\\?\root#media#0001#$guid\topologyhdmi0",
+    "{x}.\\?\root#media#0000#$guid\topologyhdmi0",
+    "{2}\\?\root#media#0000#$guid\topologyhdmi0",
+    "{2}.\\?\root#media#0000#$guid\topologymicarray1",
     "\\?\ROOT#MEDIA#0001#$guid\TopologyHdmi0",
     "\\?\ROOT#MEDIA#0000#$guid\TopologyHdmi3",
     "\\?\ROOT#MEDIA#0000#$guid\TopologyHdmi00",

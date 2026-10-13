@@ -47,11 +47,18 @@ foreach ($ep in 0..3) {
     $expected["PcmRateMask$ep"] = 0x3f
     $expected["PcmShapeMask$ep"] = 0x1f
     $expected["PcmMaxMaskedChannels$ep"] = 18
-    $expected["PcmDirectChannels$ep"] = -1 # REG_DWORD is returned as signed Int32
+    $expected["PcmDirectChannels$ep"] = 0xFFFFFFFFL
 }
+# A REG_DWORD reads back as Int32 or UInt32 depending on the PowerShell host
+# (0xffffffff came back as 4294967295 on the runners), so compare the stored
+# bits; the codec masks are REG_QWORD and compare whole.
 foreach ($name in $expected.Keys) {
-    if ($parameters.$name -ne $expected[$name]) {
-        throw "Parameters\$name is '$($parameters.$name)', expected $($expected[$name])"
+    $actual = $parameters.$name
+    $same = if ($null -eq $actual) { $false }
+        elseif ($name -like 'CodecMask*') { [int64]$actual -eq [int64]$expected[$name] }
+        else { ([int64]$actual -band 0xFFFFFFFFL) -eq ([int64]$expected[$name] -band 0xFFFFFFFFL) }
+    if (-not $same) {
+        throw "Parameters\$name is '$actual', expected $($expected[$name])"
     }
 }
 $kinds = @{}

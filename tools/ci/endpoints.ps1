@@ -76,7 +76,9 @@ public static class SpatialEndpoints {
     // PnP instance: another vendor's TopologyHdmi0 is not our endpoint 0.
     public static int MapFilter(string path, string[] owners) {
         if (path == null || owners == null) return -1;
-        var match = Regex.Match(path, @"^(?:\\\\\?\\|\\\?\?\\)([^{}]+)#\{[0-9a-f-]{36}\}\\(?:TopologyHdmi|WaveHdmi)([0-2])$", RegexOptions.IgnoreCase);
+        // GetDeviceIdConnectedTo returns a device-topology id with a "{2}."
+        // prefix, e.g. {2}.\\?\root#media#0000#{6994ad04-...}\topologyhdmi0.
+        var match = Regex.Match(path, @"^(?:\{\d+\}\.)?(?:\\\\\?\\|\\\?\?\\)([^{}]+)#\{[0-9a-f-]{36}\}\\(?:TopologyHdmi|WaveHdmi)([0-2])$", RegexOptions.IgnoreCase);
         if (!match.Success) return -1;
         string owner = match.Groups[1].Value.Replace('#', '\\');
         foreach (string expected in owners)
