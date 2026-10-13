@@ -147,6 +147,9 @@ public sealed class BioExclusivePolicy : IDisposable {
                 Marshal.Copy(wave, 0, format, wave.Length);
                 int supported = client.IsFormatSupported(1, format, IntPtr.Zero);
                 result.support_hr = Hex(supported);
+                // EXCLUSIVE_MODE_NOT_ALLOWED refuses the endpoint, not this
+                // format: the policy answered, so stop probing formats.
+                if (unchecked((uint)supported) == 0x8889000E) return result;
                 if (supported != 0) continue;
                 result.supported = true; result.channels = channels; result.rate = rate;
                 result.bits = bits; result.sample = shape == 2 ? "float" : "PCM";

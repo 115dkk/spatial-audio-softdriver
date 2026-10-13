@@ -73,8 +73,11 @@ class ExclusivePolicyContractTests(unittest.TestCase):
         self.assertNotIn("IndexOf($names", helper)
         check = read("tools/ci/exclusive_policy_check.ps1")
         self.assertIn("0x8889000E", check)
-        self.assertIn("$item.probe.supported", check)
-        self.assertIn("$item.probe.initialize_hr -eq $expectedHr", check)
+        self.assertIn("$item.probe.support_hr -eq '0x8889000E'", check)
+        self.assertIn("$item.probe.initialize_hr -eq '0x8889000E'", check)
+        self.assertIn("$item.probe.initialize_hr -eq '0x00000000'", check)
+        # A policy refusal ends the probe: it is about the endpoint, not a format.
+        self.assertIn("if (unchecked((uint)supported) == 0x8889000E) return result;", helper)
         self.assertIn("exit $(if ($report.passed) { 0 } else { 1 })", check)
 
     def test_kit_applies_checks_collects_and_clears_policy(self):
@@ -110,9 +113,16 @@ class BioExclusivePolicy {
     }
     [object] Probe() {
         if ($env:BIO_POLICY_CASE -eq 'exception') { throw 'activation failed' }
+        if ($this.endpoint -ne 2 -and $env:BIO_POLICY_CASE -eq 'refused_at_format') {
+            # What the runners showed: IsFormatSupported already refuses.
+            return @{ supported=$false; support_hr='0x8889000E'; initialize_hr=$null }
+        }
+        if ($env:BIO_POLICY_CASE -eq 'unsupported') {
+            return @{ supported=$false; support_hr='0x88890008'; initialize_hr=$null }
+        }
         $hr = if ($this.endpoint -eq 2) { '0x00000000' } else { '0x8889000E' }
         if ($env:BIO_POLICY_CASE -eq 'wrong_hr') { $hr = '0x8889000A' }
-        return @{ supported=($env:BIO_POLICY_CASE -ne 'unsupported'); initialize_hr=$hr }
+        return @{ supported=$true; support_hr='0x00000000'; initialize_hr=$hr }
     }
     [void] Dispose() { }
 }
@@ -128,14 +138,16 @@ function Get-BioPolicyTargets {
             checker.write_text(read("tools/ci/exclusive_policy_check.ps1"))
             (folder / "exclusive-policy.ps1").write_text(mock)
             summary = folder / "summary.json"
-            for case in ("ok", "wrong_policy", "missing_property", "wrong_hr", "unsupported", "exception", "missing", "duplicate"):
+            passing = ("ok", "refused_at_format")
+            for case in ("ok", "refused_at_format", "wrong_policy", "missing_property", "wrong_hr", "unsupported",
+                         "exception", "missing", "duplicate"):
                 with self.subTest(case=case):
                     run = subprocess.run([pwsh, "-NoProfile", "-File", str(checker), "-Summary", str(summary)],
                                          env={**os.environ, "BIO_POLICY_CASE": case}, capture_output=True, text=True, timeout=30)
-                    self.assertEqual(run.returncode, 0 if case == "ok" else 1, run.stdout + run.stderr)
+                    self.assertEqual(run.returncode, 0 if case in passing else 1, run.stdout + run.stderr)
                     result = json.loads(summary.read_text(encoding="utf-8-sig"))
-                    self.assertEqual(result["passed"], case == "ok")
-                    self.assertEqual(bool(result["problems"]), case != "ok")
+                    self.assertEqual(result["passed"], case in passing)
+                    self.assertEqual(bool(result["problems"]), case not in passing)
 
     def test_korean_powershell_keeps_utf8_bom(self):
         for folder in ("tools/ci", "tools/testkit"):

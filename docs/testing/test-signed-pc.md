@@ -271,8 +271,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\exclusive_policy_check.ps1
 **합격 기준**
 - 종료 코드 0, 요약의 `passed: true`
 - 0/1의 `allow_exclusive`, `exclusive_priority`는 0/0, 2는 1/1
-- 모든 엔드포인트에서 `probe.supported: true` (독점 모드에서 지원하는 실제 PCM 형식)
-- 0/1의 `probe.initialize_hr`는 `0x8889000E` (`AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED`), 2는 `0x00000000`
+- 2는 `probe.supported: true`(독점 모드에서 지원하는 실제 PCM 형식)이고 `probe.initialize_hr`가 `0x00000000`
+- 0/1은 독점 열기가 `0x8889000E`(`AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED`)로 거절됨. Windows는 형식 확인 단계(`probe.support_hr`)나 열기 단계(`probe.initialize_hr`) 가운데 한 곳에서 이 값을 돌려줍니다. 다른 오류 코드(예: 형식 미지원 `0x88890008`)는 정책의 증거가 아니므로 실패입니다.
 - 장치 없음·중복·지원 형식 없음·사용 중은 건너뛰지 않고 실패
 
 키는 공개 Windows SDK 계약이 아닌 private 속성입니다. 값만 맞고 동작이 다르면 합격이 아닙니다. 재부팅·장치 재시작·절전 복귀 후에도 재검사하십시오. 업데이트 뒤 검사가 실패하면 JSON과 수집 결과를 보내고, 임의로 서비스를 재시작하여 합격으로 바꾸지 마십시오.

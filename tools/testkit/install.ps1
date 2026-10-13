@@ -103,7 +103,11 @@ try {
         if ($problem -ne 0 -or $activeNow -ge $expectedCount) { break }
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)
-    foreach ($endpoint in $endpoints) { Write-Host "endpoint $($endpoint.state): $($endpoint.name)" }
+    $stateNames = @{ 1 = 'active'; 2 = 'disabled'; 4 = 'not present'; 8 = 'unplugged' }
+    foreach ($endpoint in $endpoints | Sort-Object endpoint) {
+        $stateName = if ($stateNames.ContainsKey([int]$endpoint.state)) { $stateNames[[int]$endpoint.state] } else { "state $($endpoint.state)" }
+        Write-Host "endpoint $($endpoint.endpoint) ($stateName): $($endpoint.name)"
+    }
     Write-Host '이 이름들이 Windows 설정 > 시스템 > 소리의 출력 장치 목록에 보여야 합니다.'
     $activeEndpoints = @($endpoints | Where-Object state -eq 1)
     $active = $activeEndpoints.Count

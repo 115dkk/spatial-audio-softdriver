@@ -30,9 +30,17 @@ try {
             $expected = if ($ep -eq 2) { 1 } else { 0 }
             $policyOk = $item.policy.allow_exclusive -eq $expected -and $item.policy.exclusive_priority -eq $expected
             $item.probe = $control.Probe()
-            $expectedHr = if ($ep -eq 2) { '0x00000000' } else { '0x8889000E' } # EXCLUSIVE_MODE_NOT_ALLOWED
-            $item.passed = $policyOk -and $item.probe.supported -and $item.probe.initialize_hr -eq $expectedHr
-            if (-not $item.passed) { $problems += "endpoint ${ep}: policy must be $expected/$expected and supported-format Initialize must return $expectedHr" }
+            # 0x8889000E is AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED. Windows may give
+            # it while checking a format or while opening the stream; either
+            # proves the policy, unlike a format the endpoint does not take.
+            $refused = $item.probe.support_hr -eq '0x8889000E' -or ($item.probe.supported -and $item.probe.initialize_hr -eq '0x8889000E')
+            $opened = $item.probe.supported -and $item.probe.initialize_hr -eq '0x00000000'
+            $behaviorOk = if ($ep -eq 2) { $opened } else { $refused }
+            $item.passed = $policyOk -and $behaviorOk
+            if (-not $item.passed) {
+                $want = if ($ep -eq 2) { 'a supported exclusive format must open (0x00000000)' } else { 'exclusive open must be refused with 0x8889000E' }
+                $problems += "endpoint ${ep}: policy must be $expected/$expected and $want"
+            }
         } catch {
             $item.error = $_.Exception.Message
             $problems += "endpoint ${ep}: $($item.error)"
