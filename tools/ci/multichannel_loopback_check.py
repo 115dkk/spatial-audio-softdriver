@@ -74,11 +74,53 @@ def make_dump(path, frames, channel_mask):
     Path(path).write_bytes(header + stream)
 
 
+# How far a tone may sit from its nominal frequency: the live clock's ASRC
+# shifts every tone by its correction (the PI limit is 2000 ppm), and the
+# tones are 25 % apart.
+TONE_TOLERANCE = 0.01
+# Trimmed from each end of the sounding part: the boundary fades and the
+# capture's start are not the steady tone.
+EDGE_S = 0.1
+
+
+def steady_span(captured, rate):
+    """Frames where the recording carries the tones, minus the edges."""
+    hop = rate // 100
+    usable = len(captured) // hop * hop
+    if usable == 0:
+        return 0, len(captured)
+    energy = (captured[:usable].astype(np.float64) ** 2).sum(axis=1)
+    envelope = energy.reshape(-1, hop).mean(axis=1)
+    active = np.flatnonzero(envelope > 0.25 * envelope.max(initial=0.0))
+    if active.size == 0:
+        return 0, len(captured)
+    edge = int(EDGE_S * rate)
+    start, end = active[0] * hop + edge, (active[-1] + 1) * hop - edge
+    if end - start < rate // 4:
+        return 0, len(captured)
+    return start, end
+
+
 def assignment_matrix(captured, rate, frequencies):
-    window = np.hanning(len(captured))[:, None]
-    spectrum = np.fft.rfft(captured * window, axis=0)
-    bins = np.rint(np.asarray(frequencies) * len(captured) / rate).astype(int)
-    return np.abs(spectrum[bins, :]) ** 2
+    """Power of reference tone k (row) in captured channel j (column).
+
+    Each entry sums a band of TONE_TOLERANCE around the tone over the steady
+    part of the recording, so a clock correction that moves the tone off its
+    nominal bin is still counted as that tone, and a tone that starts or stops
+    inside the window does not smear into its neighbours' bands.
+    """
+    start, end = steady_span(captured, rate)
+    segment = captured[start:end].astype(np.float64)
+    window = np.hanning(len(segment))[:, None]
+    power = np.abs(np.fft.rfft(segment * window, axis=0)) ** 2
+    bin_hz = rate / len(segment)
+    rows = []
+    for frequency in frequencies:
+        half = max(TONE_TOLERANCE * frequency / bin_hz, 4.0)
+        lo = max(0, int(np.floor(frequency / bin_hz - half)))
+        hi = min(power.shape[0], int(np.ceil(frequency / bin_hz + half)) + 1)
+        rows.append(power[lo:hi].sum(axis=0))
+    return np.array(rows)
 
 
 def assignment_problems(matrix, margin_db=40.0):

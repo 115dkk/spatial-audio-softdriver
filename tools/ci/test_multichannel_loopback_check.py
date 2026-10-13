@@ -15,8 +15,22 @@ from multichannel_loopback_check import (
     choose_channels,
     make_dump,
     profile_text,
+    steady_span,
     tone_frames,
 )
+
+
+def recording(channels, ppm=0.0, start_s=0.59, seconds=4.0, total_s=6.0, leak=None):
+    """A 16-bit capture of the tones, pitch-shifted as the live ASRC would."""
+    out = np.zeros((int(total_s * RATE), channels))
+    t = np.arange(int(seconds * RATE)) / RATE
+    frequencies = np.array([300.0 * 1.25 ** k for k in range(channels)]) * (1 + ppm * 1e-6)
+    start = int(start_s * RATE)
+    out[start:start + len(t)] = 0.1 * np.sin(2 * np.pi * t[:, None] * frequencies[None, :])
+    if leak is not None:
+        source, target, db = leak
+        out[:, target] += out[:, source] * 10 ** (db / 20)
+    return (np.round(out * 32767) / 32768).astype(np.float32)
 
 
 def probe(*supported):
@@ -111,6 +125,39 @@ class AssignmentTest(unittest.TestCase):
             assignment_matrix(empty, RATE, self.frequencies)
         )
         self.assertIn("captured channel 3 is silent", problems)
+
+    def test_clock_correction_does_not_read_as_crosstalk(self):
+        # The live run on the runners held the clock at +1800 ppm; the exact
+        # bins then fell on the tones' sidelobes and read 30-40 dB.
+        frequencies = [300.0 * 1.25 ** k for k in range(8)]
+        for ppm in (-2000.0, -600.0, 600.0, 1800.0, 2000.0):
+            with self.subTest(ppm=ppm):
+                matrix = assignment_matrix(recording(8, ppm), RATE, frequencies)
+                self.assertEqual(assignment_problems(matrix), [])
+
+    def test_crosstalk_is_measured_through_a_clock_correction(self):
+        frequencies = [300.0 * 1.25 ** k for k in range(8)]
+        problems = assignment_problems(
+            assignment_matrix(recording(8, 1800.0, leak=(1, 0, -30.0)), RATE, frequencies)
+        )
+        self.assertEqual(problems, ["reference channel 1 separation is 30.0 dB"])
+        quiet = assignment_problems(
+            assignment_matrix(recording(8, 1800.0, leak=(1, 0, -50.0)), RATE, frequencies)
+        )
+        self.assertEqual(quiet, [])
+
+
+class SteadySpanTest(unittest.TestCase):
+    def test_span_is_the_sounding_part_without_its_edges(self):
+        start, end = steady_span(recording(4, start_s=0.59, seconds=4.0), RATE)
+        self.assertLessEqual(abs(start - int(0.69 * RATE)), RATE // 100)
+        self.assertLessEqual(abs(end - int(4.49 * RATE)), RATE // 100)
+
+    def test_silence_or_a_short_sound_uses_the_whole_recording(self):
+        silent = np.zeros((RATE, 4), dtype=np.float32)
+        self.assertEqual(steady_span(silent, RATE), (0, RATE))
+        short = recording(4, start_s=0.5, seconds=0.3, total_s=2.0)
+        self.assertEqual(steady_span(short, RATE), (0, 2 * RATE))
 
 
 if __name__ == "__main__":
