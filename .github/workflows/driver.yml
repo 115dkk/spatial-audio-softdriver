@@ -649,6 +649,9 @@ jobs:
               -RedirectStandardOutput $out -RedirectStandardError $err
             $null = $process.Handle  # keeps ExitCode readable after the exit
             if (-not $process.WaitForExit(120000)) {
+              # Stacks while it still waits: after the kill the audio engine
+              # has closed its streams and the dump shows nothing.
+              & ./tools/ci/hang-dump.ps1 -Processes python, audiodg
               $process.Kill($true)
               throw "call ${At}: the flow check did not finish in 120 s"
             }

@@ -5,18 +5,12 @@
 #include "minwavert.h"
 CMiniportWaveRTStream::CMiniportWaveRTStream(CMiniportWaveRT* miniport, PPORTWAVERTSTREAM port)
     : miniport_(ssr::km::ComRef<CMiniportWaveRT>::Retain(miniport)), adapter_(miniport->Adapter()),
-      port_(ssr::km::ComRef<IPortWaveRTStream>::Retain(port)), endpoint_(miniport->Endpoint()) {
-    InitializeListHead(&events_);
-}
+      port_(ssr::km::ComRef<IPortWaveRTStream>::Retain(port)), endpoint_(miniport->Endpoint()) {}
 CMiniportWaveRTStream::~CMiniportWaveRTStream() {
     PAGED_CODE();
     SetState(KSSTATE_STOP);
     if (registered_) adapter_->UnregisterStream(endpoint_, this);
     FreeAudioBuffer(pages_.Mdl(), pages_.Bytes());
-    while (!IsListEmpty(&events_)) {
-        ssr::km::PoolPtr<Notification> entry(
-            CONTAINING_RECORD(RemoveHeadList(&events_), Notification, Link));
-    }
 }
 NTSTATUS CMiniportWaveRTStream::Initialize(PKSDATAFORMAT format) {
     NTSTATUS status = adapter_->RegisterStream(endpoint_, this);
@@ -54,7 +48,7 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::SetFormat(PKSDATAFORMAT data) {
 void CMiniportWaveRTStream::Reset() {
     linear_ = transferred_ = packetCount_ = eosPosition_ = 0;
     positionQpc_ = SsrQpc(); eos_ = false;
-    if (packets_) RtlZeroMemory(packets_.Get(), sizeof(Packet) * notifications_);
+    RtlZeroMemory(packets_, sizeof(packets_));
 }
 void CMiniportWaveRTStream::AdapterStop(ULONGLONG qpc) {
     // CAdapterCommon::Stop has already brought every stream to qpc.
@@ -91,25 +85,19 @@ NTSTATUS CMiniportWaveRTStream::Allocate(ULONG notifications, ULONG requested, P
     PAGED_CODE();
     *mdl = nullptr; *actual = 0; *offset = 0; *cache = MmCached;
     ULONG align = Format()->nBlockAlign;
-    if (!align || !requested || requested > SsrRingBytes / 2 || notifications > 2) return STATUS_INVALID_PARAMETER;
+    if (!align || !requested || requested > SsrRingBytes / 2 || notifications > kMaxNotifications) return STATUS_INVALID_PARAMETER;
     if (notifications && (requested % notifications || (requested / notifications) % align)) return STATUS_INVALID_PARAMETER;
     requested -= requested % align;
     if (!requested) return STATUS_INVALID_PARAMETER;
     ssr::km::DmaPages pages;
     NTSTATUS status = pages.Allocate(port_.Get(), requested, MmCached);
     if (!NT_SUCCESS(status)) return status;
-    ssr::km::PoolPtr<Packet> packets;
-    if (notifications) {
-        packets = ssr::km::PoolPtr<Packet>::Allocate(sizeof(Packet) * notifications);
-        if (!packets) return STATUS_INSUFFICIENT_RESOURCES;
-    }
     RtlZeroMemory(pages.Buffer(), requested);
     KIRQL irql; adapter_->Lock(&irql);
     if (pages_ || state_ == KSSTATE_RUN || !adapter_->Active()) status = STATUS_INVALID_DEVICE_STATE;
     else {
         *mdl = pages.Mdl(); *actual = requested;
         pages_ = ssr::km::Move(pages);
-        packets_ = ssr::km::Move(packets);
         notifications_ = notifications; Reset();
     }
     adapter_->Unlock(irql);
@@ -125,7 +113,6 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::AllocateBufferWithNotification(UL
 STDMETHODIMP_(void) CMiniportWaveRTStream::FreeAudioBuffer(PMDL mdl, ULONG) {
     PAGED_CODE();
     ssr::km::DmaPages pages;
-    ssr::km::PoolPtr<Packet> packets;
     KIRQL irql; adapter_->Lock(&irql);
     if (mdl && mdl == pages_.Mdl()) {
         if (state_ == KSSTATE_RUN) {
@@ -134,43 +121,36 @@ STDMETHODIMP_(void) CMiniportWaveRTStream::FreeAudioBuffer(PMDL mdl, ULONG) {
         }
         state_ = KSSTATE_STOP;
         pages = ssr::km::Move(pages_);
-        packets = ssr::km::Move(packets_);
         notifications_ = 0; Reset();
     }
     adapter_->Unlock(irql);
     pages.Reset();
-    packets.Reset();
     SsrPumpRead(adapter_->State());
 }
 STDMETHODIMP_(void) CMiniportWaveRTStream::FreeBufferWithNotification(PMDL mdl, ULONG bytes) { FreeAudioBuffer(mdl, bytes); }
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::RegisterNotificationEvent(PKEVENT event) {
     if (!event) return STATUS_INVALID_PARAMETER;
-    auto entry = ssr::km::PoolPtr<Notification>::Allocate();
-    if (!entry) return STATUS_INSUFFICIENT_RESOURCES;
-    entry->Event = event;
-    NTSTATUS status = STATUS_SUCCESS;
+    PKEVENT* empty = nullptr;
+    bool known = false;
     KIRQL irql; adapter_->Lock(&irql);
-    for (auto link = events_.Flink; link != &events_; link = link->Flink) {
-        if (CONTAINING_RECORD(link, Notification, Link)->Event == event) { status = STATUS_OBJECT_NAME_COLLISION; break; }
+    for (auto& slot : events_) {
+        if (slot == event) known = true;
+        else if (!slot && !empty) empty = &slot;
     }
-    if (NT_SUCCESS(status)) InsertTailList(&events_, &entry.Release()->Link);
+    NTSTATUS status = known ? STATUS_OBJECT_NAME_COLLISION : empty ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
+    if (NT_SUCCESS(status)) *empty = event;
     adapter_->Unlock(irql);
     return status;
 }
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::UnregisterNotificationEvent(PKEVENT event) {
-    ssr::km::PoolPtr<Notification> removed;
+    if (!event) return STATUS_NOT_FOUND;
+    NTSTATUS status = STATUS_NOT_FOUND;
     KIRQL irql; adapter_->Lock(&irql);
-    for (auto link = events_.Flink; link != &events_; link = link->Flink) {
-        auto entry = CONTAINING_RECORD(link, Notification, Link);
-        if (entry->Event == event) {
-            RemoveEntryList(link);
-            removed = ssr::km::PoolPtr<Notification>(entry);
-            break;
-        }
+    for (auto& slot : events_) {
+        if (slot == event) { slot = nullptr; status = STATUS_SUCCESS; break; }
     }
     adapter_->Unlock(irql);
-    if (!removed) return STATUS_NOT_FOUND;
-    return STATUS_SUCCESS;
+    return status;
 }
 void CMiniportWaveRTStream::WriteBytes(ULONGLONG begin, ULONGLONG bytes, ULONGLONG qpc) {
     while (bytes) {
@@ -184,7 +164,7 @@ void CMiniportWaveRTStream::WriteBytes(ULONGLONG begin, ULONGLONG bytes, ULONGLO
             ULONGLONG number = begin / packetBytes;
             ULONG remaining = packetBytes - static_cast<ULONG>(begin % packetBytes);
             if (length > remaining) length = remaining;
-            const auto& packet = packets_.Get()[number % notifications_];
+            const auto& packet = packets_[number % notifications_];
             if (packet.Valid && packet.Number == number) written = packet.Qpc;
         }
         ULONG first = length < pages_.Bytes() - offset ? length : pages_.Bytes() - offset;
@@ -217,8 +197,8 @@ void CMiniportWaveRTStream::UpdatePosition(ULONGLONG qpc, LONG trim) {
         ULONGLONG completed = linear_ / (bufferBytes / notifications_);
         if (completed != packetCount_) {
             packetCount_ = completed;
-            for (auto link = events_.Flink; link != &events_; link = link->Flink)
-                KeSetEvent(CONTAINING_RECORD(link, Notification, Link)->Event, IO_NO_INCREMENT, FALSE);
+            for (PKEVENT event : events_)
+                if (event) KeSetEvent(event, IO_NO_INCREMENT, FALSE);
         }
     }
 }
@@ -250,7 +230,7 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRTStream::SetWritePacket(ULONG number, DWOR
         else if (delta > 0) status = STATUS_DATA_OVERRUN;
         else if ((flags & KSSTREAM_HEADER_OPTIONSF_ENDOFSTREAM) && (eosBytes > packetBytes || eosBytes % Format()->nBlockAlign)) status = STATUS_INVALID_PARAMETER;
         else {
-            auto& packet = packets_.Get()[expected % notifications_];
+            auto& packet = packets_[expected % notifications_];
             if (packet.Valid && packet.Number == expected) status = STATUS_INVALID_DEVICE_STATE;
             else {
                 packet = {expected, qpc, true};

@@ -20,8 +20,13 @@ public:
     void PowerResume(ULONGLONG qpc);
     void AdapterStop(ULONGLONG qpc);
 private:
-    struct Notification { LIST_ENTRY Link; PKEVENT Event; };
     struct Packet { ULONGLONG Number; ULONGLONG Qpc; bool Valid; };
+    // Opening a stream allocates only the stream and its DMA pages. A failed
+    // event registration is not a clean error: the audio engine falls back to
+    // a mode that can stall its client, so packets and events have fixed slots.
+    // The engine registers one event per stream; the rest are spare.
+    static constexpr ULONG kMaxNotifications = 2;
+    static constexpr ULONG kMaxEvents = 4;
     NTSTATUS Allocate(ULONG notifications, ULONG requested, PMDL* mdl, ULONG* actual, ULONG* offset, MEMORY_CACHING_TYPE* cache);
     void WriteBytes(ULONGLONG begin, ULONGLONG bytes, ULONGLONG qpc);
     void Reset();
@@ -37,8 +42,8 @@ private:
     alignas(8) BYTE format_[ssr::kMaxFormatBytes] = {};
     WAVEFORMATEX* Format() { return reinterpret_cast<WAVEFORMATEX*>(format_); }
     ULONG notifications_ = 0;
-    ssr::km::PoolPtr<Packet> packets_;
-    LIST_ENTRY events_;
+    Packet packets_[kMaxNotifications] = {};
+    PKEVENT events_[kMaxEvents] = {};
     ssr::DmaClock clock_;
     ULONGLONG linear_ = 0;
     ULONGLONG transferred_ = 0;
