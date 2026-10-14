@@ -375,13 +375,10 @@ jobs:
         with:
           shared-key: audio
 
-      - name: VB-CABLE, a 1 ms system timer and MMCSS for the end-to-end check (tools/ci/install-virtual-cable.ps1, timer-resolution.ps1)
+      - name: Real-time audio on the runner for the end-to-end check (tools/ci/realtime-audio.ps1)
         if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
         shell: pwsh
-        run: |
-          ./tools/ci/install-virtual-cable.ps1
-          ./tools/ci/timer-resolution.ps1
-          Start-Service -Name MMCSS
+        run: ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps')
 
       - name: Build ssr-live; write the fixture profile
         id: e2e-build
@@ -409,6 +406,11 @@ jobs:
       - name: DriverRing against the installed driver (ssr-sys driver_ring, ignored elsewhere)
         if: ${{ !cancelled() && steps.e2e-build.outcome == 'success' }}
         run: cargo test --locked --release -p ssr-sys --test driver_ring -- --ignored --nocapture
+
+      - name: Crash stacks of ssr-live (cdb on any dump)
+        if: ${{ failure() && steps.e2e-build.outcome == 'success' }}
+        shell: pwsh
+        run: ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps') -Report -Symbols (Resolve-Path target/release).Path
 
       - name: Is Driver Verifier checking spatialsoftreceiver.sys
         if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
