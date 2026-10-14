@@ -345,8 +345,6 @@ kind = "pipeline"
 milestone = "M1"
 status = "implemented"
 tests = [
-  "engine::partition_for_uses_the_largest_divisor_at_most_512",
-  "engine::scene_shape_matches_decoder_output",
   "engine::limiter_never_exceeds_ceiling",
   "engine::limiter_is_transparent_below_ceiling",
   "engine::limiter_is_bit_exact_below_ceiling_across_block_boundaries",
@@ -358,7 +356,6 @@ tests = [
   "engine::decode_error_clears_ddp_recut_remainder_before_recovery",
   "engine::overrun_and_discontinuity_reset_without_panicking",
   "engine::sound_before_the_first_brir_is_counted_as_dropped",
-  "engine::needs_brir_is_emitted_once_for_repeated_common_shape_mismatch",
   "engine::oversized_arrival_slack_is_clamped",
   "engine::endpoint_mask_selects_only_low_endpoint_bits",
   "engine::endpoint_mask_allocates_no_slots_for_excluded_lane",
@@ -491,7 +488,6 @@ tests = [
   "engine::a_layout_reopen_switches_trim_to_asrc_clears_trim_and_keeps_playing",
   "engine::forced_trim_incompatible_layout_reopen_retries_and_stops_without_success",
   "engine::the_asrc_tail_fade_plan_places_the_ramp_at_the_real_signal_end",
-  "engine::an_unwritable_96_khz_cadence_tail_starts_its_short_drain_at_full_gain",
   "engine::a_short_terminal_asrc_take_fades_inside_the_rendered_period_and_drains_silently",
   "engine::a_planned_asrc_tail_freezes_the_pending_ratio_through_drain",
   "engine::asrc_layout_reopen_fades_through_the_real_tail_and_stays_silent",
@@ -984,6 +980,8 @@ tests = [
   "speakers::lr4_stays_exact_at_the_extreme_crossover_and_rate",
   "speakers::mask_order_follows_windows_channel_order",
   "speakers::channel_masks_accept_names_numbers_and_hex",
+  "speakers::loader_accepts_ffmpeg_speaker_aliases",
+  "speakers::relative_mono_fir_is_loaded_and_resampled",
   "speakers::subwoofers_align_trim_and_default_to_no_delay",
   "speakers::values_outside_their_ranges_are_rejected_before_any_allocation",
   "speakers::no_speaker_may_sit_on_the_mask_lfe_channel",

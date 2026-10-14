@@ -6,24 +6,19 @@
 //! decode, render and convolver chain as the live app and writes the binaural
 //! WAV; it links no Windows code, so it runs in Linux CI.
 
-use std::collections::BTreeMap;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::mem::{offset_of, size_of};
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
-use std::sync::Arc;
-
 use clap::{Parser, Subcommand, ValueEnum};
-use engine::{
-    Chain, ChainConfig, ChainEvent, EndpointFilter, OutputKind, OutputProfile, Prepared,
-    load_output_profile, partition_for, scene_shape,
-};
+use engine::{Chain, ChainConfig, ChainEvent, EndpointFilter, OutputKind, load_output_profile};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use ssr_abi::{
     ENDPOINT_PRIMARY, ENDPOINT_SECOND, RECORD_KIND_READ_END, RECORD_KIND_RECORDER_GAP, Record,
     RecordHeader, reads, records, split_dump,
 };
+use std::collections::BTreeMap;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::mem::{offset_of, size_of};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 /// The release tag's version when release.yml builds, the crate version else.
 const VERSION: &str = match option_env!("SSR_RELEASE_VERSION") {
@@ -63,6 +58,7 @@ impl EndpointArg {
         }
     }
 
+    #[cfg(test)]
     fn includes(self, endpoint: u16) -> bool {
         self.filter().includes(endpoint)
     }
@@ -434,17 +430,18 @@ fn render_dump(
         ..ChainConfig::default()
     };
     let mut chain = Chain::with_qpc_frequency(config, header.qpc_frequency);
-    let mut installed_shape = None;
+    let prepared = profile.prepare().map_err(|error| error.to_string())?;
+    let output_kind = prepared.kind();
+    let output_channel_mask = prepared.channel_mask();
+    let output_channels = prepared.channels();
+    drop(chain.set_prepared(Box::new(prepared)));
     let mut writer = None;
     let mut output_rate = None;
-    let output_kind = match &profile {
-        OutputProfile::Headphones(_) => OutputKind::Headphones,
-        OutputProfile::Speakers(_) => OutputKind::Speakers,
-    };
     let mut report = RenderReport {
         read_boundaries: header.format_version >= 2,
         recorder_lost_bytes: reads(&header, stream).map(|chunk| chunk.lost_bytes).sum(),
         output_kind: output_kind.as_str(),
+        output_channels,
         direct_layouts: overrides
             .iter()
             .map(|value| {
@@ -462,11 +459,10 @@ fn render_dump(
             .collect(),
         ..RenderReport::default()
     };
-    let mut output_channel_mask = 0;
     let mut hash = Sha256::new();
 
-    // Metadata and the common BRIR shape are prepared before rendering. Parser
-    // errors are reported by push_records below so malformed records appear once.
+    // Collect metadata before rendering. Parser errors are reported by
+    // push_records below so malformed records appear once.
     for record in records(stream).filter_map(Result::ok) {
         if let Record::FormatChange {
             endpoint: record_endpoint,
@@ -478,29 +474,6 @@ fn render_dump(
             report
                 .epochs
                 .insert(epoch_key(record_endpoint, epoch), format!("{format:?}"));
-            if endpoint.includes(record_endpoint)
-                && let Some(shape) = scene_shape(&format)
-                && installed_shape != Some(shape)
-            {
-                let prepared = match &profile {
-                    OutputProfile::Headphones(profile) => {
-                        let prepared = brir::prepare(profile, shape.0, partition_for(shape.1))
-                            .map_err(|error| error.to_string())?;
-                        Prepared::new(Arc::new(prepared), shape.1)
-                            .map_err(|error| error.to_string())?
-                    }
-                    OutputProfile::Speakers(profile) => {
-                        let prepared = speakers::prepare(profile, shape.0, partition_for(shape.1))
-                            .map_err(|error| error.to_string())?;
-                        Prepared::speakers(Arc::new(prepared), shape.1)
-                            .map_err(|error| error.to_string())?
-                    }
-                };
-                output_channel_mask = prepared.channel_mask();
-                report.output_channels = prepared.channels();
-                drop(chain.set_prepared(Box::new(prepared)));
-                installed_shape = Some(shape);
-            }
         }
     }
 
@@ -530,7 +503,7 @@ fn render_dump(
                 .endpoint_volumes
                 .insert(endpoint, EndpointVolume { gain, muted });
         }
-        ChainEvent::NeedsBrir { .. } => report.needs_brir += 1,
+        ChainEvent::NeedsPrepared => report.needs_brir += 1,
         ChainEvent::OutputChannels { .. }
         | ChainEvent::FormatChanged { .. }
         | ChainEvent::Overrun { .. } => {}
@@ -574,7 +547,7 @@ fn render_dump(
                 .endpoint_volumes
                 .insert(endpoint, EndpointVolume { gain, muted });
         }
-        ChainEvent::NeedsBrir { .. } => report.needs_brir += 1,
+        ChainEvent::NeedsPrepared => report.needs_brir += 1,
         ChainEvent::OutputChannels { .. }
         | ChainEvent::FormatChanged { .. }
         | ChainEvent::Overrun { .. } => {}

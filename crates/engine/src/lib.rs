@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-//! Real-time threads, the two-channel crossing ring, clock strategies and
+//! Real-time threads, the N-channel 48 kHz crossing ring, clock strategies and
 //! latency measurement.
 //!
 //! * [`chain`]: the DSP chain both the replay tool and the live capture thread
-//!   run: records in, binaural blocks out (M1).
+//!   run: records in, rendered output blocks out (M1).
 //! * [`runtime`]: the two real-time threads, the crossing ring, the clock
 //!   strategies (ASRC and trim, one PI controller) and latency statistics (M2).
 //! * [`adapters`]: port adapters that need no Windows: dump capture, WAV and
@@ -23,8 +23,7 @@ const _: () = assert!(speakers::MAX_DEVICE_CHANNELS == MAX_OUTPUT_CHANNELS);
 
 pub use chain::{
     BlockOut, Chain, ChainConfig, ChainError, ChainEvent, EndpointFilter, OutputKind,
-    OutputProfile, OutputProfileError, PrepareError, Prepared, load_output_profile, partition_for,
-    scene_shape,
+    OutputProfile, OutputProfileError, PrepareError, Prepared, load_output_profile,
 };
 pub use decode::direct::{
     DirectLayout, DirectLayoutOverride, DirectLayouts, parse_speaker,

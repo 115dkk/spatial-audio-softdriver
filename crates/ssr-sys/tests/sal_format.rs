@@ -96,7 +96,8 @@ fn sal_ddplus_is_eac3() {
     let wave = h.wave_format();
     assert_eq!(wave.len(), 52);
     assert_eq!(&wave[8..12], &768_000u32.to_le_bytes());
-    assert_eq!(&wave[16..18], &22u16.to_le_bytes());
+    // cbSize covers the IEC 61937 extension, as ssr_abi::wave_format_bytes writes it.
+    assert_eq!(&wave[16..18], &34u16.to_le_bytes());
     assert_eq!(&wave[40..], &[0; 12]);
 }
 

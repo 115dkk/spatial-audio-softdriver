@@ -957,7 +957,7 @@ mod platform {
 
     use engine::{
         ClockPreference, EngineConfig, EngineEvent, LiveChange, OutputProfile, Prepared,
-        RealtimeThread, StartOptions, partition_for, scene_shape,
+        RealtimeThread, StartOptions,
     };
     use ssr_abi::{Record, RecordHeader, dump_header_bytes, records};
     use ssr_sys::driver_ring::{DriverRing, DriverStatsSample};
@@ -1373,19 +1373,8 @@ mod platform {
         }
     }
 
-    fn prepare_output(profile: &OutputProfile, shape: (u32, usize)) -> Result<Prepared, String> {
-        match profile {
-            OutputProfile::Headphones(profile) => {
-                let prepared = brir::prepare(profile, shape.0, partition_for(shape.1))
-                    .map_err(|e| e.to_string())?;
-                Prepared::new(Arc::new(prepared), shape.1).map_err(|e| e.to_string())
-            }
-            OutputProfile::Speakers(profile) => {
-                let prepared = speakers::prepare(profile, shape.0, partition_for(shape.1))
-                    .map_err(|e| e.to_string())?;
-                Prepared::speakers(Arc::new(prepared), shape.1).map_err(|e| e.to_string())
-            }
-        }
+    fn prepare_output(profile: &OutputProfile) -> Result<Prepared, String> {
+        profile.prepare().map_err(|error| error.to_string())
     }
 
     pub fn play(options: PlayOptions) -> Result<(), String> {
@@ -1493,8 +1482,7 @@ mod platform {
                 .filter(|ms| ms.is_finite() && *ms > 0.0)
                 .map(|ms| Duration::from_secs_f64(ms / 1000.0)),
         };
-        let initial_shape = (engine::MIX_RATE, engine::MIX_FRAMES);
-        let initial_prepared = Box::new(prepare_output(&profile, initial_shape)?);
+        let initial_prepared = Box::new(prepare_output(&profile)?);
         let output_kind = initial_prepared.kind().as_str();
         let output_channels = initial_prepared.channels();
         let output_channel_mask = initial_prepared.channel_mask();
@@ -1531,8 +1519,7 @@ mod platform {
             eprintln!("playing; press Enter to stop");
         }
 
-        let mut wanted: Option<(u32, usize)> = None;
-        let mut applied = Some(initial_shape);
+        let mut needs_prepared = false;
         let started = Instant::now();
         let mut next_report = Duration::from_secs(1);
         let mut ended_at: Option<Instant> = None;
@@ -1557,13 +1544,8 @@ mod platform {
                         endpoint,
                         epoch,
                         format,
-                    } => {
-                        eprintln!("endpoint {endpoint} epoch {epoch}: {format:?}");
-                        if let Some(shape) = scene_shape(&format) {
-                            wanted = Some(shape);
-                        }
-                    }
-                    EngineEvent::NeedsBrir { rate, block } => wanted = Some((rate, block)),
+                    } => eprintln!("endpoint {endpoint} epoch {epoch}: {format:?}"),
+                    EngineEvent::NeedsPrepared => needs_prepared = true,
                     EngineEvent::Overrun { lost_bytes } => {
                         eprintln!("overrun: {lost_bytes} bytes lost");
                         figures.overruns += 1;
@@ -1592,20 +1574,20 @@ mod platform {
                     }
                 }
             }
-            // A format change and the engine's NeedsBrir name the same shape;
-            // one Prepared per shape is enough. A rejected change stays wanted
-            // and is retried on the next tick.
-            if let Some((rate, block)) = wanted.filter(|shape| Some(*shape) != applied) {
+            // Losing the prepared output is exceptional. Rebuild the fixed-shape
+            // state until the capture thread accepts it.
+            if needs_prepared {
                 let t = Instant::now();
-                let next = Box::new(prepare_output(&profile, (rate, block))?);
+                let next = Box::new(prepare_output(&profile)?);
                 eprintln!(
-                    "prepared {} {} output channels at {rate} Hz in {:.0} ms",
+                    "prepared {} {} output channels at {} Hz in {:.0} ms",
                     next.kind().as_str(),
                     next.channels(),
+                    engine::MIX_RATE,
                     t.elapsed().as_secs_f64() * 1000.0
                 );
                 match engine.apply(LiveChange::Prepared(next)) {
-                    Ok(()) => applied = Some((rate, block)),
+                    Ok(()) => needs_prepared = false,
                     Err(engine::Rejected) => eprintln!("change queue full; retrying"),
                 }
             }

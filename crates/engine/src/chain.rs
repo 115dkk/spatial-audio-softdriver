@@ -81,42 +81,11 @@ impl Default for ChainConfig {
     }
 }
 
-/// The partition used by the one common-rate back end.
-pub fn partition_for(block: usize) -> usize {
-    if block == 0 {
-        return 0;
-    }
-    if block <= 512 {
-        return block;
-    }
-    (1..=512)
-        .rev()
-        .find(|candidate| block.is_multiple_of(*candidate))
-        .expect("one divides every positive block")
-}
-
-fn supported_scene_rate(rate: u32) -> bool {
+fn supported_source_rate(rate: u32) -> bool {
     matches!(
         rate,
         44_100 | MIX_RATE | 88_200 | 96_000 | 176_400 | 192_000
     )
-}
-
-/// Returns the sole back-end shape when a format has a decoder adapter.
-pub fn scene_shape(format: &SourceFormat) -> Option<(u32, usize)> {
-    let supported = match format {
-        SourceFormat::Pcm(pcm) => supported_scene_rate(pcm.sample_rate),
-        SourceFormat::Bitstream(stream) => {
-            matches!(
-                stream.codec,
-                BitstreamCodec::Mat20
-                    | BitstreamCodec::Mat21
-                    | BitstreamCodec::Eac3
-                    | BitstreamCodec::Eac3Joc
-            ) && (stream.encoded_rate == 0 || supported_scene_rate(stream.encoded_rate))
-        }
-    };
-    supported.then_some((MIX_RATE, MIX_FRAMES))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -133,6 +102,10 @@ pub enum ChainError {
 pub enum PrepareError {
     #[error(transparent)]
     Render(#[from] render::RenderError),
+    #[error(transparent)]
+    Brir(#[from] brir::BrirError),
+    #[error(transparent)]
+    Speakers(#[from] speakers::SpeakerError),
     #[error("max block {max_block} is not a multiple of output partition {partition}")]
     Block { max_block: usize, partition: usize },
     #[error("output device has {channels} channels; supported range is 1..={MAX_OUTPUT_CHANNELS}")]
@@ -149,6 +122,22 @@ pub enum OutputKind {
 pub enum OutputProfile {
     Headphones(brir::Profile),
     Speakers(speakers::SpeakerProfile),
+}
+
+impl OutputProfile {
+    /// Prepares this profile for the fixed 48 kHz, 480-frame mix timeline.
+    pub fn prepare(&self) -> Result<Prepared, PrepareError> {
+        match self {
+            Self::Headphones(profile) => {
+                let prepared = brir::prepare(profile, MIX_RATE, MIX_FRAMES)?;
+                Prepared::new(Arc::new(prepared), MIX_FRAMES)
+            }
+            Self::Speakers(profile) => {
+                let prepared = speakers::prepare(profile, MIX_RATE, MIX_FRAMES)?;
+                Prepared::speakers(Arc::new(prepared), MIX_FRAMES)
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -695,10 +684,7 @@ pub enum ChainEvent<'a> {
         format: SourceFormat,
         support: FormatSupport,
     },
-    NeedsBrir {
-        rate: u32,
-        block: usize,
-    },
+    NeedsPrepared,
     Overrun {
         endpoint: u16,
         lost_bytes: u64,
@@ -1041,10 +1027,7 @@ impl Back {
         if !fits {
             if !self.last_needs_brir {
                 self.last_needs_brir = true;
-                out(ChainEvent::NeedsBrir {
-                    rate: MIX_RATE,
-                    block: MIX_FRAMES,
-                });
+                out(ChainEvent::NeedsPrepared);
             }
             return;
         }
@@ -1121,15 +1104,10 @@ impl Back {
             ),
         }
         if self.lfe_ramp_frames != 0 {
-            if bed.frames >= self.lfe_ramp_frames {
-                self.lfe_gain = self.lfe_target;
-                self.lfe_from = self.lfe_target;
-                self.lfe_ramp_frames = 0;
-            } else {
-                self.lfe_gain = lfe_gain_at(bed.frames);
-                self.lfe_from = self.lfe_gain;
-                self.lfe_ramp_frames -= bed.frames;
-            }
+            debug_assert_eq!(bed.frames, MIX_FRAMES);
+            self.lfe_gain = self.lfe_target;
+            self.lfe_from = self.lfe_target;
+            self.lfe_ramp_frames = 0;
         }
         self.limiter.process(samples, channels, bed.frames);
         let silent = samples.iter().all(|sample| *sample == 0.0);
@@ -1394,7 +1372,7 @@ impl Chain {
                 self.fronts[index].configure_transport(format);
                 let unsupported_rate = match format {
                     SourceFormat::Pcm(pcm) => {
-                        (!supported_scene_rate(pcm.sample_rate)).then_some(pcm.sample_rate)
+                        (!supported_source_rate(pcm.sample_rate)).then_some(pcm.sample_rate)
                     }
                     SourceFormat::Bitstream(stream)
                         if matches!(
@@ -1405,7 +1383,7 @@ impl Chain {
                                 | BitstreamCodec::Eac3Joc
                         ) =>
                     {
-                        (stream.encoded_rate != 0 && !supported_scene_rate(stream.encoded_rate))
+                        (stream.encoded_rate != 0 && !supported_source_rate(stream.encoded_rate))
                             .then_some(stream.encoded_rate)
                     }
                     SourceFormat::Bitstream(_) => None,
@@ -1488,86 +1466,20 @@ impl Chain {
         }
     }
 
-    /// Processes one record with the same start handling and 10 ms chunking as
-    /// a one-record READ passed to [`Self::push_records`].
+    /// Processes one record through the production merged-record path.
     pub fn push_record(&mut self, record: Record<'_>, out: &mut dyn FnMut(ChainEvent<'_>)) {
-        let Record::Data {
-            endpoint,
-            epoch,
-            flags,
-            pos,
-            qpc,
-            qpc_written,
-            bytes,
-        } = record
-        else {
-            self.push_record_chunk(record, out);
-            return;
-        };
-        if !self.config.endpoints.includes(endpoint) {
-            self.push_record_chunk(
-                Record::Data {
-                    endpoint,
-                    epoch,
-                    flags,
-                    pos,
-                    qpc,
-                    qpc_written,
-                    bytes,
-                },
-                out,
-            );
-            return;
-        }
-        let index = endpoint as usize;
-        if flags & RECORD_FLAG_DISCONTINUITY != 0 || self.mixer.lane_is_idle(endpoint) {
-            let first_qpc = qpc_before_end(
-                qpc,
-                bytes.len(),
-                self.fronts[index].byte_rate,
-                self.qpc_frequency,
-            );
-            self.fronts[index].reset();
-            if self.mixer.lane_is_idle(endpoint) {
-                self.lane_start_at(endpoint, first_qpc);
-            } else {
-                self.lane_discontinuity_at(endpoint, first_qpc);
-            }
-        }
-        let mut start = 0;
-        while start < bytes.len() {
-            let remaining = bytes.len() - start;
-            let chunk_len = if self.fronts[index].byte_rate == 0 {
-                remaining
-            } else {
-                self.fronts[index].chunk_bytes().min(remaining)
-            };
-            if chunk_len == 0 {
-                break;
-            }
-            let end = start + chunk_len;
-            let chunk_end_qpc = qpc_before_end(
-                qpc,
-                bytes.len() - end,
-                self.fronts[index].byte_rate,
-                self.qpc_frequency,
-            );
-            let before = self.mixer.now();
-            self.push_record_chunk(
-                Record::Data {
-                    endpoint,
-                    epoch,
-                    flags: 0,
-                    pos: pos.saturating_add(start as u64),
-                    qpc: chunk_end_qpc,
-                    qpc_written,
-                    bytes: &bytes[start..end],
-                },
-                out,
-            );
-            self.update_anchor_after_progress(before, chunk_end_qpc);
-            start = end;
-        }
+        let mut cursors: [RecordCursor<'_>; MAX_ENDPOINTS] =
+            std::array::from_fn(|_| RecordCursor {
+                stream: &[],
+                offset: 0,
+                head: None,
+                data_offset: 0,
+                start_processed: false,
+                done: true,
+            });
+        let owner = (record.endpoint() as usize).min(MAX_ENDPOINTS - 1);
+        cursors[owner].head = Some(Ok(record));
+        self.push_cursors_merged(&mut cursors, out);
     }
 
     fn update_anchor_after_progress(&mut self, before: u64, qpc: u64) {
@@ -1770,7 +1682,14 @@ impl Chain {
             next_for_endpoint(&mut cursor, endpoint);
             cursor
         });
+        self.push_cursors_merged(&mut cursors, out);
+    }
 
+    fn push_cursors_merged<'a>(
+        &mut self,
+        cursors: &mut [RecordCursor<'a>; MAX_ENDPOINTS],
+        out: &mut dyn FnMut(ChainEvent<'_>),
+    ) {
         loop {
             let mut selected: Option<(u64, usize)> = None;
             for (endpoint, cursor) in cursors.iter().enumerate() {
@@ -1932,15 +1851,20 @@ impl Chain {
             }
             // The head parser has already validated this record. Read only its
             // raw length to advance without parsing it again.
-            let consumed_len = read_record_header(&cursor.stream[cursor.offset..])
-                .map_or(0, |header| header.len as usize);
-            cursor.offset = cursor
-                .offset
-                .saturating_add(padded_record_size(consumed_len))
-                .min(cursor.stream.len());
-            cursor.data_offset = 0;
-            cursor.start_processed = false;
-            next_for_endpoint(cursor, endpoint);
+            if cursor.stream.is_empty() {
+                cursor.head = None;
+                cursor.done = true;
+            } else {
+                let consumed_len = read_record_header(&cursor.stream[cursor.offset..])
+                    .map_or(0, |header| header.len as usize);
+                cursor.offset = cursor
+                    .offset
+                    .saturating_add(padded_record_size(consumed_len))
+                    .min(cursor.stream.len());
+                cursor.data_offset = 0;
+                cursor.start_processed = false;
+                next_for_endpoint(cursor, endpoint);
+            }
         }
     }
 
@@ -2127,7 +2051,7 @@ impl Chain {
 
 #[cfg(test)]
 mod tests {
-    use ssr_types::{BitstreamFormat, PcmFormat, SampleType};
+    use ssr_types::BitstreamFormat;
 
     use super::*;
 
@@ -3041,54 +2965,5 @@ directions = []
             Ok(OutputProfile::Speakers(_))
         ));
         let _ = std::fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn partition_for_uses_the_largest_divisor_at_most_512() {
-        for (block, expected) in [(0, 0), (1536, 512), (480, 480), (441, 441), (513, 171)] {
-            assert_eq!(partition_for(block), expected);
-        }
-    }
-
-    #[test]
-    fn scene_shape_matches_decoder_output() {
-        let pcm = SourceFormat::Pcm(PcmFormat {
-            channels: 2,
-            sample_rate: 44_100,
-            bits_per_sample: 32,
-            valid_bits: 32,
-            sample_type: SampleType::Float,
-            channel_mask: 3,
-        });
-        assert_eq!(scene_shape(&pcm), Some((MIX_RATE, MIX_FRAMES)));
-        for rate in [88_200, 176_400, 192_000] {
-            let pcm = SourceFormat::Pcm(PcmFormat {
-                channels: 2,
-                sample_rate: rate,
-                bits_per_sample: 32,
-                valid_bits: 32,
-                sample_type: SampleType::Float,
-                channel_mask: 3,
-            });
-            assert_eq!(scene_shape(&pcm), Some((MIX_RATE, MIX_FRAMES)));
-        }
-        assert_eq!(
-            scene_shape(&bitstream(BitstreamCodec::Mat20, 96_000)),
-            Some((MIX_RATE, MIX_FRAMES))
-        );
-        assert_eq!(
-            scene_shape(&bitstream(BitstreamCodec::Eac3Joc, 44_100)),
-            Some((MIX_RATE, MIX_FRAMES))
-        );
-        assert_eq!(
-            scene_shape(&bitstream(BitstreamCodec::Mat21, 0)),
-            Some((MIX_RATE, MIX_FRAMES))
-        );
-        assert_eq!(
-            scene_shape(&bitstream(BitstreamCodec::Eac3, 0)),
-            Some((MIX_RATE, MIX_FRAMES))
-        );
-        assert_eq!(scene_shape(&bitstream(BitstreamCodec::Ac3, 48_000)), None);
-        assert_eq!(scene_shape(&bitstream(BitstreamCodec::Eac3, 32_000)), None);
     }
 }

@@ -167,26 +167,7 @@ impl FromStr for DirectLayoutOverride {
 /// FFmpeg's 5.0, 5.1 and 5.1.4 use the side pair. 7.1.x and 9.1.x follow
 /// FFmpeg's layouts of the same name in its native (bit) order.
 pub fn preset(name: &str) -> Option<DirectLayout> {
-    use Speaker::*;
-    let speakers: &[Speaker] = match name.to_ascii_lowercase().as_str() {
-        "mono" => &[C],
-        "stereo" => &[L, R],
-        "3.0" => &[L, R, C],
-        "quad" => &[L, R, Lrs, Rrs],
-        "5.0" => &[L, R, C, Lrs, Rrs],
-        "5.1" => &[L, R, C, Lfe, Lrs, Rrs],
-        "7.1" => &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss],
-        "5.1.2" => &[L, R, C, Lfe, Lrs, Rrs, Tfl, Tfr],
-        "5.1.4" => &[L, R, C, Lfe, Lrs, Rrs, Tfl, Tfr, Trl, Trr],
-        "7.1.2" => &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss, Tfl, Tfr],
-        "7.1.4" => &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss, Tfl, Tfr, Trl, Trr],
-        "9.1.4" => &[L, R, C, Lfe, Lrs, Rrs, Lc, Rc, Lss, Rss, Tfl, Tfr, Trl, Trr],
-        "9.1.6" => &[
-            L, R, C, Lfe, Lrs, Rrs, Lc, Rc, Lss, Rss, Tfl, Tfr, Trl, Trr, Tsl, Tsr,
-        ],
-        _ => return None,
-    };
-    DirectLayout::new(speakers).ok()
+    DirectLayout::new(ssr_types::channel_layout_preset(name)?).ok()
 }
 
 /// Reads a speaker name, ignoring case: one of [`speaker_name`]'s names, or
@@ -194,81 +175,11 @@ pub fn preset(name: &str) -> Option<DirectLayout> {
 /// FC, BL, BR, BC, SL, SR, FLC, FRC, WL, WR, TBL, TBR, TBC; the others are
 /// already ours), which Impulcifer and HeSuVi users write.
 pub fn parse_speaker(name: &str) -> Option<Speaker> {
-    use Speaker::*;
-    Some(match name.trim().to_ascii_lowercase().as_str() {
-        "l" => L,
-        "r" => R,
-        "c" => C,
-        "ls" => Ls,
-        "rs" => Rs,
-        "lrs" => Lrs,
-        "rrs" => Rrs,
-        "cs" => Cs,
-        "lw" => Lw,
-        "rw" => Rw,
-        "lc" => Lc,
-        "rc" => Rc,
-        "lss" => Lss,
-        "rss" => Rss,
-        "tfl" => Tfl,
-        "tfr" => Tfr,
-        "tsl" => Tsl,
-        "tsr" => Tsr,
-        "trl" => Trl,
-        "trr" => Trr,
-        "tc" => Tc,
-        "tfc" => Tfc,
-        "trc" => Trc,
-        "lfe" => Lfe,
-        "lfe2" => Lfe2,
-        "fl" => L,
-        "fr" => R,
-        "fc" => C,
-        "bl" => Lrs,
-        "br" => Rrs,
-        "bc" => Cs,
-        "sl" => Lss,
-        "sr" => Rss,
-        "flc" => Lc,
-        "frc" => Rc,
-        "wl" => Lw,
-        "wr" => Rw,
-        "tbl" => Trl,
-        "tbr" => Trr,
-        "tbc" => Trc,
-        _ => return None,
-    })
+    Speaker::from_name(name)
 }
 
 pub const fn speaker_name(speaker: Speaker) -> &'static str {
-    use Speaker::*;
-    match speaker {
-        L => "L",
-        R => "R",
-        C => "C",
-        Ls => "Ls",
-        Rs => "Rs",
-        Lrs => "Lrs",
-        Rrs => "Rrs",
-        Cs => "Cs",
-        Lw => "Lw",
-        Rw => "Rw",
-        Lc => "Lc",
-        Rc => "Rc",
-        Lss => "Lss",
-        Rss => "Rss",
-        Tfl => "Tfl",
-        Tfr => "Tfr",
-        Tsl => "Tsl",
-        Tsr => "Tsr",
-        Trl => "Trl",
-        Trr => "Trr",
-        Tc => "Tc",
-        Tfc => "Tfc",
-        Trc => "Trc",
-        Lfe => "LFE",
-        Lfe2 => "LFE2",
-    }
+    speaker.name()
 }
 
 #[cfg(test)]

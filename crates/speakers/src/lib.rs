@@ -3,15 +3,12 @@
 //! Speaker profile loading and control-thread preparation for the real-time
 //! speaker output stage (ADR 0030).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use convolver::FilterBank;
-use rubato::audioadapter::Adapter;
-use rubato::audioadapter_buffers::owned::InterleavedOwned;
-use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 use serde::Deserialize;
 use ssr_types::{Direction, Layout, Speaker};
 
@@ -203,10 +200,8 @@ pub enum SpeakerError {
     Layout(#[from] ssr_types::LayoutError),
     #[error(transparent)]
     Convolver(#[from] convolver::ConvolverError),
-    #[error("{path}: not a readable mono WAV: {detail}")]
-    Wav { path: PathBuf, detail: String },
-    #[error("resampling failed: {0}")]
-    Resample(String),
+    #[error(transparent)]
+    Ir(#[from] brir::ir::IrError),
 }
 
 #[derive(Deserialize)]
@@ -317,6 +312,18 @@ pub fn load_profile(path: &Path) -> Result<SpeakerProfile, SpeakerError> {
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let mut speakers = Vec::with_capacity(parsed.speakers.len());
     for speaker in parsed.speakers {
+        if matches!(
+            Speaker::from_name(&speaker.name),
+            Some(Speaker::Lfe | Speaker::Lfe2)
+        ) {
+            return Err(SpeakerError::Profile {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "{} is LFE, not a positional main speaker; use the subwoofer section",
+                    speaker.name
+                ),
+            });
+        }
         let nominal = nominal_speaker(&speaker.name).and_then(Speaker::angles);
         let angles = match (speaker.azimuth, speaker.elevation, nominal) {
             (Some(azimuth), Some(elevation), _) => (azimuth, elevation),
@@ -389,6 +396,7 @@ pub fn prepare(
                 .filter_map(|subwoofer| subwoofer.distance_m),
         )
         .fold(0.0_f32, f32::max);
+    let mut fir_cache = HashMap::new();
     let mut speakers = Vec::with_capacity(profile.speakers.len());
     for speaker in &profile.speakers {
         let crossover_hz = speaker.crossover_hz.unwrap_or(profile.crossover_hz);
@@ -406,7 +414,7 @@ pub fn prepare(
                 rate,
             ),
             gain: db_to_linear(speaker.trim_db),
-            fir: prepare_fir(speaker.fir.as_deref(), rate, partition)?,
+            fir: prepare_fir(speaker.fir.as_deref(), rate, partition, &mut fir_cache)?,
         });
     }
     let mut subwoofers = Vec::with_capacity(profile.subwoofers.len());
@@ -420,7 +428,7 @@ pub fn prepare(
                 rate,
             ),
             gain: db_to_linear(subwoofer.trim_db),
-            fir: prepare_fir(subwoofer.fir.as_deref(), rate, partition)?,
+            fir: prepare_fir(subwoofer.fir.as_deref(), rate, partition, &mut fir_cache)?,
         });
     }
     let bass_to = if subwoofers.is_empty() {
@@ -448,14 +456,23 @@ fn prepare_fir(
     path: Option<&Path>,
     rate: u32,
     partition: usize,
+    cache: &mut HashMap<PathBuf, Arc<FilterBank>>,
 ) -> Result<Option<Arc<FilterBank>>, SpeakerError> {
     let Some(path) = path else {
         return Ok(None);
     };
-    let (source_rate, mut samples) = read_mono_wav(path)?;
-    if source_rate != rate {
-        samples = resample_mono(&samples, source_rate, rate)?;
+    if let Some(bank) = cache.get(path) {
+        return Ok(Some(Arc::clone(bank)));
     }
+    let wav = brir::ir::read_wav(path, rate)?;
+    if wav.channels.len() != 1 {
+        return Err(brir::ir::IrError::Wav {
+            path: path.to_path_buf(),
+            detail: format!("room FIR needs one track, got {}", wav.channels.len()),
+        }
+        .into());
+    }
+    let samples = &wav.channels[0];
     if samples.len() as f64 > MAX_FIR_SECONDS * f64::from(rate) {
         return Err(SpeakerError::FirTooLong {
             path: path.to_path_buf(),
@@ -465,7 +482,9 @@ fn prepare_fir(
         });
     }
     let filters = [samples.as_slice()];
-    Ok(Some(Arc::new(FilterBank::new_mono(&filters, partition)?)))
+    let bank = Arc::new(FilterBank::new_mono(&filters, partition)?);
+    cache.insert(path.to_path_buf(), Arc::clone(&bank));
+    Ok(Some(bank))
 }
 
 fn validate(profile: &SpeakerProfile) -> Result<Layout, SpeakerError> {
@@ -781,44 +800,16 @@ fn butterworth(rate: u32, hz: f32, high_pass: bool) -> BiquadCoefficients {
 
 /// The `Speaker` a profile name refers to (case-insensitive), if any.
 fn nominal_speaker(name: &str) -> Option<Speaker> {
-    Some(match name.to_ascii_lowercase().as_str() {
-        "l" => Speaker::L,
-        "r" => Speaker::R,
-        "c" => Speaker::C,
-        "ls" => Speaker::Ls,
-        "rs" => Speaker::Rs,
-        "lrs" => Speaker::Lrs,
-        "rrs" => Speaker::Rrs,
-        "cs" => Speaker::Cs,
-        "lw" => Speaker::Lw,
-        "rw" => Speaker::Rw,
-        "lc" => Speaker::Lc,
-        "rc" => Speaker::Rc,
-        "lss" => Speaker::Lss,
-        "rss" => Speaker::Rss,
-        "tfl" => Speaker::Tfl,
-        "tfr" => Speaker::Tfr,
-        "tsl" => Speaker::Tsl,
-        "tsr" => Speaker::Tsr,
-        "trl" => Speaker::Trl,
-        "trr" => Speaker::Trr,
-        "tc" => Speaker::Tc,
-        "tfc" => Speaker::Tfc,
-        "trc" => Speaker::Trc,
-        _ => return None,
-    })
+    Speaker::from_name(name).filter(|speaker| speaker.angles().is_some())
 }
 
 fn parse_channel_mask(value: &str) -> Result<u32, String> {
     let mask = match value {
         "direct" => 0,
-        "2.0" => 0x0003,
-        "5.1" => 0x003f,
-        "7.1" => 0x063f,
-        "5.1.2" => 0x503f,
-        "5.1.4" => 0x2d03f,
-        "7.1.2" => 0x563f,
-        "7.1.4" => 0x2d63f,
+        preset if let Some(speakers) = ssr_types::channel_layout_preset(preset) => speakers
+            .iter()
+            .filter_map(|speaker| speaker.wave_bit())
+            .fold(0, |mask, bit| mask | bit),
         number => match number
             .strip_prefix("0x")
             .or_else(|| number.strip_prefix("0X"))
@@ -841,95 +832,6 @@ fn resolve_path(directory: &Path, path: PathBuf) -> PathBuf {
 
 fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 20.0)
-}
-
-fn read_mono_wav(path: &Path) -> Result<(u32, Vec<f32>), SpeakerError> {
-    let mut reader = hound::WavReader::open(path).map_err(|error| map_wav_error(path, error))?;
-    let spec = reader.spec();
-    if spec.channels != 1 {
-        return Err(SpeakerError::Wav {
-            path: path.to_path_buf(),
-            detail: format!("room FIR needs one track, got {}", spec.channels),
-        });
-    }
-    let samples = match (spec.sample_format, spec.bits_per_sample) {
-        (hound::SampleFormat::Int, 16 | 24 | 32) => {
-            let scale = 2.0_f32.powi(i32::from(spec.bits_per_sample) - 1);
-            reader
-                .samples::<i32>()
-                .map(|sample| {
-                    sample
-                        .map(|sample| sample as f32 / scale)
-                        .map_err(|error| map_wav_error(path, error))
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        }
-        (hound::SampleFormat::Float, 32) => reader
-            .samples::<f32>()
-            .map(|sample| sample.map_err(|error| map_wav_error(path, error)))
-            .collect::<Result<Vec<_>, _>>()?,
-        (format, bits) => {
-            return Err(SpeakerError::Wav {
-                path: path.to_path_buf(),
-                detail: format!("unsupported {bits}-bit {format:?} samples"),
-            });
-        }
-    };
-    if samples.is_empty() {
-        return Err(SpeakerError::Wav {
-            path: path.to_path_buf(),
-            detail: "room FIR is empty".into(),
-        });
-    }
-    Ok((spec.sample_rate, samples))
-}
-
-fn map_wav_error(path: &Path, error: hound::Error) -> SpeakerError {
-    match error {
-        hound::Error::IoError(source) => SpeakerError::Io {
-            path: path.to_path_buf(),
-            source,
-        },
-        other => SpeakerError::Wav {
-            path: path.to_path_buf(),
-            detail: other.to_string(),
-        },
-    }
-}
-
-fn resample_mono(
-    samples: &[f32],
-    input_rate: u32,
-    output_rate: u32,
-) -> Result<Vec<f32>, SpeakerError> {
-    let input = InterleavedOwned::new_from(samples.to_vec(), 1, samples.len())
-        .map_err(|error| SpeakerError::Resample(error.to_string()))?;
-    let chunk_size = samples.len().clamp(1, 1024);
-    let mut resampler = Fft::<f32>::new_custom(
-        input_rate as usize,
-        output_rate as usize,
-        chunk_size,
-        1,
-        1,
-        WindowFunction::BlackmanHarris2,
-        FixedSync::Both,
-    )
-    .map_err(|error| SpeakerError::Resample(error.to_string()))?;
-    let output = resampler
-        .process_all(&input, samples.len(), None)
-        .map_err(|error| SpeakerError::Resample(error.to_string()))?;
-    // The resampler keeps sample amplitude, but an impulse response sampled
-    // at a higher rate has proportionally more taps: scaling by the rate ratio
-    // keeps its frequency response (DC gain included) instead of its peak.
-    let scale = input_rate as f32 / output_rate as f32;
-    Ok((0..output.frames())
-        .map(|frame| {
-            output
-                .read_sample(0, frame)
-                .expect("mono frame is within the output adapter")
-                * scale
-        })
-        .collect())
 }
 
 #[cfg(test)]
@@ -1223,8 +1125,8 @@ mod tests {
             fir[96 + index] = value / sum;
         }
         for (from, to) in [(24_000, 48_000), (96_000, 48_000), (44_100, 48_000)] {
-            let resampled = resample_mono(&fir, from, to).unwrap();
-            let dc: f32 = resampled.iter().sum();
+            let resampled = brir::ir::resample_channels(&[fir.clone()], from, to).unwrap();
+            let dc: f32 = resampled[0].iter().sum();
             assert!((dc - 1.0).abs() < 1e-3, "{from} -> {to}: DC gain {dc}");
         }
     }
@@ -1249,7 +1151,7 @@ mod tests {
             writer.write_sample(0_i16).unwrap();
         }
         writer.finalize().unwrap();
-        let result = prepare_fir(Some(&path), 8_000, 480);
+        let result = prepare_fir(Some(&path), 8_000, 480, &mut HashMap::new());
         let _ = std::fs::remove_dir_all(directory);
         assert!(matches!(result, Err(SpeakerError::FirTooLong { .. })));
     }
@@ -1294,6 +1196,32 @@ mod tests {
         assert_eq!(prepared.subwoofers[2].delay_frames, 48);
         assert!(prepared.bass_to.is_empty());
         assert!((prepared.lfe_gain - 10.0_f32.sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn loader_accepts_ffmpeg_speaker_aliases() {
+        let directory =
+            std::env::temp_dir().join(format!("speakers-profile-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let profile = directory.join("profile.toml");
+        std::fs::write(
+            &profile,
+            r#"kind = "speakers"
+name = "alias"
+device_channels = 1
+limiter_ceiling_dbfs = 0.0
+
+[[speaker]]
+name = "FL"
+channel = 0
+"#,
+        )
+        .unwrap();
+        let loaded = load_profile(&profile).unwrap();
+        assert_eq!(loaded.speakers[0].name, "FL");
+        assert_eq!(loaded.speakers[0].azimuth_deg, 30.0);
+        assert_eq!(loaded.speakers[0].elevation_deg, 0.0);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -1345,12 +1273,17 @@ channel = 0
             &profile,
             r#"kind = "speakers"
 name = "fir"
-device_channels = 1
+device_channels = 2
 limiter_ceiling_dbfs = 0.0
 
 [[speaker]]
 name = "L"
 channel = 0
+fir = "room.wav"
+
+[[speaker]]
+name = "R"
+channel = 1
 fir = "room.wav"
 "#,
         )
@@ -1358,7 +1291,9 @@ fir = "room.wav"
         let loaded = load_profile(&profile).unwrap();
         assert_eq!(loaded.speakers[0].fir.as_deref(), Some(fir.as_path()));
         let prepared = prepare(&loaded, 48_000, 480).unwrap();
-        assert!(prepared.speakers[0].fir.is_some());
+        let first = prepared.speakers[0].fir.as_ref().unwrap();
+        let second = prepared.speakers[1].fir.as_ref().unwrap();
+        assert!(Arc::ptr_eq(first, second));
         let _ = std::fs::remove_dir_all(directory);
     }
 
