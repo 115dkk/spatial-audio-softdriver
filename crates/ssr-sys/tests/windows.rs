@@ -217,19 +217,35 @@ fn exclusive_sink_recovers_its_cadence_after_a_missed_deadline() {
         frames += format.period_frames;
     }
     let started = qpc::now();
+    let mut previous = started;
+    let mut intervals = Vec::new();
     let mut frames = 0_usize;
     while frames < format.rate as usize * 2 {
         sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
+        let now = qpc::now();
+        intervals.push(now - previous);
+        previous = now;
         frames += format.period_frames;
     }
-    let seconds = (qpc::now() - started) as f64 / qpc::frequency() as f64;
+    let seconds = (previous - started) as f64 / qpc::frequency() as f64;
     let rate = frames as f64 / seconds;
+    intervals.sort_unstable();
+    let median_ms = intervals[intervals.len() / 2] as f64 * 1_000.0 / qpc::frequency() as f64;
+    let period_ms = format.period_frames as f64 * 1_000.0 / f64::from(format.rate);
     println!(
-        "{rate:.0} frames/s after the miss, {} restarts",
+        "{rate:.0} frames/s after the miss, median period {median_ms:.2} ms of {period_ms:.2} ms, {} restarts",
         sink.restarts()
     );
+    // A device left slow signals late every period (the DAC above: ~33 ms at
+    // a 3 ms period, a third of the rate or less), which moves the median
+    // period. One late wake of a busy CI machine moves only the average: a
+    // 30 ms hiccup in these two seconds took 1.5 % off the rate on VB-CABLE.
     assert!(
-        (rate / f64::from(format.rate) - 1.0).abs() < 0.01,
+        (median_ms / period_ms - 1.0).abs() < 0.05,
+        "the sink's median period was {median_ms:.2} ms for {period_ms:.2} ms after the miss"
+    );
+    assert!(
+        (rate / f64::from(format.rate) - 1.0).abs() < 0.05,
         "the sink took {rate:.0} frames/s at {} Hz after the miss",
         format.rate
     );
