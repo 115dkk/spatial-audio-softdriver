@@ -12,6 +12,7 @@ use crate::{
     devices::{ComGuard, output_error},
     playback_clock::{ClockReading, PlaybackClock, scale},
     qpc,
+    stall_guard::StallGuard,
 };
 #[cfg(windows)]
 use ssr_types::{OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener, OutputSink};
@@ -86,9 +87,9 @@ pub struct WasapiSink {
     buffer_frames: usize,
     running: bool,
     restarts: u64,
-    /// A wait for the device longer than this (QPC ticks) means the stream
-    /// has stalled.
+    /// A wait for the device longer than this (QPC ticks) is a slow one.
     stall_ticks: u64,
+    stall: StallGuard,
     submitted: u64,
     clock_frequency: u64,
     qpc_frequency: u64,
@@ -283,6 +284,7 @@ impl OutputOpener for WasapiOpener {
             running: false,
             restarts: 0,
             stall_ticks: stall_ticks(period_frames, self.rate, qpc::frequency()),
+            stall: StallGuard::default(),
             submitted: 0,
             clock_frequency,
             qpc_frequency: qpc::frequency(),
@@ -429,6 +431,7 @@ impl WasapiSink {
             .map_err(output_error)?;
         self.submitted = self.buffer_frames as u64;
         self.started_qpc = qpc::now();
+        self.stall.started();
         self.client.start_stream().map_err(output_error)?;
         self.running = true;
         Ok(())
@@ -490,12 +493,9 @@ impl OutputSink for WasapiSink {
             self.start()?;
         }
         let waited = self.wait_for_space()?;
-        if self.exclusive && waited > self.stall_ticks {
-            // After one missed deadline an exclusive-mode USB endpoint (a
-            // TOPPING DAC on usbaudio2) was seen to signal only every ~33 ms
-            // from then on, at every period size, so the stream fell behind
-            // for good. Its position stops while it starves, so the wait is
-            // the only sign. A restart brings back the normal cadence.
+        if self.exclusive && self.stall.stalled(waited, self.stall_ticks) {
+            // A device whose cadence stays slow (stall_guard.rs). Its position
+            // stops while it starves, so the wait is the only sign.
             self.restart()?;
             self.wait_for_space()?;
         }

@@ -564,6 +564,9 @@ tests = [
   "ssr-sys::fast_dac_measurements_do_not_accumulate_nominal_period_error",
   "ssr-sys::readings_that_move_by_whole_periods_still_space_periods_one_period_apart",
   "ssr-sys::a_gap_of_more_than_four_periods_takes_the_reading",
+  "ssr-sys::one_late_wake_does_not_restart_the_stream",
+  "ssr-sys::the_first_wait_after_a_start_is_the_device_starting",
+  "ssr-sys::a_cadence_that_stays_slow_restarts_and_counts_again_after_the_start",
   "ssr-sys::integer_samples_clip_and_left_align",
   "ssr-sys::device_errors_keep_removed_busy_and_not_found_distinct",
   "ssr-sys::render_endpoints_include_a_default",
@@ -577,7 +580,7 @@ tests = [
   "ssr-sys::wasapi_exclusive_periods_and_a_restart_do_not_allocate",
   "ssr-sys::wasapi_opens_multichannel_layouts_on_the_cable",
 ]
-note = "event-driven WAVEFORMATEXTENSIBLE output for 1..=32 channels (Float32, Int32, Int24in32, Int16), with exact masks for multichannel exclusive streams and shared autoconvert fallback; stereo retains its device-quirk negotiation. The stream starts on the first period and an exclusive stream restarts after a stall. Playback QPC strictly increases: the frame count predicts each period and an eighth of a clock reading's disagreement corrects it, so readings that move by whole periods (a shared virtual cable whose position updated every other period put two periods at one QPC) still space periods about one period apart, a device clock off nominal lags by a bounded amount instead of accumulating, and a reading more than four periods off (an underrun gap, a restart) or the first after an estimate is taken as is; estimates without a reading advance by at least one period. The calculation (playback_clock.rs) is frame-based, channel-independent and tested on every OS. Device enumeration reports shared mix formats and exact exclusive support for standard speaker layouts; ignored Windows tests probe VB-CABLE and verify allocation-free shared, exclusive-with-restart and multichannel periods; the CI live audio job runs them on the cable (the multichannel one takes the default endpoint's first exclusive layout wider than stereo)"
+note = "event-driven WAVEFORMATEXTENSIBLE output for 1..=32 channels (Float32, Int32, Int24in32, Int16), with exact masks for multichannel exclusive streams and shared autoconvert fallback; stereo retains its device-quirk negotiation. The stream starts on the first period and an exclusive stream restarts when its cadence stays slow: three waits in a row longer than two periods (at least 10 ms), not counting the first wait after a start, so a device start-up or one late wake under CPU load does not drop queued audio (stall_guard.rs, tested on every OS). Playback QPC strictly increases: the frame count predicts each period and an eighth of a clock reading's disagreement corrects it, so readings that move by whole periods (a shared virtual cable whose position updated every other period put two periods at one QPC) still space periods about one period apart, a device clock off nominal lags by a bounded amount instead of accumulating, and a reading more than four periods off (an underrun gap, a restart) or the first after an estimate is taken as is; estimates without a reading advance by at least one period. The calculation (playback_clock.rs) is frame-based, channel-independent and tested on every OS. Device enumeration reports shared mix formats and exact exclusive support for standard speaker layouts; ignored Windows tests probe VB-CABLE and verify allocation-free shared, exclusive-with-restart and multichannel periods; the CI live audio job runs them on the cable (the multichannel one takes the default endpoint's first exclusive layout wider than stereo)"
 
 [[feature]]
 id = "sys.realtime_threads"

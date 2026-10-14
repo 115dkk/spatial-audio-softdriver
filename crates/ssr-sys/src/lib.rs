@@ -24,6 +24,7 @@
 pub mod driver_ring;
 mod playback_clock;
 pub mod sal_format;
+mod stall_guard;
 
 #[cfg(windows)]
 mod apartment;
