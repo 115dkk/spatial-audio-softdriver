@@ -40,6 +40,10 @@ static void RegistryValue(HANDLE key, PCWSTR name, ULONG type, PVOID output, ULO
         if (information->Type == type && information->DataLength == bytes) RtlCopyMemory(output, information->Data, bytes);
     }
 }
+static void SetRegistryDword(HANDLE key, PCWSTR name, ULONG value) {
+    UNICODE_STRING string; RtlInitUnicodeString(&string, name);
+    ZwSetValueKey(key, &string, 0, REG_DWORD, &value, sizeof(value));
+}
 static void RegistryName(HANDLE key, ULONG endpoint) {
     WCHAR name[] = L"EndpointName0";
     name[ARRAYSIZE(name) - 2] = static_cast<WCHAR>(L'0' + endpoint);
@@ -106,8 +110,16 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryP
     OBJECT_ATTRIBUTES attributes;
     InitializeObjectAttributes(&attributes, registryPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, nullptr, nullptr);
     ssr::km::KernelHandle serviceKey;
-    NTSTATUS status = ZwOpenKey(serviceKey.Put(), KEY_READ, &attributes);
+    NTSTATUS status = ZwOpenKey(serviceKey.Put(), KEY_READ | KEY_CREATE_SUB_KEY, &attributes);
     if (!NT_SUCCESS(status)) return status;
+    ULONG failAt = 0;
+    UNICODE_STRING parameters; RtlInitUnicodeString(&parameters, L"Parameters");
+    InitializeObjectAttributes(&attributes, &parameters, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+        serviceKey.Get(), nullptr);
+    ssr::km::KernelHandle parametersKey;
+    if (NT_SUCCESS(ZwOpenKey(parametersKey.Put(), KEY_QUERY_VALUE, &attributes)))
+        RegistryValue(parametersKey.Get(), L"FaultInjectAt", REG_DWORD, &failAt, sizeof(failAt));
+    ssr::km::fault::Configure(failAt);
     SsrTraceRegister();
     status = PcInitializeAdapterDriver(driver, registryPath, AddDevice);
     if (!NT_SUCCESS(status)) { SsrTraceUnregister(); return status; }
@@ -147,15 +159,37 @@ static NTSTATUS SsrDispatch(PDEVICE_OBJECT device, PIRP irp) {
 }
 static VOID DriverUnload(PDRIVER_OBJECT driver) {
     PAGED_CODE();
-    if (ServiceKey) { ZwClose(ServiceKey); ServiceKey = nullptr; }
     if (PortUnload) PortUnload(driver);
+    if (ServiceKey) {
+        UNICODE_STRING diagnostics; RtlInitUnicodeString(&diagnostics, L"Diagnostics");
+        OBJECT_ATTRIBUTES attributes;
+        InitializeObjectAttributes(&attributes, &diagnostics, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+            ServiceKey, nullptr);
+        ssr::km::KernelHandle key;
+        ULONG disposition = 0;
+        if (NT_SUCCESS(ZwCreateKey(key.Put(), KEY_QUERY_VALUE | KEY_SET_VALUE, &attributes, 0, nullptr,
+                REG_OPTION_VOLATILE, &disposition))) {
+            ULONG unloads = 0;
+            RegistryValue(key.Get(), L"Unloads", REG_DWORD, &unloads, sizeof(unloads));
+            const auto counts = ssr::km::fault::Read();
+            SetRegistryDword(key.Get(), L"Unloads", unloads + 1);
+            SetRegistryDword(key.Get(), L"FaultCalls", counts.calls);
+            SetRegistryDword(key.Get(), L"FaultInjectedAt", counts.injectedAt);
+            SetRegistryDword(key.Get(), L"OutstandingPool", static_cast<ULONG>(counts.pool));
+            SetRegistryDword(key.Get(), L"OutstandingTimers", static_cast<ULONG>(counts.timers));
+            SetRegistryDword(key.Get(), L"OutstandingDma", static_cast<ULONG>(counts.dmaPages));
+        }
+        key.Reset();
+        ZwClose(ServiceKey); ServiceKey = nullptr;
+    }
     SsrTraceUnregister();
 }
 static NTSTATUS AddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo) {
     PAGED_CODE();
     if (InterlockedCompareExchange(&AdapterPresent, 1, 0)) return STATUS_DEVICE_BUSY;
     LoadSettings();
-    NTSTATUS status = PcAddAdapterDevice(driver, pdo, StartDevice, 2 * ARRAYSIZE(SsrMiniPairs), 0);
+    NTSTATUS status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        PcAddAdapterDevice(driver, pdo, StartDevice, 2 * ARRAYSIZE(SsrMiniPairs), 0);
     if (!NT_SUCCESS(status)) { InterlockedExchange(&AdapterPresent, 0); return status; }
     auto fdo = ssr::km::ObjectRef<DEVICE_OBJECT>::Adopt(IoGetAttachedDeviceReference(pdo));
     while (fdo && fdo->DriverObject != driver)
@@ -179,13 +213,18 @@ static NTSTATUS Install(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources
         new (SsrNonPaged{}) CMiniportWaveRT(adapter, pair.Endpoint));
     ssr::km::ComRef<IPort> topology, wave;
     NTSTATUS status = miniTopology && miniWave ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
-    if (NT_SUCCESS(status)) status = PcNewPort(topology.Put(), CLSID_PortTopology);
+    if (NT_SUCCESS(status)) status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        PcNewPort(topology.Put(), CLSID_PortTopology);
     if (NT_SUCCESS(status)) status = topology->Init(device, irp, miniTopology.Get(), adapter, resources);
-    if (NT_SUCCESS(status)) status = PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Topology), topology.Get());
-    if (NT_SUCCESS(status)) status = PcNewPort(wave.Put(), CLSID_PortWaveRT);
+    if (NT_SUCCESS(status)) status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Topology), topology.Get());
+    if (NT_SUCCESS(status)) status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        PcNewPort(wave.Put(), CLSID_PortWaveRT);
     if (NT_SUCCESS(status)) status = wave->Init(device, irp, static_cast<IMiniportWaveRT*>(miniWave.Get()), adapter, resources);
-    if (NT_SUCCESS(status)) status = PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Wave), wave.Get());
-    if (NT_SUCCESS(status)) status = PcRegisterPhysicalConnection(device, wave.Get(), SsrWaveBridgePin, topology.Get(), SsrTopologyBridgePin);
+    if (NT_SUCCESS(status)) status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Wave), wave.Get());
+    if (NT_SUCCESS(status)) status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        PcRegisterPhysicalConnection(device, wave.Get(), SsrWaveBridgePin, topology.Get(), SsrTopologyBridgePin);
     return status;
 }
 static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources) {
@@ -203,7 +242,8 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resou
         new (SsrNonPaged{}) CAdapterCommon(extension->ControlDevice));
     if (!adapter) return STATUS_INSUFFICIENT_RESOURCES;
     NTSTATUS status = adapter->Start();
-    if (NT_SUCCESS(status)) status = PcRegisterAdapterPowerManagement(adapter.Get(), device);
+    if (NT_SUCCESS(status)) status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        PcRegisterAdapterPowerManagement(adapter.Get(), device);
     for (ULONG i = 0; NT_SUCCESS(status) && i < SSR_MAX_ENDPOINTS; ++i) {
         if ((adapter->Settings().EndpointMask & (1UL << i)) && i < ARRAYSIZE(SsrMiniPairs))
             status = Install(device, irp, resources, adapter.Get(), SsrMiniPairs[i]);

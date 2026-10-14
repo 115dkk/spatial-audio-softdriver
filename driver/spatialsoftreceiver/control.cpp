@@ -132,8 +132,9 @@ NTSTATUS SsrCreateControl(PDRIVER_OBJECT driver, const SsrSettings& settings, PD
     RtlInitUnicodeString(&SsrLink, L"\\DosDevices\\SpatialSoftReceiver");
     UNICODE_STRING sddl; RtlInitUnicodeString(&sddl, L"D:P(A;;GA;;;SY)(A;;GRGW;;;BA)(A;;GRGW;;;IU)");
     PDEVICE_OBJECT created = nullptr;
-    NTSTATUS status = IoCreateDeviceSecure(driver, sizeof(SsrControlState), &name,
-        FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &sddl, &SsrControlClass, &created);
+    NTSTATUS status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
+        IoCreateDeviceSecure(driver, sizeof(SsrControlState), &name,
+            FILE_DEVICE_UNKNOWN, FILE_DEVICE_SECURE_OPEN, FALSE, &sddl, &SsrControlClass, &created);
     if (!NT_SUCCESS(status)) return status;
     auto state = new (created->DeviceExtension) SsrControlState{};
     KeInitializeSpinLock(&state->Lock);

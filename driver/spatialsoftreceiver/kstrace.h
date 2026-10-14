@@ -26,6 +26,7 @@ struct SsrIrpNote {
 
 void SsrTraceRegister();
 void SsrTraceUnregister();
+void SsrTraceFault(ULONG call);
 // Before PortCls sees the IRP: afterwards it may already be completed and freed.
 void SsrTraceBefore(PIRP irp, SsrIrpNote* note);
 void SsrTraceAfter(const SsrIrpNote& note, NTSTATUS status);

@@ -3,7 +3,62 @@
 #pragma once
 #include "spatialsoftreceiver.h"
 
+void SsrTraceFault(ULONG call);
+
 namespace ssr::km {
+namespace fault {
+struct Counts {
+    ULONG calls;
+    ULONG injectedAt;
+    LONG pool;
+    LONG timers;
+    LONG dmaPages;
+};
+
+inline constinit volatile LONG FailAt{};
+inline constinit volatile LONG Calls{};
+inline constinit volatile LONG InjectedAt{};
+inline constinit volatile LONG OutstandingPool{};
+inline constinit volatile LONG OutstandingTimers{};
+inline constinit volatile LONG OutstandingDmaPages{};
+
+inline void Configure(ULONG failAt) {
+    InterlockedExchange(&FailAt, static_cast<LONG>(failAt));
+}
+
+[[nodiscard]] inline bool Hit() {
+    const ULONG call = static_cast<ULONG>(InterlockedIncrement(&Calls));
+    const ULONG failAt = static_cast<ULONG>(InterlockedCompareExchange(&FailAt, 0, 0));
+    if (failAt < 1 || call != failAt) return false;
+    InterlockedExchange(&InjectedAt, static_cast<LONG>(call));
+    SsrTraceFault(call);
+    return true;
+}
+
+inline Counts Read() {
+    return {
+        static_cast<ULONG>(InterlockedCompareExchange(&Calls, 0, 0)),
+        static_cast<ULONG>(InterlockedCompareExchange(&InjectedAt, 0, 0)),
+        InterlockedCompareExchange(&OutstandingPool, 0, 0),
+        InterlockedCompareExchange(&OutstandingTimers, 0, 0),
+        InterlockedCompareExchange(&OutstandingDmaPages, 0, 0),
+    };
+}
+}
+
+[[nodiscard]] inline void* PoolAllocate(SIZE_T bytes) {
+    if (fault::Hit()) return nullptr;
+    void* block = ExAllocatePool2(POOL_FLAG_NON_PAGED, bytes, SsrPoolTag);
+    if (block) InterlockedIncrement(&fault::OutstandingPool);
+    return block;
+}
+
+inline void PoolFree(void* block) {
+    if (!block) return;
+    ExFreePoolWithTag(block, SsrPoolTag);
+    InterlockedDecrement(&fault::OutstandingPool);
+}
+
 template <class T> constexpr T&& Move(T& value) { return static_cast<T&&>(value); }
 
 template <class T> class PoolPtr {
@@ -18,7 +73,7 @@ public:
         return *this;
     }
     [[nodiscard]] static PoolPtr Allocate(SIZE_T bytes = sizeof(T)) {
-        return PoolPtr(static_cast<T*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, bytes, SsrPoolTag)));
+        return PoolPtr(static_cast<T*>(PoolAllocate(bytes)));
     }
     ~PoolPtr() { Reset(); }
     T* Get() const { return pointer_; }
@@ -33,7 +88,7 @@ public:
     void Reset(T* adopt = nullptr) {
         T* old = pointer_;
         pointer_ = adopt;
-        if (old) ExFreePoolWithTag(old, SsrPoolTag);
+        PoolFree(old);
     }
 private:
     T* pointer_ = nullptr;
@@ -157,7 +212,10 @@ public:
         return *this;
     }
     [[nodiscard]] static ExTimer Allocate(PEXT_CALLBACK callback, PVOID context, ULONG attributes) {
-        return ExTimer(ExAllocateTimer(callback, context, attributes));
+        if (fault::Hit()) return ExTimer();
+        PEX_TIMER timer = ExAllocateTimer(callback, context, attributes);
+        if (timer) InterlockedIncrement(&fault::OutstandingTimers);
+        return ExTimer(timer);
     }
     ~ExTimer() { Reset(); }
     PEX_TIMER Get() const { return timer_; }
@@ -165,7 +223,10 @@ public:
     void Reset() {
         PEX_TIMER old = timer_;
         timer_ = nullptr;
-        if (old) ExDeleteTimer(old, TRUE, TRUE, nullptr);
+        if (old) {
+            ExDeleteTimer(old, TRUE, TRUE, nullptr);
+            InterlockedDecrement(&fault::OutstandingTimers);
+        }
     }
 private:
     explicit ExTimer(PEX_TIMER timer) : timer_(timer) {}
@@ -250,15 +311,19 @@ public:
         Reset();
         PHYSICAL_ADDRESS high;
         high.QuadPart = MAXLONGLONG;
+        if (fault::Hit()) return STATUS_INSUFFICIENT_RESOURCES;
         PMDL mdl = port->AllocatePagesForMdl(high, bytes);
         if (!mdl) return STATUS_INSUFFICIENT_RESOURCES;
+        InterlockedIncrement(&fault::OutstandingDmaPages);
         if (MmGetMdlByteCount(mdl) < bytes) {
             port->FreePagesFromMdl(mdl);
+            InterlockedDecrement(&fault::OutstandingDmaPages);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         BYTE* buffer = static_cast<BYTE*>(port->MapAllocatedPages(mdl, cache));
         if (!buffer) {
             port->FreePagesFromMdl(mdl);
+            InterlockedDecrement(&fault::OutstandingDmaPages);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         port_ = port;
@@ -281,7 +346,10 @@ public:
         buffer_ = nullptr;
         bytes_ = 0;
         if (buffer) port->UnmapAllocatedPages(buffer, mdl);
-        if (mdl) port->FreePagesFromMdl(mdl);
+        if (mdl) {
+            port->FreePagesFromMdl(mdl);
+            InterlockedDecrement(&fault::OutstandingDmaPages);
+        }
     }
 private:
     PPORTWAVERTSTREAM port_ = nullptr;

@@ -14,6 +14,9 @@ void SsrTraceUnregister() {
     if (Registered) TraceLoggingUnregister(SsrKsProvider);
     Registered = false;
 }
+void SsrTraceFault(ULONG call) {
+    if (Registered) TraceLoggingWrite(SsrKsProvider, "FaultInjected", TraceLoggingUInt32(call, "Call"));
+}
 
 // Copies up to `capacity` bytes of a request buffer. A user-mode caller's
 // METHOD_NEITHER buffer is probed first; a fault leaves nothing copied.
