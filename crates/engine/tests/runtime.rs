@@ -513,10 +513,6 @@ fn wait_for_thread_exit(timeout: Duration, mut exited: impl FnMut() -> bool) {
     }
 }
 
-const RECORD_QPC: usize = std::mem::offset_of!(ssr_abi::RecordHeader, qpc);
-const RECORD_KIND: usize = std::mem::offset_of!(ssr_abi::RecordHeader, kind);
-const RECORD_LEN: usize = std::mem::offset_of!(ssr_abi::RecordHeader, len);
-
 struct ReconnectingCapture {
     inner: RecordsCapture,
     fail_at: usize,
@@ -574,37 +570,38 @@ impl CaptureSource for RecordsCapture {
         };
         assert!(record.len() <= buffer.len());
         buffer[..record.len()].copy_from_slice(record);
-        if let Some(pacing) = &self.paced_by {
+        let raw = ssr_abi::raw_records(record).next().and_then(Result::ok);
+        if let (Some(pacing), Some(raw)) = (&self.paced_by, raw) {
             let now = pacing.state.frames.load(Ordering::Acquire);
-            let kind = u16::from_le_bytes(buffer[RECORD_KIND..RECORD_KIND + 2].try_into().unwrap());
-            let bytes = u32::from_le_bytes(buffer[RECORD_LEN..RECORD_LEN + 4].try_into().unwrap());
+            let bytes = raw.header.len;
             // Data records in this harness use stereo f32 PCM at the pacing
             // scene rate or a 192 kHz stereo i16 IEC carrier. Convert both to
             // this synthetic clock's 48 kHz QPC units.
-            let record_frames = match kind {
+            let record_frames = match raw.header.kind {
                 ssr_abi::RECORD_KIND_DATA if bytes % 8 == 0 && bytes <= (BLOCK * 16) as u32 => {
                     u64::from(bytes / 8) * u64::from(RATE) / u64::from(pacing.scene_rate)
                 }
                 ssr_abi::RECORD_KIND_DATA => u64::from(bytes) * RATE as u64 / 768_000,
                 _ => 0,
             };
-            let qpc = now.saturating_add(record_frames);
-            buffer[RECORD_QPC..RECORD_QPC + 8].copy_from_slice(&qpc.to_le_bytes());
+            assert!(ssr_abi::edit_header(
+                &mut buffer[..record.len()],
+                |header| {
+                    header.qpc = now.saturating_add(record_frames);
+                }
+            ));
         }
-        let frames = if record.len() >= RECORD_LEN + 4 {
-            let kind = u16::from_le_bytes(record[RECORD_KIND..RECORD_KIND + 2].try_into().unwrap());
-            let bytes = u32::from_le_bytes(record[RECORD_LEN..RECORD_LEN + 4].try_into().unwrap());
-            if kind == ssr_abi::RECORD_KIND_DATA {
+        let frames = raw
+            .filter(|raw| raw.header.kind == ssr_abi::RECORD_KIND_DATA)
+            .map_or(0, |raw| {
                 self.paced_by.as_ref().map_or_else(
-                    || u64::from(bytes / 8),
-                    |pacing| u64::from(bytes / 8) * u64::from(RATE) / u64::from(pacing.scene_rate),
+                    || u64::from(raw.header.len / 8),
+                    |pacing| {
+                        u64::from(raw.header.len / 8) * u64::from(RATE)
+                            / u64::from(pacing.scene_rate)
+                    },
                 )
-            } else {
-                0
-            }
-        } else {
-            0
-        };
+            });
         self.next += 1;
         if let Some(lockstep) = &self.lockstep {
             lockstep.advance_read_clock(frames);

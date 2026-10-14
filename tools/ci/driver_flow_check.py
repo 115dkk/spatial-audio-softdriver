@@ -23,7 +23,6 @@ parsing and checks are pure and tested on Linux (test_driver_flow_check.py).
 import argparse
 import json
 import os
-import struct
 import sys
 import threading
 import time
@@ -34,24 +33,18 @@ from endpoints import ENDPOINT_NUMBERS, enumerate_endpoints, find_speaker
 from ring_stats import (ENDPOINT_TONES, FLOW_TONE_AMPLITUDE, endpoint_stats,
                         threshold_problems)
 from ssr_abi import (
-    ABI_INFO, DEFAULT_ENDPOINT_MASK, MAX_DATA_PAYLOAD, MAX_VOLUME_CHANNELS,
-    READ_MAX_BYTES, RECORD_ALIGN, RECORD_FLAG_DISCONTINUITY as FLAG_DISCONTINUITY,
+    ABI_INFO, DEFAULT_ENDPOINT_MASK, LEGACY_VOLUME_PAYLOAD as LEGACY_VOLUME,
+    MAX_DATA_PAYLOAD, MAX_VOLUME_CHANNELS, READ_MAX_BYTES,
+    RECORD_FLAG_DISCONTINUITY as FLAG_DISCONTINUITY,
     RECORD_FLAG_REPEAT as FLAG_REPEAT, RECORD_HEADER as HEADER,
     RECORD_KIND_DATA as KIND_DATA, RECORD_KIND_FORMAT_CHANGE as KIND_FORMAT_CHANGE,
     RECORD_KIND_OVERRUN as KIND_OVERRUN, RECORD_KIND_STREAM_START as KIND_STREAM_START,
     RECORD_KIND_STREAM_STOP as KIND_STREAM_STOP, RECORD_KIND_VOLUME as KIND_VOLUME,
-    VOLUME_PAYLOAD as VOLUME,
+    VOLUME_MIN_Q16, VOLUME_PAYLOAD as VOLUME, WAVEFORMATEX,
+    WAVEFORMATEXTENSIBLE_BYTES, WAVE_FAMILY, WAVE_FORMAT_EXTENSIBLE,
+    WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM, WAVE_GUID_TAIL, records,
 )
 from ssr_control import ControlDevice, parse_abi_info
-
-# Dump format versions before v3 carried sixteen volume levels.
-LEGACY_VOLUME = struct.Struct("<II16i")
-
-WAVE_FORMAT_PCM = 0x0001
-WAVE_FORMAT_IEEE_FLOAT = 0x0003
-WAVE_FORMAT_EXTENSIBLE = 0xFFFE
-# Data1 of the KSDATAFORMAT_SUBTYPE_* GUIDs {0000xxxx-0000-0010-8000-00aa00389b71}.
-SUBTYPE_TAIL = bytes.fromhex("000010008000 00aa00389b71".replace(" ", ""))
 
 TONES = ENDPOINT_TONES
 # Exclusive permission/priority do not prohibit shared mode on an idle device.
@@ -60,21 +53,8 @@ TONES = ENDPOINT_TONES
 
 
 def parse_records(stream):
-    """The records of a READ stream, as dicts; stops at a cut record."""
-    records = []
-    offset = 0
-    while offset + HEADER.size <= len(stream):
-        kind, flags, epoch, byte_pos, qpc, qpc_written, length, endpoint, _ = HEADER.unpack_from(stream, offset)
-        end = offset + HEADER.size + length
-        if end > len(stream):
-            break
-        records.append({
-            "kind": kind, "flags": flags, "epoch": epoch, "byte_pos": byte_pos,
-            "qpc": qpc, "qpc_written": qpc_written, "len": length, "endpoint": endpoint,
-            "payload": bytes(stream[offset + HEADER.size:end]),
-        })
-        offset = (end + RECORD_ALIGN - 1) // RECORD_ALIGN * RECORD_ALIGN
-    return records
+    """The complete records of a READ stream, as dictionaries."""
+    return list(records(stream))
 
 
 # The driver brings every running stream to the same QPC under one lock
@@ -126,7 +106,7 @@ def parse_volume(payload):
         raise ValueError("volume payload must be 72 or 136 bytes")
     if not 1 <= count <= MAX_VOLUME_CHANNELS or mute_mask >> count:
         raise ValueError("invalid volume channel count or mute mask")
-    if any(not -96 * 65536 <= level <= 0 for level in levels[:count]) or any(levels[count:]):
+    if any(not VOLUME_MIN_Q16 <= level <= 0 for level in levels[:count]) or any(levels[count:]):
         raise ValueError("invalid volume levels or nonzero unused channels")
     return {"channel_count": count, "mute_mask": mute_mask, "level_q16": levels,
             "levels_db": [level / 65536.0 for level in levels[:count]]}
@@ -134,14 +114,14 @@ def parse_volume(payload):
 
 def parse_wave_format(payload):
     """WAVEFORMATEX(TENSIBLE): tag, channels, rate, byte rate, block, bits, sample kind."""
-    tag, channels, rate, avg, block, bits = struct.unpack_from("<HHIIHH", payload)
+    tag, channels, rate, avg, block, bits, _ = WAVEFORMATEX.unpack_from(payload)
     kind = {WAVE_FORMAT_PCM: "int", WAVE_FORMAT_IEEE_FLOAT: "float"}.get(tag)
-    if tag == WAVE_FORMAT_EXTENSIBLE and len(payload) >= 40:
+    if tag == WAVE_FORMAT_EXTENSIBLE and len(payload) >= WAVEFORMATEXTENSIBLE_BYTES:
         # The container size (wBitsPerSample) decides the decoding; the
         # SubFormat GUID says integer or float.
         sub = payload[24:40]
-        data1 = struct.unpack_from("<I", sub)[0]
-        if sub[4:] == SUBTYPE_TAIL:
+        data1 = int.from_bytes(sub[:4], "little")
+        if sub[4:] == WAVE_FAMILY.to_bytes(2, "little") + WAVE_GUID_TAIL:
             kind = {WAVE_FORMAT_PCM: "int", WAVE_FORMAT_IEEE_FLOAT: "float"}.get(data1)
     return {"tag": tag, "channels": channels, "rate": rate, "avg_bytes": avg,
             "block_align": block, "bits": bits, "sample": kind}

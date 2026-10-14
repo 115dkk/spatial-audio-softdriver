@@ -4,6 +4,8 @@ device, so the Linux lint job runs them."""
 import struct
 import unittest
 
+import ssr_abi
+
 import numpy as np
 
 from driver_flow_check import (
@@ -111,12 +113,33 @@ class DriverFlowTest(unittest.TestCase):
 
     def test_new_layout(self):
         self.assertEqual(ABI_INFO.size, 160)
-        raw = bytearray(160)
-        struct.pack_into("<IIII", raw, 0, 1, 160, 65536, 8 * 1024 * 1024)
-        struct.pack_into("<QIIII", raw, 16, 0x1fe, 0x3f, 0x1f, 18, 0xffffffff)
-        struct.pack_into("<QQII", raw, 40, 3, QPC, 7, 0)
-        for ep in range(3):
-            struct.pack_into("<QIIII", raw, 64 + 24 * ep, 0x6c, 0x3f, 0x1f, 18, 0xffffffff)
+        values = [0] * len(ssr_abi.ABI_INFO_FIELDS)
+        indexes = {name: index for index, name in enumerate(ssr_abi.ABI_INFO_FIELDS)}
+        for name, value in {
+            "abi_version": 1,
+            "struct_size": ABI_INFO.size,
+            "driver_version": 65536,
+            "ring_bytes": 8 * 1024 * 1024,
+            "compiled.codecs": 0x1fe,
+            "compiled.pcm.rates": 0x3f,
+            "compiled.pcm.shapes": 0x1f,
+            "compiled.pcm.max_masked_channels": 18,
+            "compiled.pcm.direct_channels": 0xffffffff,
+            "features": 3,
+            "qpc_frequency": QPC,
+            "endpoint_mask": 7,
+        }.items():
+            values[indexes[name]] = value
+        for endpoint in range(3):
+            for name, value in {
+                "codecs": 0x6c,
+                "pcm.rates": 0x3f,
+                "pcm.shapes": 0x1f,
+                "pcm.max_masked_channels": 18,
+                "pcm.direct_channels": 0xffffffff,
+            }.items():
+                values[indexes[f"endpoints[{endpoint}].{name}"]] = value
+        raw = ABI_INFO.pack(*values)
         info = parse_abi_info(raw)
         self.assertEqual(info["qpc_frequency"], QPC)
         self.assertEqual(info["endpoint_mask"], 7)

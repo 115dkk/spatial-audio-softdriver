@@ -36,8 +36,16 @@ pub mod wave;
 pub mod wire;
 
 pub use dump::{DumpError, ReadChunk, Reads, dump_header, dump_header_bytes, reads, split_dump};
-pub use record::{AbiError, Record, RecordWriter, record_size, records, volume_gain};
-pub use wave::{WaveFormatError, parse_wave_format, wave_format_bytes};
+pub use record::{
+    AbiError, READ_END_RECORD_BYTES, RECORDER_GAP_RECORD_BYTES, RawRecord, RawRecords, Record,
+    RecordWriter, edit_header, raw_records, record_size, records, volume_gain,
+};
+pub use wave::{
+    IEC61937_FAMILY, IEC61937_FORMAT_BYTES, WAVE_FAMILY, WAVE_FORMAT_DOLBY_AC3_SPDIF,
+    WAVE_FORMAT_DTS, WAVE_FORMAT_EXTENSIBLE, WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM,
+    WAVE_GUID_TAIL, WAVEFORMATEX_BYTES, WAVEFORMATEXTENSIBLE_BYTES, WaveFormatError,
+    parse_wave_format, wave_format_bytes,
+};
 pub use wire::*;
 
 /// Compatibility alias for callers using the original constant name.

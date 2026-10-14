@@ -1,7 +1,6 @@
 import unittest
 
 import ssr_abi
-from driver_flow_check import parse_records
 from ssr_control import parse_abi_info, parse_stats
 
 
@@ -21,7 +20,7 @@ class GeneratedAbiTests(unittest.TestCase):
             "10270000000000000000000000000000"
             "0400000000000000"
         ) + b"abcd" + b"\0" * 4
-        record = parse_records(raw)[0]
+        record = list(ssr_abi.records(raw))[0]
         self.assertEqual(record["kind"], ssr_abi.RECORD_KIND_DATA)
         self.assertEqual(record["qpc"], 10_000)
         self.assertEqual(record["payload"], b"abcd")

@@ -3,7 +3,6 @@
 import argparse
 import json
 import math
-import struct
 import subprocess
 import sys
 import time
@@ -14,8 +13,10 @@ import soundfile as sf
 
 from loopback_check import compare, report_problems
 from ssr_abi import (ABI_VERSION, DUMP_FORMAT_VERSION, DUMP_HEADER, DUMP_MAGIC,
-                     RECORD_HEADER, RECORD_KIND_DATA, RECORD_KIND_FORMAT_CHANGE,
-                     RECORD_KIND_STREAM_START, RECORD_KIND_STREAM_STOP)
+                     RECORD_ALIGN, RECORD_HEADER, RECORD_KIND_DATA,
+                     RECORD_KIND_FORMAT_CHANGE, RECORD_KIND_STREAM_START,
+                     RECORD_KIND_STREAM_STOP, WAVEFORMATEXTENSIBLE,
+                     WAVE_FORMAT_EXTENSIBLE, wave_subformat)
 
 
 RATE = 48_000
@@ -54,16 +55,16 @@ def tone_frames(channels, seconds=4.0):
 
 def _record(kind, epoch, byte_pos, qpc, payload=b""):
     header = RECORD_HEADER.pack(kind, 0, epoch, byte_pos, qpc, 0, len(payload), 0, 0)
-    return header + payload + b"\0" * ((-len(payload)) % 8)
+    return header + payload + b"\0" * ((-len(payload)) % RECORD_ALIGN)
 
 
 def make_dump(path, frames, channel_mask):
     """Write a current ssr-abi dump containing float32 interleaved PCM."""
     channels = frames.shape[1]
     block = channels * 4
-    wave = struct.pack("<HHIIHHHHI16s", 0xFFFE, channels, RATE, RATE * block, block,
-                       32, 22, 32, channel_mask,
-                       bytes.fromhex("0300000000001000800000aa00389b71"))
+    wave = WAVEFORMATEXTENSIBLE.pack(
+        WAVE_FORMAT_EXTENSIBLE, channels, RATE, RATE * block, block,
+        32, 22, 32, channel_mask, wave_subformat(3))
     stream = bytearray()
     stream += _record(RECORD_KIND_STREAM_START, 1, 0, 0)
     stream += _record(RECORD_KIND_FORMAT_CHANGE, 1, 0, 0, wave)

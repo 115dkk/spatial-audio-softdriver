@@ -352,214 +352,6 @@ fn main() -> ExitCode {
 }
 
 #[cfg(any(windows, test))]
-mod paced_bounds {
-    use std::mem::{offset_of, size_of};
-
-    use ssr_abi::RecordHeader;
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    const HEADER_BYTES: usize = size_of::<RecordHeader>();
-    #[cfg_attr(not(windows), allow(dead_code))]
-    const KIND_AT: usize = offset_of!(RecordHeader, kind);
-    #[cfg_attr(not(windows), allow(dead_code))]
-    const POS_AT: usize = offset_of!(RecordHeader, byte_pos);
-    #[cfg_attr(not(windows), allow(dead_code))]
-    const LEN_AT: usize = offset_of!(RecordHeader, len);
-    #[cfg_attr(not(windows), allow(dead_code))]
-    const QPC_AT: usize = offset_of!(RecordHeader, qpc);
-
-    /// Where one READ chunk ends in the cleaned stream. `recorded` is false for
-    /// a chunk the recorder did not close with a READ end: the unterminated
-    /// tail (all of a dump written by a tool rather than recorded) or bytes
-    /// cut short by a recorder gap. Only recorded ends are READ boundaries.
-    #[derive(Clone, Copy, Debug)]
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) struct ReadEnd {
-        pub(super) at: usize,
-        pub(super) recorded: bool,
-    }
-
-    /// The READ-aligned records `--loop` repeats, and how far one pass moves
-    /// the dump's clock and byte position.
-    #[derive(Clone, Copy, Debug)]
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) struct LoopSpan {
-        pub(super) start: usize,
-        pub(super) end: usize,
-        pub(super) first_read_end: Option<usize>,
-        pub(super) qpc: u64,
-        pub(super) bytes: u64,
-    }
-
-    /// Size (padding included, clamped to the stream) and kind, byte position,
-    /// payload length and dump QPC of the record at `at`.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) fn record_at(stream: &[u8], at: usize) -> (usize, u16, u64, u32, u64) {
-        let header = &stream[at..at + HEADER_BYTES];
-        let kind = u16::from_le_bytes(header[KIND_AT..KIND_AT + 2].try_into().expect("2 bytes"));
-        let pos = u64::from_le_bytes(header[POS_AT..POS_AT + 8].try_into().expect("8 bytes"));
-        let len = u32::from_le_bytes(header[LEN_AT..LEN_AT + 4].try_into().expect("4 bytes"));
-        let qpc = u64::from_le_bytes(header[QPC_AT..QPC_AT + 8].try_into().expect("8 bytes"));
-        let size = ssr_abi::record_size(len as usize).min(stream.len() - at);
-        (size, kind, pos, len, qpc)
-    }
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) fn wrap_loop(
-        span: LoopSpan,
-        offset: &mut usize,
-        next_read_end: &mut usize,
-        qpc_shift: &mut u64,
-        pos_shift: &mut u64,
-    ) -> bool {
-        if *offset != span.end {
-            return false;
-        }
-        *offset = span.start;
-        if let Some(first_read_end) = span.first_read_end {
-            *next_read_end = first_read_end;
-        }
-        *qpc_shift += span.qpc;
-        *pos_shift += span.bytes;
-        true
-    }
-
-    /// Finds the repeat span. Format 2 supplies READ ends so the span expands
-    /// from the first data record's READ start through the last one's READ end,
-    /// when the recorder closed that READ. Otherwise (legacy dumps, and dumps
-    /// with no recorded READ around the last data record) the span is the data
-    /// records alone, so state records before them play once.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) fn loop_span(
-        stream: &[u8],
-        read_ends: Option<&[ReadEnd]>,
-    ) -> Result<LoopSpan, String> {
-        let mut data = Vec::new();
-        let mut at = 0;
-        while at < stream.len() {
-            let (size, kind, pos, len, qpc) = record_at(stream, at);
-            if kind == ssr_abi::RECORD_KIND_DATA {
-                data.push((at, size, pos, len, qpc));
-            }
-            at += size;
-        }
-        let (&first, &last) = match (data.first(), data.last()) {
-            (Some(first), Some(last)) if data.len() >= 2 => (first, last),
-            _ => return Err("--loop needs a dump with at least two data records".to_owned()),
-        };
-        let spacing = data[1].4.saturating_sub(first.4);
-        let recorded_span = read_ends.and_then(|ends| {
-            let first_read = ends.partition_point(|end| end.at <= first.0);
-            let last_read = ends.partition_point(|end| end.at <= last.0);
-            let end = ends.get(last_read).filter(|end| end.recorded)?;
-            let start = first_read
-                .checked_sub(1)
-                .map_or(0, |before| ends[before].at);
-            Some((start, end.at, Some(first_read)))
-        });
-        let (start, end, first_read_end) =
-            recorded_span.unwrap_or((first.0, last.0 + last.1, None));
-        Ok(LoopSpan {
-            start,
-            end,
-            first_read_end,
-            qpc: last.4.saturating_sub(first.4) + spacing,
-            bytes: (last.2 + u64::from(last.3)).saturating_sub(first.2),
-        })
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use ssr_abi::RecordWriter;
-
-        use super::*;
-
-        #[test]
-        fn format_two_loop_span_uses_whole_recorded_reads() {
-            let mut stream = [0; 512];
-            let mut writer = RecordWriter::new(&mut stream);
-            assert!(writer.stream_start(1, 1));
-            let read_zero = writer.len();
-            assert!(writer.format_change(1, 2, &[]));
-            assert!(writer.data(1, 0, 10, &[1]));
-            let read_one = writer.len();
-            assert!(writer.data(1, 1, 20, &[2]));
-            assert!(writer.stream_stop(1, 21));
-            let read_two = writer.len();
-            assert!(writer.stream_start(2, 30));
-            let read_three = writer.len();
-            let len = writer.len();
-
-            let ends = [read_zero, read_one, read_two, read_three]
-                .map(|at| ReadEnd { at, recorded: true });
-            let span = loop_span(&stream[..len], Some(&ends)).unwrap();
-            assert_eq!(span.start, read_zero);
-            assert_eq!(span.end, read_two);
-            assert_eq!(span.first_read_end, Some(1));
-
-            let mut offset = span.end;
-            let mut next_read_end = 3;
-            let mut qpc_shift = 0;
-            let mut pos_shift = 0;
-            assert!(wrap_loop(
-                span,
-                &mut offset,
-                &mut next_read_end,
-                &mut qpc_shift,
-                &mut pos_shift,
-            ));
-            assert_eq!(offset, read_zero);
-            assert_eq!(next_read_end, 1);
-            assert_eq!(qpc_shift, span.qpc);
-            assert_eq!(pos_shift, span.bytes);
-        }
-
-        /// A format-2 dump written by a tool (the CI fixtures) has no READ
-        /// ends: its one unterminated chunk is not a READ, so the loop repeats
-        /// the data records and never the format or stream records before
-        /// them.
-        #[test]
-        fn unrecorded_reads_loop_the_data_records() {
-            let mut stream = [0; 512];
-            let mut writer = RecordWriter::new(&mut stream);
-            assert!(writer.format_change(1, 0, &[]));
-            assert!(writer.stream_start(1, 0));
-            let first_data = writer.len();
-            assert!(writer.data(1, 0, 10, &[1; 16]));
-            assert!(writer.data(1, 16, 20, &[2; 16]));
-            let after_data = writer.len();
-            assert!(writer.stream_stop(1, 25));
-            let len = writer.len();
-
-            let tail = [ReadEnd {
-                at: len,
-                recorded: false,
-            }];
-            let span = loop_span(&stream[..len], Some(&tail)).unwrap();
-            assert_eq!((span.start, span.end), (first_data, after_data));
-            assert_eq!(span.first_read_end, None);
-            assert_eq!(span.bytes, 32);
-
-            // A recorded READ before the data does not make the unterminated
-            // tail that holds the last data record a READ either.
-            let ends = [
-                ReadEnd {
-                    at: first_data,
-                    recorded: true,
-                },
-                ReadEnd {
-                    at: len,
-                    recorded: false,
-                },
-            ];
-            let span = loop_span(&stream[..len], Some(&ends)).unwrap();
-            assert_eq!((span.start, span.end), (first_data, after_data));
-            assert_eq!(span.first_read_end, None);
-        }
-    }
-}
-
-#[cfg(any(windows, test))]
 mod capture_tap {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -569,23 +361,25 @@ mod capture_tap {
     use ssr_types::{CaptureError, CaptureSource, TrimUnsupported};
 
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) const READ_END_BYTES: usize = 40;
+    pub(super) const READ_END_BYTES: usize = ssr_abi::READ_END_RECORD_BYTES;
 
     #[cfg_attr(not(windows), allow(dead_code))]
-    fn marker(write: impl FnOnce(&mut RecordWriter<'_>) -> bool) -> [u8; 48] {
-        let mut bytes = [0; 48];
+    fn marker(
+        write: impl FnOnce(&mut RecordWriter<'_>) -> bool,
+    ) -> [u8; ssr_abi::RECORDER_GAP_RECORD_BYTES] {
+        let mut bytes = [0; ssr_abi::RECORDER_GAP_RECORD_BYTES];
         let mut writer = RecordWriter::new(&mut bytes);
         assert!(write(&mut writer));
         bytes
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) fn read_end_marker(qpc: u64) -> [u8; 48] {
+    pub(super) fn read_end_marker(qpc: u64) -> [u8; ssr_abi::RECORDER_GAP_RECORD_BYTES] {
         marker(|writer| writer.read_end(qpc))
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
-    fn recorder_gap_marker(qpc: u64, lost_bytes: u64) -> [u8; 48] {
+    fn recorder_gap_marker(qpc: u64, lost_bytes: u64) -> [u8; ssr_abi::RECORDER_GAP_RECORD_BYTES] {
         marker(|writer| writer.recorder_gap(qpc, lost_bytes))
     }
 
@@ -946,7 +740,6 @@ mod platform {
     use std::collections::BTreeMap;
     use std::fs::File;
     use std::io::{BufRead, BufWriter, Write};
-    use std::mem::offset_of;
     #[cfg(test)]
     use std::mem::size_of;
     use std::path::{Path, PathBuf};
@@ -955,11 +748,12 @@ mod platform {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use engine::adapters::DumpCapture;
     use engine::{
         ClockPreference, EngineConfig, EngineEvent, LiveChange, OutputProfile, Prepared,
         RealtimeThread, StartOptions,
     };
-    use ssr_abi::{Record, RecordHeader, dump_header_bytes, records};
+    use ssr_abi::{Record, dump_header_bytes, records};
     use ssr_sys::driver_ring::{DriverRing, DriverStatsSample};
     use ssr_sys::mmcss::{self, MmcssGuard};
     use ssr_sys::output::WasapiOpener;
@@ -967,7 +761,6 @@ mod platform {
     use ssr_types::{CaptureError, CaptureSource, TrimUnsupported};
 
     use super::capture_tap::{READ_END_BYTES, TeeCapture, read_end_marker};
-    use super::paced_bounds::{LoopSpan, ReadEnd, loop_span, record_at, wrap_loop};
     use super::{CaptureKind, Clock, chain_errors_json, parse_endpoints, report_request_fields};
 
     pub struct PlayOptions {
@@ -1157,7 +950,7 @@ mod platform {
             stats: Arc<std::sync::Mutex<DriverStatsTotals>>,
         },
         Sal(SalRing),
-        Dump(PacedDump),
+        Dump(DumpCapture),
     }
 
     impl CaptureSource for Source {
@@ -1215,152 +1008,6 @@ mod platform {
         }
     }
 
-    #[cfg(test)]
-    const HEADER_BYTES: usize = size_of::<RecordHeader>();
-    const POS_AT: usize = offset_of!(RecordHeader, byte_pos);
-    const QPC_AT: usize = offset_of!(RecordHeader, qpc);
-    const QPC_WRITTEN_AT: usize = offset_of!(RecordHeader, qpc_written);
-
-    /// Replays a dump at the pace its QPC stamps give, restamping every record
-    /// with the QPC at which it was handed out, as a driver read would. The
-    /// whole live path (real-time threads, WASAPI, clock correction, latency)
-    /// then runs on a PC without SAL; the source clock is the QPC.
-    struct PacedDump {
-        stream: Vec<u8>,
-        offset: usize,
-        read_ends: Vec<usize>,
-        next_read_end: usize,
-        /// The first record's dump QPC and the local QPC it was released at.
-        origin: Option<(u64, u64)>,
-        dump_frequency: u64,
-        frequency: u64,
-        ended: Arc<AtomicBool>,
-        /// With `--loop`, the data records to repeat.
-        repeat: Option<LoopSpan>,
-        /// Added to the dump QPC and byte position of every record replayed
-        /// after the first pass.
-        qpc_shift: u64,
-        pos_shift: u64,
-    }
-
-    impl PacedDump {
-        fn new(bytes: &[u8], ended: Arc<AtomicBool>, repeat: bool) -> Result<Self, String> {
-            let (header, stream) = ssr_abi::split_dump(bytes).map_err(|e| e.to_string())?;
-            // Checked once here, so `read` can slice without checks failing.
-            for record in records(stream) {
-                record.map_err(|e| e.to_string())?;
-            }
-            if header.qpc_frequency == 0 {
-                return Err("the dump header has a zero QPC frequency".to_owned());
-            }
-            let mut clean = Vec::with_capacity(stream.len());
-            let mut read_ends = Vec::new();
-            let mut bounds = Vec::new();
-            for chunk in ssr_abi::reads(&header, stream) {
-                clean.extend_from_slice(chunk.bytes);
-                read_ends.push(clean.len());
-                bounds.push(ReadEnd {
-                    at: clean.len(),
-                    recorded: chunk.end_qpc.is_some(),
-                });
-            }
-            let repeat = if repeat {
-                Some(loop_span(
-                    &clean,
-                    (header.format_version >= 2).then_some(bounds.as_slice()),
-                )?)
-            } else {
-                None
-            };
-            Ok(Self {
-                stream: clean,
-                offset: 0,
-                read_ends,
-                next_read_end: 0,
-                origin: None,
-                dump_frequency: header.qpc_frequency,
-                frequency: qpc::frequency(),
-                ended,
-                repeat,
-                qpc_shift: 0,
-                pos_shift: 0,
-            })
-        }
-    }
-
-    impl PacedDump {
-        /// With `--loop`, goes back to the first data record once the last
-        /// one has been handed out, one pass later in time and position.
-        fn wrap(&mut self) {
-            if let Some(span) = self.repeat {
-                wrap_loop(
-                    span,
-                    &mut self.offset,
-                    &mut self.next_read_end,
-                    &mut self.qpc_shift,
-                    &mut self.pos_shift,
-                );
-            }
-        }
-    }
-
-    impl CaptureSource for PacedDump {
-        fn read(&mut self, buf: &mut [u8], wait: Duration) -> Result<usize, CaptureError> {
-            let deadline = qpc::now() + (wait.as_secs_f64() * self.frequency as f64) as u64;
-            loop {
-                self.wrap();
-                if self.offset == self.stream.len() {
-                    self.ended.store(true, Ordering::Release);
-                    return Err(CaptureError::Ended);
-                }
-                let now = qpc::now();
-                let mut written = 0;
-                while self.offset < self.stream.len() {
-                    self.wrap();
-                    let (size, kind, pos, _, dump_qpc) = record_at(&self.stream, self.offset);
-                    let dump_qpc = dump_qpc + self.qpc_shift;
-                    let (dump0, local0) = *self.origin.get_or_insert((dump_qpc, now));
-                    let due = local0
-                        + (u128::from(dump_qpc.saturating_sub(dump0)) * u128::from(self.frequency)
-                            / u128::from(self.dump_frequency)) as u64;
-                    if due > now || written + size > buf.len() {
-                        break;
-                    }
-                    let out = &mut buf[written..written + size];
-                    out.copy_from_slice(&self.stream[self.offset..self.offset + size]);
-                    out[QPC_AT..QPC_AT + 8].copy_from_slice(&now.to_le_bytes());
-                    out[QPC_WRITTEN_AT..QPC_WRITTEN_AT + 8].copy_from_slice(&now.to_le_bytes());
-                    if kind == ssr_abi::RECORD_KIND_DATA || kind == ssr_abi::RECORD_KIND_OVERRUN {
-                        out[POS_AT..POS_AT + 8]
-                            .copy_from_slice(&(pos + self.pos_shift).to_le_bytes());
-                    }
-                    written += size;
-                    self.offset += size;
-                    if self
-                        .read_ends
-                        .get(self.next_read_end)
-                        .is_some_and(|end| self.offset == *end)
-                    {
-                        self.next_read_end += 1;
-                        break;
-                    }
-                }
-                if written > 0 || now >= deadline {
-                    return Ok(written);
-                }
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
-
-        fn now_qpc(&self) -> Option<u64> {
-            Some(qpc::now())
-        }
-
-        fn set_rate_trim(&mut self, _ppm: f64) -> Result<(), TrimUnsupported> {
-            Err(TrimUnsupported)
-        }
-    }
-
     thread_local! {
         // Keeps each real-time thread registered with MMCSS until it exits.
         static MMCSS: RefCell<Option<MmcssGuard>> = const { RefCell::new(None) };
@@ -1386,7 +1033,13 @@ mod platform {
             Some(path) => {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
                 (
-                    Source::Dump(PacedDump::new(&bytes, ended.clone(), options.repeat)?),
+                    Source::Dump(DumpCapture::from_dump(
+                        &bytes,
+                        qpc::frequency(),
+                        qpc::now,
+                        Some(ended.clone()),
+                        options.repeat,
+                    )?),
                     qpc::frequency(),
                     None,
                 )
@@ -2028,7 +1681,12 @@ mod platform {
         }
 
         fn record_qpc(bytes: &[u8]) -> u64 {
-            u64::from_le_bytes(bytes[QPC_AT..QPC_AT + 8].try_into().unwrap())
+            ssr_abi::raw_records(bytes)
+                .next()
+                .unwrap()
+                .unwrap()
+                .header
+                .qpc
         }
 
         #[test]
@@ -2043,7 +1701,14 @@ mod platform {
             let len = writer.len();
             dump.extend_from_slice(&buf[..len]);
             let ended = Arc::new(AtomicBool::new(false));
-            let mut paced = PacedDump::new(&dump, ended.clone(), false).unwrap();
+            let mut paced = DumpCapture::from_dump(
+                &dump,
+                qpc::frequency(),
+                qpc::now,
+                Some(ended.clone()),
+                false,
+            )
+            .unwrap();
             let frequency = qpc::frequency();
 
             let mut out = vec![0_u8; 4096];
@@ -2064,7 +1729,10 @@ mod platform {
                     "released before {due_ms} ms"
                 );
             }
-            assert_eq!(out[HEADER_BYTES], 2);
+            assert_eq!(
+                ssr_abi::raw_records(&out).next().unwrap().unwrap().payload[0],
+                2
+            );
 
             assert!(!ended.load(Ordering::Acquire));
             assert_eq!(
@@ -2081,7 +1749,12 @@ mod platform {
         }
 
         fn record_pos(bytes: &[u8]) -> u64 {
-            u64::from_le_bytes(bytes[POS_AT..POS_AT + 8].try_into().unwrap())
+            ssr_abi::raw_records(bytes)
+                .next()
+                .unwrap()
+                .unwrap()
+                .header
+                .byte_pos
         }
 
         #[test]
@@ -2098,7 +1771,14 @@ mod platform {
             let len = writer.len();
             dump.extend_from_slice(&buf[..len]);
             let ended = Arc::new(AtomicBool::new(false));
-            let mut paced = PacedDump::new(&dump, ended.clone(), true).unwrap();
+            let mut paced = DumpCapture::from_dump(
+                &dump,
+                qpc::frequency(),
+                qpc::now,
+                Some(ended.clone()),
+                true,
+            )
+            .unwrap();
             let frequency = qpc::frequency();
 
             let mut out = vec![0_u8; 4096];
@@ -2116,7 +1796,11 @@ mod platform {
             ] {
                 let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
                 assert_eq!(n, ssr_abi::record_size(16), "pass {pass}");
-                assert_eq!(out[HEADER_BYTES], payload, "pass {pass}");
+                assert_eq!(
+                    ssr_abi::raw_records(&out).next().unwrap().unwrap().payload[0],
+                    payload,
+                    "pass {pass}"
+                );
                 assert_eq!(record_pos(&out), pos, "pass {pass}");
                 assert!(
                     record_qpc(&out) - before >= due(frequency, due_ms),
@@ -2125,6 +1809,53 @@ mod platform {
             }
             // The stop record after the span never plays while looping.
             assert!(!ended.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn format_two_loop_span_uses_whole_recorded_reads() {
+            let mut dump = dump_header_bytes(1);
+            let mut buf = vec![0_u8; 512];
+            let mut writer = RecordWriter::new(&mut buf);
+            assert!(writer.stream_start(1, 0));
+            assert!(writer.read_end(0));
+            assert!(writer.format_change(1, 0, &[]));
+            assert!(writer.data(1, 0, 0, &[1]));
+            assert!(writer.read_end(0));
+            assert!(writer.data(1, 1, 0, &[2]));
+            assert!(writer.stream_stop(1, 0));
+            assert!(writer.read_end(0));
+            assert!(writer.stream_start(2, 0));
+            assert!(writer.read_end(0));
+            let len = writer.len();
+            dump.extend_from_slice(&buf[..len]);
+
+            let mut capture = DumpCapture::from_dump(&dump, 1, || 0, None, true).unwrap();
+            let mut out = vec![0_u8; 512];
+            let mut next_kinds = || {
+                let len = capture.read(&mut out, Duration::ZERO).unwrap();
+                ssr_abi::raw_records(&out[..len])
+                    .map(|record| record.unwrap().header.kind)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(next_kinds(), [ssr_abi::RECORD_KIND_STREAM_START]);
+            assert_eq!(
+                next_kinds(),
+                [
+                    ssr_abi::RECORD_KIND_FORMAT_CHANGE,
+                    ssr_abi::RECORD_KIND_DATA
+                ]
+            );
+            assert_eq!(
+                next_kinds(),
+                [ssr_abi::RECORD_KIND_DATA, ssr_abi::RECORD_KIND_STREAM_STOP]
+            );
+            assert_eq!(
+                next_kinds(),
+                [
+                    ssr_abi::RECORD_KIND_FORMAT_CHANGE,
+                    ssr_abi::RECORD_KIND_DATA
+                ]
+            );
         }
 
         #[test]
@@ -2138,7 +1869,14 @@ mod platform {
             let len = writer.len();
             dump.extend_from_slice(&buf[..len]);
             let ended = Arc::new(AtomicBool::new(false));
-            let mut paced = PacedDump::new(&dump, ended.clone(), true).unwrap();
+            let mut paced = DumpCapture::from_dump(
+                &dump,
+                qpc::frequency(),
+                qpc::now,
+                Some(ended.clone()),
+                true,
+            )
+            .unwrap();
             let mut out = vec![0_u8; 4096];
             for pos in [0, 16, 32, 48, 64] {
                 let n = paced.read(&mut out, Duration::from_millis(500)).unwrap();
@@ -2157,7 +1895,10 @@ mod platform {
             let len = writer.len();
             dump.extend_from_slice(&buf[..len]);
             let ended = Arc::new(AtomicBool::new(false));
-            assert!(PacedDump::new(&dump, ended, true).is_err());
+            assert!(
+                DumpCapture::from_dump(&dump, qpc::frequency(), qpc::now, Some(ended), true)
+                    .is_err()
+            );
         }
     }
 }

@@ -11,7 +11,6 @@ import json
 import math
 import os
 import statistics
-import struct
 import sys
 import time
 from pathlib import Path
@@ -27,26 +26,15 @@ from ssr_abi import (
     RECORD_KIND_OVERRUN as KIND_OVERRUN, RECORD_KIND_READ_END as KIND_READ_END,
     RECORD_KIND_STREAM_START as KIND_STREAM_START,
     RECORD_KIND_STREAM_STOP as KIND_STREAM_STOP, RECORD_KIND_VOLUME as KIND_VOLUME,
+    IEC61937_FAMILY, IEC61937_NAMES, WAVEFORMATEXTENSIBLE,
+    WAVE_FAMILY, WAVE_FORMAT_DOLBY_AC3_SPDIF, WAVE_FORMAT_DTS,
+    WAVE_FORMAT_EXTENSIBLE, WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM,
+    WAVE_GUID_TAIL,
 )
 from ssr_control import ControlDevice
 
 ERROR_SHARING_VIOLATION = 32
 DEFAULT_TIMEOUT_MS = 50
-
-# GUID Data1 values from crates/ssr-abi/src/wave.rs and ksmedia.h.
-IEC_NAMES = {
-    0x000A: "IEC 61937 E-AC-3",
-    0x010A: "IEC 61937 E-AC-3 JOC",
-    0x000B: "IEC 61937 DTS-HD",
-    0x010B: "IEC 61937 DTS:X E1",
-    0x030B: "IEC 61937 DTS:X E2",
-    0x000C: "IEC 61937 TrueHD",
-    0x010C: "IEC 61937 MAT 2.0",
-    0x030C: "IEC 61937 MAT 2.1",
-    0x070C: "IEC 61937 MAT 2.1",
-}
-GUID_TAIL = bytes.fromhex("1000800000aa00389b71")
-
 
 def dump_header(qpc_frequency):
     return DUMP_HEADER.pack(DUMP_MAGIC, ABI_VERSION, DUMP_HEADER.size, qpc_frequency,
@@ -73,19 +61,21 @@ def format_description(payload):
     name = None
     channel_mask = 0
     valid_bits = fmt["bits"]
-    if tag == 0x0001:
+    if tag == WAVE_FORMAT_PCM:
         name = "PCM {0}-bit".format(fmt["bits"])
-    elif tag == 0x0003:
+    elif tag == WAVE_FORMAT_IEEE_FLOAT:
         name = "PCM 32-bit float" if fmt["bits"] == 32 else "PCM float"
-    elif tag == 0x0092:
+    elif tag == WAVE_FORMAT_DOLBY_AC3_SPDIF:
         name = "IEC 61937 AC-3"
-    elif tag == 0x0008:
+    elif tag == WAVE_FORMAT_DTS:
         name = "IEC 61937 DTS"
-    elif tag == 0xFFFE and len(payload) >= 40:
-        valid_bits, channel_mask = struct.unpack_from("<HI", payload, 18)
-        data1, family = struct.unpack_from("<IH", payload, 24)
-        if payload[30:40] == GUID_TAIL:
-            if family == 0:
+    elif tag == WAVE_FORMAT_EXTENSIBLE and len(payload) >= WAVEFORMATEXTENSIBLE.size:
+        values = WAVEFORMATEXTENSIBLE.unpack_from(payload)
+        valid_bits, channel_mask, subformat = values[7:]
+        data1 = int.from_bytes(subformat[:4], "little")
+        family = int.from_bytes(subformat[4:6], "little")
+        if subformat[6:] == WAVE_GUID_TAIL:
+            if family == WAVE_FAMILY:
                 if data1 == 1:
                     name = ("PCM 24-in-32-bit" if valid_bits == 24 and fmt["bits"] == 32
                             else "PCM 24-bit packed" if fmt["bits"] == 24
@@ -96,8 +86,8 @@ def format_description(payload):
                     name = "IEC 61937 AC-3"
                 elif data1 == 8:
                     name = "IEC 61937 DTS"
-            elif family == 0x0CEA:
-                name = IEC_NAMES.get(data1)
+            elif family == IEC61937_FAMILY:
+                name = IEC61937_NAMES.get(data1)
         if name is None:
             name = "WAVEFORMATEXTENSIBLE {0:#x}/{1:#x}".format(family, data1)
     else:

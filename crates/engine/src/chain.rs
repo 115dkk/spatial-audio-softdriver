@@ -12,8 +12,8 @@ use decode::{DecodeConfig, DecodeError, Decoders, MAX_SCENE_FRAMES, Route};
 use render::PanGeometry;
 use speakers::{BiquadCoefficients, CrossoverCoefficients, PreparedSpeakers};
 use ssr_abi::{
-    AbiError, MAX_ENDPOINTS, RECORD_ALIGN, RECORD_FLAG_DISCONTINUITY, Record, RecordHeader,
-    VolumePayload, volume_gain,
+    AbiError, MAX_ENDPOINTS, RECORD_FLAG_DISCONTINUITY, RawRecords, Record, VolumePayload,
+    raw_records, records, volume_gain,
 };
 use ssr_types::{BitstreamCodec, Feeds, OutputLayout, SceneBlock, SourceFormat};
 
@@ -811,93 +811,54 @@ fn rebase_abi_error(error: AbiError, base: usize) -> AbiError {
     }
 }
 
-const RECORD_HEADER_SIZE: usize = size_of::<RecordHeader>();
-
 #[derive(Debug)]
 struct RecordCursor<'a> {
     stream: &'a [u8],
-    offset: usize,
+    raw: RawRecords<'a>,
     head: Option<Result<Record<'a>, AbiError>>,
     data_offset: usize,
     start_processed: bool,
     done: bool,
 }
 
-fn padded_record_size(payload_len: usize) -> usize {
-    RECORD_HEADER_SIZE
-        .saturating_add(payload_len)
-        .div_ceil(RECORD_ALIGN as usize)
-        .saturating_mul(RECORD_ALIGN as usize)
-}
-
-fn read_record_header(bytes: &[u8]) -> Option<RecordHeader> {
-    if bytes.len() < RECORD_HEADER_SIZE {
-        return None;
-    }
-    Some(RecordHeader {
-        kind: u16::from_ne_bytes(bytes[0..2].try_into().ok()?),
-        flags: u16::from_ne_bytes(bytes[2..4].try_into().ok()?),
-        epoch: u32::from_ne_bytes(bytes[4..8].try_into().ok()?),
-        byte_pos: u64::from_ne_bytes(bytes[8..16].try_into().ok()?),
-        qpc: u64::from_ne_bytes(bytes[16..24].try_into().ok()?),
-        qpc_written: u64::from_ne_bytes(bytes[24..32].try_into().ok()?),
-        len: u32::from_ne_bytes(bytes[32..36].try_into().ok()?),
-        endpoint: u16::from_ne_bytes(bytes[36..38].try_into().ok()?),
-        reserved: u16::from_ne_bytes(bytes[38..40].try_into().ok()?),
-    })
-}
-
-fn record_owner(header: &RecordHeader) -> usize {
-    (header.endpoint as usize).min(MAX_ENDPOINTS - 1)
+fn record_owner(endpoint: u16) -> usize {
+    (endpoint as usize).min(MAX_ENDPOINTS - 1)
 }
 
 fn next_for_endpoint<'a>(cursor: &mut RecordCursor<'a>, endpoint: usize) {
-    while !cursor.done && cursor.offset < cursor.stream.len() {
-        let rest = &cursor.stream[cursor.offset..];
-        let Some(header) = read_record_header(rest) else {
-            cursor.done = true;
-            cursor.head = (endpoint == 0).then_some(Err(AbiError::Truncated {
-                offset: cursor.offset,
-                endpoint: None,
-                need: RECORD_HEADER_SIZE,
-                have: rest.len(),
-            }));
-            return;
+    while !cursor.done {
+        let raw = match cursor.raw.next() {
+            Some(Ok(raw)) => raw,
+            Some(Err(error)) => {
+                cursor.done = true;
+                let owner = match error_endpoint(&error) {
+                    Some(value) => record_owner(value),
+                    None => 0,
+                };
+                cursor.head = (owner == endpoint).then_some(Err(error));
+                return;
+            }
+            None => {
+                cursor.head = None;
+                cursor.done = true;
+                return;
+            }
         };
-        let total = RECORD_HEADER_SIZE.saturating_add(header.len as usize);
-        if rest.len() < total {
-            cursor.done = true;
-            let owner = record_owner(&header);
-            cursor.head = (owner == endpoint).then_some(Err(AbiError::Truncated {
-                offset: cursor.offset,
-                endpoint: Some(header.endpoint),
-                need: total,
-                have: rest.len(),
-            }));
-            return;
-        }
-        let owner = record_owner(&header);
-        if owner != endpoint {
-            cursor.offset = cursor
-                .offset
-                .saturating_add(padded_record_size(header.len as usize))
-                .min(cursor.stream.len());
+        if record_owner(raw.header.endpoint) != endpoint {
             continue;
         }
-        let physical_size = padded_record_size(header.len as usize).min(rest.len());
-        let Some(item) = ssr_abi::records(&rest[..physical_size]).next() else {
-            // The parser skips kinds it does not know. Step over this one
-            // record and keep looking for the endpoint's next record.
-            cursor.offset = cursor
-                .offset
-                .saturating_add(physical_size)
-                .min(cursor.stream.len());
+        let Some(item) = records(cursor.raw_buf(raw)).next() else {
             continue;
         };
-        cursor.head = Some(item.map_err(|error| rebase_abi_error(error, cursor.offset)));
+        cursor.head = Some(item.map_err(|error| rebase_abi_error(error, raw.offset)));
         return;
     }
-    cursor.head = None;
+}
+
+impl<'a> RecordCursor<'a> {
+    fn raw_buf(&self, raw: ssr_abi::RawRecord<'a>) -> &'a [u8] {
+        &self.stream[raw.offset..raw.offset + raw.size]
+    }
 }
 
 impl Front {
@@ -1471,7 +1432,7 @@ impl Chain {
         let mut cursors: [RecordCursor<'_>; MAX_ENDPOINTS] =
             std::array::from_fn(|_| RecordCursor {
                 stream: &[],
-                offset: 0,
+                raw: raw_records(&[]),
                 head: None,
                 data_offset: 0,
                 start_processed: false,
@@ -1673,7 +1634,7 @@ impl Chain {
         let mut cursors: [RecordCursor<'_>; MAX_ENDPOINTS] = std::array::from_fn(|endpoint| {
             let mut cursor = RecordCursor {
                 stream,
-                offset: 0,
+                raw: raw_records(stream),
                 head: None,
                 data_offset: 0,
                 start_processed: false,
@@ -1849,22 +1810,9 @@ impl Chain {
                 Ok(record) => self.push_record_chunk(record, out),
                 Err(error) => self.handle_record_error(error, out),
             }
-            // The head parser has already validated this record. Read only its
-            // raw length to advance without parsing it again.
-            if cursor.stream.is_empty() {
-                cursor.head = None;
-                cursor.done = true;
-            } else {
-                let consumed_len = read_record_header(&cursor.stream[cursor.offset..])
-                    .map_or(0, |header| header.len as usize);
-                cursor.offset = cursor
-                    .offset
-                    .saturating_add(padded_record_size(consumed_len))
-                    .min(cursor.stream.len());
-                cursor.data_offset = 0;
-                cursor.start_processed = false;
-                next_for_endpoint(cursor, endpoint);
-            }
+            cursor.data_offset = 0;
+            cursor.start_processed = false;
+            next_for_endpoint(cursor, endpoint);
         }
     }
 

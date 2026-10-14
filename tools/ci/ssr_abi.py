@@ -59,9 +59,39 @@ FEATURE_RATE_TRIM = 2
 FEATURE_WRITE_PACKET = 4
 ENDPOINT_STATE_STREAMING = 1
 DUMP_FORMAT_VERSION = 3
+WAVE_FORMAT_PCM = 1
+WAVE_FORMAT_IEEE_FLOAT = 3
+WAVE_FORMAT_DTS = 8
+WAVE_FORMAT_DOLBY_AC3_SPDIF = 146
+WAVE_FORMAT_EXTENSIBLE = 65534
+WAVE_FAMILY = 0
+IEC61937_FAMILY = 3306
+WAVEFORMATEX_BYTES = 18
+WAVEFORMATEXTENSIBLE_BYTES = 40
+IEC61937_FORMAT_BYTES = 52
+FILE_DEVICE_UNKNOWN = 34
+METHOD_BUFFERED = 0
+METHOD_IN_DIRECT = 1
+METHOD_OUT_DIRECT = 2
+METHOD_NEITHER = 3
+FILE_ANY_ACCESS = 0
+FILE_READ_ACCESS = 1
+FILE_WRITE_ACCESS = 2
 PCM_RATES = [44100, 48000, 88200, 96000, 176400, 192000]
 DUMP_MAGIC = b"SSRDUMP\0"
 LEGACY_DUMP_MAGIC = b"BIODUMP\0"
+WAVE_GUID_TAIL = bytes([16, 0, 128, 0, 0, 170, 0, 56, 155, 113])
+IEC61937_NAMES = {
+    10: "IEC 61937 E-AC-3",
+    266: "IEC 61937 E-AC-3 JOC",
+    11: "IEC 61937 DTS-HD",
+    267: "IEC 61937 DTS:X E1",
+    779: "IEC 61937 DTS:X E2",
+    12: "IEC 61937 TrueHD",
+    268: "IEC 61937 MAT 2.0",
+    780: "IEC 61937 MAT 2.1",
+    1804: "IEC 61937 MAT 2.1",
+}
 
 VOLUME_PAYLOAD_FIELDS = (
     "channel_count",
@@ -100,6 +130,28 @@ VOLUME_PAYLOAD_FIELDS = (
     "level_q16[31]",
 )
 VOLUME_PAYLOAD = struct.Struct("<II32i")
+
+LEGACY_VOLUME_PAYLOAD_FIELDS = (
+    "channel_count",
+    "mute_mask",
+    "level_q16[0]",
+    "level_q16[1]",
+    "level_q16[2]",
+    "level_q16[3]",
+    "level_q16[4]",
+    "level_q16[5]",
+    "level_q16[6]",
+    "level_q16[7]",
+    "level_q16[8]",
+    "level_q16[9]",
+    "level_q16[10]",
+    "level_q16[11]",
+    "level_q16[12]",
+    "level_q16[13]",
+    "level_q16[14]",
+    "level_q16[15]",
+)
+LEGACY_VOLUME_PAYLOAD = struct.Struct("<II16i")
 
 RECORD_HEADER_FIELDS = (
     "kind",
@@ -231,3 +283,62 @@ DUMP_HEADER_FIELDS = (
     "reserved",
 )
 DUMP_HEADER = struct.Struct("<8sIIQII")
+
+WAVEFORMATEX_FIELDS = (
+    "format_tag",
+    "channels",
+    "samples_per_sec",
+    "avg_bytes_per_sec",
+    "block_align",
+    "bits_per_sample",
+    "extra_size",
+)
+WAVEFORMATEX = struct.Struct("<HHIIHHH")
+
+WAVEFORMATEXTENSIBLE_FIELDS = (
+    "format_tag",
+    "channels",
+    "samples_per_sec",
+    "avg_bytes_per_sec",
+    "block_align",
+    "bits_per_sample",
+    "extra_size",
+    "valid_bits_per_sample",
+    "channel_mask",
+    "subformat",
+)
+WAVEFORMATEXTENSIBLE = struct.Struct("<HHIIHHHHI16s")
+
+ABI_INFO_PREFIX_FIELDS = (
+    "abi_version",
+    "struct_size",
+)
+ABI_INFO_PREFIX = struct.Struct("<II")
+
+DRIVER_STATS_PREFIX_FIELDS = (
+    "struct_size",
+)
+DRIVER_STATS_PREFIX = struct.Struct("<I")
+
+
+def records(stream):
+    """Yield complete ABI records as dictionaries; stop at a cut record."""
+    offset = 0
+    while offset + RECORD_HEADER.size <= len(stream):
+        values = RECORD_HEADER.unpack_from(stream, offset)
+        record = dict(zip(RECORD_HEADER_FIELDS, values))
+        end = offset + RECORD_HEADER.size + record["len"]
+        if end > len(stream):
+            break
+        record["payload"] = bytes(stream[offset + RECORD_HEADER.size:end])
+        record["offset"] = offset
+        total = RECORD_HEADER.size + record["len"]
+        record["size"] = min((total + RECORD_ALIGN - 1) // RECORD_ALIGN * RECORD_ALIGN, len(stream) - offset)
+        yield record
+        offset += record["size"]
+
+def ctl_code(device_type, function, method, access):
+    return (device_type << 16) | (access << 14) | (function << 2) | method
+
+def wave_subformat(data1, family=WAVE_FAMILY):
+    return struct.pack("<IH", data1, family) + WAVE_GUID_TAIL

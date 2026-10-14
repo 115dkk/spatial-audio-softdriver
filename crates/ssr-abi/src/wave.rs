@@ -9,20 +9,20 @@ use core::fmt;
 
 use ssr_types::{BitstreamCodec, BitstreamFormat, PcmFormat, SampleType, SourceFormat};
 
-const WAVE_FORMAT_PCM: u16 = 0x0001;
-const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
-const WAVE_FORMAT_DTS: u16 = 0x0008;
-const WAVE_FORMAT_DOLBY_AC3_SPDIF: u16 = 0x0092;
-const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+pub const WAVE_FORMAT_PCM: u16 = 0x0001;
+pub const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
+pub const WAVE_FORMAT_DTS: u16 = 0x0008;
+pub const WAVE_FORMAT_DOLBY_AC3_SPDIF: u16 = 0x0092;
+pub const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
 /// The fixed tail shared by both GUID families.
-const GUID_TAIL: [u8; 10] = [0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
-const FAMILY_WAVE: u16 = 0x0000;
-const FAMILY_IEC61937: u16 = 0x0cea;
+pub const WAVE_GUID_TAIL: [u8; 10] = [0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
+pub const WAVE_FAMILY: u16 = 0x0000;
+pub const IEC61937_FAMILY: u16 = 0x0cea;
 
-const WFX_LEN: usize = 18;
-const EXTENSIBLE_LEN: usize = 40;
-const IEC61937_LEN: usize = 52;
+pub const WAVEFORMATEX_BYTES: usize = 18;
+pub const WAVEFORMATEXTENSIBLE_BYTES: usize = 40;
+pub const IEC61937_FORMAT_BYTES: usize = 52;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum WaveFormatError {
@@ -69,9 +69,9 @@ fn u32_at(b: &[u8], i: usize) -> u32 {
 
 /// Parses the raw structure into a [`SourceFormat`].
 pub fn parse_wave_format(b: &[u8]) -> Result<SourceFormat, WaveFormatError> {
-    if b.len() < WFX_LEN {
+    if b.len() < WAVEFORMATEX_BYTES {
         return Err(WaveFormatError::Truncated {
-            need: WFX_LEN,
+            need: WAVEFORMATEX_BYTES,
             have: b.len(),
         });
     }
@@ -115,14 +115,14 @@ pub fn parse_wave_format(b: &[u8]) -> Result<SourceFormat, WaveFormatError> {
         WAVE_FORMAT_DOLBY_AC3_SPDIF => bitstream(BitstreamCodec::Ac3, 0, 0),
         WAVE_FORMAT_DTS => bitstream(BitstreamCodec::Dts, 0, 0),
         WAVE_FORMAT_EXTENSIBLE => {
-            if b.len() < EXTENSIBLE_LEN {
+            if b.len() < WAVEFORMATEXTENSIBLE_BYTES {
                 return Err(WaveFormatError::Truncated {
-                    need: EXTENSIBLE_LEN,
+                    need: WAVEFORMATEXTENSIBLE_BYTES,
                     have: b.len(),
                 });
             }
             let cb_size = usize::from(u16_at(b, 16));
-            if cb_size < EXTENSIBLE_LEN - WFX_LEN {
+            if cb_size < WAVEFORMATEXTENSIBLE_BYTES - WAVEFORMATEX_BYTES {
                 return Err(WaveFormatError::Inconsistent(
                     "cbSize too small for EXTENSIBLE",
                 ));
@@ -132,26 +132,28 @@ pub fn parse_wave_format(b: &[u8]) -> Result<SourceFormat, WaveFormatError> {
             let guid: [u8; 16] = b[24..40].try_into().expect("slice length checked above");
             let id = u32_at(&guid, 0);
             let family = u16_at(&guid, 4);
-            if guid[6..16] != GUID_TAIL {
+            if guid[6..16] != WAVE_GUID_TAIL {
                 return Err(WaveFormatError::UnknownSubformat(guid));
             }
-            let (encoded_rate, encoded_channels) =
-                if cb_size >= IEC61937_LEN - WFX_LEN && b.len() >= IEC61937_LEN {
-                    (u32_at(b, 40), u32_at(b, 44))
-                } else {
-                    (0, 0)
-                };
+            let (encoded_rate, encoded_channels) = if cb_size
+                >= IEC61937_FORMAT_BYTES - WAVEFORMATEX_BYTES
+                && b.len() >= IEC61937_FORMAT_BYTES
+            {
+                (u32_at(b, 40), u32_at(b, 44))
+            } else {
+                (0, 0)
+            };
             let valid = if valid_bits == 0 { bits } else { valid_bits };
             match (family, id) {
-                (FAMILY_WAVE, 0x0001) => pcm(SampleType::Int, valid, mask),
-                (FAMILY_WAVE, 0x0003) => pcm(SampleType::Float, valid, mask),
-                (FAMILY_WAVE, 0x0092) => {
+                (WAVE_FAMILY, 0x0001) => pcm(SampleType::Int, valid, mask),
+                (WAVE_FAMILY, 0x0003) => pcm(SampleType::Float, valid, mask),
+                (WAVE_FAMILY, 0x0092) => {
                     bitstream(BitstreamCodec::Ac3, encoded_rate, encoded_channels)
                 }
-                (FAMILY_WAVE, 0x0008) => {
+                (WAVE_FAMILY, 0x0008) => {
                     bitstream(BitstreamCodec::Dts, encoded_rate, encoded_channels)
                 }
-                (FAMILY_IEC61937, id) => {
+                (IEC61937_FAMILY, id) => {
                     let codec = match id {
                         0x0000_000a => BitstreamCodec::Eac3,
                         0x0000_010a => BitstreamCodec::Eac3Joc,
@@ -189,7 +191,7 @@ pub fn wave_format_bytes(format: &SourceFormat) -> Vec<u8> {
                 p.bits_per_sample,
                 p.valid_bits,
                 p.channel_mask,
-                FAMILY_WAVE,
+                WAVE_FAMILY,
                 id,
                 p.bytes_per_frame(),
                 None,
@@ -197,15 +199,15 @@ pub fn wave_format_bytes(format: &SourceFormat) -> Vec<u8> {
         }
         SourceFormat::Bitstream(s) => {
             let (family, id) = match s.codec {
-                BitstreamCodec::Ac3 => (FAMILY_WAVE, 0x0092),
-                BitstreamCodec::Dts => (FAMILY_WAVE, 0x0008),
-                BitstreamCodec::Eac3 => (FAMILY_IEC61937, 0x000a),
-                BitstreamCodec::Eac3Joc => (FAMILY_IEC61937, 0x010a),
-                BitstreamCodec::DtsHd => (FAMILY_IEC61937, 0x000b),
-                BitstreamCodec::TrueHd => (FAMILY_IEC61937, 0x000c),
-                BitstreamCodec::Mat20 => (FAMILY_IEC61937, 0x010c),
-                BitstreamCodec::Mat21 => (FAMILY_IEC61937, 0x030c),
-                BitstreamCodec::Other(id) => (FAMILY_IEC61937, id),
+                BitstreamCodec::Ac3 => (WAVE_FAMILY, 0x0092),
+                BitstreamCodec::Dts => (WAVE_FAMILY, 0x0008),
+                BitstreamCodec::Eac3 => (IEC61937_FAMILY, 0x000a),
+                BitstreamCodec::Eac3Joc => (IEC61937_FAMILY, 0x010a),
+                BitstreamCodec::DtsHd => (IEC61937_FAMILY, 0x000b),
+                BitstreamCodec::TrueHd => (IEC61937_FAMILY, 0x000c),
+                BitstreamCodec::Mat20 => (IEC61937_FAMILY, 0x010c),
+                BitstreamCodec::Mat21 => (IEC61937_FAMILY, 0x030c),
+                BitstreamCodec::Other(id) => (IEC61937_FAMILY, id),
             };
             (
                 s.container_channels,
@@ -221,9 +223,9 @@ pub fn wave_format_bytes(format: &SourceFormat) -> Vec<u8> {
         }
     };
     let len = if encoded.is_some() {
-        IEC61937_LEN
+        IEC61937_FORMAT_BYTES
     } else {
-        EXTENSIBLE_LEN
+        WAVEFORMATEXTENSIBLE_BYTES
     };
     let mut b = Vec::with_capacity(len);
     b.extend_from_slice(&WAVE_FORMAT_EXTENSIBLE.to_le_bytes());
@@ -232,12 +234,12 @@ pub fn wave_format_bytes(format: &SourceFormat) -> Vec<u8> {
     b.extend_from_slice(&(rate * block_bytes as u32).to_le_bytes());
     b.extend_from_slice(&(block_bytes as u16).to_le_bytes());
     b.extend_from_slice(&bits.to_le_bytes());
-    b.extend_from_slice(&((len - WFX_LEN) as u16).to_le_bytes());
+    b.extend_from_slice(&((len - WAVEFORMATEX_BYTES) as u16).to_le_bytes());
     b.extend_from_slice(&valid.to_le_bytes());
     b.extend_from_slice(&mask.to_le_bytes());
     b.extend_from_slice(&id.to_le_bytes());
     b.extend_from_slice(&family.to_le_bytes());
-    b.extend_from_slice(&GUID_TAIL);
+    b.extend_from_slice(&WAVE_GUID_TAIL);
     if let Some((encoded_rate, encoded_channels)) = encoded {
         b.extend_from_slice(&encoded_rate.to_le_bytes());
         b.extend_from_slice(&encoded_channels.to_le_bytes());
