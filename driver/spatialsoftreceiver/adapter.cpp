@@ -121,12 +121,17 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryP
         RegistryValue(parametersKey.Get(), L"FaultInjectAt", REG_DWORD, &failAt, sizeof(failAt));
     ssr::km::fault::Configure(failAt);
     SsrTraceRegister();
+    // Every slot holds the I/O manager's default before PortCls fills its own.
+    const PDRIVER_DISPATCH unset = driver->MajorFunction[IRP_MJ_CLEANUP];
     status = PcInitializeAdapterDriver(driver, registryPath, AddDevice);
     if (!NT_SUCCESS(status)) { SsrTraceUnregister(); return status; }
     ServiceKey = serviceKey.Release();
     PortUnload = driver->DriverUnload;
     driver->DriverUnload = DriverUnload;
-    for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major) PortDispatch[major] = driver->MajorFunction[major];
+    // A slot PortCls left at the default stays null here, so SsrDispatch answers
+    // it itself instead of calling the default from inside this driver.
+    for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major)
+        PortDispatch[major] = driver->MajorFunction[major] == unset ? nullptr : driver->MajorFunction[major];
     driver->MajorFunction[IRP_MJ_CREATE] = SsrDispatch;
     driver->MajorFunction[IRP_MJ_CLOSE] = SsrDispatch;
     driver->MajorFunction[IRP_MJ_CLEANUP] = SsrDispatch;
@@ -147,10 +152,18 @@ static NTSTATUS SsrDispatch(PDEVICE_OBJECT device, PIRP irp) {
         if (major == IRP_MJ_CREATE || major == IRP_MJ_CLOSE || major == IRP_MJ_CLEANUP ||
             major == IRP_MJ_DEVICE_CONTROL)
             return SsrControlDispatch(device, irp);
+        // The control device has no stack below it: power and WMI requests
+        // keep the status their sender set.
+        if (major == IRP_MJ_POWER || major == IRP_MJ_SYSTEM_CONTROL) return SsrCompleteUnhandled(irp);
         return SsrComplete(irp, STATUS_INVALID_DEVICE_REQUEST);
     }
-    if (major > IRP_MJ_MAXIMUM_FUNCTION || !PortDispatch[major])
+    if (major > IRP_MJ_MAXIMUM_FUNCTION) return SsrComplete(irp, STATUS_INVALID_DEVICE_REQUEST);
+    if (!PortDispatch[major]) {
+        // PortCls registers no CLEANUP (PcInitializeAdapterDriver), and a
+        // cleanup cannot fail: the handle is closing whatever it returns.
+        if (major == IRP_MJ_CLEANUP) return SsrComplete(irp, STATUS_SUCCESS);
         return SsrComplete(irp, STATUS_INVALID_DEVICE_REQUEST);
+    }
     SsrIrpNote note;
     SsrTraceBefore(irp, &note);
     NTSTATUS status = PortDispatch[major](device, irp);
@@ -254,7 +267,8 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resou
 }
 static NTSTATUS PnpHandler(PDEVICE_OBJECT device, PIRP irp) {
     PAGED_CODE();
-    if (device->DeviceType == FILE_DEVICE_UNKNOWN) return SsrComplete(irp, STATUS_INVALID_DEVICE_REQUEST);
+    // The control device is not in a PnP stack; a PnP request keeps its status.
+    if (device->DeviceType == FILE_DEVICE_UNKNOWN) return SsrCompleteUnhandled(irp);
     auto extension = SsrExtension(device);
     UCHAR minor = IoGetCurrentIrpStackLocation(irp)->MinorFunction;
     if (minor == IRP_MN_STOP_DEVICE || minor == IRP_MN_SURPRISE_REMOVAL || minor == IRP_MN_REMOVE_DEVICE) {

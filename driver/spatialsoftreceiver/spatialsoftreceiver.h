@@ -54,4 +54,7 @@ inline ULONGLONG SsrQpc() {
     STDMETHODIMP_(ULONG) Release() override { LONG n = InterlockedDecrement(&references_); if (!n) delete this; return static_cast<ULONG>(n); }
 
 NTSTATUS SsrComplete(PIRP irp, NTSTATUS status, ULONG_PTR information = 0);
+// Completes a request this driver does not handle and that has no lower
+// driver, leaving the status its sender set (PnP, power, WMI).
+NTSTATUS SsrCompleteUnhandled(PIRP irp);
 extern const GUID SsrAdapterInterface;

@@ -134,10 +134,9 @@ STDMETHODIMP_(void) CAdapterCommon::PowerChangeState(POWER_STATE state) {
 STDMETHODIMP_(NTSTATUS) CAdapterCommon::QueryPowerChangeState(POWER_STATE state) {
     return state.DeviceState >= PowerDeviceD0 && state.DeviceState <= PowerDeviceD3 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
+// PortCls fills the capabilities from the bus; DeviceState[PowerSystemUnspecified]
+// and DeviceD1/DeviceD2 belong to the system and the bus. The root bus already
+// maps working to D0 and every sleep state to D3, so nothing changes (SysVAD).
 STDMETHODIMP_(NTSTATUS) CAdapterCommon::QueryDeviceCapabilities(PDEVICE_CAPABILITIES caps) {
-    if (!caps || caps->Size < sizeof(*caps)) return STATUS_INVALID_PARAMETER;
-    caps->DeviceD1 = FALSE; caps->DeviceD2 = FALSE;
-    for (ULONG i = 0; i < PowerSystemMaximum; ++i)
-        caps->DeviceState[i] = i == PowerSystemWorking ? PowerDeviceD0 : PowerDeviceD3;
-    return STATUS_SUCCESS;
+    return caps ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }

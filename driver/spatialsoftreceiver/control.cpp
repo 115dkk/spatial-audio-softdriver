@@ -13,6 +13,11 @@ NTSTATUS SsrComplete(PIRP irp, NTSTATUS status, ULONG_PTR information) {
     IoCompleteRequest(irp, IO_NO_INCREMENT);
     return status;
 }
+NTSTATUS SsrCompleteUnhandled(PIRP irp) {
+    const NTSTATUS status = irp->IoStatus.Status;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return status;
+}
 static SsrControlState* StateFromQueue(PIO_CSQ queue) {
     return CONTAINING_RECORD(queue, SsrControlState, Csq);
 }
