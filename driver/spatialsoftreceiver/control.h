@@ -20,6 +20,8 @@ struct SsrControlState {
     IO_CSQ Csq;
     PIRP Pending;
     ULONG DetachedReads;
+    SsrReadContext ReadSlot;
+    BOOLEAN ReadSlotBusy;
     ULONGLONG Generation;
     ssr::km::ExTimer DeadlineTimer;
     BOOLEAN Removed;

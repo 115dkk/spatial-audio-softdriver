@@ -20,15 +20,14 @@ static SsrReadContext* ReadContext(PIRP irp) {
     return static_cast<SsrReadContext*>(irp->Tail.Overlay.DriverContext[0]);
 }
 static void FinishRead(SsrControlState* state, PIRP irp, NTSTATUS status, ULONG bytes = 0) {
-    auto read = ssr::km::PoolPtr<SsrReadContext>(ReadContext(irp));
-    if (read->Detached) {
-        KIRQL irql;
-        KeAcquireSpinLock(&state->Lock, &irql);
-        --state->DetachedReads;
-        KeReleaseSpinLock(&state->Lock, irql);
-    }
+    auto read = ReadContext(irp);
+    KIRQL irql;
+    KeAcquireSpinLock(&state->Lock, &irql);
+    NT_ASSERT(read == &state->ReadSlot && state->ReadSlotBusy);
+    if (read->Detached) --state->DetachedReads;
     irp->Tail.Overlay.DriverContext[0] = nullptr;
-    read.Reset();
+    state->ReadSlotBusy = FALSE;
+    KeReleaseSpinLock(&state->Lock, irql);
     // No state accesses after releasing this reference: removal can finish.
     IoReleaseRemoveLock(&state->RemoveLock, irp);
     SsrComplete(irp, status, bytes);
@@ -276,7 +275,7 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
         ULONG input = stack->Parameters.DeviceIoControl.InputBufferLength;
         ULONG output = stack->Parameters.DeviceIoControl.OutputBufferLength;
         PVOID buffer = irp->AssociatedIrp.SystemBuffer;
-        ssr::km::PoolPtr<SsrReadContext> read;
+        SsrReadContext read{};
         status = STATUS_SUCCESS;
         if (code == IOCTL_SSR_READ) {
             if (input < sizeof(SSR_READ_REQUEST)) status = STATUS_INVALID_PARAMETER;
@@ -287,13 +286,9 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
                     NormalPagePriority | MdlMappingNoExecute));
                 if (!mapped) status = STATUS_INSUFFICIENT_RESOURCES;
                 else {
-                    read = ssr::km::PoolPtr<SsrReadContext>::Allocate();
-                    if (!read) status = STATUS_INSUFFICIENT_RESOURCES;
-                    else {
-                        const auto request = static_cast<SSR_READ_REQUEST*>(buffer);
-                        *read = {mapped, ssr::ReadGate::Capacity(output), request->min_bytes,
-                            ssr::ReadGate::Deadline(SsrQpc(), state->Frequency, request->timeout_ms), file, FALSE, 0};
-                    }
+                    const auto request = static_cast<SSR_READ_REQUEST*>(buffer);
+                    read = {mapped, ssr::ReadGate::Capacity(output), request->min_bytes,
+                        ssr::ReadGate::Deadline(SsrQpc(), state->Frequency, request->timeout_ms), file, FALSE, 0};
                 }
             }
         }
@@ -343,14 +338,19 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
                 }
                 break;
             case IOCTL_SSR_READ: {
-                read->Generation = state->Generation;
+                read.Generation = state->Generation;
                 const ULONGLONG qpc = SsrQpc();
                 state->Ring.PrepareRead(qpc);
-                if (state->Pending || state->DetachedReads) status = STATUS_DEVICE_BUSY;
-                else if (state->Ring.FirstRecordBytes() > read->Capacity) status = STATUS_BUFFER_TOO_SMALL;
-                else if (ssr::ReadGate::ShouldComplete(state->Ring, read->Minimum, read->Capacity, qpc, read->Deadline))
-                    information = state->Ring.Read(read->Output, read->Capacity, qpc);
-                else status = STATUS_PENDING;
+                if (state->Pending || state->DetachedReads || state->ReadSlotBusy) status = STATUS_DEVICE_BUSY;
+                else if (state->Ring.FirstRecordBytes() > read.Capacity) status = STATUS_BUFFER_TOO_SMALL;
+                else if (ssr::ReadGate::ShouldComplete(state->Ring, read.Minimum, read.Capacity, qpc, read.Deadline))
+                    information = state->Ring.Read(read.Output, read.Capacity, qpc);
+                else {
+                    state->ReadSlot = read;
+                    state->ReadSlotBusy = TRUE;
+                    irp->Tail.Overlay.DriverContext[0] = &state->ReadSlot;
+                    status = STATUS_PENDING;
+                }
                 break;
             }
             default: status = STATUS_INVALID_DEVICE_REQUEST; break;
@@ -363,7 +363,6 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
             ssr::km::RemoveLockHold dispatchHold;
             NTSTATUS held = dispatchHold.Acquire(&state->RemoveLock, &dispatchTag);
             if (NT_SUCCESS(held)) {
-                irp->Tail.Overlay.DriverContext[0] = read.Release();
                 IoMarkIrpPending(irp);
                 NTSTATUS inserted = IoCsqInsertIrpEx(&state->Csq, irp, nullptr, nullptr);
                 if (!NT_SUCCESS(inserted)) FinishRead(state, irp, inserted);
@@ -371,9 +370,13 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
                 SsrPumpRead(state);
                 return STATUS_PENDING;
             }
+            KeAcquireSpinLock(&state->Lock, &irql);
+            NT_ASSERT(state->ReadSlotBusy && ReadContext(irp) == &state->ReadSlot);
+            irp->Tail.Overlay.DriverContext[0] = nullptr;
+            state->ReadSlotBusy = FALSE;
+            KeReleaseSpinLock(&state->Lock, irql);
             status = held;
         }
-        read.Reset();
     }
     IoReleaseRemoveLock(&state->RemoveLock, irp);
     return SsrComplete(irp, status, information);
