@@ -29,11 +29,11 @@ name: Driver
 #              image), all under Driver Verifier (tools/ci/verifier.ps1), and
 #              the kit's collect.ps1 and uninstall.ps1 run as a tester would
 #              run them
-#   faults     the same kit under injected allocation failures (randomized on
-#              windows-2022, systematic on windows-2025): the device restarts
-#              thirty times so the error branches of DriverEntry, AddDevice,
-#              StartDevice and the control device run, then uninstalls; a
-#              leak or a bad cleanup bugchecks the runner under Pool Tracking
+#   faults     the same kit with the driver's own fault switch on both
+#              images: each resource acquisition of a load (DriverEntry,
+#              AddDevice, StartDevice) and then of playing (streams, the
+#              control device) fails once, and every instance must unload
+#              holding nothing; then the driver must play correctly
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
 #   sysvad-build, sysvad-control  diagnosis only: SysVAD itself built on
@@ -244,7 +244,7 @@ jobs:
         shell: pwsh
         run: |
           . ./tools/ci/verifier.ps1
-          Enable-SsrVerifier -Mode Standard -When BeforeLoad
+          Enable-SsrVerifier -When BeforeLoad
 
       # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
       # by the tester's own install.ps1. It takes under a minute; one that
@@ -266,7 +266,7 @@ jobs:
         shell: pwsh
         run: |
           . ./tools/ci/verifier.ps1
-          Enable-SsrVerifier -Mode Standard -When Loaded
+          Enable-SsrVerifier -When Loaded
 
       # Stopped before the diagnostics below open the filters themselves.
       - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
@@ -522,24 +522,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
 
   # Error branches only run when something fails. Driver Verifier cannot make
-  # the load path fail on these runners: Server 2022's volatile settings list
-  # the driver but intercept none of its calls, and Server 2025's
-  # `/dif ... /now` attaches to the running image only and is gone after the
-  # next unload (ADR 0027, 2026-10-14). So the driver has its own switch:
-  # Parameters\FaultInjectAt fails the N-th resource acquisition after the
-  # image loads, and the unload writes what the instance still held. The sweep
-  # restarts the device once per fault point of a clean load (DriverEntry,
-  # AddDevice, StartDevice and whatever the endpoint builder opens) and needs
-  # every instance to leave nothing behind and the last, clean one to bring
-  # all three endpoints back. On Server 2025 the running image then gets
-  # Verifier's systematic failures while it plays and is fuzzed, and must
-  # play correctly once they stop. A bugcheck loses the runner and fails the
-  # job.
+  # anything fail on these runners: Server 2022's volatile settings list the
+  # driver but intercept none of its calls, and on Server 2025 the systematic
+  # simulation failed none of 480 allocations of the running image (ADR 0027,
+  # 2026-10-14). So the driver has its own switch: Parameters\FaultInjectAt
+  # fails the N-th resource acquisition after the image loads, and the unload
+  # writes what the instance still held. The first sweep enables and disables
+  # the device once per fault point of a clean load (DriverEntry, AddDevice,
+  # StartDevice and whatever the endpoint builder opens); the second once per
+  # fault point that playing a tone into every endpoint and reading the ring
+  # adds (streams, DMA buffers, timers, the control device). Every instance
+  # must leave nothing behind, and afterwards the driver must play correctly.
+  # A bugcheck loses the runner and fails the job.
   faults:
     name: driver error branches under injected failures (${{ matrix.os }})
     needs: build
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
@@ -615,38 +614,72 @@ jobs:
         run: ./tools/ci/hang-dump.ps1 -Processes pnputil
 
       - uses: actions/setup-python@v7
-        if: ${{ matrix.os == 'windows-2025' && steps.sweep.outcome == 'success' }}
+        if: steps.sweep.outcome == 'success'
         with:
           python-version: "3.13"
 
-      # Runtime allocations (streams, packets, notifications, control-device
-      # opens and READs) under Verifier's systematic low-resources simulation
-      # on the running image. Failures are expected while it is on; the run
-      # afterwards must pass.
-      - name: Play and fuzz under systematic failures, then play clean (Server 2025)
-        if: ${{ matrix.os == 'windows-2025' && steps.sweep.outcome == 'success' }}
-        timeout-minutes: 15
+      - name: Fail each fault point that playing adds once (tools/ci/fault-sweep.ps1)
+        id: runtime-sweep
+        if: steps.sweep.outcome == 'success'
+        timeout-minutes: 60
         shell: pwsh
         run: |
-          . ./tools/ci/verifier.ps1
-          python -m pip install --quiet -r tools/ci/requirements.txt
-          Enable-SsrVerifier -Mode Faults -When Loaded | Out-Null
-          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'flow-faults.json')
-          Write-Host "flow check under failures exited $LASTEXITCODE (failures expected)"
-          python tools/ci/ioctl_fuzz.py --seconds 30 --seed ${{ github.run_id }} --summary (Join-Path $env:RUNNER_TEMP 'fuzz-faults.json')
-          Write-Host "fuzzer under failures exited $LASTEXITCODE"
-          $state = Get-SsrVerifierState
-          Disable-SsrVerifierFaults
-          $summary = "systematic failures (${{ matrix.os }}): $($state.FaultsInjected) allocations failed on purpose of $($state.PoolAttempted)"
+          python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
+          . ./tools/ci/fault-sweep.ps1
+          . ./tools/ci/package-identities.ps1
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
+          # The flow check writes a table to the step summary; one per fault
+          # point would bury it, so only this step's own line goes there.
+          $stepSummary = $env:GITHUB_STEP_SUMMARY
+          Remove-Item Env:GITHUB_STEP_SUMMARY
+          $logs = Join-Path $env:RUNNER_TEMP 'runtime-sweep'
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          # Two seconds of a tone into each endpoint while the ring is read: the
+          # streams, their DMA buffers and timers, and the control device. It
+          # fails while a fault is switched on (that is the point) and must
+          # pass on a clean instance; a run that does not finish is a hang in
+          # an error branch and names its call.
+          $play = {
+            param([int] $At)
+            $out = Join-Path $logs "flow-$At.out"
+            $err = Join-Path $logs "flow-$At.err"
+            $arguments = @('tools/ci/driver_flow_check.py', '--expect-mask', '0x7', '--seconds', '2',
+                           '--summary', (Join-Path $logs "flow-$At.json"))
+            $process = Start-Process -FilePath python -ArgumentList $arguments -NoNewWindow -PassThru `
+              -RedirectStandardOutput $out -RedirectStandardError $err
+            $null = $process.Handle  # keeps ExitCode readable after the exit
+            if (-not $process.WaitForExit(120000)) {
+              $process.Kill($true)
+              throw "call ${At}: the flow check did not finish in 120 s"
+            }
+            Write-Host "call ${At}: flow check exit $($process.ExitCode)"
+            if ($At -eq 0 -and $process.ExitCode -ne 0) {
+              Get-Content $out, $err | Write-Host
+              throw "the flow check failed on a clean instance (exit $($process.ExitCode))"
+            }
+          }
+          $steps = @(Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Exercise $play -Max 300)
+          $first = ($steps | Select-Object -First 1).FailedCall
+          $last = ($steps | Select-Object -Last 1).FailedCall
+          $summary = "runtime fault sweep (${{ matrix.os }}): $($steps.Count) fault points of playing (calls $first to $last) failed one at a time; every instance unloaded holding nothing"
           Write-Host $summary
-          Add-Content $env:GITHUB_STEP_SUMMARY "`n$summary`n"
-          if (-not $state.Listed) { throw 'Driver Verifier is not checking spatialsoftreceiver.sys' }
-          if (-not $state.FaultsInjected) { throw 'verifier failed no allocation on purpose' }
-          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'flow-after-faults.json')
-          if ($LASTEXITCODE -ne 0) { throw "the driver did not play correctly after the failures stopped (exit $LASTEXITCODE)" }
+          Add-Content $stepSummary "`n$summary`n"
 
-      # The uninstall unloads the last image; on Server 2025 that is the one
-      # Verifier watched, and its pool tracking checks for leaks there.
+      - name: Where the runtime sweep waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.runtime-sweep.outcome == 'failure' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tools/ci/hang-dump.ps1 -Processes pnputil, python, audiodg
+
+      - name: Play correctly after the sweeps (tools/ci/driver_flow_check.py)
+        if: steps.runtime-sweep.outcome == 'success'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'flow-after-sweep.json')
+          if ($LASTEXITCODE -ne 0) { throw "the driver did not play correctly after the sweeps (exit $LASTEXITCODE)" }
+
+      # The uninstall unloads the last image, which writes its report too.
       - name: Uninstall as a tester would (tools/testkit/uninstall.ps1)
         if: always() && steps.install.outputs.kit != ''
         shell: pwsh
@@ -661,7 +694,7 @@ jobs:
           name: faults-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/flow-*.json
-            ${{ runner.temp }}/fuzz-*.json
+            ${{ runner.temp }}/runtime-sweep
           if-no-files-found: ignore
 
   # Diagnosis, not a gate (ADR 0027, 2026-10-14): on Server 2022 the install of

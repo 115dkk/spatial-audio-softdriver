@@ -50,13 +50,27 @@ function Enable-SsrDevice([string] $InstanceId, [int] $SettleSeconds) {
     $global:SsrRunning = $instance
     0
 }
+# The exercise passes $env:SSR_RUNTIME_CALLS more fault points in the running
+# instance; one of them may be the switched one, and the instance keeps
+# running (a stream that failed to open does not unload the driver).
+function Invoke-Exercise([int] $At) {
+    $global:SsrActions.Add("exercise $At")
+    if ($At -eq 0 -and $env:SSR_CLEAN_EXERCISE_FAILS) { throw 'the clean exercise failed' }
+    if (-not $global:SsrRunning) { return }
+    $from = $global:SsrRunning.Calls + 1
+    $global:SsrRunning.Calls += [int]$env:SSR_RUNTIME_CALLS
+    if ($global:SsrAt -ge $from -and $global:SsrAt -le $global:SsrRunning.Calls -and -not $env:SSR_IGNORE) {
+        $global:SsrRunning.Injected = $global:SsrAt
+        if ($global:SsrAt -eq [int]$env:SSR_LEAK_AT) { $global:SsrRunning.Pool = 1 }
+    }
+}
 # The install left a clean instance running.
 $global:SsrRunning = @{ Calls = [int]$env:SSR_CALLS; Injected = 0; Pool = 0 }
 """
 
 
 class FaultSweepTests(unittest.TestCase):
-    def run_ps(self, body, *, calls=5, leak_at=0, ignore=False, survive_at=0):
+    def run_ps(self, body, *, calls=5, leak_at=0, ignore=False, survive_at=0, runtime=0, clean_exercise_fails=False):
         pwsh = os.environ.get("SSR_TEST_PWSH") or shutil.which("pwsh")
         if not pwsh:
             self.skipTest("set SSR_TEST_PWSH to run tools/ci/fault-sweep.ps1")
@@ -65,8 +79,12 @@ class FaultSweepTests(unittest.TestCase):
             f"{MODEL}\n"
             f"try {{\n{body}\n}} catch {{ Write-Output \"ERROR $($_.Exception.Message)\"; exit 1 }}\n"
         )
-        env = dict(os.environ, SSR_CALLS=str(calls), SSR_LEAK_AT=str(leak_at), SSR_SURVIVE_AT=str(survive_at))
+        env = dict(os.environ, SSR_CALLS=str(calls), SSR_LEAK_AT=str(leak_at), SSR_SURVIVE_AT=str(survive_at),
+                   SSR_RUNTIME_CALLS=str(runtime))
         env.pop("SSR_IGNORE", None)
+        env.pop("SSR_CLEAN_EXERCISE_FAILS", None)
+        if clean_exercise_fails:
+            env["SSR_CLEAN_EXERCISE_FAILS"] = "1"
         if ignore:
             env["SSR_IGNORE"] = "1"
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +117,36 @@ class FaultSweepTests(unittest.TestCase):
         result = self.run_ps(self.SWEEP, calls=3, survive_at=2, leak_at=2)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("call 2: OutstandingPool 1 at unload", result.stdout)
+
+    RUNTIME = ("$steps = @(Invoke-SsrFaultSweep -InstanceId x -SettleSeconds 0 -Exercise { param($At) Invoke-Exercise $At })\n"
+               "Write-Output \"STEPS $(($steps | ForEach-Object FailedCall) -join ',') AT $global:SsrAt\"\n"
+               "Write-Output \"ACTIONS $($global:SsrActions -join ',')\"")
+
+    def test_the_exercise_sweeps_only_the_points_it_adds_to_a_load(self):
+        result = self.run_ps(self.RUNTIME, calls=2, runtime=2)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.lines(result)
+        self.assertEqual(lines["STEPS"], "3,4 AT 0")
+        self.assertTrue(lines["ACTIONS"].startswith("disable,enable 0,disable,enable 0,exercise 0,disable,"),
+                        lines["ACTIONS"])
+        self.assertTrue(lines["ACTIONS"].endswith("enable 3,exercise 3,disable,enable 4,exercise 4,disable,enable 0"),
+                        lines["ACTIONS"])
+
+    def test_a_clean_exercise_that_fails_stops_the_sweep(self):
+        result = self.run_ps(self.RUNTIME, calls=2, runtime=2, clean_exercise_fails=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the clean exercise failed", result.stdout)
+        self.assertNotIn("enable 3", result.stdout)
+
+    def test_a_runtime_leak_names_its_call(self):
+        result = self.run_ps(self.RUNTIME, calls=2, runtime=3, leak_at=4)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("call 4: OutstandingPool 1 at unload", result.stdout)
+
+    def test_an_exercise_that_reaches_no_fault_point_fails(self):
+        result = self.run_ps(self.RUNTIME, calls=2, runtime=0)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("passed no fault point beyond the load's 2", result.stdout)
 
     def test_a_leak_after_one_failed_call_names_that_call(self):
         result = self.run_ps(self.SWEEP, calls=5, leak_at=3)

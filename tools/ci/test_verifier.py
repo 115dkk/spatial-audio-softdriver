@@ -1,6 +1,6 @@
 """tools/ci/verifier.ps1: option choice per Windows version, refusals, and /query parsing.
 
-The PowerShell runs with verifier.exe and cmd.exe replaced by functions, so the
+The PowerShell runs with verifier.exe replaced by a function, so the
 decision logic is tested on any OS with pwsh (CI sets SSR_TEST_PWSH).
 """
 import os
@@ -80,11 +80,6 @@ function verifier.exe {
     if ($args[0] -eq '/dif') { return $env:SSR_DIF_OUTPUT }
     'ok'
 }
-function cmd.exe {
-    $global:SsrCalls.Add("cmd " + ($args -join ' '))
-    $global:LASTEXITCODE = 0
-    'ok'
-}
 """
 
 class VerifierScriptTests(unittest.TestCase):
@@ -131,86 +126,72 @@ class VerifierScriptTests(unittest.TestCase):
         result = self.run_ps(self.STATE, dif=False, query="No drivers are currently verified.")
         self.assertEqual(self.state_line(result), "STATE    False    ")
 
-    def test_server_2022_sets_faults_first_then_all_flags_before_the_load(self):
+    def test_server_2022_sets_the_flags_before_the_load(self):
         result = self.run_ps(
-            "Enable-SsrVerifier -Mode Faults -When BeforeLoad -Probability 1000 | Out-Null\n"
+            "Enable-SsrVerifier -When BeforeLoad | Out-Null\n"
             "$global:SsrCalls | ForEach-Object { Write-Output \"CALL $_\" }", dif=False)
-        calls = self.calls(result)
-        self.assertTrue(calls[0].startswith("cmd /d /c verifier.exe /volatile /faults 1000"), calls)
-        self.assertIn('"" "" 0', calls[0])
-        self.assertEqual(calls[1], "verifier /volatile /flags 0x9BF /adddriver spatialsoftreceiver.sys")
-        self.assertEqual(calls[-1], "verifier /query")
+        self.assertEqual(self.calls(result),
+                         ["verifier /volatile /flags 0x9BB /adddriver spatialsoftreceiver.sys", "verifier /query"])
 
-    def test_server_2022_refuses_flags_that_did_not_stick(self):
+    def test_server_2022_refuses_flags_without_pool_tracking(self):
         query = QUERY.replace("0x000009bf", "0x00000004")
-        result = self.run_ps("Enable-SsrVerifier -Mode Faults -When BeforeLoad", dif=False, query=query)
+        result = self.run_ps("Enable-SsrVerifier -When BeforeLoad", dif=False, query=query)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("without 0x8", result.stdout + result.stderr)
-        query = QUERY.replace("0x000009bf", "0x000009bb")
-        result = self.run_ps("Enable-SsrVerifier -Mode Faults -When BeforeLoad", dif=False, query=query)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("without 0x4", result.stdout + result.stderr)
 
     def test_server_2025_starts_rule_classes_on_the_running_driver(self):
         result = self.run_ps(
-            "Enable-SsrVerifier -Mode Faults -When Loaded | Out-Null\n"
+            "Enable-SsrVerifier -When Loaded | Out-Null\n"
             "$global:SsrCalls | ForEach-Object { Write-Output \"CALL $_\" }", dif=True)
-        calls = self.calls(result)
-        self.assertEqual(calls[0], "verifier /dif 1 2 4 5 9 12 18 19 /now /driver spatialsoftreceiver.sys")
-        self.assertEqual(calls[1], "verifier /faultssystematic enableruntime")
-        self.assertEqual(calls[-1], "verifier /query")
+        self.assertEqual(self.calls(result),
+                         ["verifier /dif 1 2 4 5 9 12 18 /now /driver spatialsoftreceiver.sys", "verifier /query"])
 
     def test_server_2025_fails_when_the_driver_is_not_running(self):
-        result = self.run_ps("Enable-SsrVerifier -Mode Standard -When Loaded", dif=True, dif_output=DIF_NOT_RUNNING)
+        result = self.run_ps("Enable-SsrVerifier -When Loaded", dif=True, dif_output=DIF_NOT_RUNNING)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("0xC0000C7B: the driver is not running", result.stdout + result.stderr)
 
     def test_each_stage_does_nothing_on_the_other_windows(self):
         for dif, when in ((True, "BeforeLoad"), (False, "Loaded")):
             result = self.run_ps(
-                f"Enable-SsrVerifier -Mode Faults -When {when} | Out-Null\n"
+                f"Enable-SsrVerifier -When {when} | Out-Null\n"
                 "$global:SsrCalls | ForEach-Object { Write-Output \"CALL $_\" }", dif=dif)
             self.assertEqual(self.calls(result), [])
 
-    def test_standard_mode_injects_nothing(self):
-        for dif, when, first in (
-                (False, "BeforeLoad", "verifier /volatile /flags 0x9BB /adddriver spatialsoftreceiver.sys"),
-                (True, "Loaded", "verifier /dif 1 2 4 5 9 12 18 /now /driver spatialsoftreceiver.sys")):
-            result = self.run_ps(
-                f"Enable-SsrVerifier -Mode Standard -When {when} | Out-Null\n"
-                "$global:SsrCalls | ForEach-Object { Write-Output \"CALL $_\" }", dif=dif)
-            self.assertEqual(self.calls(result), [first, "verifier /query"])
-
     def test_a_driver_missing_from_the_query_fails_the_step(self):
-        result = self.run_ps("Enable-SsrVerifier -Mode Standard -When BeforeLoad", dif=False,
+        result = self.run_ps("Enable-SsrVerifier -When BeforeLoad", dif=False,
                              query="No drivers are currently verified.")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not list spatialsoftreceiver.sys", result.stdout + result.stderr)
 
     def test_a_setting_that_needs_a_reboot_fails_the_step(self):
         for code, words in ((2, "needs a reboot"), (1, "failed (exit 1)")):
-            result = self.run_ps("Enable-SsrVerifier -Mode Standard -When BeforeLoad", dif=False, exit_code=code)
+            result = self.run_ps("Enable-SsrVerifier -When BeforeLoad", dif=False, exit_code=code)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(words, result.stdout + result.stderr)
 
 
 class WorkflowContractTests(unittest.TestCase):
-    def test_driver_workflow_uses_the_helper_and_injects_faults_on_both_images(self):
+    def test_driver_workflow_uses_the_helper_and_sweeps_faults_on_both_images(self):
         workflow = (ROOT / ".github/workflows/driver.yml").read_text(encoding="utf-8")
         self.assertNotIn("/flags 0x209BB", workflow)
+        self.assertNotIn("-Mode ", workflow)
         package = workflow.split("\n  package:\n", 1)[1].split("\n  faults:\n", 1)[0]
         faults = workflow.split("\n  faults:\n", 1)[1].split("\n  codeql:\n", 1)[0]
         install = package.index("install-driver-test.ps1")
         # Volatile flags before the first load, /dif once the driver runs.
-        self.assertLess(package.index("Enable-SsrVerifier -Mode Standard -When BeforeLoad"), install)
-        self.assertGreater(package.index("Enable-SsrVerifier -Mode Standard -When Loaded"), install)
+        self.assertLess(package.index("Enable-SsrVerifier -When BeforeLoad"), install)
+        self.assertGreater(package.index("Enable-SsrVerifier -When Loaded"), install)
         self.assertIn("Invoke-SsrRestartCycles -InstanceId $device.InstanceId -Count 5", package)
-        # The load path through the driver's own switch on both images; the
-        # running image through Verifier's systematic failures where /dif exists.
+        # The driver's own switch on both images: the load's fault points,
+        # then the ones playing adds, then a clean play.
         self.assertIn("os: [windows-2022, windows-2025]", faults)
-        self.assertGreater(faults.index("Invoke-SsrFaultSweep"), faults.index("install-driver-test.ps1"))
-        self.assertIn("Enable-SsrVerifier -Mode Faults -When Loaded", faults)
-        self.assertIn("Disable-SsrVerifierFaults", faults)
+        load = faults.index("Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Max")
+        runtime = faults.index("Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Exercise")
+        self.assertLess(faults.index("install-driver-test.ps1"), load)
+        self.assertLess(load, runtime)
+        self.assertLess(runtime, faults.index("flow-after-sweep.json"))
+        self.assertNotIn("Enable-SsrVerifier", faults)
         self.assertIn("uninstall.ps1", faults)
         for job in (package, faults):
             self.assertIn("timeout-minutes: 5", job.split("run: ./tools/ci/install-driver-test.ps1", 1)[0].rsplit("- name:", 1)[1])

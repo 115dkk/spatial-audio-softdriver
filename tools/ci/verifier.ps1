@@ -5,15 +5,10 @@
 #
 # - Windows 10 / Server 2022 (build < 22000): volatile flags, set before the
 #   driver loads, take special pool, IRQL, pool tracking, I/O, deadlock, DMA,
-#   security and miscellaneous checks (0x9BB) and randomized low-resources
-#   simulation (0x4, `/faults`). `/volatile /faults` replaces the whole flag
-#   word with 0x4, so it runs first and the flags are set after it.
+#   security and miscellaneous checks (0x9BB).
 # - Windows 11 / Server 2025: `/dif <classes> /now` starts rule classes on a
 #   driver that is already running; on one that is not it lands in
 #   FailedDrivers with 0xC0000C7B (STATUS_DIF_VOLATILE_DRIVER_IS_NOT_RUNNING).
-#   Class 19 with `/faultssystematic enableruntime` fails each distinct
-#   allocation call stack once
-#   (https://learn.microsoft.com/windows-hardware/drivers/devtest/systematic-low-resource-simulation).
 #
 # So the workflow calls Enable-SsrVerifier twice, once before the install and
 # once after the driver has loaded; each call does the part that belongs to
@@ -21,11 +16,17 @@
 # is checked: exit 1 is an error, 2 means the setting needs a reboot this job
 # will never get, and the step fails unless `/query` then lists the driver.
 #
+# Low-resources simulation is not used. On Server 2022 the volatile settings
+# list the driver but intercept none of its calls, and on Server 2025 the
+# systematic simulation (class 19, `/faultssystematic enableruntime`) failed
+# none of 480 allocations while the driver played and was fuzzed. The driver's
+# own fault switch reaches every error branch instead (tools/ci/fault-sweep.ps1,
+# ADR 0027, 2026-10-14).
+#
 #   . ./tools/ci/verifier.ps1
-#   Enable-SsrVerifier -Mode Standard -When BeforeLoad   # before the install
-#   Enable-SsrVerifier -Mode Standard -When Loaded       # after the driver loaded
-#   Enable-SsrVerifier -Mode Faults ...                  # the same plus allocation failures
-#   Get-SsrVerifierState                                 # parsed `verifier /query`
+#   Enable-SsrVerifier -When BeforeLoad   # before the install
+#   Enable-SsrVerifier -When Loaded       # after the driver loaded
+#   Get-SsrVerifierState                  # parsed `verifier /query`
 #   Invoke-SsrRestartCycles -InstanceId $id -Count 20
 $ErrorActionPreference = 'Stop'
 
@@ -37,7 +38,6 @@ $SsrStandardClasses = @(1, 2, 4, 5, 9, 12, 18)
 # The same checks as volatile flags where Windows 10 allows them, plus
 # deadlock detection (0x20) and DMA checking (0x80).
 $SsrStandardFlags = 0x9BB
-$SsrLowResourcesFlag = 0x4
 $SsrPoolTrackingFlag = 0x8
 
 function Test-SsrDifVerifier {
@@ -56,17 +56,13 @@ function Invoke-SsrVerifier([string[]] $Arguments) {
 }
 
 function Enable-SsrVerifier {
+    # The checks a tester runs with `verifier /standard`, as far as the runner
+    # can take them without a reboot.
     param(
-        # Standard: the checks a tester runs with `verifier /standard`, as far
-        # as the runner can take them without a reboot. Faults: the same plus
-        # injected allocation failures, so error branches run.
-        [Parameter(Mandatory)] [ValidateSet('Standard', 'Faults')] [string] $Mode,
         # BeforeLoad: before the driver's first load (volatile flags apply to
         # drivers loaded afterwards). Loaded: once it runs (`/dif ... /now`
         # applies only to a running driver).
-        [Parameter(Mandatory)] [ValidateSet('BeforeLoad', 'Loaded')] [string] $When,
-        # Randomized failures: chances in 10,000 per eligible call.
-        [int] $Probability = 1000
+        [Parameter(Mandatory)] [ValidateSet('BeforeLoad', 'Loaded')] [string] $When
     )
     $dif = Test-SsrDifVerifier
     if ($dif -ne ($When -eq 'Loaded')) {
@@ -74,52 +70,22 @@ function Enable-SsrVerifier {
         return
     }
     if ($dif) {
-        $classes = @($SsrStandardClasses)
-        if ($Mode -eq 'Faults') { $classes += 19 }
-        $output = Invoke-SsrVerifier (@('/dif') + ($classes | ForEach-Object { "$_" }) + @('/now', '/driver', $SsrVerifiedImage))
+        $output = Invoke-SsrVerifier (@('/dif') + ($SsrStandardClasses | ForEach-Object { "$_" }) + @('/now', '/driver', $SsrVerifiedImage))
         $name = [regex]::Escape($SsrVerifiedImage)
         if ($output -match "(?im)FailedDrivers\W*.*\b$name\s+(0x[0-9A-Fa-f]+)") {
             $status = $Matches[1]
             $why = if ($status -ieq '0xC0000C7B') { ': the driver is not running' } else { '' }
             throw "verifier could not start checking $SsrVerifiedImage ($status$why)"
         }
-        if ($Mode -eq 'Faults') {
-            # Systematic: each distinct call stack in the driver fails once.
-            Invoke-SsrVerifier @('/faultssystematic', 'enableruntime') | Out-Null
-        }
     } else {
-        $flags = $SsrStandardFlags
-        if ($Mode -eq 'Faults') {
-            # Randomized: no tag or application filter (PnP start runs in the
-            # System process), and no delay after boot. The empty filters are
-            # positional `""` placeholders, so cmd passes them verbatim. This
-            # sets the flag word to 0x4 alone, so it goes first.
-            $line = "verifier.exe /volatile /faults $Probability `"`" `"`" 0"
-            Write-Host $line
-            $output = (& cmd.exe /d /c $line 2>&1 | Out-String).TrimEnd()
-            $code = $LASTEXITCODE
-            if ($output) { Write-Host $output }
-            if ($code -ne 0) { throw "$line failed (exit $code)" }
-            $flags = $flags -bor $SsrLowResourcesFlag
-        }
-        Invoke-SsrVerifier @('/volatile', '/flags', ('0x{0:X}' -f $flags), '/adddriver', $SsrVerifiedImage) | Out-Null
+        Invoke-SsrVerifier @('/volatile', '/flags', ('0x{0:X}' -f $SsrStandardFlags), '/adddriver', $SsrVerifiedImage) | Out-Null
     }
     $state = Get-SsrVerifierState
     if (-not $state.Listed) { throw "Driver Verifier does not list $SsrVerifiedImage after enabling it" }
-    if (-not $dif) {
-        foreach ($bit in @($SsrPoolTrackingFlag) + @(if ($Mode -eq 'Faults') { $SsrLowResourcesFlag })) {
-            if ($null -ne $state.Flags -and -not ($state.Flags -band $bit)) {
-                throw ('Driver Verifier flags are 0x{0:X}, without 0x{1:X}' -f $state.Flags, $bit)
-            }
-        }
+    if (-not $dif -and $null -ne $state.Flags -and -not ($state.Flags -band $SsrPoolTrackingFlag)) {
+        throw ('Driver Verifier flags are 0x{0:X}, without 0x{1:X}' -f $state.Flags, $SsrPoolTrackingFlag)
     }
     $state
-}
-
-function Disable-SsrVerifierFaults {
-    # Stops systematic failures on a running driver (Server 2025) and leaves
-    # the other checks on, so a run after it shows the driver recovered.
-    if (Test-SsrDifVerifier) { Invoke-SsrVerifier @('/faultssystematic', 'disableruntime') | Out-Null }
 }
 
 function Get-SsrVerifierState {
@@ -182,10 +148,9 @@ function Get-SsrProblemCode([string] $InstanceId) {
 function Invoke-SsrRestartCycles {
     # Restarts the device $Count times. Each restart removes the device stack,
     # so the image unloads (Pool Tracking reports leaks then) and loads again,
-    # running DriverEntry, AddDevice and StartDevice. Under fault injection a
-    # start may fail; that is a handled failure (problem code 10, 31, 37 or 39),
-    # not a test failure. Code 38 means the previous image never unloaded: a
-    # reference that was not released.
+    # running DriverEntry, AddDevice and StartDevice. Each cycle's problem code
+    # is returned for the caller to judge; code 38 fails here, because it means
+    # the previous image never unloaded: a reference that was not released.
     param(
         [Parameter(Mandatory)] [string] $InstanceId,
         [int] $Count = 10,

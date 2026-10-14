@@ -8,13 +8,17 @@
 # it; a restart would unload one instance and load the next in one go, and
 # the second report would overwrite the first.
 #
+# With -Exercise the sweep runs that script block after each start and fails
+# instead the points it adds to a clean load (streams, the control device).
+#
 # Driver Verifier cannot do this on the runners: on Server 2022 its volatile
 # settings list the driver but intercept none of its calls, and on Server
-# 2025 `/dif ... /now` attaches to the running image only and is gone after
-# the next unload (ADR 0027, 2026-10-14).
+# 2025 `/dif ... /now` attaches to the running image only, and its systematic
+# simulation failed none of 480 allocations there (ADR 0027, 2026-10-14).
 #
 #   . ./tools/ci/fault-sweep.ps1
 #   $steps = Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Max 400
+#   $steps = Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Exercise { param($At) ... }
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'verifier.ps1')
 
@@ -80,37 +84,62 @@ function Enable-SsrDevice([string] $InstanceId, [int] $SettleSeconds) {
 function Invoke-SsrFaultSweep {
     param(
         [Parameter(Mandatory)] [string] $InstanceId,
-        # Upper bound on the sweep; a clean load that makes more calls than
-        # this fails the step rather than leaving the tail untested.
+        # Run after each start, to reach the runtime fault points (streams,
+        # the control device), with the call number this instance fails (0 on
+        # a clean one). It throws to fail the sweep, so it should throw only
+        # when the number is 0; with a fault switched on, failing is expected.
+        # With it the sweep covers only the points the exercise adds to a
+        # clean load; without it, the load's own points.
+        [scriptblock] $Exercise = $null,
+        # Upper bound on the sweep; more fault points than this fails the step
+        # rather than leaving the tail untested.
         [int] $Max = 400,
         [int] $SettleSeconds = 3
     )
     $steps = @()
     $failures = @()
     $unloads = { $r = Get-SsrUnloadReport; if ($r -and $null -ne $r.Unloads) { [long]$r.Unloads } else { 0 } }
+    # PowerShell names ignore case: this must not be called $exercise, or it
+    # would replace the parameter and call itself.
+    $runExercise = { param([int] $At) if ($Exercise) { & $Exercise $At | Out-Host } }
 
-    # One clean instance's whole life (start, settle, unload) bounds the sweep.
+    # One clean instance's whole life (start, settle, exercise, unload).
+    $cleanLife = {
+        param([bool] $WithExercise)
+        Set-SsrFaultInjectAt 0
+        $problem = Enable-SsrDevice $InstanceId $SettleSeconds
+        if ($problem -ne 0) { throw "a clean start left problem $problem" }
+        if ($WithExercise) { & $runExercise 0 }
+        $before = & $unloads
+        Disable-SsrDevice $InstanceId $SettleSeconds
+        $report = Get-SsrUnloadReport
+        $problems = @(Test-SsrUnloadReport $report $before 0)
+        if ($problems.Count) { throw "a clean load: $($problems -join '; ')" }
+        [int]$report.FaultCalls
+    }
     Disable-SsrDevice $InstanceId $SettleSeconds
-    Set-SsrFaultInjectAt 0
-    $problem = Enable-SsrDevice $InstanceId $SettleSeconds
-    if ($problem -ne 0) { throw "a clean start left problem $problem" }
-    $before = & $unloads
-    Disable-SsrDevice $InstanceId $SettleSeconds
-    $clean = Get-SsrUnloadReport
-    $problems = @(Test-SsrUnloadReport $clean $before 0)
-    if ($problems.Count) { throw "a clean load: $($problems -join '; ')" }
-    $calls = [int]$clean.FaultCalls
-    if ($calls -lt 1) { throw 'a clean load passed no fault point; the driver has no fault switch' }
-    if ($calls -gt $Max) { throw "a clean load passed $calls fault points, more than the sweep's $Max" }
-    Write-Host "a clean load passes $calls fault points"
+    $loadCalls = & $cleanLife $false
+    if ($loadCalls -lt 1) { throw 'a clean load passed no fault point; the driver has no fault switch' }
+    $first = 1
+    $last = $loadCalls
+    if ($Exercise) {
+        $first = $loadCalls + 1
+        $last = & $cleanLife $true
+        if ($last -lt $first) { throw "the exercise passed no fault point beyond the load's $loadCalls" }
+        Write-Host "a clean load passes $loadCalls fault points; with the exercise, $last"
+    } else {
+        Write-Host "a clean load passes $loadCalls fault points"
+    }
+    if ($last - $first + 1 -gt $Max) { throw "$($last - $first + 1) fault points to sweep, more than the sweep's $Max" }
 
-    for ($at = 1; $at -le $calls; ++$at) {
+    for ($at = $first; $at -le $last; ++$at) {
         Set-SsrFaultInjectAt $at
         $before = & $unloads
         $problem = Enable-SsrDevice $InstanceId $SettleSeconds
         # A failed start unloads the image at once; a start that survived the
-        # failure unloads at the disable.
+        # failure (or met it later, in the exercise) unloads at the disable.
         if ((& $unloads) -le $before) {
+            & $runExercise $at
             Disable-SsrDevice $InstanceId $SettleSeconds
             $report = Get-SsrUnloadReport
         } else {
