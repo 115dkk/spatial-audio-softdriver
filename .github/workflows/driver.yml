@@ -703,43 +703,20 @@ jobs:
   # Diagnosis, not a gate (ADR 0027, 2026-10-14): on Server 2022 the runner is
   # lost when Driver Verifier's I/O verification (0x10) is on while the driver
   # installs, for master's driver and this one alike, with the audio services
-  # disabled. The fifth round failed the start at fault points 1, 2, 3, 7, 8,
-  # 11, 14 and 28 (the last registration) and every runner survived; only the
-  # full start (k=0) lost it. So the trigger comes after a successful start.
-  # This round asks when (tools/ci/beacon.ps1 reports the phase and the
-  # device's state as a commit status every few seconds, which outlives the
-  # runner) and what it needs: three endpoints or one, our interposition on
-  # PortCls's major functions (pnp-only keeps PortCls's handlers but PnP, as
-  # SysVAD does), the adapter's power callbacks (no-power), and, as the
-  # beacon's control, the same start without Verifier. Remove once found.
-  diag-build:
-    name: diagnostic driver build (${{ matrix.variant }})
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: pnp-only
-            property: SsrDiagDefines=SSR_DIAG_PNP_ONLY
-          - variant: no-power
-            property: SsrDiagDefines=SSR_DIAG_NO_POWER
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Build Release x64 with ${{ matrix.property }} (tools/build-driver.ps1)
-        shell: pwsh
-        run: ./tools/build-driver.ps1 -Configuration Release -Platform x64 -Property '${{ matrix.property }}'
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: spatialsoftreceiver-diag-${{ matrix.variant }}
-          path: target/driver/Release/x64
-          if-no-files-found: error
-          retention-days: 7
-
+  # disabled. Failing the start at any fault point up to the last registration
+  # keeps the runner; a successful start loses it within ten seconds of the
+  # install beginning, before Get-PnpDevice lists the device, with three
+  # endpoints or one, with or without our interposition on PortCls's major
+  # functions and with or without the adapter's power callbacks (the beacon,
+  # tools/ci/beacon.ps1, reports each job's phase as a commit status, which
+  # outlives the runner). SysVAD does not install on this image, so this round
+  # puts another root-enumerated PortCls audio driver through the same start:
+  # VB-CABLE, installed the same way (tools/ci/install-virtual-cable.ps1). If
+  # it loses the runner too, the cause is the image's I/O verification of a
+  # PortCls start, not this driver. Remove once settled.
   verifier-isolation:
     name: 2022 start under I/O verification (${{ matrix.variant }})
-    needs: [build, diag-build]
+    needs: build
     runs-on: windows-2022
     timeout-minutes: 15
     continue-on-error: true
@@ -754,33 +731,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: full
-            artifact: spatialsoftreceiver-Release-x64
+          - variant: ours
             verifier: true
-          - variant: one-endpoint
-            artifact: spatialsoftreceiver-Release-x64
+            image: spatialsoftreceiver.sys
+            hardware_id: Root\SpatialSoftReceiver
+          - variant: vb-cable
             verifier: true
-            endpoint_mask: 1
-          - variant: pnp-only
-            artifact: spatialsoftreceiver-diag-pnp-only
-            verifier: true
-          - variant: no-power
-            artifact: spatialsoftreceiver-diag-no-power
-            verifier: true
-          - variant: no-verifier
-            artifact: spatialsoftreceiver-Release-x64
+            image: vbaudio_cable64_win7.sys
+            hardware_id: VBAudioVACWDM
+          - variant: vb-cable-no-verifier
             verifier: false
+            image: vbaudio_cable64_win7.sys
+            hardware_id: VBAudioVACWDM
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v7
+        if: matrix.variant == 'ours'
         with:
-          name: ${{ matrix.artifact }}
+          name: spatialsoftreceiver-Release-x64
           path: ${{ runner.temp }}/package
 
       - name: Report progress as a commit status (tools/ci/beacon.ps1)
         shell: pwsh
-        run: ./tools/ci/beacon.ps1 -Start -Context $env:BEACON_CONTEXT
+        run: ./tools/ci/beacon.ps1 -Start -Context $env:BEACON_CONTEXT -HardwareId '${{ matrix.hardware_id }}'
 
       - name: Keep the audio services off
         shell: pwsh
@@ -790,21 +764,12 @@ jobs:
             Set-Service -Name $name -StartupType Disabled
           }
 
-      - name: Driver settings before the first load
-        shell: pwsh
-        run: |
-          . ./tools/ci/fault-sweep.ps1
-          Set-SsrFaultInjectAt 0
-          if ('${{ matrix.endpoint_mask }}') {
-            New-ItemProperty -Path (Join-Path $SsrServiceKey 'Parameters') -Name EndpointMask -PropertyType DWord -Value ${{ matrix.endpoint_mask || 0 }} -Force | Out-Null
-          }
-          Get-ItemProperty (Join-Path $SsrServiceKey 'Parameters') | Format-List FaultInjectAt, EndpointMask | Out-String | Write-Host
-
-      - name: Driver Verifier with I/O verification only (0x10)
+      - name: Driver Verifier with I/O verification only (0x10) on ${{ matrix.image }}
         if: matrix.verifier
         shell: pwsh
         run: |
           . ./tools/ci/verifier.ps1
+          $SsrVerifiedImage = '${{ matrix.image }}'
           Invoke-SsrVerifier @('/volatile', '/flags', '0x10', '/adddriver', $SsrVerifiedImage) | Out-Null
           if (-not (Get-SsrVerifierState).Listed) { throw "Driver Verifier does not list $SsrVerifiedImage" }
 
@@ -815,7 +780,11 @@ jobs:
         shell: pwsh
         run: |
           ./tools/ci/beacon.ps1 -Mark 'installing'
-          ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package') -SkipExclusivePolicy
+          if ('${{ matrix.variant }}' -eq 'ours') {
+            ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package') -SkipExclusivePolicy
+          } else {
+            ./tools/ci/install-virtual-cable.ps1
+          }
           $code = $LASTEXITCODE
           ./tools/ci/beacon.ps1 -Mark "install returned $code"
           exit $code
@@ -833,14 +802,12 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          . ./tools/ci/fault-sweep.ps1
-          . ./tools/ci/package-identities.ps1
-          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
-          $problem = if ($device) { Get-SsrProblemCode $device.InstanceId } else { 'no device' }
-          $line = "${{ matrix.variant }} (Verifier 0x10: ${{ matrix.verifier }}): the runner survived the start (problem $problem, install ${{ steps.install.outcome }})"
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains '${{ matrix.hardware_id }}' } | Select-Object -First 1
+          $state = if ($device) { "$($device.Status), problem $($device.Problem)" } else { 'no device' }
+          $line = "${{ matrix.variant }} (Verifier 0x10 on ${{ matrix.image }}: ${{ matrix.verifier }}): the runner survived the start ($state, install ${{ steps.install.outcome }})"
           Write-Host $line
           Add-Content $env:GITHUB_STEP_SUMMARY "`n$line`n"
-          ./tools/ci/beacon.ps1 -Finish -Context $env:BEACON_CONTEXT -Description "survived; problem $problem, install ${{ steps.install.outcome }}"
+          ./tools/ci/beacon.ps1 -Finish -Context $env:BEACON_CONTEXT -Description "survived; $state, install ${{ steps.install.outcome }}"
 
   codeql:
     name: CodeQL Windows driver suites
