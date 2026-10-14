@@ -484,6 +484,7 @@ tests = [
   "engine::the_end_of_a_source_drains_without_underruns",
   "engine::pi_controller_clamps_and_integrates",
   "engine::auto_selects_trim_only_when_capture_and_output_support_it",
+  "engine::leaving_trim_clears_a_sub_deadband_applied_request_exactly",
   "engine::format_change_does_not_change_the_startup_clock_or_mix_rate",
   "engine::output_clock_selection_rechecks_every_opened_format",
   "engine::reconnect_at_44_1_khz_switches_to_asrc_and_fades_audio_back_in",
@@ -492,11 +493,16 @@ tests = [
   "engine::the_asrc_tail_fade_plan_places_the_ramp_at_the_real_signal_end",
   "engine::an_unwritable_96_khz_cadence_tail_starts_its_short_drain_at_full_gain",
   "engine::a_short_terminal_asrc_take_fades_inside_the_rendered_period_and_drains_silently",
+  "engine::a_planned_asrc_tail_freezes_the_pending_ratio_through_drain",
   "engine::asrc_layout_reopen_fades_through_the_real_tail_and_stays_silent",
   "engine::asrc_eof_fades_through_the_real_tail_and_stays_silent",
+  "engine::the_end_of_capture_seen_after_the_last_take_drains_the_tail_right_after_it",
+  "engine::an_underrun_before_the_end_of_capture_fades_the_tail_back_in",
+  "engine::eof_drain_sink_failure_returns_from_the_allocation_free_scope",
+  "engine::declined_cadence_change_keeps_asrc_live_and_a_later_layout_tail_fresh",
   "engine::sustained_slow_cadence_grows_the_period_and_reopens_once",
 ]
-note = "rubato Async sinc on the binaural pair. Auto chooses Trim only when the capture supports trim and the output is 48 kHz; otherwise it chooses ASRC at startup, and every output reopen (layout, loss or cadence) validates the opened format and reselects the mode, including 48 kHz Trim to 44.1 kHz ASRC; leaving Trim explicitly clears the capture source's requested correction. Forced Trim retries an incompatible reopened rate without counting a successful reopen, and stop interrupts that retry backoff. Non-loss layout and cadence reopens drain the old ASRC delay through the still-live sink before replacing the resampler, while actual device loss retains its discard policy. Source format changes never alter that choice or the fixed 48 kHz scene rate. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms plus the smaller of the period's take and the delivery, which is what one delivery landing just after a take costs it; priming fills to target + delivery + take, so the trough starts there. 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation that keeps audible priming excess and can land blocks a period late. The level is the frames the output has not taken yet, so markers a period already read do not count whole (they put the trough up to a period high and the CI soaks underran). The integral learns only within 12 ms of the setpoint and never further into a saturated output: priming keeps audible frames (ADR 0028), so a backlog or a refill after an underrun starts the trough tens of ms high, and integrating that latency as skew drained the ring dry every ~20 s in the CI soaks; 12 ms holds the one-block step a phase slip makes when the period is at least a block long, so the integral learns the skew from those slips. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
+note = "rubato Async sinc on the binaural pair. Auto chooses Trim only when the capture supports trim and the output is 48 kHz; otherwise it chooses ASRC at startup, and every output reopen (layout, loss or cadence) validates the opened format and reselects the mode, including 48 kHz Trim to 44.1 kHz ASRC; leaving Trim explicitly clears the capture source's requested correction. Forced Trim retries an incompatible reopened rate without counting a successful reopen, and stop interrupts that retry backoff. Non-loss layout and cadence reopens drain the old ASRC delay through the still-live sink before replacing the resampler, while actual device loss retains its discard policy. The end of capture is checked before every period, so a tail the resampler still holds after the last rendered period drains right after it, fading back in after an underrun; the ratio stays fixed while a tail drains, and a cadence change the opener declines leaves the sink and resampler untouched. Source format changes never alter that choice or the fixed 48 kHz scene rate. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms plus the smaller of the period's take and the delivery, which is what one delivery landing just after a take costs it; priming fills to target + delivery + take, so the trough starts there. 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation that keeps audible priming excess and can land blocks a period late. The level is the frames the output has not taken yet, so markers a period already read do not count whole (they put the trough up to a period high and the CI soaks underran). The integral learns only within 12 ms of the setpoint and never further into a saturated output: priming keeps audible frames (ADR 0028), so a backlog or a refill after an underrun starts the trough tens of ms high, and integrating that latency as skew drained the ring dry every ~20 s in the CI soaks; 12 ms holds the one-block step a phase slip makes when the period is at least a block long, so the integral learns the skew from those slips. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
 
 [[feature]]
 id = "engine.clock_trim"
@@ -645,6 +651,7 @@ milestone = "M2"
 status = "partial"
 tests = [
   "engine::cadence_guard_accepts_normal_rejects_sustained_slow_and_ignores_a_blip",
+  "engine::declined_cadence_change_keeps_asrc_live_and_a_later_layout_tail_fresh",
   "engine::sustained_slow_cadence_grows_the_period_and_reopens_once",
 ]
 note = "the WASAPI sink exposes its latest audio-clock position and the runtime compares position deltas with playback-QPC deltas over two-second windows. A ratio outside 0.9..=1.1 for at least three seconds increments output_cadence_faults and emits one fault event; exclusive output then requests one doubled period, capped at 20 ms, and reports the reopen result. Failed cadence reopens use the same stop-aware unbounded retry policy as device loss. VB-CABLE in exclusive mode was observed at 65 % of nominal at a 10 ms period (ADR 0026)"

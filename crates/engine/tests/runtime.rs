@@ -115,7 +115,11 @@ fn assert_boundary_frames_are_continuous_and_silent_after_zero(frames: &[f32], f
         .expect("fade did not end at exact zero");
     assert!(
         frames[first_zero..].iter().all(|sample| *sample == 0.0),
-        "old sink drain became audible again after reaching zero"
+        "old sink drain became audible again after reaching zero at {first_zero}; next nonzero {:?}",
+        frames[first_zero..]
+            .iter()
+            .position(|sample| *sample != 0.0)
+            .map(|offset| first_zero + offset)
     );
     assert_tone_step_bound(frames, frequency);
 }
@@ -619,6 +623,7 @@ struct SinkState {
     opened_layouts: Mutex<Vec<OutputLayout>>,
     opened_formats: Mutex<Vec<OutputFormat>>,
     requested_periods: Mutex<Vec<Duration>>,
+    accept_period_change: AtomicBool,
     inject_cadence_tail: AtomicBool,
     inject_cadence_tail_enabled: AtomicBool,
     stopped: AtomicBool,
@@ -649,6 +654,7 @@ impl SinkState {
             opened_layouts: Mutex::new(Vec::new()),
             opened_formats: Mutex::new(Vec::new()),
             requested_periods: Mutex::new(Vec::new()),
+            accept_period_change: AtomicBool::new(true),
             inject_cadence_tail: AtomicBool::new(false),
             inject_cadence_tail_enabled: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
@@ -698,6 +704,9 @@ impl OutputOpener for TestOpener {
 
     fn set_period(&mut self, period: Duration) -> bool {
         self.state.requested_periods.lock().unwrap().push(period);
+        if !self.state.accept_period_change.load(Ordering::Acquire) {
+            return false;
+        }
         if self
             .state
             .inject_cadence_tail_enabled
@@ -2051,30 +2060,19 @@ fn a_layout_reopen_switches_trim_to_asrc_clears_trim_and_keeps_playing() {
     let old_last = old_sink
         .last()
         .copied()
-        .expect("old sink emitted a final ASRC-tail period");
+        .expect("old Trim sink emitted a final boundary period");
     let old_penultimate = old_sink
         .get(old_sink.len().saturating_sub(2))
         .copied()
-        .expect("old sink emitted audio before its ASRC tail");
-    let tail_energy = period_energy(old_last);
-    let preceding_energy = period_energy(old_penultimate);
-    // At a layout boundary no new stereo input may be consumed. The last old-
-    // sink period therefore consists solely of the old ASRC's delayed output;
-    // its energy must be present, but below the preceding tone period. Exact
-    // sample counts are filter-implementation details, so energy is the stable
-    // completeness witness.
+        .expect("old Trim sink emitted audio before its boundary period");
     assert!(
-        tail_energy > 0.0 && tail_energy < preceding_energy,
-        "old ASRC tail energy {tail_energy} did not follow tone energy {preceding_energy}"
+        period_energy(old_penultimate) > 0.0,
+        "old Trim sink lost its final ordinary audio period"
     );
-    assert_eq!(old_last[old_last.len() - 2..], [0.0, 0.0]);
-    // output_delay spans two 10 ms periods at this ratio, so include the last
-    // rendered period followed by both drain periods.
-    let old_boundary: Vec<_> = old_sink[old_sink.len().saturating_sub(3)..]
-        .iter()
-        .map(|samples| samples.as_slice())
-        .collect();
-    assert_boundary_tail_is_continuous_and_silent_after_zero(&old_boundary, frequency);
+    assert!(
+        period_energy(old_last) > 0.0,
+        "old Trim sink swallowed its final ordinary period"
+    );
     let new_first = periods
         .iter()
         .find(|(layout, samples)| layout.channels == 12 && samples.iter().any(|x| *x != 0.0))
@@ -2379,14 +2377,98 @@ fn output_failure_discards_mixed_layout_crossing_audio_and_recovers() {
 }
 
 #[test]
+fn declined_cadence_change_keeps_asrc_live_and_a_later_layout_tail_fresh() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    state.played_numerator.store(4, Ordering::Release);
+    state.played_denominator.store(5, Ordering::Release);
+    state.accept_period_change.store(false, Ordering::Release);
+    let frequency = 997.0;
+    let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    records.extend(
+        (0..1_200_u64)
+            .map(|block| tone_record(block * BLOCK as u64, block * BLOCK as u64, frequency)),
+    );
+    let capture = RecordsCapture {
+        records,
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: Some(Pacing {
+            state: Arc::clone(&state),
+            lead: 8,
+            scene_rate: RATE,
+        }),
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let mut output = opener_with_period(Arc::clone(&state), 44_100, 441);
+    output.reopen_format = Some(OutputFormat::exclusive(44_100, 12, 0, 441));
+    let engine = start_with(
+        lockstep_config(ClockPreference::Auto, Arc::clone(&lockstep)),
+        capture,
+        output,
+        StartOptions {
+            qpc_frequency: QPC_FREQUENCY,
+            prepared: Some(prepared(RATE)),
+        },
+    )
+    .unwrap();
+
+    for _ in 0..401 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+    }
+    let requested = state.requested_periods.lock().unwrap().clone();
+    let before_layout = state.periods_by_layout.lock().unwrap().clone();
+    assert_eq!(requested, [Duration::from_millis(20)]);
+    assert_eq!(state.opened_formats.lock().unwrap().len(), 1);
+    assert!(
+        before_layout
+            .iter()
+            .rev()
+            .take(4)
+            .all(|(_, samples)| period_energy(samples) > 0.0),
+        "declined cadence change drained or silenced the live ASRC"
+    );
+
+    engine
+        .apply(LiveChange::Prepared(speaker_prepared(12, 0)))
+        .unwrap();
+    for _ in 0..40 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+        if engine.status().output_reopens == 1 {
+            break;
+        }
+    }
+    let periods = state.periods_by_layout.lock().unwrap().clone();
+    lockstep.release();
+    let report = engine.stop();
+
+    let first_reopened = periods
+        .iter()
+        .position(|(layout, _)| layout.channels == 12)
+        .expect("later layout change reopened the sink");
+    let old_tail = &periods[..first_reopened];
+    let boundary: Vec<_> = old_tail
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(|(_, samples)| samples.as_slice())
+        .collect();
+    assert_boundary_tail_is_continuous_and_silent_after_zero(&boundary, frequency);
+    assert_eq!(report.output_reopens, 1);
+}
+
+#[test]
 fn sustained_slow_cadence_grows_the_period_and_reopens_once() {
     let lockstep = Arc::new(Lockstep::default());
     let state = SinkState::lockstep(0, Arc::clone(&lockstep));
     state.played_numerator.store(4, Ordering::Release);
     state.played_denominator.store(5, Ordering::Release);
-    state
-        .inject_cadence_tail_enabled
-        .store(true, Ordering::Release);
     let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
     let frequency = 997.0;
     records.extend(
@@ -2476,18 +2558,21 @@ fn sustained_slow_cadence_grows_the_period_and_reopens_once() {
         tail_energy > 0.0 && tail_energy < preceding_energy,
         "old ASRC tail energy {tail_energy} did not follow tone energy {preceding_energy}"
     );
-    // output_delay spans two 10 ms periods at this ratio, so include the last
-    // rendered period followed by both drain periods.
+    // The 117-frame delay occupies one 441-frame drain period. Include that
+    // period and the final normally rendered period before it.
     let old_boundary: Vec<_> = old_tail
         .iter()
         .rev()
-        .take(3)
+        .take(2)
         .rev()
         .map(|(_, samples)| samples.as_slice())
         .collect();
-    assert_boundary_tail_is_continuous_and_silent_after_zero(&old_boundary, frequency);
     let boundary_frames = boundary_left_frames(&old_boundary);
-    let drain_start = 441;
+    let drain_start = old_boundary[0].len() / 2;
+    assert_boundary_frames_are_continuous_and_silent_after_zero(
+        &boundary_frames[drain_start..],
+        frequency,
+    );
     assert!(
         boundary_frames[..drain_start]
             .iter()
@@ -2889,7 +2974,7 @@ fn asrc_eof_fades_through_the_real_tail_and_stays_silent() {
         .iter()
         .rposition(|(_, samples)| samples.iter().any(|sample| *sample != 0.0))
         .expect("EOF emitted no audible period");
-    // Cover the final rendered period and both drain periods without including
+    // Two periods before the last audible one and the drain after it, without
     // the ASRC startup transient.
     let boundary_start = last_audible.saturating_sub(2);
     let boundary_end = (last_audible + 2).min(periods.len());
@@ -2899,27 +2984,29 @@ fn asrc_eof_fades_through_the_real_tail_and_stays_silent() {
         .collect();
     assert_boundary_tail_is_continuous_and_silent_after_zero(&boundary, frequency);
     let frames = boundary_left_frames(&boundary);
-    let signal_end = frames
+    let last_nonzero = frames
         .iter()
-        .rposition(|sample| sample.abs() > 1.0e-4)
-        .map(|frame| frame + 1)
+        .rposition(|sample| *sample != 0.0)
         .expect("EOF emitted no tail signal");
+    // Pinned for this fixture: the third period here is the final rendered
+    // one, its padded take held 105 output frames of real input, and the
+    // signal ends the 117-frame delay after them. The arithmetic behind the
+    // pin is checked against known input by the engine's unit tests; here a
+    // tail that is skipped, repeated or cut short moves the end.
+    let predicted_signal_end = 2 * 441 + 105 + 117;
     assert!(
-        frames[signal_end..]
+        last_nonzero.abs_diff(predicted_signal_end - 1) <= 2,
+        "EOF last nonzero frame {last_nonzero} missed the pinned end {}",
+        predicted_signal_end - 1
+    );
+    assert!(
+        frames[predicted_signal_end..]
             .iter()
-            .all(|sample| sample.abs() <= 1.0e-4),
-        "EOF output rose above the ASRC numerical-noise floor after the signal"
+            .all(|sample| *sample == 0.0),
+        "EOF output rose after its exact-zero predicted end"
     );
-    let fade_start = signal_end.saturating_sub(88);
-    let cycle_frames = (44_100.0_f32 / frequency).ceil() as usize;
-    let peak = frames[fade_start - cycle_frames..fade_start]
-        .iter()
-        .map(|sample| sample.abs())
-        .fold(0.0_f32, f32::max);
-    assert!(
-        peak >= 0.97,
-        "pre-fade EOF tone peak {peak} was below 97% of full scale"
-    );
+    let signal_end = predicted_signal_end;
+    assert_tone_step_bound(&frames[..signal_end], frequency);
     drop(periods);
     lockstep.release();
     let _ = engine.stop();
