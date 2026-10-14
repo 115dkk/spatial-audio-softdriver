@@ -698,11 +698,13 @@ jobs:
           if-no-files-found: ignore
 
   # Diagnosis, not a gate (ADR 0027, 2026-10-14): on Server 2022 the install of
-  # the RAII/C++23 driver takes the runner down when the KS trace and Driver
-  # Verifier's I/O verification (0x10) are both on; with either alone, or with
-  # any other Verifier check and the trace, it passes. These variant builds
-  # say which part of the driver it needs: the trace's buffer copies, the
-  # trace's events at all, or MSVC's conformance mode. Remove once found.
+  # the RAII/C++23 driver takes the runner down when the KS trace session and
+  # Driver Verifier's I/O verification (0x10) are both on. The first round
+  # ruled out the trace's buffer copies, its events (a build that writes none
+  # still fails) and MSVC's conformance mode. This round asks whether master's
+  # driver fails the same way today (a runner image change, not our driver),
+  # whether the image needs to register the provider at all, and whether the
+  # session is needed with 0x10 alone. Remove once found.
   diag-build:
     name: diagnostic driver build (${{ matrix.variant }})
     runs-on: windows-2022
@@ -710,18 +712,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: trace-metadata-only
-            property: SsrDiagDefines=SSR_TRACE_METADATA_ONLY
-          - variant: trace-off
-            property: SsrDiagDefines=SSR_TRACE_OFF
-          - variant: permissive
-            property: SsrConformanceMode=false
+          - variant: master-driver
+            ref: master
+          - variant: no-provider
+            property: SsrDiagDefines=SSR_TRACE_NO_PROVIDER
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref || github.sha }}
 
-      - name: Build Release x64 with ${{ matrix.property }} (tools/build-driver.ps1)
+      - name: Build Release x64 (tools/build-driver.ps1 of that commit)
         shell: pwsh
-        run: ./tools/build-driver.ps1 -Configuration Release -Platform x64 -Property '${{ matrix.property }}'
+        run: |
+          $extra = @{}
+          if ('${{ matrix.property }}') { $extra.Property = '${{ matrix.property }}' }
+          ./tools/build-driver.ps1 -Configuration Release -Platform x64 @extra
 
       - uses: actions/upload-artifact@v7
         with:
@@ -731,23 +736,24 @@ jobs:
           retention-days: 7
 
   verifier-isolation:
-    name: 2022 install with the KS trace and I/O verification (${{ matrix.variant }})
+    name: 2022 install with I/O verification (${{ matrix.variant }})
     needs: [build, diag-build]
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 12
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         include:
-          - variant: release
+          - variant: master-driver
+            artifact: spatialsoftreceiver-diag-master-driver
+            trace: true
+          - variant: no-provider
+            artifact: spatialsoftreceiver-diag-no-provider
+            trace: true
+          - variant: release-no-trace
             artifact: spatialsoftreceiver-Release-x64
-          - variant: trace-metadata-only
-            artifact: spatialsoftreceiver-diag-trace-metadata-only
-          - variant: trace-off
-            artifact: spatialsoftreceiver-diag-trace-off
-          - variant: permissive
-            artifact: spatialsoftreceiver-diag-permissive
+            trace: false
     steps:
       - uses: actions/checkout@v7
 
@@ -765,6 +771,7 @@ jobs:
           }
 
       - name: Start the driver's KS request trace (tools/ci/ks-trace.ps1)
+        if: matrix.trace
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start
 
@@ -782,12 +789,17 @@ jobs:
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
 
       - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
-        if: always() && steps.install.outcome != 'skipped'
+        if: always() && matrix.trace && steps.install.outcome != 'skipped'
         shell: pwsh
         run: |
           Start-Sleep -Seconds 10
           ./tools/ci/ks-trace.ps1 -Stop
-          Add-Content $env:GITHUB_STEP_SUMMARY "`nKS trace and I/O verification, ${{ matrix.variant }} build: install ${{ steps.install.outcome }}`n"
+
+      - name: Result
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_STEP_SUMMARY "`nI/O verification, ${{ matrix.variant }} (trace ${{ matrix.trace }}): install ${{ steps.install.outcome }}`n"
 
   codeql:
     name: CodeQL Windows driver suites

@@ -9,7 +9,13 @@ TRACELOGGING_DEFINE_PROVIDER(SsrKsProvider, "SpatialSoftReceiver.Driver.Ks",
 
 static constinit bool Registered{};
 
-void SsrTraceRegister() { Registered = NT_SUCCESS(TraceLoggingRegister(SsrKsProvider)); }
+void SsrTraceRegister() {
+#ifdef SSR_TRACE_NO_PROVIDER
+    // Diagnostic build (driver.yml): no provider, so no session reaches the image.
+#else
+    Registered = NT_SUCCESS(TraceLoggingRegister(SsrKsProvider));
+#endif
+}
 void SsrTraceUnregister() {
     if (Registered) TraceLoggingUnregister(SsrKsProvider);
     Registered = false;
