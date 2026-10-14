@@ -207,7 +207,7 @@ tests = [
   "decode::ddp_and_pcm_use_the_same_nominal_speaker_table",
   "decode::rejected_pushes_do_not_allocate_error_strings",
 ]
-note = "bed channels and LFE from pinned harletty-bridge eac3; shared ssr-types::Speaker nominal positions preserve PCM/DD+ angles and exclude measured BRIR presets. Fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. Upstream eac3 allocates per frame; adapter buffers and OAMD timeline are preallocated"
+note = "bed channels and LFE from pinned harletty-bridge eac3; shared ssr-types::Speaker nominal positions preserve PCM/DD+ angles and exclude measured BRIR presets. Fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. Upstream eac3 allocates per frame on the capture thread (5.1: 25 blocks, 37 KB per 32 ms frame after the first; its API returns owned channel buffers, and it is not forked, ADR 0007); adapter buffers and OAMD timeline are preallocated"
 
 [[feature]]
 id = "decode.ddp_joc"
