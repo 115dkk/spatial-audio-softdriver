@@ -56,24 +56,46 @@ fn wasapi_shared_periods_do_not_allocate() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "requires a multichannel default render endpoint and plays 200 ms of silence"]
+#[ignore = "requires a default render endpoint with an exclusive multichannel format; plays 200 ms of silence"]
 fn wasapi_multichannel_periods_do_not_allocate() {
     use ssr_types::{OutputLayout, OutputOpener, OutputSink};
-    let layout = OutputLayout {
-        channels: 6,
-        channel_mask: 0x3f,
-    };
+    // The first exclusive layout wider than stereo that the default endpoint
+    // offers: VB-CABLE on the runners takes 7.1 but not 5.1, a desktop DAC may
+    // take only 5.1. None at all is a failure, not a skip, because the job
+    // that runs this installs a multichannel cable.
+    let default = ssr_sys::devices::render_endpoint_formats()
+        .unwrap()
+        .into_iter()
+        .find(|formats| formats.endpoint.is_default)
+        .expect("a default render endpoint");
+    let layout = default
+        .layouts
+        .iter()
+        .find(|layout| layout.exclusive && layout.channels > 2)
+        .map(|layout| OutputLayout {
+            channels: layout.channels,
+            channel_mask: layout.channel_mask,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{} offers no exclusive multichannel layout",
+                default.endpoint.name
+            )
+        });
     let mut sink = ssr_sys::output::WasapiOpener {
-        endpoint: None,
+        endpoint: Some(default.endpoint.id.clone()),
         rate: 48_000,
-        shared_fallback: true,
+        shared_fallback: false,
         exclusive: true,
-        period: None,
+        period: common::exclusive_period(),
     }
     .open(layout)
     .unwrap();
     let format = sink.format();
-    assert_eq!((format.channels, format.channel_mask), (6, 0x3f));
+    assert_eq!(
+        (format.channels, format.channel_mask),
+        (layout.channels, layout.channel_mask)
+    );
     let count = (format.rate as usize / 5).div_ceil(format.period_frames);
     sink.next_period(&mut |samples| samples.fill(0.0)).unwrap();
     assert_no_alloc(|| {
@@ -93,7 +115,7 @@ fn wasapi_exclusive_periods_and_a_restart_do_not_allocate() {
         rate: 48_000,
         shared_fallback: true,
         exclusive: true,
-        period: None,
+        period: common::exclusive_period(),
     }
     .open(ssr_types::OutputLayout::STEREO)
     .unwrap();

@@ -394,6 +394,12 @@ jobs:
             --report "$RUNNER_TEMP/driver-e2e-report.json" --summary "$RUNNER_TEMP/driver-e2e.json" \
             --record "$RUNNER_TEMP/driver-e2e.ssrdump"
 
+      # The Rust ring reader against the installed driver: QUERY_INFO's
+      # default mask, trim at 0 and +-100 ppm, and a READ that times out.
+      - name: DriverRing against the installed driver (ssr-sys driver_ring, ignored elsewhere)
+        if: ${{ !cancelled() && steps.e2e-build.outcome == 'success' }}
+        run: cargo test --locked --release -p ssr-sys --test driver_ring -- --ignored --nocapture
+
       - name: Is Driver Verifier checking spatialsoftreceiver.sys
         if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
         shell: pwsh

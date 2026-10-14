@@ -43,3 +43,16 @@ pub fn read(h: SalHeader, payload: &[u8]) -> Vec<u8> {
     b.extend_from_slice(payload);
     b
 }
+
+/// The exclusive period device tests ask for: the device's minimum unless
+/// `SSR_TEST_EXCLUSIVE_PERIOD_MS` names one. CI sets 20 ms because VB-CABLE,
+/// a WaveCyclic driver, signals no faster than the system timer (ADR 0026).
+#[cfg(windows)]
+#[allow(dead_code)] // each test binary that includes this module uses a subset
+pub fn exclusive_period() -> Option<std::time::Duration> {
+    std::env::var("SSR_TEST_EXCLUSIVE_PERIOD_MS")
+        .ok()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map(std::time::Duration::from_millis)
+}

@@ -286,11 +286,13 @@ jobs:
 
       # The exclusive cadence tests run at a 20 ms period, longer than a PCM
       # block; exclusive_cadence_at_each_period prints the rate the sink
-      # keeps at 3 to 40 ms (ADR 0026).
-      - name: Device tests ssr-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
+      # keeps at 3 to 40 ms (ADR 0026). no_alloc runs WASAPI periods (shared,
+      # exclusive with a forced restart, and an exclusive multichannel layout
+      # of the default endpoint) under the allocation guard.
+      - name: Device tests ssr-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent, no allocation)
         env:
           SSR_TEST_EXCLUSIVE_PERIOD_MS: "20"
-        run: cargo test --locked --release -p ssr-sys --test windows -- --ignored --test-threads=1 --nocapture
+        run: cargo test --locked --release -p ssr-sys --test windows --test no_alloc -- --ignored --test-threads=1 --nocapture
 
       # The stages below run even when an earlier one failed, so one CI round
       # reports on all of them; the job still fails.
