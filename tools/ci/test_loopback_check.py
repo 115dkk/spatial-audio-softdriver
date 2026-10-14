@@ -101,6 +101,7 @@ class ReportProblems(unittest.TestCase):
     @staticmethod
     def clean_report():
         return {
+            "source": "dump",
             "underruns_while_streaming": 0,
             "output_restarts": 0,
             "output_reconnects": 0,
