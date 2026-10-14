@@ -4,7 +4,7 @@
 #include "minwavert.h"
 #include "minwavertstream.h"
 #include "basetopo.h"
-static PCPROPERTY_ITEM WaveProperties[] = {
+static constinit PCPROPERTY_ITEM WaveProperties[] = {
     {&KSPROPSETID_Pin, KSPROPERTY_PIN_PROPOSEDATAFORMAT, KSPROPERTY_TYPE_SET | KSPROPERTY_TYPE_BASICSUPPORT, CMiniportWaveRT::Property},
 };
 DEFINE_PCAUTOMATION_TABLE_PROP(WaveAutomation, WaveProperties);
@@ -13,9 +13,9 @@ DEFINE_PCAUTOMATION_TABLE_PROP(WaveAutomation, WaveProperties);
 // mode attribute after the format, and KS matches an attributed format only
 // against a range that lists the attribute. With bare ranges every pin the
 // audio service tried to create failed with STATUS_NO_MATCH (driver KS trace).
-static KSATTRIBUTE ModeAttribute = {sizeof(KSATTRIBUTE), 0, SsrGuid(STATICGUIDOF(KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE))};
-static PKSATTRIBUTE ModeAttributes[] = {&ModeAttribute};
-static KSATTRIBUTE_LIST ModeAttributeList = {RTL_NUMBER_OF(ModeAttributes), ModeAttributes};
+static constinit KSATTRIBUTE ModeAttribute = {sizeof(KSATTRIBUTE), 0, SsrGuid(STATICGUIDOF(KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE))};
+static constinit PKSATTRIBUTE ModeAttributes[] = {&ModeAttribute};
+static constinit KSATTRIBUTE_LIST ModeAttributeList = {RTL_NUMBER_OF(ModeAttributes), ModeAttributes};
 CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint)
     : adapter_(ssr::km::ComRef<CAdapterCommon>::Retain(adapter)), endpoint_(endpoint) {
     ULONG count = 0;

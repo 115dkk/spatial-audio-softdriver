@@ -4,8 +4,8 @@
 #include "hdmiwavtable.h"
 #include <wdmsec.h>
 
-static const GUID SsrControlClass = {0x26be775d,0x821e,0x41ad,{0xbc,0x82,0x74,0x51,0x29,0xc1,0x29,0x42}};
-static UNICODE_STRING SsrLink;
+static constinit const GUID SsrControlClass = {0x26be775d,0x821e,0x41ad,{0xbc,0x82,0x74,0x51,0x29,0xc1,0x29,0x42}};
+static constinit UNICODE_STRING SsrLink{};
 
 NTSTATUS SsrComplete(PIRP irp, NTSTATUS status, ULONG_PTR information) {
     irp->IoStatus.Status = status;

@@ -3,7 +3,7 @@
 // Reduced from audio/sysvad/common.cpp at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
 #include "common.h"
 #include "minwavertstream.h"
-const GUID SsrAdapterInterface = {0x534664d2,0x3ca6,0x4fbd,{0x84,0x75,0x3a,0x0b,0x41,0xb9,0x4c,0x11}};
+constinit const GUID SsrAdapterInterface = {0x534664d2,0x3ca6,0x4fbd,{0x84,0x75,0x3a,0x0b,0x41,0xb9,0x4c,0x11}};
 CAdapterCommon::CAdapterCommon(PDEVICE_OBJECT control)
     : control_(ssr::km::ObjectRef<DEVICE_OBJECT>::Retain(control)), state_(SsrControl(control)) {
     settings_ = state_->Settings;
