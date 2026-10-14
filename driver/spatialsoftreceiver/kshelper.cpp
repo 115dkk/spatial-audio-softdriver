@@ -69,7 +69,7 @@ NTSTATUS SsrValidateFormat(const SSR_ENDPOINT_FORMATS& formats, PKSDATAFORMAT da
     const auto* raw = reinterpret_cast<const UCHAR*>(data + 1);
     const ULONG bytes = sizeof(WAVEFORMATEX) + static_cast<ULONG>(raw[16]) +
         (static_cast<ULONG>(raw[17]) << 8U);
-    if (bytes > ssr::kMaxFormatBytes || bytes > data->FormatSize - sizeof(KSDATAFORMAT) ||
+    if (bytes > data->FormatSize - sizeof(KSDATAFORMAT) ||
         !ssr::FormatAccepted(formats, &data->SubFormat, raw, bytes)) return STATUS_NO_MATCH;
     *wave = reinterpret_cast<const WAVEFORMATEX*>(raw);
     return STATUS_SUCCESS;

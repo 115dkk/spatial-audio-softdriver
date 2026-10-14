@@ -173,7 +173,8 @@ bool FormatAccepted(const SSR_ENDPOINT_FORMATS& enabled, const void* subformat,
     const auto* guid = static_cast<const uint8_t*>(subformat);
     const auto* data = static_cast<const uint8_t*>(wfx);
     const uint32_t declared = kWaveFormatExBytes + U16(data + 16);
-    if (declared > bytes) return false;
+    // The ring keeps a copy of the format for repeats (kMaxFormatBytes).
+    if (declared > bytes || declared > kMaxFormatBytes) return false;
     const uint16_t tag = U16(data);
     const uint16_t channels = U16(data + 2);
     const uint32_t rate = U32(data + 4);

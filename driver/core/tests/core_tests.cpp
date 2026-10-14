@@ -930,6 +930,79 @@ void CodecCarrierAcceptance() {
     }
 }
 
+// Pinned independently of kCodecCarriers: codec bits as numbers, the
+// ksmedia.h subtypes and KSAUDIO_SPEAKER masks the driver advertised before
+// the table moved into the core.
+void CodecCarrierGolden() {
+    const ssr::CodecCarrier golden[] = {
+        {0x002, 0x0092, 0x0000, 2,  44100, 0x60f, 16, 16},  // AC-3, 5.1 surround
+        {0x002, 0x0092, 0x0000, 2,  48000, 0x60f, 16, 16},
+        {0x010, 0x000c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // TrueHD (MLP), 7.1
+        {0x010, 0x000c, 0x0cea, 8, 192000, 0x63f, 16, 16},  // TrueHD, 7.1 surround
+        {0x080, 0x0008, 0x0000, 2,  48000, 0x60f, 16, 16},  // DTS
+        {0x100, 0x000b, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // DTS-HD
+        {0x100, 0x010b, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // DTS:X E1
+        {0x100, 0x030b, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // DTS:X E2
+        {0x020, 0x010c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // MAT 2.0
+        {0x040, 0x030c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // MAT 2.1
+        {0x040, 0x070c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // MAT 2.1 (PROFILE4 alias)
+        {0x004, 0x000a, 0x0cea, 2, 192000, 0x60f, 16, 16},  // E-AC-3
+        {0x008, 0x010a, 0x0cea, 2, 192000, 0x0ff, 16, 16},  // E-AC-3 JOC
+    };
+    static_assert(sizeof(golden) == sizeof(ssr::kCodecCarriers), "carrier count");
+    for (size_t i = 0; i < sizeof(golden) / sizeof(golden[0]); ++i) {
+        const auto& a = golden[i];
+        const auto& b = ssr::kCodecCarriers[i];
+        CHECK(a.bit == b.bit && a.subtype_id == b.subtype_id && a.subtype_family == b.subtype_family &&
+              a.channels == b.channels && a.rate == b.rate && a.channel_mask == b.channel_mask &&
+              a.bits == b.bits && a.valid_bits == b.valid_bits);
+        uint8_t wave[40]{}; CarrierWave(wave, a);
+        CHECK(ssr::CodecBit(wave, sizeof(wave)) == a.bit);
+        CHECK(ssr::FormatAccepted({a.bit, {}}, wave + 24, wave, sizeof(wave)));
+    }
+}
+
+// Each check of FormatAccepted on its own, with every other field valid.
+void FormatAcceptedSingleChecks() {
+    const SSR_ENDPOINT_FORMATS all{SSR_COMPILED_CODECS, SSR_COMPILED_PCM};
+    // Extensible with a cbSize too small for WAVEFORMATEXTENSIBLE, although
+    // the buffer holds a valid one.
+    const uint16_t shortSizes[] = {0, 21};
+    for (uint16_t cb : shortSizes) {
+        uint8_t wave[40]{}; CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 16, 16, false});
+        CHECK(ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+        Put16(wave, 16, cb);
+        CHECK(!ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+    }
+    // A plain WAVEFORMATEX must agree with the KS subtype too.
+    {
+        uint8_t wave[40]{}; CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 16, 16, false});
+        Put16(wave, 0, 1); Put16(wave, 16, 0);
+        uint8_t pcm[16]; memcpy(pcm, wave + 24, sizeof(pcm));
+        uint8_t floating[16]; memcpy(floating, pcm, sizeof(floating)); Put32(floating, 0, 3);
+        CHECK(ssr::FormatAccepted(all, pcm, wave, 18));
+        CHECK(!ssr::FormatAccepted(all, floating, wave, 18));
+    }
+    // A carrier's container width on its own (valid bits unchanged).
+    for (const auto& carrier : ssr::kCodecCarriers) {
+        uint8_t wave[40]{}; CarrierWave(wave, carrier);
+        Put16(wave, 14, 24);
+        Put16(wave, 12, static_cast<uint16_t>(carrier.channels * 3U));
+        Put32(wave, 8, carrier.rate * carrier.channels * 3U);
+        CHECK(!ssr::FormatAccepted({carrier.bit, {}}, wave + 24, wave, sizeof(wave)));
+    }
+    // The ring keeps formats up to kMaxFormatBytes; a longer declared format
+    // is refused even when the buffer holds it.
+    {
+        uint8_t wave[ssr::kMaxFormatBytes + 1]{};
+        CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 16, 16, false});
+        Put16(wave, 16, static_cast<uint16_t>(ssr::kMaxFormatBytes - 18U));
+        CHECK(ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+        Put16(wave, 16, static_cast<uint16_t>(ssr::kMaxFormatBytes - 17U));
+        CHECK(!ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+    }
+}
+
 void FormatSubtypeValidation() {
     const SSR_ENDPOINT_FORMATS all{SSR_COMPILED_CODECS, SSR_COMPILED_PCM};
     uint8_t wave[40]{}; CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 32, 32, true});
@@ -1149,6 +1222,8 @@ int main() {
     PcmCandidateAgreementGrid();
     PcmMaskBits();
     CodecCarrierAcceptance();
+    CodecCarrierGolden();
+    FormatAcceptedSingleChecks();
     FormatSubtypeValidation();
     FormatTypeRules();
     PcmRangeRules();
