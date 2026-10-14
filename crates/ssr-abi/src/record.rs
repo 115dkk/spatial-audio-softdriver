@@ -177,11 +177,17 @@ impl<'a> Iterator for RawRecords<'a> {
     }
 }
 
-/// Returns a mutable zerocopy view of a record header when it is complete.
-pub fn header_mut(record: &mut [u8]) -> Option<&mut RecordHeader> {
-    RecordHeader::mut_from_prefix(record)
-        .ok()
-        .map(|(header, _)| header)
+/// Changes the header at the start of `record` in place: the header is read
+/// into a copy, `edit` changes it, and it is written back. The bytes need no
+/// alignment (a header holds `u64` fields, and a capture buffer or a record
+/// inside one need not start on an eight-byte boundary). Returns `false`, and
+/// leaves `record` as it is, when it is shorter than a header.
+pub fn edit_header(record: &mut [u8], edit: impl FnOnce(&mut RecordHeader)) -> bool {
+    let Ok((mut header, _)) = RecordHeader::read_from_prefix(record) else {
+        return false;
+    };
+    edit(&mut header);
+    header.write_to_prefix(record).is_ok()
 }
 
 /// Iterates the records in `buf`.
@@ -640,18 +646,28 @@ mod tests {
     }
 
     #[test]
-    fn header_mut_restamps_without_touching_payload() {
-        let mut buf = [0; 64];
-        let mut writer = RecordWriter::new(&mut buf);
-        assert!(writer.data(1, 2, 3, &[4, 5, 6]));
-        let len = writer.len();
-        let header = header_mut(&mut buf[..len]).unwrap();
-        header.qpc = 99;
-        header.byte_pos = 42;
-        let raw = raw_records(&buf[..len]).next().unwrap().unwrap();
-        assert_eq!((raw.header.qpc, raw.header.byte_pos), (99, 42));
-        assert_eq!(raw.payload, &[4, 5, 6]);
-        assert!(header_mut(&mut [0; HEADER - 1]).is_none());
+    fn edit_header_restamps_without_touching_payload_at_any_alignment() {
+        // At most one of these starts is on an eight-byte boundary, whatever
+        // the array's own alignment is.
+        for start in [0, 1, 4] {
+            let mut buf = [0; 72];
+            let len = {
+                let mut writer = RecordWriter::new(&mut buf[start..]);
+                assert!(writer.data(1, 2, 3, &[4, 5, 6]));
+                writer.len()
+            };
+            let record = &mut buf[start..start + len];
+            assert!(edit_header(record, |header| {
+                header.qpc = 99;
+                header.byte_pos = 42;
+            }));
+            let raw = raw_records(record).next().unwrap().unwrap();
+            assert_eq!((raw.header.qpc, raw.header.byte_pos), (99, 42), "{start}");
+            assert_eq!(raw.payload, &[4, 5, 6]);
+        }
+        let mut short = [7; HEADER - 1];
+        assert!(!edit_header(&mut short, |header| header.qpc = 1));
+        assert_eq!(short, [7; HEADER - 1]);
     }
 
     #[test]

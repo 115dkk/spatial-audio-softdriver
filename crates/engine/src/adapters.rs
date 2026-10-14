@@ -218,15 +218,18 @@ impl CaptureSource for DumpCapture {
                 let source = self.offset;
                 let out = &mut buf[written..written + raw.size];
                 out.copy_from_slice(&self.stream[source..source + raw.size]);
-                let header = ssr_abi::header_mut(out).expect("validated header");
-                header.qpc = now;
-                header.qpc_written = now;
-                if matches!(
-                    header.kind,
-                    ssr_abi::RECORD_KIND_DATA | ssr_abi::RECORD_KIND_OVERRUN
-                ) {
-                    header.byte_pos = header.byte_pos.saturating_add(self.pos_shift);
-                }
+                let pos_shift = self.pos_shift;
+                let restamped = ssr_abi::edit_header(out, |header| {
+                    header.qpc = now;
+                    header.qpc_written = now;
+                    if matches!(
+                        header.kind,
+                        ssr_abi::RECORD_KIND_DATA | ssr_abi::RECORD_KIND_OVERRUN
+                    ) {
+                        header.byte_pos = header.byte_pos.saturating_add(pos_shift);
+                    }
+                });
+                debug_assert!(restamped, "a validated record holds a whole header");
                 written += raw.size;
                 self.offset += raw.size;
                 if self

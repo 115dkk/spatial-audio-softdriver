@@ -584,9 +584,12 @@ impl CaptureSource for RecordsCapture {
                 ssr_abi::RECORD_KIND_DATA => u64::from(bytes) * RATE as u64 / 768_000,
                 _ => 0,
             };
-            ssr_abi::header_mut(&mut buffer[..record.len()])
-                .unwrap()
-                .qpc = now.saturating_add(record_frames);
+            assert!(ssr_abi::edit_header(
+                &mut buffer[..record.len()],
+                |header| {
+                    header.qpc = now.saturating_add(record_frames);
+                }
+            ));
         }
         let frames = raw
             .filter(|raw| raw.header.kind == ssr_abi::RECORD_KIND_DATA)
