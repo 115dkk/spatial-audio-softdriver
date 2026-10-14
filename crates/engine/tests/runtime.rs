@@ -171,9 +171,9 @@ fn stream_stop_record(endpoint: u16) -> Vec<u8> {
     record
 }
 
-fn ddp_format_record() -> Vec<u8> {
+fn bitstream_format_record(codec: BitstreamCodec) -> Vec<u8> {
     let format = SourceFormat::Bitstream(BitstreamFormat {
-        codec: BitstreamCodec::Eac3,
+        codec,
         container_rate: 192_000,
         container_channels: 2,
         encoded_rate: 48_000,
@@ -185,6 +185,10 @@ fn ddp_format_record() -> Vec<u8> {
     let len = writer.len();
     record.truncate(len);
     record
+}
+
+fn ddp_format_record() -> Vec<u8> {
+    bitstream_format_record(BitstreamCodec::Eac3)
 }
 
 fn speaker_prepared(channels: usize, channel_mask: u32) -> Box<Prepared> {
@@ -1068,6 +1072,7 @@ fn format_and_needs_brir_events_reach_poll() {
             endpoint: ENDPOINT_PRIMARY,
             epoch: 1,
             format,
+            unsupported: None,
         } if *format == pcm_format(RATE)
     )));
     assert!(
@@ -1078,6 +1083,56 @@ fn format_and_needs_brir_events_reach_poll() {
     lockstep.release();
     let report = engine.stop();
     assert_eq!(report.blocks, 0);
+}
+
+#[test]
+fn format_events_carry_mat_unsupported_reason_and_pcm_support() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let capture = RecordsCapture {
+        records: vec![
+            bitstream_format_record(BitstreamCodec::Mat21),
+            format_record(RATE),
+        ],
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let mut engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        opener(state, RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    lockstep.step_read(3);
+    let events = engine.poll();
+    lockstep.release();
+    let _ = engine.stop();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::FormatChanged {
+            format: SourceFormat::Bitstream(BitstreamFormat {
+                codec: BitstreamCodec::Mat21,
+                ..
+            }),
+            unsupported: Some(ssr_types::UnsupportedReason::Format),
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::FormatChanged {
+            format: SourceFormat::Pcm(_),
+            unsupported: None,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -1166,6 +1221,7 @@ fn unsupported_format_is_counted_without_changing_endpoint_fault_semantics() {
             endpoint: 1,
             epoch: 1,
             format,
+            unsupported: Some(ssr_types::UnsupportedReason::SourceRate),
         } if *format == pcm_format(32_000)
     )));
     assert!(
@@ -1200,7 +1256,7 @@ fn malformed_records_are_counted_by_endpoint_and_without_attribution() {
     assert!(writer.stream_stop(1, 0));
     let length = writer.len();
     bad_length.resize(length + 1, 0);
-    bad_length[32..36].copy_from_slice(&1_u32.to_le_bytes());
+    assert!(ssr_abi::edit_header(&mut bad_length, |header| header.len = 1));
     let truncated_header = vec![0; std::mem::size_of::<ssr_abi::RecordHeader>() - 1];
     let capture = RecordsCapture {
         records: vec![bad_length, truncated_header],
@@ -1251,6 +1307,101 @@ fn malformed_records_are_counted_by_endpoint_and_without_attribution() {
             .get(ssr_types::ChainErrorKind::TruncatedRecord),
         1
     );
+}
+
+#[test]
+fn repeated_chain_errors_are_all_counted() {
+    const ERROR_COUNT: u64 = 3;
+
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let mut bad_length = vec![0; ssr_abi::record_size(1)];
+    let mut writer = RecordWriter::new(&mut bad_length);
+    writer.set_endpoint(1);
+    assert!(writer.stream_stop(1, 0));
+    let length = writer.len();
+    bad_length.resize(length + 1, 0);
+    assert!(ssr_abi::edit_header(&mut bad_length, |header| header.len = 1));
+    let capture = RecordsCapture {
+        records: vec![bad_length; ERROR_COUNT as usize],
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        opener(state, RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    lockstep.step_read(ERROR_COUNT + 1);
+    let count = engine.status().endpoints[1]
+        .chain_errors
+        .get(ssr_types::ChainErrorKind::BadRecordLength);
+    lockstep.release();
+    let report = engine.stop();
+    assert_eq!(count, ERROR_COUNT);
+    assert_eq!(
+        report.final_status.endpoints[1]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::BadRecordLength),
+        ERROR_COUNT
+    );
+}
+
+#[test]
+fn status_publishes_skipped_out_of_range_records() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let mut bad_length = vec![0; ssr_abi::record_size(1)];
+    let mut writer = RecordWriter::new(&mut bad_length);
+    writer.set_endpoint(7);
+    assert!(writer.stream_stop(1, 0));
+    let length = writer.len();
+    bad_length.resize(length + 1, 0);
+    assert!(ssr_abi::edit_header(&mut bad_length, |header| header.len = 1));
+    let capture = RecordsCapture {
+        records: vec![bad_length],
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        opener(state, RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    lockstep.step_read(2);
+    let status = engine.status();
+    lockstep.release();
+    let report = engine.stop();
+    assert_eq!(status.skipped_records, 1);
+    assert_eq!(
+        status
+            .unattributed_chain_errors
+            .get(ssr_types::ChainErrorKind::BadRecordLength),
+        0
+    );
+    assert!(
+        status
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.chain_errors.total() == 0)
+    );
+    assert_eq!(report.final_status.skipped_records, 1);
 }
 
 #[test]
@@ -1343,11 +1494,10 @@ fn zero_mask_pcm_without_a_direct_layout_reports_that_reason() {
     lockstep.release();
     drop(engine);
     assert!(status.fault.is_none());
-    let reason = status.endpoints[0]
-        .unsupported
-        .as_deref()
-        .unwrap_or_default();
-    assert!(reason.contains("no direct layout"), "{reason:?}");
+    assert_eq!(
+        status.endpoints[0].unsupported,
+        Some(ssr_types::UnsupportedReason::DirectLayout)
+    );
 }
 
 #[test]

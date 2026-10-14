@@ -421,7 +421,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
    **합격 기준**
    - 요약의 `formats[]`가 위 표와 맞고, `byte_pos_discontinuities`, `overrun_records`, `lost_bytes`가 0
    - 높이 채널, 24비트 packed, 176.4·192 kHz, 직접 출력 16채널은 `ssr-live` 보고의 `endpoints[2].unsupported`가 `null`이고 소리가 들림. 16채널은 기본 배치 9.1.6으로 들림(6-1단계의 표)
-   - 직접 출력 24채널은 `--direct-layout`이 없으면 `endpoints[2].unsupported`가 `PCM with channel mask 0 has no direct layout for its channel count`이고, 다른 엔드포인트의 소리는 끊기지 않음. 소스의 채널 순서대로 24개 이름을 `--direct-layout 24=<이름,...>`으로 주면 `unsupported`가 `null`이고 소리가 들림
+   - 직접 출력 24채널은 `--direct-layout`이 없으면 `endpoints[2].unsupported`가 `PCM with channel mask 0 has no direct layout for its channel count`, `endpoints[2].unsupported_reason`이 `direct_layout`이고, 다른 엔드포인트의 소리는 끊기지 않음. 소스의 채널 순서대로 24개 이름을 `--direct-layout 24=<이름,...>`으로 주면 두 값이 `null`이고 소리가 들림
    - 재생기가 그 형식을 열지 못하거나 다른 형식으로 바꿔 보냈으면, 고른 형식과 재생기 쪽 메시지를 그대로 적음
 
 ## 5. 쓰기 패킷 주기 (ADR 0014)
@@ -497,12 +497,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 
 출력은 기본이 독점입니다. DAC를 다른 프로그램이 독점으로 쥐고 있거나 DAC가 독점을 거절하면 `exclusive output is unavailable: ...`로 끝나고, 공유 모드로 몰래 내려가지 않습니다. 그 프로그램을 끄고 다시 하거나, 공유로 들으려면 `--shared`를 붙입니다. `--allow-shared-fallback`을 붙이면 독점이 안 될 때만 공유로 내려가고, 보고의 `output_fell_back`이 `true`가 됩니다.
 
-보고의 `clock_strategy`는 명령행 요청을 되풀이한 값이 아니라 런타임이 시작할 때 실제로 고른 `trim` 또는 `asrc`입니다. `output_mode`(`mode`도 같음)도 실제로 연 모드입니다. `output_cadence_ratio`는 DAC가 실제로 재생한 속도를 명목 속도로 나눈 값이고 1에 가까워야 합니다. `endpoints`에는 네 슬롯의 `endpoint`, `format`, `epoch`, `unsupported`가 들어갑니다. 쓰지 않은 슬롯의 `format`이 `null`인 것은 정상이나 `unsupported`는 모든 슬롯에서 `null`이어야 합니다.
+보고의 `clock_strategy`는 명령행 요청을 되풀이한 값이 아니라 런타임이 시작할 때 실제로 고른 `trim` 또는 `asrc`입니다. `output_mode`(`mode`도 같음)도 실제로 연 모드입니다. `output_cadence_ratio`는 DAC가 실제로 재생한 속도를 명목 속도로 나눈 값이고 1에 가까워야 합니다. `endpoints`에는 네 슬롯의 `endpoint`, `format`, `epoch`, `unsupported`, `unsupported_reason`이 들어갑니다. `unsupported`는 사람이 읽는 문장이고 `unsupported_reason`은 안정된 분류입니다.
+
+| `unsupported_reason` | `unsupported` |
+| --- | --- |
+| `format` | `source format is unsupported` |
+| `source_rate` | `the source sample rate cannot be converted to the 48 kHz mix rate` |
+| `direct_layout` | `PCM with channel mask 0 has no direct layout for its channel count` |
+
+쓰지 않은 슬롯의 `format`이 `null`인 것은 정상이나 두 unsupported 값은 모든 슬롯에서 `null`이어야 합니다. 최상위 `skipped_records`는 드라이버 범위를 벗어난 엔드포인트 번호를 쓴 레코드 수이며 정상 실행에서는 0이어야 합니다.
 
 **합격 기준**
 - `underruns_while_streaming`이 0
 - `dropped_frames`, `lane_underrun_frames`, `output_overflow_frames`, `dropped_events`가 모두 0
-- `endpoints`가 네 슬롯이고 `endpoints[*].unsupported`가 모두 `null`
+- `endpoints`가 네 슬롯이고 `endpoints[*].unsupported`와 `endpoints[*].unsupported_reason`이 모두 `null`
+- `skipped_records`가 0
 - `driver.endpoints[*].lost_bytes`가 모두 0
 - `output_mode`가 요청한 모드(기본 `exclusive`)이고 `output_fell_back`이 `false`
 - `output_reconnects`, `output_cadence_faults`가 0이고, `output_cadence_ratio`가 0.98~1.02
@@ -543,7 +552,7 @@ py .\report_check.py --preset replug driver-replug.json
 - `5.0`, `5.1`, `5.1.2`, `5.1.4` 프리셋의 서라운드는 Windows 5.1처럼 뒤쪽 쌍(Lrs, Rrs)입니다. 옆 채널(SL, SR)을 쓰는 소스(ffmpeg의 5.1, 5.1.4 등)라면 이름 목록으로 적습니다.
 - 모르는 이름, 같은 자리 두 번, 채널 수와 이름 수가 다른 값은 재생을 시작하기 전에 거절합니다. `--report`의 `direct_layouts`에는 명령행으로 정한 배치만 남습니다.
 - LFE(`LFE` 또는 `LFE2`)는 한 배치에 하나만 둡니다. 둘을 넣으면 재생을 시작하기 전에 거절합니다.
-- 기본 순서가 없는 채널 수(7, 9, 11, 13, 15, 17 이상)는 배치를 정하지 않으면 재생하지 않습니다. 이때 보고의 `endpoints[*].unsupported`에 `no direct layout`이 남습니다. 자리 이름이 24개뿐이라(LFE 하나 포함) 직접 출력은 24채널까지 배치할 수 있습니다.
+- 기본 순서가 없는 채널 수(7, 9, 11, 13, 15, 17 이상)는 배치를 정하지 않으면 재생하지 않습니다. 이때 보고의 `endpoints[*].unsupported`는 `PCM with channel mask 0 has no direct layout for its channel count`, `endpoints[*].unsupported_reason`은 `direct_layout`입니다. 자리 이름이 24개뿐이라(LFE 하나 포함) 직접 출력은 24채널까지 배치할 수 있습니다.
 
 ### 6-2. 스피커로 듣기 (선택, 다채널 장비가 있을 때)
 

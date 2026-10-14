@@ -43,11 +43,11 @@ use ssr_types::{
     BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ChainErrorCounts, ChainErrorKind,
     ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault, EngineStatus, LatencyStats,
     OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener, OutputSink, PcmFormat,
-    SampleType, SourceFormat, UnderrunSnapshot,
+    SampleType, SourceFormat, UnderrunSnapshot, UnsupportedReason,
 };
 
 use crate::Chain;
-use crate::chain::{ChainConfig, ChainError, ChainEvent, Prepared};
+use crate::chain::{ChainConfig, ChainEvent, Prepared};
 use crate::{MAX_OUTPUT_CHANNELS, MIX_FRAMES};
 
 const DEFAULT_QPC_FREQUENCY: u64 = 10_000_000;
@@ -108,10 +108,6 @@ const ARRIVAL_WINDOW: usize = 8;
 const FAULT_NONE: u32 = 0;
 const FAULT_CAPTURE: u32 = 1;
 const FAULT_OUTPUT: u32 = 2;
-const UNSUPPORTED_NONE: u32 = 0;
-const UNSUPPORTED_FORMAT: u32 = 1;
-const UNSUPPORTED_SCENE_RATE: u32 = 2;
-const UNSUPPORTED_DIRECT_LAYOUT: u32 = 3;
 
 /// Which real-time thread a [`ThreadHook`] runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +256,7 @@ pub enum EngineEvent {
         endpoint: u16,
         epoch: u32,
         format: SourceFormat,
+        unsupported: Option<UnsupportedReason>,
     },
     /// Blocks are being dropped until an output is prepared.
     NeedsPrepared,
@@ -654,14 +651,14 @@ impl EndpointShared {
             format_b: AtomicU64::new(0),
             format_c: AtomicU64::new(0),
             epoch: AtomicU32::new(0),
-            unsupported: AtomicU32::new(UNSUPPORTED_NONE),
+            unsupported: AtomicU32::new(0),
             volume_bits: AtomicU32::new(0.0_f32.to_bits()),
             muted: AtomicBool::new(false),
             chain_errors: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
-    fn publish(&self, epoch: u32, format: SourceFormat, unsupported: u32) {
+    fn publish(&self, epoch: u32, format: SourceFormat, unsupported: Option<UnsupportedReason>) {
         self.format_seq.fetch_add(1, Ordering::AcqRel);
         let (tag, a, b, c) = encode_format(format);
         self.format_tag.store(tag, Ordering::Relaxed);
@@ -669,7 +666,10 @@ impl EndpointShared {
         self.format_b.store(b, Ordering::Relaxed);
         self.format_c.store(c, Ordering::Relaxed);
         self.epoch.store(epoch, Ordering::Relaxed);
-        self.unsupported.store(unsupported, Ordering::Relaxed);
+        self.unsupported.store(
+            unsupported.map_or(0, UnsupportedReason::code),
+            Ordering::Relaxed,
+        );
         self.format_seq.fetch_add(1, Ordering::Release);
     }
 
@@ -693,7 +693,15 @@ impl EndpointShared {
         ChainErrorCounts::from_fn(|kind| self.chain_errors[kind.index()].load(Ordering::Relaxed))
     }
 
-    fn read(&self) -> (Option<SourceFormat>, u32, u32, f32, bool) {
+    fn read(
+        &self,
+    ) -> (
+        Option<SourceFormat>,
+        u32,
+        Option<UnsupportedReason>,
+        f32,
+        bool,
+    ) {
         loop {
             let before = self.format_seq.load(Ordering::Acquire);
             if before & 1 != 0 {
@@ -714,7 +722,7 @@ impl EndpointShared {
                 return (
                     decode_format(tag, a, b, c),
                     epoch,
-                    unsupported,
+                    UnsupportedReason::from_code(unsupported),
                     volume_db,
                     muted,
                 );
@@ -769,6 +777,7 @@ struct Shared {
     /// the crossing ring ([`ArrivalPeak`]); the output primes for it.
     arrival_frames: AtomicU64,
     dropped_frames: AtomicU64,
+    skipped_records: AtomicU64,
     volume_transitions_coalesced: AtomicU64,
     output_overflow_frames: AtomicU64,
     idle_blocks: AtomicU64,
@@ -823,6 +832,7 @@ impl Shared {
             lane_underrun_frames: AtomicU64::new(0),
             arrival_frames: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
+            skipped_records: AtomicU64::new(0),
             volume_transitions_coalesced: AtomicU64::new(0),
             output_overflow_frames: AtomicU64::new(0),
             idle_blocks: AtomicU64::new(0),
@@ -947,16 +957,22 @@ impl Shared {
         }
     }
 
-    fn publish_format(&self, endpoint: u16, epoch: u32, format: SourceFormat, unsupported: u32) {
+    fn publish_format(
+        &self,
+        endpoint: u16,
+        epoch: u32,
+        format: SourceFormat,
+        unsupported: Option<UnsupportedReason>,
+    ) {
         if let Some(status) = self.endpoints.get(endpoint as usize) {
             status.publish(epoch, format, unsupported);
         }
     }
 
-    fn publish_unsupported(&self, endpoint: u16, code: u32) {
+    fn publish_unsupported(&self, endpoint: u16, reason: UnsupportedReason) {
         if let Some(status) = self.endpoints.get(endpoint as usize) {
             status.format_seq.fetch_add(1, Ordering::AcqRel);
-            status.unsupported.store(code, Ordering::Relaxed);
+            status.unsupported.store(reason.code(), Ordering::Relaxed);
             status.format_seq.fetch_add(1, Ordering::Release);
         }
     }
@@ -988,17 +1004,7 @@ impl Shared {
 
     fn read_endpoint(&self, endpoint: usize) -> EndpointStatus {
         let status = &self.endpoints[endpoint];
-        let (format, epoch, unsupported_code, volume_db, muted) = status.read();
-        let unsupported = match unsupported_code {
-            UNSUPPORTED_FORMAT => Some("source format is unsupported".to_owned()),
-            UNSUPPORTED_SCENE_RATE => {
-                Some("scene rate cannot be converted to the 48 kHz mix rate".to_owned())
-            }
-            UNSUPPORTED_DIRECT_LAYOUT => Some(
-                "PCM with channel mask 0 has no direct layout for its channel count".to_owned(),
-            ),
-            _ => None,
-        };
+        let (format, epoch, unsupported, volume_db, muted) = status.read();
         EndpointStatus {
             format,
             epoch,
@@ -1071,6 +1077,7 @@ impl Shared {
         EngineStatus {
             endpoints: std::array::from_fn(|endpoint| self.read_endpoint(endpoint)),
             unattributed_chain_errors: self.read_unattributed_chain_errors(),
+            skipped_records: self.skipped_records.load(Ordering::Acquire),
             latency: self.latency(),
             ring_level_ms: f32::from_bits(self.ring_level_bits.load(Ordering::Acquire)),
             underruns: self.underruns.load(Ordering::Acquire),
@@ -1125,6 +1132,7 @@ enum RtEvent {
         endpoint: u16,
         epoch: u32,
         format: SourceFormat,
+        unsupported: Option<UnsupportedReason>,
     },
     NeedsPrepared,
     Overrun {
@@ -1155,10 +1163,12 @@ impl RtEvent {
                 endpoint,
                 epoch,
                 format,
+                unsupported,
             } => EngineEvent::FormatChanged {
                 endpoint,
                 epoch,
                 format,
+                unsupported,
             },
             Self::NeedsPrepared => EngineEvent::NeedsPrepared,
             Self::Overrun { lost_bytes } => EngineEvent::Overrun { lost_bytes },
@@ -1355,6 +1365,9 @@ fn capture_rt_step<C: CaptureSource>(
         .dropped_frames
         .store(chain.dropped_frames(), Ordering::Release);
     shared
+        .skipped_records
+        .store(chain.skipped_records(), Ordering::Release);
+    shared
         .volume_transitions_coalesced
         .store(chain.volume_transitions_coalesced(), Ordering::Release);
     CaptureStep::Continue
@@ -1472,6 +1485,9 @@ fn capture_thread_main<C: CaptureSource>(
         .dropped_frames
         .store(chain.dropped_frames(), Ordering::Release);
     shared
+        .skipped_records
+        .store(chain.skipped_records(), Ordering::Release);
+    shared
         .volume_transitions_coalesced
         .store(chain.volume_transitions_coalesced(), Ordering::Release);
     shared.capture_done.store(true, Ordering::Release);
@@ -1498,7 +1514,7 @@ fn handle_chain_event(
             endpoint,
             epoch,
             format,
-            support,
+            unsupported,
         } => {
             let previous_epoch = shared
                 .endpoints
@@ -1509,17 +1525,12 @@ fn handle_chain_event(
             if previous_epoch != epoch {
                 shared.request_latency_reset();
             }
-            let unsupported = match support {
-                crate::chain::FormatSupport::Supported => UNSUPPORTED_NONE,
-                crate::chain::FormatSupport::UnsupportedFormat => UNSUPPORTED_FORMAT,
-                crate::chain::FormatSupport::UnsupportedSceneRate => UNSUPPORTED_SCENE_RATE,
-                crate::chain::FormatSupport::UnsupportedDirectLayout => UNSUPPORTED_DIRECT_LAYOUT,
-            };
             shared.publish_format(endpoint, epoch, format, unsupported);
             events.push(RtEvent::FormatChanged {
                 endpoint,
                 epoch,
                 format,
+                unsupported,
             });
         }
         ChainEvent::NeedsPrepared => events.push(RtEvent::NeedsPrepared),
@@ -1532,21 +1543,15 @@ fn handle_chain_event(
             gain,
             muted,
         } => shared.publish_volume(endpoint, gain, muted),
-        ChainEvent::Error { endpoint, error } => {
-            shared.note_chain_error(endpoint, crate::chain::chain_error_kind(&error));
-            if let Some(endpoint) = endpoint {
-                match error {
-                    ChainError::UnsupportedSceneRate(_) => {
-                        shared.publish_unsupported(endpoint, UNSUPPORTED_SCENE_RATE);
-                    }
-                    ChainError::Decode(decode::DecodeError::NoDirectLayout(_)) => {
-                        shared.publish_unsupported(endpoint, UNSUPPORTED_DIRECT_LAYOUT);
-                    }
-                    _ if is_unsupported(&error) => {
-                        shared.publish_unsupported(endpoint, UNSUPPORTED_FORMAT);
-                    }
-                    _ => {}
-                }
+        ChainEvent::Error {
+            endpoint,
+            error,
+            repeat: _,
+        } => {
+            let kind = crate::chain::chain_error_kind(&error);
+            shared.note_chain_error(endpoint, kind);
+            if let (Some(endpoint), Some(reason)) = (endpoint, kind.unsupported_reason()) {
+                shared.publish_unsupported(endpoint, reason);
             }
         }
     }
@@ -1809,16 +1814,6 @@ fn wait_for_stop(shared: &Shared, duration: Duration) -> bool {
         remaining = remaining.saturating_sub(step);
     }
     shared.stop.load(Ordering::Acquire)
-}
-
-fn is_unsupported(error: &ChainError) -> bool {
-    matches!(
-        error,
-        ChainError::Decode(decode::DecodeError::UnsupportedCodec(_))
-            | ChainError::Decode(decode::DecodeError::Unsupported { .. })
-            | ChainError::Decode(decode::DecodeError::NoDirectLayout(_))
-            | ChainError::UnsupportedSceneRate(_)
-    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5967,7 +5962,7 @@ mod tests {
                 endpoint: 1,
                 epoch: 1,
                 format,
-                support: crate::chain::FormatSupport::Supported,
+                unsupported: None,
             },
             &mut { audio },
             &mut { timing },
@@ -5988,7 +5983,7 @@ mod tests {
                 endpoint: 0,
                 epoch: 1,
                 format,
-                support: crate::chain::FormatSupport::Supported,
+                unsupported: None,
             },
             &mut audio,
             &mut timing,
@@ -6052,10 +6047,10 @@ mod tests {
         ];
         for (epoch, format) in formats.into_iter().enumerate() {
             let endpoint = epoch % ENGINE_ENDPOINTS;
-            shared.publish_format(endpoint as u16, epoch as u32, format, UNSUPPORTED_NONE);
+            shared.publish_format(endpoint as u16, epoch as u32, format, None);
             assert_eq!(
                 shared.endpoints[endpoint].read(),
-                (Some(format), epoch as u32, UNSUPPORTED_NONE, 0.0, false)
+                (Some(format), epoch as u32, None, 0.0, false)
             );
             assert_eq!(shared.status().endpoints[endpoint].format, Some(format));
         }
@@ -6081,7 +6076,7 @@ mod tests {
                 encoded_channels: 0xfedc_ba98,
             }),
         ];
-        shared.publish_format(2, 0, formats[0], UNSUPPORTED_NONE);
+        shared.publish_format(2, 0, formats[0], None);
         let writer = Arc::clone(&shared);
         let handle = std::thread::spawn(move || {
             let mut state = 0x1234_5678_u32;
@@ -6100,9 +6095,9 @@ mod tests {
                 endpoint.epoch.store(index as u32, Ordering::Relaxed);
                 endpoint.unsupported.store(
                     if index == 0 {
-                        UNSUPPORTED_NONE
+                        0
                     } else {
-                        UNSUPPORTED_FORMAT
+                        UnsupportedReason::Format.code()
                     },
                     Ordering::Relaxed,
                 );
@@ -6124,8 +6119,15 @@ mod tests {
             }
             let observed = shared.endpoints[2].read();
             assert!(
-                observed == (Some(formats[0]), 0, UNSUPPORTED_NONE, 0.0, false)
-                    || observed == (Some(formats[1]), 1, UNSUPPORTED_FORMAT, -6.0, true,),
+                observed == (Some(formats[0]), 0, None, 0.0, false)
+                    || observed
+                        == (
+                            Some(formats[1]),
+                            1,
+                            Some(UnsupportedReason::Format),
+                            -6.0,
+                            true,
+                        ),
                 "torn endpoint state: {observed:?}"
             );
         }

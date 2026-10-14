@@ -55,7 +55,7 @@ pub fn channel_layout_preset(name: &str) -> Option<&'static [Speaker]> {
 pub use scene::{MAX_OBJECTS, Object, Position, SceneBlock};
 pub use status::{
     ChainErrorCounts, ChainErrorKind, ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault,
-    EngineStatus, LatencyStats, UnderrunSnapshot,
+    EngineStatus, LatencyStats, UnderrunSnapshot, UnsupportedReason,
 };
 
 /// The fixed scene sample rate every decoder produces.

@@ -27,6 +27,50 @@ pub enum ChainErrorKind {
     MissingDirectLayout,
 }
 
+/// Why an entrance's current source format cannot be decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UnsupportedReason {
+    Format = 1,
+    SourceRate = 2,
+    DirectLayout = 3,
+}
+
+impl UnsupportedReason {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Format => "format",
+            Self::SourceRate => "source_rate",
+            Self::DirectLayout => "direct_layout",
+        }
+    }
+
+    pub const fn code(self) -> u32 {
+        self as u32
+    }
+
+    pub const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::Format),
+            2 => Some(Self::SourceRate),
+            3 => Some(Self::DirectLayout),
+            _ => None,
+        }
+    }
+}
+
+impl core::fmt::Display for UnsupportedReason {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::Format => "source format is unsupported",
+            Self::SourceRate => "the source sample rate cannot be converted to the 48 kHz mix rate",
+            Self::DirectLayout => {
+                "PCM with channel mask 0 has no direct layout for its channel count"
+            }
+        })
+    }
+}
+
 impl ChainErrorKind {
     pub const ALL: [Self; 11] = [
         Self::UnsupportedCodec,
@@ -61,6 +105,21 @@ impl ChainErrorKind {
 
     pub const fn index(self) -> usize {
         self as usize
+    }
+
+    pub const fn unsupported_reason(self) -> Option<UnsupportedReason> {
+        match self {
+            Self::UnsupportedCodec | Self::UnsupportedFormat => Some(UnsupportedReason::Format),
+            Self::UnsupportedSceneRate => Some(UnsupportedReason::SourceRate),
+            Self::MissingDirectLayout => Some(UnsupportedReason::DirectLayout),
+            Self::CorruptPayload
+            | Self::MissingFormat
+            | Self::WrongRoute
+            | Self::TruncatedRecord
+            | Self::BadRecordLength
+            | Self::BadFormatRecord
+            | Self::BadVolumeRecord => None,
+        }
     }
 }
 
@@ -127,7 +186,7 @@ pub struct EndpointStatus {
     pub muted: bool,
     /// Why this entrance's current format cannot be decoded. This is local to
     /// the entrance and never faults the other entrances.
-    pub unsupported: Option<String>,
+    pub unsupported: Option<UnsupportedReason>,
     /// Every chain error attributed to this entrance, by stable kind.
     pub chain_errors: ChainErrorCounts,
 }
@@ -157,6 +216,8 @@ pub struct EngineStatus {
     pub endpoints: [EndpointStatus; ENGINE_ENDPOINTS],
     /// Chain errors whose malformed record did not identify an entrance.
     pub unattributed_chain_errors: ChainErrorCounts,
+    /// Records naming an endpoint beyond the driver's range.
+    pub skipped_records: u64,
     pub latency: LatencyStats,
     /// Lowest crossing-ring level over the last control window, in
     /// milliseconds of rendered signal: the margin the clock controller holds
@@ -206,4 +267,55 @@ pub struct EngineStatus {
     /// Current clock correction in ppm (trim or resampling ratio).
     pub clock_ppm: f64,
     pub fault: Option<EngineFault>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChainErrorKind, UnsupportedReason};
+
+    #[test]
+    fn unsupported_reason_codes_names_and_messages_are_stable() {
+        for (reason, code, name, message) in [
+            (
+                UnsupportedReason::Format,
+                1,
+                "format",
+                "source format is unsupported",
+            ),
+            (
+                UnsupportedReason::SourceRate,
+                2,
+                "source_rate",
+                "the source sample rate cannot be converted to the 48 kHz mix rate",
+            ),
+            (
+                UnsupportedReason::DirectLayout,
+                3,
+                "direct_layout",
+                "PCM with channel mask 0 has no direct layout for its channel count",
+            ),
+        ] {
+            assert_eq!(reason.code(), code);
+            assert_eq!(UnsupportedReason::from_code(code), Some(reason));
+            assert_eq!(reason.name(), name);
+            assert_eq!(reason.to_string(), message);
+        }
+        assert_eq!(UnsupportedReason::from_code(0), None);
+        assert_eq!(UnsupportedReason::from_code(4), None);
+    }
+
+    #[test]
+    fn every_chain_error_has_the_expected_unsupported_reason() {
+        for kind in ChainErrorKind::ALL {
+            let expected = match kind {
+                ChainErrorKind::UnsupportedCodec | ChainErrorKind::UnsupportedFormat => {
+                    Some(UnsupportedReason::Format)
+                }
+                ChainErrorKind::UnsupportedSceneRate => Some(UnsupportedReason::SourceRate),
+                ChainErrorKind::MissingDirectLayout => Some(UnsupportedReason::DirectLayout),
+                _ => None,
+            };
+            assert_eq!(kind.unsupported_reason(), expected, "{kind:?}");
+        }
+    }
 }

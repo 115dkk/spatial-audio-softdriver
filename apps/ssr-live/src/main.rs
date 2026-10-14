@@ -1197,7 +1197,14 @@ mod platform {
                         endpoint,
                         epoch,
                         format,
-                    } => eprintln!("endpoint {endpoint} epoch {epoch}: {format:?}"),
+                        unsupported,
+                    } => {
+                        if let Some(reason) = unsupported {
+                            eprintln!("endpoint {endpoint} epoch {epoch}: {format:?} ({reason})");
+                        } else {
+                            eprintln!("endpoint {endpoint} epoch {epoch}: {format:?}");
+                        }
+                    }
                     EngineEvent::NeedsPrepared => needs_prepared = true,
                     EngineEvent::Overrun { lost_bytes } => {
                         eprintln!("overrun: {lost_bytes} bytes lost");
@@ -1355,7 +1362,8 @@ mod platform {
                         "endpoint": endpoint,
                         "format": status.format.map(|format| format!("{format:?}")),
                         "epoch": status.epoch,
-                        "unsupported": status.unsupported,
+                        "unsupported": status.unsupported.map(|reason| reason.to_string()),
+                        "unsupported_reason": status.unsupported.map(ssr_types::UnsupportedReason::name),
                         "chain_errors": chain_errors_json(status.chain_errors),
                     })
                 })
@@ -1404,6 +1412,7 @@ mod platform {
                 "output_overflow_frames": report.output_overflow_frames,
                 "idle_blocks": report.idle_blocks,
                 "dropped_events": report.dropped_events,
+                "skipped_records": report.final_status.skipped_records,
                 "endpoints": endpoints,
                 "chain_errors": {
                     "unattributed": chain_errors_json(report.final_status.unattributed_chain_errors),

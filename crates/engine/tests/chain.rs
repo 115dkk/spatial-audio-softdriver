@@ -300,7 +300,7 @@ fn repeated_format_initializes_once_and_subsequent_restatements_are_noops() {
 }
 
 #[test]
-fn repeated_unsupported_format_is_reported_only_once() {
+fn repeated_format_record_is_processed_only_once() {
     let format = pcm_format(12_345, 2, 3);
     let mut chain = Chain::new(ChainConfig::default());
     let mut errors = 0;
@@ -1994,7 +1994,10 @@ fn low_rate_pcm_chunking_always_makes_progress() {
     let mut chain = Chain::with_qpc_frequency(ChainConfig::default(), 1_000_000);
     let mut errors = 0;
     chain.push_records(&stream, &mut |event| {
-        if let ChainEvent::Error { endpoint, error } = event {
+        if let ChainEvent::Error {
+            endpoint, error, ..
+        } = event
+        {
             assert_eq!(endpoint, Some(ENDPOINT_PRIMARY));
             assert_eq!(error, engine::ChainError::UnsupportedSceneRate(50));
             errors += 1;
@@ -2975,95 +2978,89 @@ fn unknown_encoded_rates_reach_the_selected_bitstream_decoders() {
     let payload = &fixture[..2560];
     let mut ddp_burst = Vec::new();
     bitstream::frame_burst(bitstream::DataType::Eac3, payload, 24_576, &mut ddp_burst);
-
-    for (codec, data_type, payload, expect_block) in [
-        (
-            BitstreamCodec::Eac3,
-            bitstream::DataType::Eac3,
-            payload,
-            true,
-        ),
-        (
-            BitstreamCodec::Mat21,
-            bitstream::DataType::Mat,
-            &[][..],
-            false,
-        ),
-    ] {
-        let format = bitstream_format(codec, 0);
-        let mut chain = Chain::new(ChainConfig::default());
-        let mut events = Vec::new();
-        chain.push_record(
-            Record::FormatChange {
-                endpoint: ENDPOINT_PRIMARY,
-                epoch: 7,
-                repeat: false,
-                qpc: 0,
-                format,
+    let format = bitstream_format(BitstreamCodec::Eac3, 0);
+    let mut chain = Chain::new(ChainConfig::default());
+    let mut events = Vec::new();
+    chain.push_record(
+        Record::FormatChange {
+            endpoint: ENDPOINT_PRIMARY,
+            epoch: 7,
+            repeat: false,
+            qpc: 0,
+            format,
+        },
+        &mut |event| match event {
+            ChainEvent::FormatChanged { .. } => events.push("format"),
+            ChainEvent::Error { error, .. } => match error {
+                engine::ChainError::UnsupportedSceneRate(_) => events.push("rate"),
+                engine::ChainError::Decode(_) => events.push("decode"),
+                engine::ChainError::Record(_) => events.push("record"),
             },
-            &mut |event| match event {
-                ChainEvent::FormatChanged { .. } => events.push("format"),
-                ChainEvent::Error { error, .. } => match error {
-                    engine::ChainError::UnsupportedSceneRate(_) => events.push("rate"),
-                    engine::ChainError::Decode(_) => events.push("decode"),
-                    engine::ChainError::Record(_) => events.push("record"),
-                },
-                _ => {}
-            },
-        );
-        assert_eq!(events, ["format"]);
+            _ => {}
+        },
+    );
+    assert_eq!(events, ["format"]);
 
-        if codec == BitstreamCodec::Eac3 {
-            let mut needs_prepared = 0;
-            let mut errors = 0;
-            chain.push_record(
-                Record::Data {
-                    endpoint: ENDPOINT_PRIMARY,
-                    epoch: 7,
-                    flags: 0,
-                    pos: 0,
-                    qpc: 123,
-                    qpc_written: 0,
-                    bytes: &ddp_burst,
-                },
-                &mut |event| match event {
-                    ChainEvent::NeedsPrepared => needs_prepared += 1,
-                    ChainEvent::Error { .. } => errors += 1,
-                    _ => {}
-                },
-            );
-            assert!(expect_block);
-            assert_eq!(needs_prepared, 1);
-            assert_eq!(errors, 0);
-        } else {
-            let mut burst = Vec::new();
-            bitstream::frame_burst(data_type, payload, 8, &mut burst);
-            let mut saw_decode_error = false;
-            chain.push_record(
-                Record::Data {
-                    endpoint: ENDPOINT_PRIMARY,
-                    epoch: 7,
-                    flags: 0,
-                    pos: 0,
-                    qpc: 123,
-                    qpc_written: 0,
-                    bytes: &burst,
-                },
-                &mut |event| {
-                    if matches!(
-                        event,
-                        ChainEvent::Error {
-                            error: engine::ChainError::Decode(_),
-                            ..
-                        }
-                    ) {
-                        saw_decode_error = true;
-                    }
-                },
-            );
-            assert!(saw_decode_error, "MAT reached its planned decoder");
-        }
-    }
+    let mut needs_prepared = 0;
+    let mut errors = 0;
+    chain.push_record(
+        Record::Data {
+            endpoint: ENDPOINT_PRIMARY,
+            epoch: 7,
+            flags: 0,
+            pos: 0,
+            qpc: 123,
+            qpc_written: 0,
+            bytes: &ddp_burst,
+        },
+        &mut |event| match event {
+            ChainEvent::NeedsPrepared => needs_prepared += 1,
+            ChainEvent::Error { .. } => errors += 1,
+            _ => {}
+        },
+    );
+    assert_eq!(needs_prepared, 1);
+    assert_eq!(errors, 0);
+}
+
+#[test]
+fn unavailable_mat_is_unsupported_on_the_format_event_and_ignores_data() {
+    let format = bitstream_format(BitstreamCodec::Mat21, 0);
+    let mut chain = Chain::new(ChainConfig::default());
+    let mut reason = None;
+    let mut errors = 0;
+    chain.push_record(
+        Record::FormatChange {
+            endpoint: ENDPOINT_PRIMARY,
+            epoch: 7,
+            repeat: false,
+            qpc: 0,
+            format,
+        },
+        &mut |event| match event {
+            ChainEvent::FormatChanged { unsupported, .. } => reason = unsupported,
+            ChainEvent::Error { .. } => errors += 1,
+            _ => {}
+        },
+    );
+    assert_eq!(reason, Some(ssr_types::UnsupportedReason::Format));
+    assert_eq!(errors, 1);
+
+    let mut burst = Vec::new();
+    bitstream::frame_burst(bitstream::DataType::Mat, &[], 8, &mut burst);
+    chain.push_record(
+        Record::Data {
+            endpoint: ENDPOINT_PRIMARY,
+            epoch: 7,
+            flags: 0,
+            pos: 0,
+            qpc: 123,
+            qpc_written: 0,
+            bytes: &burst,
+        },
+        &mut |_| errors += 1,
+    );
+    assert_eq!(errors, 1);
 }
 
 #[test]
@@ -3542,7 +3539,19 @@ fn endpoint_mask_selects_only_low_endpoint_bits() {
 }
 
 #[test]
-fn endpoint_filter_ignores_unselected_endpoint_without_counting_it_invalid() {
+fn filtered_malformed_records_are_attributed_and_out_of_range_records_are_skipped() {
+    fn malformed_stop(endpoint: u16) -> Vec<u8> {
+        let mut stream = vec![0; 64];
+        let mut writer = RecordWriter::new(&mut stream);
+        writer.set_endpoint(endpoint);
+        assert!(writer.stream_stop(1, 2));
+        let length = writer.len();
+        // A one-byte payload is a bad length for a stop record; the byte is there.
+        assert!(ssr_abi::edit_header(&mut stream, |header| header.len = 1));
+        stream.resize(length + 1, 0);
+        stream
+    }
+
     let mut chain = Chain::new(ChainConfig {
         endpoints: engine::EndpointFilter::Only(ENDPOINT_PRIMARY),
         ..ChainConfig::default()
@@ -3570,6 +3579,8 @@ fn endpoint_filter_ignores_unselected_endpoint_without_counting_it_invalid() {
         },
         &mut |_| events += 1,
     );
+    // Well-formed records of an endpoint outside the filter are not this
+    // engine's to decode, and nothing about them is invalid.
     assert_eq!(events, 0);
     assert_eq!(chain.skipped_records(), 0);
 
@@ -3585,17 +3596,26 @@ fn endpoint_filter_ignores_unselected_endpoint_without_counting_it_invalid() {
     assert_eq!(events, 0);
     assert_eq!(chain.skipped_records(), 1);
 
-    let mut stream = vec![0; 64];
-    let mut writer = RecordWriter::new(&mut stream);
-    writer.set_endpoint(ENDPOINT_SECOND);
-    assert!(writer.stream_stop(1, 2));
-    let length = writer.len();
-    // Turn the endpoint-1 stop into a bad-length record while retaining its header.
-    stream[32..36].copy_from_slice(&1_u32.to_le_bytes());
-    stream.resize(length + 1, 0);
-    chain.push_records(&stream, &mut |_| events += 1);
-    assert_eq!(events, 0);
+    let malformed_endpoint_two = malformed_stop(2);
+    let mut repeats = Vec::new();
+    for _ in 0..2 {
+        chain.push_records(&malformed_endpoint_two, &mut |event| match event {
+            ChainEvent::Error {
+                endpoint: Some(2),
+                error: engine::ChainError::Record(AbiError::BadLength { endpoint: 2, .. }),
+                repeat,
+            } => repeats.push(repeat),
+            other => panic!("unexpected event: {other:?}"),
+        });
+    }
+    assert_eq!(repeats, [false, true]);
+    assert_eq!(chain.suppressed_errors(), 1);
     assert_eq!(chain.skipped_records(), 1);
+
+    let malformed_endpoint_seven = malformed_stop(7);
+    chain.push_records(&malformed_endpoint_seven, &mut |_| events += 1);
+    assert_eq!(events, 0);
+    assert_eq!(chain.skipped_records(), 2);
 }
 
 #[test]
