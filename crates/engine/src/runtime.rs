@@ -1982,7 +1982,18 @@ fn output_thread_main<O: OutputOpener>(
         if let Some(hook) = &config.rt_event {
             hook(RtLoopEvent::OutputEnd);
         }
-        let mut step = step.expect("the real-time scope must run its closure exactly once");
+        let mut step = output.end_before_reopen(
+            step.expect("the real-time scope must run its closure exactly once"),
+        );
+        if output.ended() {
+            draining_reopen = None;
+            if let OutputStep::Lost(error) = &step {
+                // Nothing is left to play, so there is nothing to reconnect for.
+                shared.publish_output_error(&error.to_string());
+                output.events.fault(FAULT_OUTPUT, RtEvent::OutputFault);
+                break;
+            }
+        }
         if draining_reopen.is_none() {
             let reopen = match step {
                 OutputStep::ChangeLayout(layout) => Some(ReopenStep::ChangeLayout(layout)),
@@ -2337,21 +2348,6 @@ impl OutputState {
                 self.priming = false;
             }
         }
-        if mode == ClockMode::Asrc
-            && self.asrc_tail_pending
-            && self.tail_periods == 0
-            && self.shared.capture_done.load(Ordering::Acquire)
-            && self.drained()
-        {
-            // The end of capture became visible while the device asked for
-            // this period, after the take that emptied the ring went out: the
-            // resampler's tail goes here instead of an empty period.
-            self.plan_sent_period_tail();
-            self.fill_tail_period(buffer);
-            self.tail_periods = self.tail_periods.saturating_sub(1);
-            return;
-        }
-
         let frames = buffer.len() / self.channels;
         let layout_frames = self.current_layout_frames();
         let marker_frames = self.queued_frames();
@@ -2368,6 +2364,10 @@ impl OutputState {
             produced_frames: 0,
             since_block_ms: 0.0,
         };
+        // Read once, just before the take: every decision about how this
+        // period ends uses the same reading. Capture finishing after it is a
+        // source that was late for this period.
+        let capture_done = self.shared.capture_done.load(Ordering::Acquire);
         let produced = match mode {
             ClockMode::Trim => {
                 let output_frames = frames.min(layout_frames);
@@ -2379,8 +2379,7 @@ impl OutputState {
                 )
             }
             ClockMode::Asrc => {
-                self.asrc.ending =
-                    at_layout_boundary || self.shared.capture_done.load(Ordering::Acquire);
+                self.asrc.ending = at_layout_boundary || capture_done;
                 self.asrc.render(
                     &mut self.audio,
                     &mut buffer[..frames * self.channels],
@@ -2395,11 +2394,28 @@ impl OutputState {
         if mode == ClockMode::Asrc && produced.source_frames != 0 {
             self.asrc_tail_pending = self.asrc.drain_periods() != 0;
         }
+        // The stream ended here: nothing more is coming, so a short period is
+        // its end, not a source falling behind.
+        let stream_ended = capture_done && self.drained();
+        if stream_ended
+            && mode == ClockMode::Asrc
+            && produced.output_frames == 0
+            && self.asrc_tail_pending
+            && self.tail_periods == 0
+        {
+            // The take that emptied the ring already went out (the end was not
+            // visible yet), so the resampler's tail goes in this period.
+            self.plan_sent_period_tail();
+            self.fill_tail_period(buffer);
+            self.tail_periods = self.tail_periods.saturating_sub(1);
+            return;
+        }
         let layout_ended = at_layout_boundary && produced.source_frames >= layout_frames;
+        // Only a resampler that consumed input owes a tail.
         let drains_asrc = mode == ClockMode::Asrc
+            && self.asrc_tail_pending
             && self.asrc.drain_periods() != 0
-            && (layout_ended
-                || (self.shared.capture_done.load(Ordering::Acquire) && self.audio.slots() == 0));
+            && (layout_ended || stream_ended);
         if drains_asrc {
             self.prepare_asrc_drain_fade(Some((
                 produced.output_frames,
@@ -2418,7 +2434,7 @@ impl OutputState {
                     self.apply_fade_out(buffer, produced.output_frames);
                 }
             }
-            if !layout_ended {
+            if !layout_ended && !stream_ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
                 self.shared.publish_underrun(UnderrunSnapshot {
                     produced_frames: produced.output_frames as u32,
@@ -2837,6 +2853,8 @@ impl OutputState {
         self.asrc = AsrcClock::new(self.period_frames, self.device_rate, self.channels);
         let scene_rate = self.shared.scene_rate.load(Ordering::Acquire);
         self.asrc.reset(scene_rate, self.device_rate);
+        self.asrc_tail_pending = false;
+        self.tail_periods = 0;
         self.shared
             .output_overflow_frames
             .fetch_add(frames, Ordering::Relaxed);
@@ -2939,6 +2957,18 @@ impl OutputState {
         self.audio.slots() == 0 && self.asrc.buffered_frames() == 0
     }
 
+    /// Once capture has ended and every frame is rendered, nothing is left to
+    /// play on a reopened sink, so a layout or cadence reopen gives way to
+    /// finishing (the tail still owed goes to the current sink).
+    fn end_before_reopen(&self, step: OutputStep) -> OutputStep {
+        match step {
+            OutputStep::ChangeLayout(_) | OutputStep::GrowCadence(_) if self.ended() => {
+                OutputStep::Continue
+            }
+            step => step,
+        }
+    }
+
     /// Capture has ended and every frame it produced has been rendered.
     fn ended(&self) -> bool {
         self.shared.capture_started.load(Ordering::Acquire)
@@ -2985,11 +3015,9 @@ impl OutputState {
 
     fn begin_reopen_tail(&mut self) -> bool {
         self.asrc.freeze_ratio();
-        // A tail already written in full (the end of capture came first) is
-        // not planned again.
-        if self.strategy_mode == ClockMode::Asrc
-            && self.tail_periods == 0
-            && !self.drain_fade_prepared
+        // Only input the resampler consumed and has not drained yet owes a
+        // tail; one already written in full is not planned again.
+        if self.strategy_mode == ClockMode::Asrc && self.tail_periods == 0 && self.asrc_tail_pending
         {
             self.plan_sent_period_tail();
         }
@@ -4828,6 +4856,8 @@ mod tests {
             );
             assert_eq!(rendered.output_frames, period_frames);
         }
+        // What fill records after a take the resampler consumed.
+        output.asrc_tail_pending = true;
 
         assert!(output.begin_reopen_tail());
         assert_eq!(output.drain_fade_lead_frames, 0);
@@ -5183,6 +5213,109 @@ mod tests {
             "the interrupted tail stepped {step}, above the tone bound {}",
             tone_step + 0.05
         );
+    }
+
+    fn ended_output(mode: ClockMode, frames: usize) -> (OutputState, Arc<Shared>) {
+        let shared = Arc::new(Shared::new());
+        shared.scene_rate.store(48_000, Ordering::Release);
+        shared.clock_mode.store(mode.as_u32(), Ordering::Release);
+        shared.capture_started.store(true, Ordering::Release);
+        shared.capture_input_ended.store(true, Ordering::Release);
+        shared.capture_done.store(true, Ordering::Release);
+        let (mut audio_in, audio) = RingBuffer::<f32>::new(4_096 * 2);
+        let (mut timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
+        let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
+        let device_rate = if mode == ClockMode::Trim {
+            48_000
+        } else {
+            44_100
+        };
+        let mut output = OutputState::new(
+            audio,
+            timing,
+            device_rate,
+            480,
+            0.0,
+            DEFAULT_QPC_FREQUENCY,
+            events,
+            Arc::clone(&shared),
+            OutputLayout::STEREO,
+            4_096,
+        );
+        output.asrc.reset(48_000, device_rate);
+        output.fade_in_remaining = 0;
+        for frame in 0..frames {
+            let sample = (2.0 * std::f32::consts::PI * 997.0 * frame as f32 / 48_000.0).sin();
+            audio_in.push(sample).unwrap();
+            audio_in.push(sample).unwrap();
+        }
+        if frames != 0 {
+            timing_in
+                .push(TimingMarker {
+                    stream_frame: 0,
+                    frames: frames as u32,
+                    source_qpc: 0,
+                    rate: 48_000,
+                    layout: OutputLayout::STEREO,
+                })
+                .unwrap();
+        }
+        (output, shared)
+    }
+
+    #[test]
+    fn a_stream_that_ends_before_any_audio_owes_no_tail_and_no_underrun() {
+        let (mut output, shared) = ended_output(ClockMode::Asrc, 0);
+        assert!(output.asrc.drain_periods() != 0);
+        let mut period = vec![1.0; 480 * 2];
+        output.fill(&mut period);
+        assert!(period.iter().all(|sample| *sample == 0.0));
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
+        assert_eq!(output.tail_periods, 0);
+        assert!(!output.begin_reopen_tail(), "a reopen invented a tail");
+        let mut sink = TailSink {
+            periods: Vec::new(),
+            period_frames: 480,
+        };
+        output.write_terminal_tail(&mut sink).unwrap();
+        assert!(sink.periods.is_empty(), "the end invented a tail");
+    }
+
+    #[test]
+    fn a_trim_stream_that_ends_inside_a_period_plays_its_last_frames_without_an_underrun() {
+        let (mut output, shared) = ended_output(ClockMode::Trim, 100);
+        let mut period = vec![0.0; 480 * 2];
+        output.fill(&mut period);
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
+        assert!(output.drained());
+        assert!(period[..12 * 2].iter().any(|sample| *sample != 0.0));
+        assert!(period[100 * 2..].iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn a_reopen_gives_way_to_finishing_once_everything_is_rendered() {
+        let (output, shared) = ended_output(ClockMode::Asrc, 0);
+        let layout = OutputLayout {
+            channels: 12,
+            channel_mask: 0,
+        };
+        assert!(matches!(
+            output.end_before_reopen(OutputStep::ChangeLayout(layout)),
+            OutputStep::Continue
+        ));
+        assert!(matches!(
+            output.end_before_reopen(OutputStep::GrowCadence(Duration::from_millis(20))),
+            OutputStep::Continue
+        ));
+        assert!(matches!(
+            output.end_before_reopen(OutputStep::Lost(OutputError::Removed)),
+            OutputStep::Lost(_)
+        ));
+        shared.capture_done.store(false, Ordering::Release);
+        assert!(matches!(
+            output.end_before_reopen(OutputStep::ChangeLayout(layout)),
+            OutputStep::ChangeLayout(_)
+        ));
     }
 
     #[test]
