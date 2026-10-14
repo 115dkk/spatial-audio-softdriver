@@ -278,6 +278,7 @@ struct Steps {
     period_completed: u64,
     capture_phases_completed: u64,
     capture_finished: bool,
+    output_finished: bool,
     qpc: u64,
     released: bool,
 }
@@ -419,6 +420,31 @@ impl Lockstep {
         let mut steps = self.steps.lock().unwrap();
         steps.capture_finished = true;
         self.changed.notify_all();
+    }
+
+    fn finish_output(&self) {
+        let mut steps = self.steps.lock().unwrap();
+        steps.output_finished = true;
+        self.changed.notify_all();
+    }
+
+    /// Waits until the output thread has left because the stream ended.
+    fn wait_output_finished(&self) {
+        let mut steps = self.steps.lock().unwrap();
+        while !steps.output_finished {
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(steps, Duration::from_secs(5))
+                .unwrap();
+            steps = next;
+            if timeout.timed_out() {
+                let message = format!("output did not finish: {steps:?}");
+                steps.released = true;
+                self.changed.notify_all();
+                drop(steps);
+                panic!("{message}");
+            }
+        }
     }
 
     /// Waits until the capture thread has stopped, so everything it will put
@@ -823,6 +849,7 @@ fn lockstep_config(clock: ClockPreference, lockstep: Arc<Lockstep>) -> EngineCon
             engine::RtLoopEvent::CaptureEnd => lockstep.complete_capture_phase(),
             engine::RtLoopEvent::OutputEnd => lockstep.complete_period(),
             engine::RtLoopEvent::CaptureFinished => lockstep.finish_capture(),
+            engine::RtLoopEvent::OutputFinished => lockstep.finish_output(),
             _ => {}
         })),
         ..config(clock)
@@ -3111,6 +3138,47 @@ fn stop_interrupts_output_reconnect_backoff_promptly() {
     assert!(start.elapsed() < Duration::from_millis(200));
     assert_eq!(report.final_status.output_reconnect_attempts, 0);
     assert!(state.stopped.load(Ordering::Acquire));
+}
+
+#[test]
+fn a_lost_output_stops_reconnecting_once_the_stream_has_ended() {
+    // Wall time: the output notices the end only after its real reconnect
+    // backoff, since no sink is open to ask for a period.
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    state.fail_from_period.store(0, Ordering::Release);
+    let capture = RecordsCapture {
+        records: vec![format_record(RATE)],
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: false,
+    };
+    let mut output = opener(Arc::clone(&state), RATE);
+    output.fail_after_first = true;
+    let engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        output,
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    // The first period fails, so the output waits to reconnect with no sink;
+    // every reopen fails. The source then ends without queuing audio.
+    lockstep.step_period(1);
+    lockstep.step_read(1);
+    lockstep.start_read(1);
+    lockstep.wait_capture_finished();
+    lockstep.wait_output_finished();
+    let report = engine.stop();
+    assert!(
+        report.final_status.fault.is_some(),
+        "the lost output was not reported"
+    );
 }
 
 #[test]

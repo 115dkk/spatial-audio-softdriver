@@ -144,6 +144,9 @@ pub enum RtLoopEvent {
     /// The output is about to write what the resampler holds after the last
     /// rendered period, then stop.
     OutputTailBegin,
+    /// The output thread left because the stream ended, not because the
+    /// engine was stopped.
+    OutputFinished,
 }
 
 pub type RtEventHook = Arc<dyn Fn(RtLoopEvent) + Send + Sync>;
@@ -1963,6 +1966,9 @@ fn output_thread_main<O: OutputOpener>(
                 shared.publish_output_error(&error.to_string());
                 output.events.fault(FAULT_OUTPUT, RtEvent::OutputFault);
             }
+            if let Some(hook) = &config.rt_event {
+                hook(RtLoopEvent::OutputFinished);
+            }
             break;
         }
         let mut step = None;
@@ -2005,6 +2011,9 @@ fn output_thread_main<O: OutputOpener>(
                 // Nothing is left to play, so there is nothing to reconnect for.
                 shared.publish_output_error(&error.to_string());
                 output.events.fault(FAULT_OUTPUT, RtEvent::OutputFault);
+                if let Some(hook) = &config.rt_event {
+                    hook(RtLoopEvent::OutputFinished);
+                }
                 break;
             }
         }
@@ -2037,6 +2046,14 @@ fn output_thread_main<O: OutputOpener>(
                 let mut delay = 0;
                 loop {
                     if delay != 0 && wait_for_stop(&shared, Duration::from_millis(delay)) {
+                        return;
+                    }
+                    if output.ended() {
+                        // Capture ended while no sink was open and nothing is queued:
+                        // there is nothing left to play on a new one.
+                        if let Some(hook) = &config.rt_event {
+                            hook(RtLoopEvent::OutputFinished);
+                        }
                         return;
                     }
                     if let Some(hook) = &config.rt_event {
@@ -2104,6 +2121,14 @@ fn output_thread_main<O: OutputOpener>(
                     if wait_for_stop(&shared, Duration::from_millis(delay)) {
                         return;
                     }
+                    if output.ended() {
+                        // Capture ended while no sink was open and nothing is queued:
+                        // there is nothing left to play on a new one.
+                        if let Some(hook) = &config.rt_event {
+                            hook(RtLoopEvent::OutputFinished);
+                        }
+                        return;
+                    }
                     if let Some(hook) = &config.rt_event {
                         hook(RtLoopEvent::OutputOpenBegin);
                     }
@@ -2154,6 +2179,14 @@ fn output_thread_main<O: OutputOpener>(
                 let mut delay = 0;
                 loop {
                     if delay != 0 && wait_for_stop(&shared, Duration::from_millis(delay)) {
+                        return;
+                    }
+                    if output.ended() {
+                        // Capture ended while no sink was open and nothing is queued:
+                        // there is nothing left to play on a new one.
+                        if let Some(hook) = &config.rt_event {
+                            hook(RtLoopEvent::OutputFinished);
+                        }
                         return;
                     }
                     if let Some(hook) = &config.rt_event {
@@ -2412,20 +2445,21 @@ impl OutputState {
         // The stream ended here: nothing more is coming, so a short period is
         // its end, not a source falling behind.
         let stream_ended = capture_done && self.drained();
-        if stream_ended
+        let layout_ended = at_layout_boundary && produced.source_frames >= layout_frames;
+        if (stream_ended || layout_ended)
             && mode == ClockMode::Asrc
             && produced.output_frames == 0
             && self.asrc_tail_pending
             && self.tail_periods == 0
         {
-            // The take that emptied the ring already went out (the end was not
-            // visible yet), so the resampler's tail goes in this period.
+            // The take that emptied the stream or the old layout already went
+            // out (the end was not visible yet), so the resampler's tail goes
+            // in this period; a reopen writes whatever of it is left.
             self.plan_sent_period_tail();
             self.fill_tail_period(buffer);
             self.tail_periods = self.tail_periods.saturating_sub(1);
             return;
         }
-        let layout_ended = at_layout_boundary && produced.source_frames >= layout_frames;
         // Only a resampler that consumed input owes a tail.
         let drains_asrc = mode == ClockMode::Asrc
             && self.asrc_tail_pending
@@ -5028,6 +5062,20 @@ mod tests {
     fn asrc_after_one_whole_take_with_period(
         period_frames: usize,
     ) -> (OutputState, Arc<Shared>, Vec<f32>) {
+        let (output, shared, period, _, _) = asrc_after_one_whole_take_keeping_input(period_frames);
+        (output, shared, period)
+    }
+
+    /// As above, with the ring's producers kept so more input can follow.
+    fn asrc_after_one_whole_take_keeping_input(
+        period_frames: usize,
+    ) -> (
+        OutputState,
+        Arc<Shared>,
+        Vec<f32>,
+        rtrb::Producer<f32>,
+        rtrb::Producer<TimingMarker>,
+    ) {
         let shared = Arc::new(Shared::new());
         shared.scene_rate.store(48_000, Ordering::Release);
         shared
@@ -5072,7 +5120,7 @@ mod tests {
         assert_eq!(output.audio.slots(), 0, "the take did not empty the ring");
         assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
         assert_eq!(output.tail_periods, 0, "capture had not ended yet");
-        (output, shared, period)
+        (output, shared, period, audio_in, timing_in)
     }
 
     fn left(samples: &[f32]) -> Vec<f32> {
@@ -5172,6 +5220,56 @@ mod tests {
         assert!(
             pre_fade_peak > 0.5,
             "the period lost the tail before its fade: peak {pre_fade_peak}"
+        );
+        assert_eq!(frames[signal_end - 1], 0.0);
+        assert!(frames[signal_end..].iter().all(|sample| *sample == 0.0));
+        let tone_step = 2.0 * (std::f32::consts::PI * 997.0 / 44_100.0).sin();
+        let step = max_step(&frames[220..signal_end]);
+        assert!(
+            step <= tone_step + 0.05,
+            "the tail step {step} exceeded the tone bound {}",
+            tone_step + 0.05
+        );
+    }
+
+    #[test]
+    fn a_layout_change_seen_while_the_device_asks_for_a_period_puts_the_old_tail_in_it() {
+        let (mut output, shared, period, mut audio_in, mut timing_in) =
+            asrc_after_one_whole_take_keeping_input(441);
+        let delay = output.asrc.output_delay();
+        let new_layout = OutputLayout {
+            channels: 12,
+            channel_mask: 0,
+        };
+        // While the device waits, capture delivers a block in a new layout.
+        timing_in
+            .push(TimingMarker {
+                stream_frame: output.stream_frame,
+                frames: 1,
+                source_qpc: output.stream_frame,
+                rate: 48_000,
+                layout: new_layout,
+            })
+            .unwrap();
+        for _ in 0..12 {
+            audio_in.push(0.25).unwrap();
+        }
+        let mut next = vec![0.0; 441 * 2];
+        output.fill(&mut next);
+
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
+        assert_eq!(output.pending_layout_change(), Some(new_layout));
+        assert_eq!(output.tail_periods, 0);
+        assert!(!output.begin_reopen_tail(), "the reopen owes a second tail");
+        let mut frames = left(&period);
+        frames.extend(left(&next));
+        let signal_end = 441 + delay;
+        let pre_fade_peak = frames[441..signal_end - 88]
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        assert!(
+            pre_fade_peak > 0.5,
+            "the old layout's tail was not in the period: peak {pre_fade_peak}"
         );
         assert_eq!(frames[signal_end - 1], 0.0);
         assert!(frames[signal_end..].iter().all(|sample| *sample == 0.0));
