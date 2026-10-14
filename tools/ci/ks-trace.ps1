@@ -99,6 +99,13 @@ foreach ($event in $doc.Events.Event) {
     $process = [uint32]$data.Process
     $who = if ($names.ContainsKey($process)) { "$($names[$process])[$process]" } else { "pid $process" }
     $status = $data.Status
+    if ($data.ContainsKey('StackLeft')) {
+        # KsEnter, written before PortCls: an entry with no line after it is
+        # a request that never returned.
+        $target = $files[$data.File]; if (-not $target) { $target = "file $($data.File)" }
+        $lines.Add("$time $who ENTER major $($data.Major) code $($data.Code) irql $($data.Irql) stack left $($data.StackLeft) @ $target")
+        continue
+    }
     if ($data.ContainsKey('Name')) {
         $name = Bytes $data.Name
         $text = Name $name

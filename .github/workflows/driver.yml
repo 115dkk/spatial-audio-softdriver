@@ -560,6 +560,14 @@ jobs:
             Start-Service -Name $name
           }
 
+      # The KS trace runs here without Verifier: on Server 2022 the package
+      # job's install, with both on, has not returned since the RAII/C++23
+      # change, while this job's install without either did. This separates
+      # the two (ADR 0027, 2026-10-14).
+      - name: Start the driver's KS request trace (tools/ci/ks-trace.ps1)
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Start
+
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
         id: install
         timeout-minutes: 5
@@ -571,6 +579,13 @@ jobs:
         timeout-minutes: 15
         shell: pwsh
         run: ./tools/ci/hang-dump.ps1 -Processes drvinst, rundll32
+
+      - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
+        if: always() && steps.install.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          ./tools/ci/ks-trace.ps1 -Stop
 
       - name: Fail each fault point of a load once (tools/ci/fault-sweep.ps1)
         id: sweep

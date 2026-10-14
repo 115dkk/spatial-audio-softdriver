@@ -37,6 +37,18 @@ void SsrTraceBefore(PIRP irp, SsrIrpNote* note) {
     if (!Registered || !TraceLoggingProviderEnabled(SsrKsProvider, 0, 0)) return;
     auto stack = IoGetCurrentIrpStackLocation(irp);
     if (stack->MajorFunction != IRP_MJ_CREATE && stack->MajorFunction != IRP_MJ_DEVICE_CONTROL) return;
+    // Written before PortCls sees the request, so a request that never
+    // returns still names itself; the IRQL and the stack left say whether the
+    // copies below were safe and how deep the caller already was.
+    const KIRQL irql = KeGetCurrentIrql();
+    TraceLoggingWrite(SsrKsProvider, "KsEnter",
+        TraceLoggingUInt32(HandleToULong(PsGetCurrentProcessId()), "Process"),
+        TraceLoggingPointer(stack->FileObject, "File"),
+        TraceLoggingUInt8(stack->MajorFunction, "Major"),
+        TraceLoggingHexUInt32(stack->MajorFunction == IRP_MJ_DEVICE_CONTROL ?
+            stack->Parameters.DeviceIoControl.IoControlCode : 0, "Code"),
+        TraceLoggingUInt8(irql, "Irql"),
+        TraceLoggingUInt64(IoGetRemainingStackSize(), "StackLeft"));
     note->Active = true;
     note->Major = stack->MajorFunction;
     note->Code = 0;
@@ -45,6 +57,9 @@ void SsrTraceBefore(PIRP irp, SsrIrpNote* note) {
     note->Related = stack->FileObject ? stack->FileObject->RelatedFileObject : nullptr;
     note->Process = HandleToULong(PsGetCurrentProcessId());
     note->InputBytes = note->ValueBytes = note->NameBytes = 0;
+    // ProbeForRead and a copy that may fault need APC_LEVEL or below; above it
+    // the event carries the request's identity without its bytes.
+    if (irql > APC_LEVEL) return;
     if (stack->MajorFunction == IRP_MJ_CREATE) {
         // A filter's reference string, or KSSTRING_Pin with the KSPIN_CONNECT
         // and data format after it: the I/O manager's copy, kernel memory.
@@ -61,8 +76,13 @@ void SsrTraceBefore(PIRP irp, SsrIrpNote* note) {
     // KSPROPERTY or KSP_PIN, then for DATAINTERSECTION the client's ranges.
     note->InputBytes = Capture(control.Type3InputBuffer, control.InputBufferLength, irp->RequestorMode,
                                note->Input, sizeof(note->Input));
+    // Input sits at an odd offset in the note: copy Flags out instead of
+    // reading it through a misaligned KSPROPERTY pointer.
+    ULONG flags = 0;
+    if (note->InputBytes >= sizeof(KSPROPERTY))
+        RtlCopyMemory(&flags, note->Input + FIELD_OFFSET(KSPROPERTY, Flags), sizeof(flags));
     if (control.IoControlCode == IOCTL_KS_PROPERTY && note->InputBytes >= sizeof(KSPROPERTY) &&
-        (reinterpret_cast<PKSPROPERTY>(note->Input)->Flags & KSPROPERTY_TYPE_SET))
+        (flags & KSPROPERTY_TYPE_SET))
         note->ValueBytes = Capture(irp->UserBuffer, control.OutputBufferLength, irp->RequestorMode,
                                    note->Value, sizeof(note->Value));
 }
