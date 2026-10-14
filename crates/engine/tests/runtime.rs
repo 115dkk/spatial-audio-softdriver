@@ -3168,8 +3168,18 @@ fn a_lost_output_stops_reconnecting_once_the_stream_has_ended() {
     .unwrap();
 
     // The first period fails, so the output waits to reconnect with no sink;
-    // every reopen fails. The source then ends without queuing audio.
+    // every reopen fails. Once a reopen has been tried, the output is inside
+    // its retry loop (capture had not ended when it decided), and only then
+    // does the source end without queuing audio.
     lockstep.step_period(1);
+    let start = Instant::now();
+    while engine.status().output_reconnect_attempts == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the output never tried to reopen"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     lockstep.step_read(1);
     lockstep.start_read(1);
     lockstep.wait_capture_finished();
