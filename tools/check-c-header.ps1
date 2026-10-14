@@ -26,7 +26,8 @@ Set-Content -Path (Join-Path $work 'probe.cpp') -Value $probe -Encoding ascii
 $builds = @(
     @{ Name = 'c89'; Args = "/nologo /W4 /WX /I `"$include`" probe.c /Fe:c89.exe" },
     @{ Name = 'c11'; Args = "/nologo /W4 /WX /std:c11 /I `"$include`" probe.c /Fe:c11.exe" },
-    @{ Name = 'cpp17'; Args = "/nologo /W4 /WX /std:c++17 /EHsc /I `"$include`" probe.cpp /Fe:cpp17.exe" }
+    @{ Name = 'cpp17'; Args = "/nologo /W4 /WX /std:c++17 /EHsc /I `"$include`" probe.cpp /Fe:cpp17.exe" },
+    @{ Name = 'cpp23'; Args = "/nologo /W4 /WX /std:c++23preview /EHsc /I `"$include`" probe.cpp /Fe:cpp23.exe" }
 )
 try {
     foreach ($b in $builds) {

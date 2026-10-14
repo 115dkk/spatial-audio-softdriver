@@ -24,9 +24,16 @@ name: Driver
 #              the ring back, ssr-live then renders the ring to VB-CABLE while
 #              a tone plays into each endpoint and both tones must come back
 #              out (tools/ci/driver_e2e_check.py), an IOCTL fuzzer attacks
-#              the control device (tools/ci/ioctl_fuzz.py), all under Driver
-#              Verifier where the image allows it, and the kit's collect.ps1
-#              and uninstall.ps1 run as a tester would run them
+#              the control device (tools/ci/ioctl_fuzz.py), the device
+#              restarts five times (each restart unloads and reloads the
+#              image), all under Driver Verifier (tools/ci/verifier.ps1), and
+#              the kit's collect.ps1 and uninstall.ps1 run as a tester would
+#              run them
+#   faults     the same kit under injected allocation failures (randomized on
+#              windows-2022, systematic on windows-2025): the device restarts
+#              thirty times so the error branches of DriverEntry, AddDevice,
+#              StartDevice and the control device run, then uninstalls; a
+#              leak or a bad cleanup bugchecks the runner under Pool Tracking
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
 #   sysvad-build, sysvad-control  diagnosis only: SysVAD itself built on
@@ -225,23 +232,16 @@ jobs:
         run: ./tools/ci/ks-trace.ps1 -Start
 
       # Driver Verifier watches the driver from the moment it loads, without
-      # a reboot (volatile settings apply to drivers loaded afterwards): pool,
-      # IRQL, I/O and deadlock checks. A violation bugchecks the runner, which
-      # fails the job. Whether a hosted image accepts volatile verification is
-      # printed below; until a run shows it does, a refusal is a warning, not
-      # a failure.
-      - name: Driver Verifier for spatialsoftreceiver.sys, volatile (standard checks)
-        id: verifier
+      # a reboot. Which options a running system takes differs by Windows
+      # version (volatile flags on Server 2022, `/dif ... /now` rule classes on
+      # Server 2025); tools/ci/verifier.ps1 picks them and fails the step when
+      # verifier refuses one or asks for a reboot. A violation bugchecks the
+      # runner, which fails the job.
+      - name: Driver Verifier for spatialsoftreceiver.sys (standard checks, tools/ci/verifier.ps1)
         shell: pwsh
         run: |
-          & verifier.exe /volatile /flags 0x209BB /adddriver spatialsoftreceiver.sys
-          $code = $LASTEXITCODE
-          Write-Host "verifier /volatile exited $code"
-          & verifier.exe /querysettings
-          "requested=$code" | Out-File -Append $env:GITHUB_OUTPUT
-          # Actions ends a pwsh step with the last native exit code; a refusal
-          # here is reported by the next check, not by failing this step.
-          exit 0
+          . ./tools/ci/verifier.ps1
+          Enable-SsrVerifier -Mode Standard
 
       # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
       # by the tester's own install.ps1.
@@ -395,21 +395,13 @@ jobs:
             --record "$RUNNER_TEMP/driver-e2e.ssrdump"
 
       - name: Is Driver Verifier checking spatialsoftreceiver.sys
-        id: verified
         if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
         shell: pwsh
         run: |
-          $query = (& verifier.exe /query) -join "`n"
-          Write-Host $query
-          $active = $query -match '(?im)^\s*Name:\s*spatialsoftreceiver\.sys'
-          "active=$($active.ToString().ToLower())" | Out-File -Append $env:GITHUB_OUTPUT
-          if ($active) {
-            Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: checking spatialsoftreceiver.sys (${{ matrix.os }})`n"
-          } else {
-            Write-Host '::warning::Driver Verifier is not checking spatialsoftreceiver.sys on this image; the IOCTL fuzzer runs without it'
-            Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: NOT active on ${{ matrix.os }}`n"
-          }
-          exit 0
+          . ./tools/ci/verifier.ps1
+          $state = Get-SsrVerifierState
+          if (-not $state.Listed) { throw 'Driver Verifier is not checking spatialsoftreceiver.sys' }
+          Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: checking spatialsoftreceiver.sys (${{ matrix.os }}, level $($state.Level))`n"
 
       # The control device under hostile callers: wrong sizes, extreme fields,
       # unknown codes, cancel and close racing a pending READ, a second open.
@@ -427,9 +419,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ioctl_fuzz.py exited $LASTEXITCODE" }
 
       - name: Driver Verifier counters after the fuzzer
-        if: ${{ !cancelled() && steps.verified.outputs.active == 'true' }}
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
         shell: pwsh
         run: '& verifier.exe /query'
+
+      # Each restart removes the device stack, so the image unloads (Pool
+      # Tracking bugchecks on a leaked allocation then) and loads again through
+      # DriverEntry, AddDevice and StartDevice. All three endpoints must come
+      # back each time.
+      - name: Restart the device 5 times under Driver Verifier (tools/ci/verifier.ps1)
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          . ./tools/ci/package-identities.ps1
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
+          if (-not $device) { throw 'the Spatial SoftReceiver device is gone' }
+          $before = Get-SsrVerifierState
+          $cycles = @(Invoke-SsrRestartCycles -InstanceId $device.InstanceId -Count 5)
+          $broken = @($cycles | Where-Object { $_.Problem -ne 0 -or $_.PnputilExit -ne 0 })
+          if ($broken.Count) { throw "$($broken.Count) of 5 restarts left the device with a problem code" }
+          $after = Get-SsrVerifierState
+          Write-Host "verifier loads $($before.Loads) -> $($after.Loads), unloads $($before.Unloads) -> $($after.Unloads)"
+          $deadline = (Get-Date).AddSeconds(60)
+          while ($true) {
+            try { ./tools/ci/endpoint-states.ps1 -InstanceId $device.InstanceId; break }
+            catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Seconds 3 }
+          }
 
       - name: The audio stack after the flow check
         if: failure() && steps.install.outputs.loaded == 'true'
@@ -477,6 +494,91 @@ jobs:
         run: |
           & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
           if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
+
+  # Error branches only run when something fails. Driver Verifier fails the
+  # driver's own allocations on purpose (tools/ci/verifier.ps1 -Mode Faults):
+  # randomized low-resources simulation where volatile settings allow it
+  # (Server 2022), systematic low-resources simulation where `/dif ... /now`
+  # exists (Server 2025), which fails each distinct call stack once. A start
+  # that fails is expected here; a bugcheck (a leak at unload, a double free,
+  # a wrong IRQL) loses the runner and fails the job.
+  faults:
+    name: driver under injected allocation failures (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: spatialsoftreceiver-Release-x64
+          path: ${{ runner.temp }}/package
+
+      - name: Start the audio services
+        shell: pwsh
+        run: |
+          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
+            Set-Service -Name $name -StartupType Automatic
+            Start-Service -Name $name
+          }
+
+      - name: Driver Verifier with injected allocation failures (tools/ci/verifier.ps1)
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          Enable-SsrVerifier -Mode Faults
+
+      # The install may itself meet an injected failure; what follows only
+      # needs the device node and the kit.
+      - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
+        id: install
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      - name: Restart the device 30 times under injected failures
+        id: cycles
+        if: ${{ !cancelled() && steps.install.outputs.kit != '' }}
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          . ./tools/ci/package-identities.ps1
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
+          if (-not $device) { throw 'install created no Spatial SoftReceiver device' }
+          $cycles = @(Invoke-SsrRestartCycles -InstanceId $device.InstanceId -Count 30)
+          $failed = @($cycles | Where-Object Problem -ne 0).Count
+          $state = Get-SsrVerifierState
+          $summary = "faults (${{ matrix.os }}): 30 restarts, $failed left a problem code (expected under injection); verifier faults injected: $($state.FaultsInjected); loads $($state.Loads), unloads $($state.Unloads)"
+          Write-Host $summary
+          Add-Content $env:GITHUB_STEP_SUMMARY "`n$summary`n"
+          if (-not $state.Listed) { throw 'Driver Verifier is not checking spatialsoftreceiver.sys' }
+          # Whether verifier reports its injection count on this image is
+          # learned from the first runs; until then a missing count is a warning.
+          if ($null -eq $state.FaultsInjected) { Write-Host '::warning::verifier /query printed no AllocationsFailedDeliberately count' }
+
+      # The last restart may have left the device started or failed; either
+      # way the uninstall removes it, and the image unload is where Pool
+      # Tracking checks for leaks.
+      - name: Uninstall as a tester would (tools/testkit/uninstall.ps1)
+        if: always() && steps.install.outputs.kit != ''
+        shell: pwsh
+        run: |
+          & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
+          if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
+
+      - name: Driver Verifier after the unload
+        if: always()
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          $state = Get-SsrVerifierState
+          Write-Host "listed $($state.Listed), loads $($state.Loads), unloads $($state.Unloads), current nonpaged allocations $($state.CurrentNonPagedPoolAllocations)"
 
   codeql:
     name: CodeQL Windows driver suites
