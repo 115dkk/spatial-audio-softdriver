@@ -849,8 +849,8 @@ constexpr TestShape kTestShapes[] = {
 };
 
 void CheckCandidate(const SSR_PCM_FORMATS& enabled, const ssr::PcmCandidate& candidate, bool expected) {
-    uint8_t storage[41]{};
-    auto* wave = storage + 1; // Exercise unaligned WAVE and GUID parsing.
+    uint8_t unaligned[41]{};
+    auto* wave = unaligned + 1; // Exercise unaligned WAVE and GUID parsing.
     CandidateWave(wave, candidate);
     CHECK(ssr::PcmCandidateAllowed(enabled, candidate) == expected);
     CHECK(ssr::PcmAllowed(enabled, wave, 40) == expected);
