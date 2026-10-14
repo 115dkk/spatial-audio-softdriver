@@ -11,7 +11,7 @@ use ssr_types::CaptureSource;
 fn installed_driver_opens_reads_and_accepts_trim() {
     let mut ring = DriverRing::open()
         .expect("Spatial SoftReceiver control device must be installed for this test");
-    assert_eq!(ring.info().endpoint_mask, 0x7);
+    assert_eq!(ring.info().endpoint_mask, ssr_abi::DEFAULT_ENDPOINT_MASK);
     assert!(ring.info().qpc_frequency > 0);
 
     for ppm in [0.0, -100.0, 100.0] {

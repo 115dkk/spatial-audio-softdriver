@@ -26,19 +26,18 @@ private:
     void WriteBytes(ULONGLONG begin, ULONGLONG bytes, ULONGLONG qpc);
     void Reset();
     LONG references_ = 1;
-    CMiniportWaveRT* miniport_;
+    ssr::km::ComRef<CMiniportWaveRT> miniport_;
+    // The miniport reference keeps the adapter alive; this pointer does not own it.
     CAdapterCommon* adapter_;
-    PPORTWAVERTSTREAM port_;
+    ssr::km::ComRef<IPortWaveRTStream> port_;
+    ssr::km::DmaPages pages_;
     USHORT endpoint_;
     bool registered_ = false;
     KSSTATE state_ = KSSTATE_STOP;
     alignas(8) BYTE format_[ssr::kMaxFormatBytes] = {};
     WAVEFORMATEX* Format() { return reinterpret_cast<WAVEFORMATEX*>(format_); }
-    PMDL mdl_ = nullptr;
-    BYTE* dma_ = nullptr;
-    ULONG bufferBytes_ = 0;
     ULONG notifications_ = 0;
-    Packet* packets_ = nullptr;
+    ssr::km::PoolPtr<Packet> packets_;
     LIST_ENTRY events_;
     ssr::DmaClock clock_;
     ULONGLONG linear_ = 0;

@@ -131,7 +131,7 @@ def check(clang, source, arch, roots, extra_includes, analyze):
         "-fms-extensions",
         "-fms-compatibility",
         "-fms-compatibility-version=19.40",
-        "-std=c++17",
+        "-std=c++23",
         "-fno-exceptions",
         "-fno-rtti",
         "-nostdinc",

@@ -269,7 +269,7 @@ mod tests {
             },
             features: 3,
             qpc_frequency: 10_000_000,
-            endpoint_mask: 7,
+            endpoint_mask: ssr_abi::DEFAULT_ENDPOINT_MASK,
             reserved: 0,
             endpoints: [
                 formats,

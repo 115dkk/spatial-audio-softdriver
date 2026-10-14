@@ -3,6 +3,7 @@
 // Reduced from audio/sysvad/common.h at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
 #pragma once
 #include "control.h"
+#include "ssr_kernel.h"
 class CMiniportWaveRTStream;
 class CAdapterCommon final : public IAdapterPowerManagement {
 public:
@@ -37,11 +38,11 @@ private:
     // Called with streamLock_ held.
     void SyncTimer(ULONGLONG qpc);
     LONG references_ = 1;
-    PDEVICE_OBJECT control_;
+    ssr::km::ObjectRef<DEVICE_OBJECT> control_;
     SsrControlState* state_;
     SsrSettings settings_;
     KSPIN_LOCK streamLock_;
-    PEX_TIMER timer_ = nullptr;
+    ssr::km::ExTimer timer_;
     CMiniportWaveRTStream* streams_[SSR_MAX_ENDPOINTS] = {};
     bool active_ = false;
     ULONG running_ = 0;  // streams in KSSTATE_RUN

@@ -29,7 +29,7 @@ class ExclusivePolicyContractTests(unittest.TestCase):
             self.assertIn(f'{{L"WaveHdmi{ep}", L"TopologyHdmi{ep}", SSR_ENDPOINT_{constant}}}', pairs)
         adapter = read("driver/spatialsoftreceiver/adapter.cpp")
         self.assertIn("2 * ARRAYSIZE(SsrMiniPairs)", adapter)
-        self.assertIn("Settings = {0x7,", adapter)
+        self.assertIn("Settings = {SSR_DEFAULT_ENDPOINT_MASK,", adapter)
         self.assertIn("Settings.EndpointMask &= available", adapter)
         load = adapter.split("static void LoadSettings()", 1)[1].split('extern "C"', 1)[0]
         self.assertNotIn("return;", load)

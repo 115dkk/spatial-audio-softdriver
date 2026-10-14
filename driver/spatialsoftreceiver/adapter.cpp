@@ -9,12 +9,13 @@
 #include "hdmitopo.h"
 #include "minipairs.h"
 #include "kstrace.h"
+#include "ssr_kernel.h"
 
-static SsrSettings Settings;
-static LONG AdapterPresent;
-static PDRIVER_UNLOAD PortUnload;
-static PDRIVER_DISPATCH PortDispatch[IRP_MJ_MAXIMUM_FUNCTION + 1];
-static HANDLE ServiceKey;
+static constinit SsrSettings Settings{};
+static constinit LONG AdapterPresent{};
+static constinit PDRIVER_UNLOAD PortUnload{};
+static constinit PDRIVER_DISPATCH PortDispatch[IRP_MJ_MAXIMUM_FUNCTION + 1]{};
+static constinit HANDLE ServiceKey{};
 extern "C" DRIVER_INITIALIZE DriverEntry;
 static DRIVER_ADD_DEVICE AddDevice;
 // SsrDispatch takes the control device's major functions and passes PortCls's
@@ -55,18 +56,18 @@ static void RegistryName(HANDLE key, ULONG endpoint) {
 }
 static void LoadSettings() {
     PAGED_CODE();
-    Settings = {0x7, {SsrDefaultFormats, SsrDefaultFormats, SsrDefaultFormats, SsrDefaultFormats}, FALSE, {}};
+    Settings = {SSR_DEFAULT_ENDPOINT_MASK, {SsrDefaultFormats, SsrDefaultFormats, SsrDefaultFormats, SsrDefaultFormats}, FALSE, {}};
     for (ULONG i = 0; i < SSR_MAX_ENDPOINTS; ++i)
         ssr::EndpointName<WCHAR>(i, false, nullptr, 0, Settings.EndpointName[i]);
     UNICODE_STRING parameters; RtlInitUnicodeString(&parameters, L"Parameters");
     OBJECT_ATTRIBUTES attributes;
     InitializeObjectAttributes(&attributes, &parameters, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, ServiceKey, nullptr);
-    HANDLE key;
+    ssr::km::KernelHandle key;
     ULONG packet = 0;
-    if (NT_SUCCESS(ZwOpenKey(&key, KEY_QUERY_VALUE, &attributes))) {
-        for (ULONG i = 0; i < SSR_MAX_ENDPOINTS; ++i) RegistryName(key, i);
-        RegistryValue(key, L"EndpointMask", REG_DWORD, &Settings.EndpointMask, sizeof(Settings.EndpointMask));
-        RegistryValue(key, L"WritePacket", REG_DWORD, &packet, sizeof(packet));
+    if (NT_SUCCESS(ZwOpenKey(key.Put(), KEY_QUERY_VALUE, &attributes))) {
+        for (ULONG i = 0; i < SSR_MAX_ENDPOINTS; ++i) RegistryName(key.Get(), i);
+        RegistryValue(key.Get(), L"EndpointMask", REG_DWORD, &Settings.EndpointMask, sizeof(Settings.EndpointMask));
+        RegistryValue(key.Get(), L"WritePacket", REG_DWORD, &packet, sizeof(packet));
         for (ULONG i = 0; i < SSR_MAX_ENDPOINTS; ++i) {
             WCHAR codec[] = L"CodecMask0", rates[] = L"PcmRateMask0", shapes[] = L"PcmShapeMask0";
             WCHAR masked[] = L"PcmMaxMaskedChannels0", direct[] = L"PcmDirectChannels0";
@@ -76,20 +77,19 @@ static void LoadSettings() {
             masked[ARRAYSIZE(masked) - 2] += static_cast<WCHAR>(i);
             direct[ARRAYSIZE(direct) - 2] += static_cast<WCHAR>(i);
             auto& f = Settings.Formats[i];
-            RegistryValue(key, codec, REG_QWORD, &f.codecs, sizeof(f.codecs));
-            RegistryValue(key, rates, REG_DWORD, &f.pcm.rates, sizeof(f.pcm.rates));
-            RegistryValue(key, shapes, REG_DWORD, &f.pcm.shapes, sizeof(f.pcm.shapes));
-            RegistryValue(key, masked, REG_DWORD, &f.pcm.max_masked_channels, sizeof(f.pcm.max_masked_channels));
-            RegistryValue(key, direct, REG_DWORD, &f.pcm.direct_channels, sizeof(f.pcm.direct_channels));
+            RegistryValue(key.Get(), codec, REG_QWORD, &f.codecs, sizeof(f.codecs));
+            RegistryValue(key.Get(), rates, REG_DWORD, &f.pcm.rates, sizeof(f.pcm.rates));
+            RegistryValue(key.Get(), shapes, REG_DWORD, &f.pcm.shapes, sizeof(f.pcm.shapes));
+            RegistryValue(key.Get(), masked, REG_DWORD, &f.pcm.max_masked_channels, sizeof(f.pcm.max_masked_channels));
+            RegistryValue(key.Get(), direct, REG_DWORD, &f.pcm.direct_channels, sizeof(f.pcm.direct_channels));
         }
-        ZwClose(key);
     }
     // Normalize defaults too: the absent reserved endpoint must report mask 0
     // even when the Parameters key could not be opened.
     Settings.WritePacket = packet != 0;
     constexpr ULONG available = (1UL << ARRAYSIZE(SsrMiniPairs)) - 1UL;
     Settings.EndpointMask &= available;
-    if (!Settings.EndpointMask) Settings.EndpointMask = 0x7 & available;
+    if (!Settings.EndpointMask) Settings.EndpointMask = SSR_DEFAULT_ENDPOINT_MASK & available;
     for (ULONG i = 0; i < SSR_MAX_ENDPOINTS; ++i) {
         auto& f = Settings.Formats[i];
         if (!(Settings.EndpointMask & (1UL << i))) { f = {}; continue; }
@@ -105,11 +105,13 @@ static void LoadSettings() {
 extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryPath) {
     OBJECT_ATTRIBUTES attributes;
     InitializeObjectAttributes(&attributes, registryPath, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, nullptr, nullptr);
-    NTSTATUS status = ZwOpenKey(&ServiceKey, KEY_READ, &attributes);
+    ssr::km::KernelHandle serviceKey;
+    NTSTATUS status = ZwOpenKey(serviceKey.Put(), KEY_READ, &attributes);
     if (!NT_SUCCESS(status)) return status;
     SsrTraceRegister();
     status = PcInitializeAdapterDriver(driver, registryPath, AddDevice);
-    if (!NT_SUCCESS(status)) { SsrTraceUnregister(); ZwClose(ServiceKey); ServiceKey = nullptr; return status; }
+    if (!NT_SUCCESS(status)) { SsrTraceUnregister(); return status; }
+    ServiceKey = serviceKey.Release();
     PortUnload = driver->DriverUnload;
     driver->DriverUnload = DriverUnload;
     for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major) PortDispatch[major] = driver->MajorFunction[major];
@@ -155,40 +157,35 @@ static NTSTATUS AddDevice(PDRIVER_OBJECT driver, PDEVICE_OBJECT pdo) {
     LoadSettings();
     NTSTATUS status = PcAddAdapterDevice(driver, pdo, StartDevice, 2 * ARRAYSIZE(SsrMiniPairs), 0);
     if (!NT_SUCCESS(status)) { InterlockedExchange(&AdapterPresent, 0); return status; }
-    PDEVICE_OBJECT fdo = IoGetAttachedDeviceReference(pdo);
-    while (fdo && fdo->DriverObject != driver) {
-        PDEVICE_OBJECT lower = IoGetLowerDeviceObject(fdo);
-        ObDereferenceObject(fdo); fdo = lower;
-    }
+    auto fdo = ssr::km::ObjectRef<DEVICE_OBJECT>::Adopt(IoGetAttachedDeviceReference(pdo));
+    while (fdo && fdo->DriverObject != driver)
+        fdo = ssr::km::ObjectRef<DEVICE_OBJECT>::Adopt(IoGetLowerDeviceObject(fdo.Get()));
     if (!fdo) return STATUS_SUCCESS; // START detects absent control state.
     // PcAddAdapterDevice already cleared it; stated here for the driver rules.
     fdo->Flags &= ~DO_DEVICE_INITIALIZING;
-    auto extension = SsrExtension(fdo);
+    auto extension = SsrExtension(fdo.Get());
     extension->Common = nullptr;
     extension->ControlDevice = nullptr;
     extension->ControlStatus = SsrCreateControl(driver, Settings, &extension->ControlDevice);
-    ObDereferenceObject(fdo);
     // PortCls has already attached its FDO. A failed control-device creation
     // fails START, not ADD, so PnP/PortCls retain responsibility for teardown.
     return STATUS_SUCCESS;
 }
 static NTSTATUS Install(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources,
                         CAdapterCommon* adapter, const SsrMiniPair& pair) {
-    PPORT topology = nullptr, wave = nullptr;
-    auto miniTopology = new (SsrNonPaged{}) CMiniportTopologyHdmi(adapter, pair.Endpoint);
-    auto miniWave = new (SsrNonPaged{}) CMiniportWaveRT(adapter, pair.Endpoint);
+    auto miniTopology = ssr::km::ComRef<CMiniportTopologyHdmi>::Adopt(
+        new (SsrNonPaged{}) CMiniportTopologyHdmi(adapter, pair.Endpoint));
+    auto miniWave = ssr::km::ComRef<CMiniportWaveRT>::Adopt(
+        new (SsrNonPaged{}) CMiniportWaveRT(adapter, pair.Endpoint));
+    ssr::km::ComRef<IPort> topology, wave;
     NTSTATUS status = miniTopology && miniWave ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
-    if (NT_SUCCESS(status)) status = PcNewPort(&topology, CLSID_PortTopology);
-    if (NT_SUCCESS(status)) status = topology->Init(device, irp, miniTopology, adapter, resources);
-    if (NT_SUCCESS(status)) status = PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Topology), topology);
-    if (NT_SUCCESS(status)) status = PcNewPort(&wave, CLSID_PortWaveRT);
-    if (NT_SUCCESS(status)) status = wave->Init(device, irp, static_cast<IMiniportWaveRT*>(miniWave), adapter, resources);
-    if (NT_SUCCESS(status)) status = PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Wave), wave);
-    if (NT_SUCCESS(status)) status = PcRegisterPhysicalConnection(device, wave, SsrWaveBridgePin, topology, SsrTopologyBridgePin);
-    if (wave) wave->Release();
-    if (topology) topology->Release();
-    if (miniWave) miniWave->Release();
-    if (miniTopology) miniTopology->Release();
+    if (NT_SUCCESS(status)) status = PcNewPort(topology.Put(), CLSID_PortTopology);
+    if (NT_SUCCESS(status)) status = topology->Init(device, irp, miniTopology.Get(), adapter, resources);
+    if (NT_SUCCESS(status)) status = PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Topology), topology.Get());
+    if (NT_SUCCESS(status)) status = PcNewPort(wave.Put(), CLSID_PortWaveRT);
+    if (NT_SUCCESS(status)) status = wave->Init(device, irp, static_cast<IMiniportWaveRT*>(miniWave.Get()), adapter, resources);
+    if (NT_SUCCESS(status)) status = PcRegisterSubdevice(device, const_cast<PWSTR>(pair.Wave), wave.Get());
+    if (NT_SUCCESS(status)) status = PcRegisterPhysicalConnection(device, wave.Get(), SsrWaveBridgePin, topology.Get(), SsrTopologyBridgePin);
     return status;
 }
 static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resources) {
@@ -202,16 +199,17 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resou
     control->Settings = Settings;
     KeReleaseSpinLock(&control->Lock, settingsIrql);
     if (extension->Common) return STATUS_INVALID_DEVICE_STATE;
-    auto adapter = new (SsrNonPaged{}) CAdapterCommon(extension->ControlDevice);
+    auto adapter = ssr::km::ComRef<CAdapterCommon>::Adopt(
+        new (SsrNonPaged{}) CAdapterCommon(extension->ControlDevice));
     if (!adapter) return STATUS_INSUFFICIENT_RESOURCES;
     NTSTATUS status = adapter->Start();
-    if (NT_SUCCESS(status)) status = PcRegisterAdapterPowerManagement(adapter, device);
+    if (NT_SUCCESS(status)) status = PcRegisterAdapterPowerManagement(adapter.Get(), device);
     for (ULONG i = 0; NT_SUCCESS(status) && i < SSR_MAX_ENDPOINTS; ++i) {
         if ((adapter->Settings().EndpointMask & (1UL << i)) && i < ARRAYSIZE(SsrMiniPairs))
-            status = Install(device, irp, resources, adapter, SsrMiniPairs[i]);
+            status = Install(device, irp, resources, adapter.Get(), SsrMiniPairs[i]);
     }
-    if (NT_SUCCESS(status)) extension->Common = adapter;
-    else { adapter->Stop(); adapter->Release(); }
+    if (NT_SUCCESS(status)) extension->Common = adapter.Detach();
+    else adapter->Stop();
     return status;
 }
 static NTSTATUS PnpHandler(PDEVICE_OBJECT device, PIRP irp) {

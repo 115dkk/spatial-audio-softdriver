@@ -58,52 +58,21 @@ void SsrBuildFormat(const SsrFormatEntry& entry, PKSDATAFORMAT_WAVEFORMATEXTENSI
 // takes that format type at all: the endpoint builder proposes PCM, AC3 and
 // WMA Pro this way on a render pin before it lists the endpoint's formats.
 bool SsrFormatTypeAllowed(const SSR_ENDPOINT_FORMATS& formats, const KSDATAFORMAT* data) {
-    if (!IsEqualGUIDAligned(data->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) ||
+    if (!data || !IsEqualGUIDAligned(data->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) ||
         !IsEqualGUIDAligned(data->Specifier, KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)) return false;
-    if (IsEqualGUIDAligned(data->SubFormat, KSDATAFORMAT_SUBTYPE_PCM))
-        return SsrPcmEnabled(formats.pcm, false);
-    if (IsEqualGUIDAligned(data->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT))
-        return SsrPcmEnabled(formats.pcm, true);
-    for (const auto& entry : SsrFormats)
-        if ((entry.Bit & formats.codecs) && IsEqualGUIDAligned(entry.Subtype, data->SubFormat)) return true;
-    return false;
+    return ssr::FormatTypeAccepted(formats, &data->SubFormat);
 }
 NTSTATUS SsrValidateFormat(const SSR_ENDPOINT_FORMATS& formats, PKSDATAFORMAT data, const WAVEFORMATEX** wave) {
-    if (!data || data->FormatSize < sizeof(KSDATAFORMAT) + sizeof(WAVEFORMATEX) ||
+    if (!data || !wave || data->FormatSize < sizeof(KSDATAFORMAT) + sizeof(WAVEFORMATEX) ||
         !IsEqualGUIDAligned(data->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) ||
         !IsEqualGUIDAligned(data->Specifier, KSDATAFORMAT_SPECIFIER_WAVEFORMATEX)) return STATUS_NO_MATCH;
-    auto wfx = reinterpret_cast<const WAVEFORMATEX*>(data + 1);
-    ULONG bytes = sizeof(WAVEFORMATEX) + wfx->cbSize;
-    if (bytes > ssr::kMaxFormatBytes || bytes > data->FormatSize - sizeof(KSDATAFORMAT)) return STATUS_NO_MATCH;
-    bool allowed = ssr::FormatAllowed(formats, wfx, bytes);
-    if (!allowed || (wfx->wBitsPerSample != 16 && wfx->wBitsPerSample != 24 && wfx->wBitsPerSample != 32) ||
-        wfx->nBlockAlign != wfx->nChannels * (wfx->wBitsPerSample / 8) ||
-        static_cast<ULONGLONG>(wfx->nSamplesPerSec) * wfx->nBlockAlign != wfx->nAvgBytesPerSec)
-        return STATUS_NO_MATCH;
-    GUID subtype;
-    ULONG channelMask = 0;
-    USHORT validBits = wfx->wBitsPerSample;
-    if (wfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-        if (bytes < sizeof(WAVEFORMATEXTENSIBLE)) return STATUS_NO_MATCH;
-        auto ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(wfx);
-        validBits = ext->Samples.wValidBitsPerSample;
-        subtype = ext->SubFormat; channelMask = ext->dwChannelMask;
-    } else if (wfx->wFormatTag == WAVE_FORMAT_PCM) subtype = KSDATAFORMAT_SUBTYPE_PCM;
-    else if (wfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) subtype = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-    else if (wfx->wFormatTag == WAVE_FORMAT_DOLBY_AC3_SPDIF) subtype = KSDATAFORMAT_SUBTYPE_IEC61937_DOLBY_DIGITAL;
-    else return STATUS_NO_MATCH;
-    if (!IsEqualGUIDAligned(subtype, data->SubFormat)) return STATUS_NO_MATCH;
-    if (ssr::PcmAllowed(formats.pcm, wfx, bytes)) {
-        *wave = wfx; return STATUS_SUCCESS;
-    }
-    for (const auto& entry : SsrFormats) {
-        if ((entry.Bit & formats.codecs) && IsEqualGUIDAligned(entry.Subtype, subtype) && entry.Channels == wfx->nChannels &&
-            entry.Rate == wfx->nSamplesPerSec && entry.Bits == wfx->wBitsPerSample &&
-            entry.ValidBits == validBits && (!channelMask || channelMask == entry.ChannelMask)) {
-            *wave = wfx; return STATUS_SUCCESS;
-        }
-    }
-    return STATUS_NO_MATCH;
+    const auto* raw = reinterpret_cast<const UCHAR*>(data + 1);
+    const ULONG bytes = sizeof(WAVEFORMATEX) + static_cast<ULONG>(raw[16]) +
+        (static_cast<ULONG>(raw[17]) << 8U);
+    if (bytes > ssr::kMaxFormatBytes || bytes > data->FormatSize - sizeof(KSDATAFORMAT) ||
+        !ssr::FormatAccepted(formats, &data->SubFormat, raw, bytes)) return STATUS_NO_MATCH;
+    *wave = reinterpret_cast<const WAVEFORMATEX*>(raw);
+    return STATUS_SUCCESS;
 }
 bool SsrRangeAccepts(PKSDATARANGE range, const SsrFormatEntry& format) {
     if (range->FormatSize < sizeof(KSDATARANGE_AUDIO)) return false;
@@ -122,15 +91,13 @@ bool SsrRangeAccepts(PKSDATARANGE range, const SsrFormatEntry& format) {
 // https://learn.microsoft.com/windows-hardware/drivers/ddi/portcls/nf-portcls-iminiport-datarangeintersection
 bool SsrPcmIntersection(const SSR_PCM_FORMATS& pcm, USHORT endpoint,
                        PKSDATARANGE range, PKSDATARANGE matching, SsrFormatEntry* result) {
-    struct Context { const SSR_PCM_FORMATS* pcm; PKSDATARANGE range; PKSDATARANGE matching; } context{&pcm, range, matching};
+    if (!range || !matching || !result) return false;
+    struct Context { PKSDATARANGE range; PKSDATARANGE matching; } context{range, matching};
     auto accepts = [](const ssr::PcmCandidate& candidate, void* opaque) {
         auto& c = *static_cast<Context*>(opaque);
         SsrFormatEntry entry{0, candidate.floating ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM,
             candidate.channels, candidate.rate, candidate.channel_mask, candidate.bits, candidate.valid_bits};
-        if (!SsrRangeAccepts(c.range, entry) || !SsrRangeAccepts(c.matching, entry)) return false;
-        KSDATAFORMAT_WAVEFORMATEXTENSIBLE format;
-        SsrBuildFormat(entry, &format);
-        return ssr::PcmAllowed(*c.pcm, &format.WaveFormatExt, sizeof(format.WaveFormatExt));
+        return SsrRangeAccepts(c.range, entry) && SsrRangeAccepts(c.matching, entry);
     };
     const auto oem = SsrDefaultPcm(endpoint);
     ssr::PcmCandidate chosen{};

@@ -77,7 +77,11 @@
       <CompileAs>CompileAsCpp</CompileAs>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <ExceptionHandling>false</ExceptionHandling>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp23</LanguageStandard>
+      <!-- C++20+ warns on enum arithmetic in WDK headers (C5054) and implies
+           /permissive-. Angle includes are WDK; quoted project headers remain /W4 /WX. -->
+      <TreatAngleIncludeAsExternal>true</TreatAngleIncludeAsExternal>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <PreprocessorDefinitions>_WIN32;UNICODE;_UNICODE;NTDDI_VERSION=0x0A000008;PC_IMPLEMENTATION;_USE_WAVERT_;_NEW_DELETE_OPERATORS_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <TreatWarningAsError>true</TreatWarningAsError>

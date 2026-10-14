@@ -7,7 +7,7 @@
 TRACELOGGING_DEFINE_PROVIDER(SsrKsProvider, "SpatialSoftReceiver.Driver.Ks",
     (0xa63636ab, 0x03aa, 0x4a58, 0x9d, 0xcd, 0x86, 0xc2, 0x73, 0xeb, 0x95, 0xfd));
 
-static bool Registered;
+static constinit bool Registered{};
 
 void SsrTraceRegister() { Registered = NT_SUCCESS(TraceLoggingRegister(SsrKsProvider)); }
 void SsrTraceUnregister() {

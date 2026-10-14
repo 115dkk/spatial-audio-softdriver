@@ -16,8 +16,8 @@ DEFINE_PCAUTOMATION_TABLE_PROP(WaveAutomation, WaveProperties);
 static KSATTRIBUTE ModeAttribute = {sizeof(KSATTRIBUTE), 0, SsrGuid(STATICGUIDOF(KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE))};
 static PKSATTRIBUTE ModeAttributes[] = {&ModeAttribute};
 static KSATTRIBUTE_LIST ModeAttributeList = {RTL_NUMBER_OF(ModeAttributes), ModeAttributes};
-CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : adapter_(adapter), endpoint_(endpoint) {
-    adapter_->AddRef();
+CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint)
+    : adapter_(ssr::km::ComRef<CAdapterCommon>::Retain(adapter)), endpoint_(endpoint) {
     ULONG count = 0;
     auto addRange = [&](const GUID& subtype, ULONG channels, ULONG minBits, ULONG maxBits,
                         ULONG minRate, ULONG maxRate, bool pcm) {
@@ -40,22 +40,14 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
         bridgePointers_[count++] = &bridge;
     };
     const auto& pcm = Formats().pcm;
-    ULONG maxChannels = pcm.max_masked_channels;
-    for (ULONG c = 1; c <= SSR_MAX_PCM_CHANNELS; ++c)
-        if ((pcm.direct_channels & (1U << (c - 1))) && c > maxChannels) maxChannels = c;
-    ULONG minRate = 192000, maxRate = 0;
-    for (ULONG r = 0; r < 6; ++r) if (pcm.rates & (1U << r)) {
-        if (SSR_PCM_RATES[r] < minRate) minRate = SSR_PCM_RATES[r];
-        maxRate = SSR_PCM_RATES[r];
-    }
+    ssr::PcmRangeBounds bounds{};
     // The OEM device format is float: try its range first for wildcard queries.
-    if (SsrPcmEnabled(pcm, true))
-        addRange(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, maxChannels, 32, 32, minRate, maxRate, true);
-    if (SsrPcmEnabled(pcm, false)) {
-        ULONG minBits = (pcm.shapes & 1) ? 16UL : (pcm.shapes & 2) ? 24UL : 32UL;
-        ULONG maxBits = (pcm.shapes & 12) ? 32UL : (pcm.shapes & 2) ? 24UL : 16UL;
-        addRange(KSDATAFORMAT_SUBTYPE_PCM, maxChannels, minBits, maxBits, minRate, maxRate, true);
-    }
+    if (ssr::PcmRange(pcm, true, &bounds))
+        addRange(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, bounds.max_channels, bounds.min_bits,
+            bounds.max_bits, bounds.min_rate, bounds.max_rate, true);
+    if (ssr::PcmRange(pcm, false, &bounds))
+        addRange(KSDATAFORMAT_SUBTYPE_PCM, bounds.max_channels, bounds.min_bits,
+            bounds.max_bits, bounds.min_rate, bounds.max_rate, true);
     for (const auto& format : SsrFormats) if (format.Bit & Formats().codecs)
         addRange(format.Subtype, format.Channels, format.Bits, format.Bits, format.Rate, format.Rate, false);
     pins_[0].MaxGlobalInstanceCount = 1;
@@ -86,7 +78,7 @@ CMiniportWaveRT::CMiniportWaveRT(CAdapterCommon* adapter, USHORT endpoint) : ada
     descriptor_.ConnectionCount = RTL_NUMBER_OF(connections_);
     descriptor_.Connections = connections_;
 }
-CMiniportWaveRT::~CMiniportWaveRT() { adapter_->Release(); }
+CMiniportWaveRT::~CMiniportWaveRT() = default;
 STDMETHODIMP CMiniportWaveRT::QueryInterface(REFIID iid, PVOID* object) {
     if (!object) return STATUS_INVALID_PARAMETER;
     *object = nullptr;
@@ -117,11 +109,12 @@ STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::NewStream(PMINIPORTWAVERTSTREAM* output
     const WAVEFORMATEX* wave;
     NTSTATUS status = SsrValidateFormat(Formats(), format, &wave);
     if (!NT_SUCCESS(status)) return status;
-    auto stream = new (SsrNonPaged{}) CMiniportWaveRTStream(this, port);
+    auto stream = ssr::km::ComRef<CMiniportWaveRTStream>::Adopt(
+        new (SsrNonPaged{}) CMiniportWaveRTStream(this, port));
     if (!stream) return STATUS_INSUFFICIENT_RESOURCES;
     status = stream->Initialize(format);
-    if (NT_SUCCESS(status)) *output = static_cast<IMiniportWaveRTStreamNotification*>(stream);
-    else stream->Release();
+    if (NT_SUCCESS(status))
+        *output = static_cast<IMiniportWaveRTStreamNotification*>(stream.Detach());
     return status;
 }
 STDMETHODIMP_(NTSTATUS) CMiniportWaveRT::DataRangeIntersection(ULONG pin, PKSDATARANGE range, PKSDATARANGE matching, ULONG size, PVOID output, PULONG required) {

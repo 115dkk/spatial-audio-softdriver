@@ -188,6 +188,50 @@ struct PcmCandidate {
     uint16_t valid_bits;
     bool floating;
 };
+// Single PCM product rule used by byte validation and intersection search.
+bool PcmCandidateAllowed(const SSR_PCM_FORMATS& enabled, const PcmCandidate& candidate);
+// At least one known shape, rate and channel arrangement exists for this type.
+bool PcmTypeEnabled(const SSR_PCM_FORMATS& enabled, bool floating);
+struct PcmRangeBounds {
+    uint32_t max_channels, min_bits, max_bits, min_rate, max_rate;
+};
+// Sparse outer bounds, not permission for every interior value. False leaves
+// *out unchanged; a null output or a disabled type returns false.
+bool PcmRange(const SSR_PCM_FORMATS& enabled, bool floating, PcmRangeBounds* out);
+
+struct CodecCarrier {
+    uint64_t bit;
+    uint32_t subtype_id;
+    uint16_t subtype_family;
+    uint16_t channels;
+    uint32_t rate;
+    uint32_t channel_mask;
+    uint16_t bits;
+    uint16_t valid_bits;
+};
+// Concrete carriers in their KS enumeration order; the adapter checks the GUIDs
+// and speaker masks against ksmedia.h at compile time.
+inline constexpr CodecCarrier kCodecCarriers[] = {
+    {SSR_FORMAT_AC3,       0x0092, 0x0000, 2,  44100, 0x60f, 16, 16},
+    {SSR_FORMAT_AC3,       0x0092, 0x0000, 2,  48000, 0x60f, 16, 16},
+    {SSR_FORMAT_TRUEHD,    0x000c, 0x0cea, 8, 192000, 0x0ff, 16, 16},
+    {SSR_FORMAT_TRUEHD,    0x000c, 0x0cea, 8, 192000, 0x63f, 16, 16},
+    {SSR_FORMAT_DTS,       0x0008, 0x0000, 2,  48000, 0x60f, 16, 16},
+    {SSR_FORMAT_DTS_HD,    0x000b, 0x0cea, 8, 192000, 0x0ff, 16, 16},
+    {SSR_FORMAT_DTS_HD,    0x010b, 0x0cea, 8, 192000, 0x0ff, 16, 16},
+    {SSR_FORMAT_DTS_HD,    0x030b, 0x0cea, 8, 192000, 0x0ff, 16, 16},
+    {SSR_FORMAT_MAT20,     0x010c, 0x0cea, 8, 192000, 0x0ff, 16, 16},
+    {SSR_FORMAT_MAT21,     0x030c, 0x0cea, 8, 192000, 0x0ff, 16, 16},
+    {SSR_FORMAT_MAT21,     0x070c, 0x0cea, 8, 192000, 0x0ff, 16, 16},
+    {SSR_FORMAT_EAC3,      0x000a, 0x0cea, 2, 192000, 0x60f, 16, 16},
+    {SSR_FORMAT_EAC3_JOC,  0x010a, 0x0cea, 2, 192000, 0x0ff, 16, 16},
+};
+// Unlike FormatAllowed (classification), these are concrete KS acceptance rules.
+// subformat points to 16 little-endian GUID bytes; both inputs may be unaligned.
+bool FormatAccepted(const SSR_ENDPOINT_FORMATS& enabled, const void* subformat,
+                    const void* wfx, uint32_t bytes);
+bool FormatTypeAccepted(const SSR_ENDPOINT_FORMATS& enabled, const void* subformat);
+
 using PcmCandidateAccept = bool (*)(const PcmCandidate&, void* context);
 bool ChoosePcmIntersection(const SSR_PCM_FORMATS& pcm, const PcmCandidate& oem,
                            PcmCandidateAccept accepts, void* context, PcmCandidate* result);

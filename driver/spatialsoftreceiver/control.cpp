@@ -20,15 +20,15 @@ static SsrReadContext* ReadContext(PIRP irp) {
     return static_cast<SsrReadContext*>(irp->Tail.Overlay.DriverContext[0]);
 }
 static void FinishRead(SsrControlState* state, PIRP irp, NTSTATUS status, ULONG bytes = 0) {
-    auto read = ReadContext(irp);
+    auto read = ssr::km::PoolPtr<SsrReadContext>(ReadContext(irp));
     if (read->Detached) {
         KIRQL irql;
         KeAcquireSpinLock(&state->Lock, &irql);
         --state->DetachedReads;
         KeReleaseSpinLock(&state->Lock, irql);
     }
-    ExFreePoolWithTag(read, SsrPoolTag);
     irp->Tail.Overlay.DriverContext[0] = nullptr;
+    read.Reset();
     // No state accesses after releasing this reference: removal can finish.
     IoReleaseRemoveLock(&state->RemoveLock, irp);
     SsrComplete(irp, status, bytes);
@@ -55,7 +55,7 @@ static void ArmDeadline(SsrControlState* state, ULONGLONG deadline) {
     ULONGLONG due = ssr::MulDivCeil(left, 10000000, state->Frequency);
     constexpr ULONGLONG oneMinute = 600000000;
     if (due > oneMinute) due = oneMinute;
-    ExSetTimer(state->DeadlineTimer, -static_cast<LONGLONG>(due > 0 ? due : 1), 0, nullptr);
+    ExSetTimer(state->DeadlineTimer.Get(), -static_cast<LONGLONG>(due > 0 ? due : 1), 0, nullptr);
 }
 static NTSTATUS CsqInsert(PIO_CSQ queue, PIRP irp, PVOID) {
     auto state = StateFromQueue(queue);
@@ -76,7 +76,7 @@ static VOID CsqRemove(PIO_CSQ queue, PIRP irp) {
     // Preserve READ ownership across the CSQ-unlock/consumer-lock gap.
     ReadContext(irp)->Detached = TRUE;
     ++state->DetachedReads;
-    if (state->DeadlineTimer) ExCancelTimer(state->DeadlineTimer, nullptr);
+    if (state->DeadlineTimer) ExCancelTimer(state->DeadlineTimer.Get(), nullptr);
 }
 struct SsrPeek { BOOLEAN ReadyOnly; SsrFileContext* File; };
 static PIRP CsqPeek(PIO_CSQ queue, PIRP previous, PVOID context) {
@@ -144,56 +144,56 @@ NTSTATUS SsrCreateControl(PDRIVER_OBJECT driver, const SsrSettings& settings, PD
     state->Frequency = static_cast<ULONGLONG>(frequency.QuadPart);
     status = IoCsqInitializeEx(&state->Csq, CsqInsert, CsqRemove, CsqPeek, CsqAcquire, CsqRelease, CsqCancel);
     if (NT_SUCCESS(status)) status = IoCreateSymbolicLink(&SsrLink, &name);
-    if (!NT_SUCCESS(status)) { IoDeleteDevice(created); return status; }
+    if (!NT_SUCCESS(status)) {
+        state->~SsrControlState();
+        IoDeleteDevice(created);
+        return status;
+    }
     created->Flags &= ~DO_DEVICE_INITIALIZING;
     *device = created;
     return STATUS_SUCCESS;
 }
 NTSTATUS SsrStartControl(SsrControlState* state) {
     PAGED_CODE();
-    auto storage = static_cast<PUCHAR>(ExAllocatePool2(POOL_FLAG_NON_PAGED, SsrRingBytes, SsrPoolTag));
+    auto storage = ssr::km::PoolPtr<UCHAR>::Allocate(SsrRingBytes);
     if (!storage) return STATUS_INSUFFICIENT_RESOURCES;
-    PEX_TIMER timer = ExAllocateTimer(DeadlineTick, state, EX_TIMER_HIGH_RESOLUTION);
-    if (!timer) { ExFreePoolWithTag(storage, SsrPoolTag); return STATUS_INSUFFICIENT_RESOURCES; }
+    auto timer = ssr::km::ExTimer::Allocate(DeadlineTick, state, EX_TIMER_HIGH_RESOLUTION);
+    if (!timer) return STATUS_INSUFFICIENT_RESOURCES;
     KIRQL irql;
     KeAcquireSpinLock(&state->Lock, &irql);
     NTSTATUS status = STATUS_SUCCESS;
     if (state->Removed || state->Started) status = STATUS_INVALID_DEVICE_STATE;
-    else if (!state->Ring.Init(storage, SsrRingBytes)) status = STATUS_INVALID_PARAMETER;
+    else if (!state->Ring.Init(storage.Get(), SsrRingBytes)) status = STATUS_INVALID_PARAMETER;
     else {
         for (USHORT ep = 0; ep < SSR_MAX_ENDPOINTS; ++ep)
             if (state->Settings.EndpointMask & (1UL << ep))
                 state->Ring.ConfigureVolume(ep, SsrVolumeChannels(ep));
-        state->Storage = storage;
-        state->DeadlineTimer = timer;
+        state->Storage = ssr::km::Move(storage);
+        state->DeadlineTimer = ssr::km::Move(timer);
         state->Trim = 0;
         state->MaxLatenessUs = 0;
         ++state->Generation;
         state->Started = TRUE;
     }
     KeReleaseSpinLock(&state->Lock, irql);
-    if (!NT_SUCCESS(status)) {
-        ExDeleteTimer(timer, TRUE, TRUE, nullptr);
-        ExFreePoolWithTag(storage, SsrPoolTag);
-    }
     return status;
 }
 void SsrStopControl(SsrControlState* state) {
     PAGED_CODE();
+    ssr::km::ExTimer timer;
+    ssr::km::PoolPtr<UCHAR> storage;
     KIRQL irql;
     KeAcquireSpinLock(&state->Lock, &irql);
     state->Started = FALSE;
     state->Trim = 0;
-    PEX_TIMER timer = state->DeadlineTimer;
-    state->DeadlineTimer = nullptr;
-    PUCHAR storage = state->Storage;
-    state->Storage = nullptr;
+    timer = ssr::km::Move(state->DeadlineTimer);
+    storage = ssr::km::Move(state->Storage);
     KeReleaseSpinLock(&state->Lock, irql);
-    if (timer) ExDeleteTimer(timer, TRUE, TRUE, nullptr);
+    timer.Reset();
     PIRP pending;
     while ((pending = IoCsqRemoveNextIrp(&state->Csq, nullptr)) != nullptr)
         FinishRead(state, pending, STATUS_DEVICE_NOT_READY);
-    if (storage) ExFreePoolWithTag(storage, SsrPoolTag);
+    storage.Reset();
 }
 void SsrDeleteControl(PDEVICE_OBJECT device) {
     PAGED_CODE();
@@ -209,7 +209,11 @@ void SsrDeleteControl(PDEVICE_OBJECT device) {
     IoDeleteSymbolicLink(&SsrLink);
     SsrStopControl(state);
     IoReleaseRemoveLockAndWait(&state->RemoveLock, device);
-    // Open FILE_OBJECT references retain the device extension until CLOSE.
+    // Open FILE_OBJECT references retain the device extension until CLOSE,
+    // and CLEANUP/CLOSE still use this state after IoDeleteDevice, so its
+    // lifetime does not end here. SsrStopControl has already released the
+    // only members that own anything; the I/O manager frees the memory.
+    NT_ASSERT(!state->DeadlineTimer && !state->Storage);
     IoDeleteDevice(device);
 }
 static void CleanFile(SsrControlState* state, SsrFileContext* file) {
@@ -239,7 +243,7 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
                 --state->OpenCount;
                 KeReleaseSpinLock(&state->Lock, irql);
                 stack->FileObject->FsContext = nullptr;
-                ExFreePoolWithTag(file, SsrPoolTag);
+                ssr::km::PoolPtr<SsrFileContext> closeFile(file);
             }
         }
         return SsrComplete(irp, STATUS_SUCCESS);
@@ -249,19 +253,20 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
     ULONG_PTR information = 0;
     KIRQL irql;
     if (stack->MajorFunction == IRP_MJ_CREATE) {
+        ssr::km::PoolPtr<SsrFileContext> newFile;
         if (stack->FileObject->FileName.Length != 0) status = STATUS_OBJECT_NAME_NOT_FOUND;
-        else file = static_cast<SsrFileContext*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*file), SsrPoolTag));
-        if (NT_SUCCESS(status) && !file) status = STATUS_INSUFFICIENT_RESOURCES;
-        else if (file) {
+        else newFile = ssr::km::PoolPtr<SsrFileContext>::Allocate();
+        if (NT_SUCCESS(status) && !newFile) status = STATUS_INSUFFICIENT_RESOURCES;
+        else if (newFile) {
             KeAcquireSpinLock(&state->Lock, &irql);
             if (state->Removed) status = STATUS_DELETE_PENDING;
             else if (state->OpenCount) status = STATUS_SHARING_VIOLATION;
             else {
-                state->OpenCount = 1; stack->FileObject->FsContext = file;
+                state->OpenCount = 1;
+                stack->FileObject->FsContext = newFile.Release();
                 if (state->Started) state->Ring.DiscardQueued(SsrQpc());
             }
             KeReleaseSpinLock(&state->Lock, irql);
-            if (!NT_SUCCESS(status)) ExFreePoolWithTag(file, SsrPoolTag);
         }
     } else if (stack->MajorFunction != IRP_MJ_DEVICE_CONTROL || !file) {
         status = STATUS_INVALID_DEVICE_REQUEST;
@@ -270,7 +275,7 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
         ULONG input = stack->Parameters.DeviceIoControl.InputBufferLength;
         ULONG output = stack->Parameters.DeviceIoControl.OutputBufferLength;
         PVOID buffer = irp->AssociatedIrp.SystemBuffer;
-        SsrReadContext* read = nullptr;
+        ssr::km::PoolPtr<SsrReadContext> read;
         status = STATUS_SUCCESS;
         if (code == IOCTL_SSR_READ) {
             if (input < sizeof(SSR_READ_REQUEST)) status = STATUS_INVALID_PARAMETER;
@@ -281,7 +286,7 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
                     NormalPagePriority | MdlMappingNoExecute));
                 if (!mapped) status = STATUS_INSUFFICIENT_RESOURCES;
                 else {
-                    read = static_cast<SsrReadContext*>(ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*read), SsrPoolTag));
+                    read = ssr::km::PoolPtr<SsrReadContext>::Allocate();
                     if (!read) status = STATUS_INSUFFICIENT_RESOURCES;
                     else {
                         const auto request = static_cast<SSR_READ_REQUEST*>(buffer);
@@ -354,20 +359,20 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
         if (status == STATUS_PENDING) {
             // Keep a separate dispatch reference: CSQ can complete before insertion returns.
             UCHAR dispatchTag = 0;
-            NTSTATUS held = IoAcquireRemoveLock(&state->RemoveLock, &dispatchTag);
+            ssr::km::RemoveLockHold dispatchHold;
+            NTSTATUS held = dispatchHold.Acquire(&state->RemoveLock, &dispatchTag);
             if (NT_SUCCESS(held)) {
-                irp->Tail.Overlay.DriverContext[0] = read;
+                irp->Tail.Overlay.DriverContext[0] = read.Release();
                 IoMarkIrpPending(irp);
                 NTSTATUS inserted = IoCsqInsertIrpEx(&state->Csq, irp, nullptr, nullptr);
                 if (!NT_SUCCESS(inserted)) FinishRead(state, irp, inserted);
                 // Catch a write/cleanup between the first gate check and insertion.
                 SsrPumpRead(state);
-                IoReleaseRemoveLock(&state->RemoveLock, &dispatchTag);
                 return STATUS_PENDING;
             }
             status = held;
         }
-        if (read) ExFreePoolWithTag(read, SsrPoolTag);
+        read.Reset();
     }
     IoReleaseRemoveLock(&state->RemoveLock, irp);
     return SsrComplete(irp, status, information);
