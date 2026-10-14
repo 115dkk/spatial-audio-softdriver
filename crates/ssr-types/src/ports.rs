@@ -6,7 +6,7 @@
 //!
 //! | seam | adapters |
 //! | --- | --- |
-//! | [`CaptureSource`] | driver ring and SAL ring (`ssr-sys`), dump file (`engine::adapters`), test fakes |
+//! | [`CaptureSource`] | driver ring and SAL ring (`ssr-sys`), paced and looping dump file (`engine::adapters`), test fakes |
 //! | [`OutputOpener`] / [`OutputSink`] | WASAPI (`ssr-sys`), WAV file and null (`engine::adapters`), test fakes |
 //! | [`Host`] | none until the supervisor (M4) needs one |
 

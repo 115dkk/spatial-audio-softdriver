@@ -112,6 +112,78 @@ pub enum AbiError {
     },
 }
 
+/// One raw record of any kind. `payload` excludes padding; `size` includes it,
+/// except that absent padding after the final record is clamped to the buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawRecord<'a> {
+    pub offset: usize,
+    pub header: RecordHeader,
+    pub payload: &'a [u8],
+    pub size: usize,
+}
+
+/// Iterates every raw record in `buf`, including unknown and recorder-only kinds.
+pub fn raw_records(buf: &[u8]) -> RawRecords<'_> {
+    RawRecords {
+        buf,
+        offset: 0,
+        done: false,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RawRecords<'a> {
+    buf: &'a [u8],
+    offset: usize,
+    done: bool,
+}
+
+impl<'a> Iterator for RawRecords<'a> {
+    type Item = Result<RawRecord<'a>, AbiError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done || self.offset >= self.buf.len() {
+            return None;
+        }
+        let offset = self.offset;
+        let rest = &self.buf[offset..];
+        let Ok((header, _)) = RecordHeader::read_from_prefix(rest) else {
+            self.done = true;
+            return Some(Err(AbiError::Truncated {
+                offset,
+                endpoint: None,
+                need: HEADER,
+                have: rest.len(),
+            }));
+        };
+        let total = HEADER.saturating_add(header.len as usize);
+        if rest.len() < total {
+            self.done = true;
+            return Some(Err(AbiError::Truncated {
+                offset,
+                endpoint: Some(header.endpoint),
+                need: total,
+                have: rest.len(),
+            }));
+        }
+        let size = padded(total).min(rest.len());
+        self.offset = offset.saturating_add(size);
+        Some(Ok(RawRecord {
+            offset,
+            header,
+            payload: &rest[HEADER..total],
+            size,
+        }))
+    }
+}
+
+/// Returns a mutable zerocopy view of a record header when it is complete.
+pub fn header_mut(record: &mut [u8]) -> Option<&mut RecordHeader> {
+    RecordHeader::mut_from_prefix(record)
+        .ok()
+        .map(|(header, _)| header)
+}
+
 /// Iterates the records in `buf`.
 ///
 /// Kinds this version does not know are skipped. A record whose own length is
@@ -121,17 +193,13 @@ pub enum AbiError {
 /// located.
 pub fn records(buf: &[u8]) -> Records<'_> {
     Records {
-        buf,
-        offset: 0,
-        done: false,
+        raw: raw_records(buf),
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Records<'a> {
-    buf: &'a [u8],
-    offset: usize,
-    done: bool,
+    raw: RawRecords<'a>,
 }
 
 impl<'a> Iterator for Records<'a> {
@@ -139,34 +207,14 @@ impl<'a> Iterator for Records<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.done || self.offset >= self.buf.len() {
-                return None;
-            }
-            let offset = self.offset;
-            let rest = &self.buf[offset..];
-            let Ok((header, _)) = RecordHeader::read_from_prefix(rest) else {
-                self.done = true;
-                return Some(Err(AbiError::Truncated {
-                    offset,
-                    endpoint: None,
-                    need: HEADER,
-                    have: rest.len(),
-                }));
+            let raw = match self.raw.next()? {
+                Ok(raw) => raw,
+                Err(error) => return Some(Err(error)),
             };
-            let len = header.len as usize;
-            let total = HEADER + len;
-            if rest.len() < total {
-                self.done = true;
-                return Some(Err(AbiError::Truncated {
-                    offset,
-                    endpoint: Some(header.endpoint),
-                    need: total,
-                    have: rest.len(),
-                }));
-            }
-            // The padding after the last record may be absent.
-            self.offset = (offset + padded(total)).min(self.buf.len());
-            let payload = &rest[HEADER..total];
+            let offset = raw.offset;
+            let header = raw.header;
+            let payload = raw.payload;
+            let len = payload.len();
             let bad_length = || {
                 Some(Err(AbiError::BadLength {
                     offset,
@@ -309,9 +357,14 @@ fn padded(n: usize) -> usize {
 }
 
 /// Bytes a record with a `payload_len`-byte payload occupies, padding included.
-pub fn record_size(payload_len: usize) -> usize {
-    padded(HEADER + payload_len)
+pub const fn record_size(payload_len: usize) -> usize {
+    let bytes = HEADER + payload_len;
+    let align = RECORD_ALIGN as usize;
+    bytes.div_ceil(align) * align
 }
+
+pub const READ_END_RECORD_BYTES: usize = record_size(0);
+pub const RECORDER_GAP_RECORD_BYTES: usize = record_size(size_of::<crate::wire::OverrunPayload>());
 
 /// Writes records into a caller-provided buffer without allocating.
 #[derive(Debug)]
@@ -503,6 +556,102 @@ mod tests {
         let n = w.len();
         buf.truncate(n);
         buf
+    }
+
+    #[test]
+    fn raw_records_yield_all_kinds_unknown_and_clamped_last_padding() {
+        let mut buf = vec![0; 512];
+        let len = {
+            let mut writer = RecordWriter::new(&mut buf);
+            assert!(writer.data(1, 4, 5, &[1, 2, 3]));
+            assert!(writer.read_end(10));
+            assert!(writer.recorder_gap(11, 12));
+            assert!(writer.push(header(9, 77, 2, 8, 13), &[4]));
+            writer.len()
+        };
+        buf.truncate(len - 7);
+        let raw: Vec<_> = raw_records(&buf).collect::<Result<_, _>>().unwrap();
+        assert_eq!(raw.len(), 4);
+        assert_eq!(raw[0].payload, &[1, 2, 3]);
+        assert_eq!(raw[1].header.kind, RECORD_KIND_READ_END);
+        assert_eq!(raw[2].header.kind, RECORD_KIND_RECORDER_GAP);
+        assert_eq!(raw[3].header.kind, 77);
+        assert_eq!(raw[3].size, HEADER + 1);
+    }
+
+    #[test]
+    fn raw_records_yield_every_known_kind() {
+        let mut buf = vec![0; 1024];
+        let mut writer = RecordWriter::new(&mut buf);
+        assert!(writer.data(1, 0, 1, &[1]));
+        assert!(writer.format_change(1, 2, &[]));
+        assert!(writer.stream_start(1, 3));
+        assert!(writer.stream_stop(1, 4));
+        assert!(writer.overrun(1, 5, 6));
+        assert!(writer.volume(
+            7,
+            false,
+            &VolumePayload {
+                channel_count: 1,
+                mute_mask: 0,
+                level_q16: [0; MAX_VOLUME_CHANNELS],
+            },
+        ));
+        assert!(writer.read_end(8));
+        assert!(writer.recorder_gap(9, 10));
+        let len = writer.len();
+        let kinds: Vec<_> = raw_records(&buf[..len])
+            .map(|raw| raw.unwrap().header.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                RECORD_KIND_DATA,
+                RECORD_KIND_FORMAT_CHANGE,
+                RECORD_KIND_STREAM_START,
+                RECORD_KIND_STREAM_STOP,
+                RECORD_KIND_OVERRUN,
+                RECORD_KIND_VOLUME,
+                RECORD_KIND_READ_END,
+                RECORD_KIND_RECORDER_GAP,
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_records_report_cut_header_and_payload_once() {
+        let cut_header: Vec<_> = raw_records(&[0; HEADER - 1]).collect();
+        assert!(matches!(
+            cut_header.as_slice(),
+            [Err(AbiError::Truncated { endpoint: None, .. })]
+        ));
+
+        let mut buf = [0; 64];
+        let mut writer = RecordWriter::new(&mut buf);
+        assert!(writer.data(1, 0, 0, &[1; 8]));
+        let cut_record: Vec<_> = raw_records(&buf[..HEADER + 7]).collect();
+        assert!(matches!(
+            cut_record.as_slice(),
+            [Err(AbiError::Truncated {
+                endpoint: Some(ENDPOINT_PRIMARY),
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn header_mut_restamps_without_touching_payload() {
+        let mut buf = [0; 64];
+        let mut writer = RecordWriter::new(&mut buf);
+        assert!(writer.data(1, 2, 3, &[4, 5, 6]));
+        let len = writer.len();
+        let header = header_mut(&mut buf[..len]).unwrap();
+        header.qpc = 99;
+        header.byte_pos = 42;
+        let raw = raw_records(&buf[..len]).next().unwrap().unwrap();
+        assert_eq!((raw.header.qpc, raw.header.byte_pos), (99, 42));
+        assert_eq!(raw.payload, &[4, 5, 6]);
+        assert!(header_mut(&mut [0; HEADER - 1]).is_none());
     }
 
     #[test]

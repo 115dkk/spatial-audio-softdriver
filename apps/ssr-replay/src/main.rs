@@ -11,12 +11,12 @@ use engine::{Chain, ChainConfig, ChainEvent, EndpointFilter, OutputKind, load_ou
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use ssr_abi::{
-    ENDPOINT_PRIMARY, ENDPOINT_SECOND, RECORD_KIND_READ_END, RECORD_KIND_RECORDER_GAP, Record,
-    RecordHeader, reads, records, split_dump,
+    ENDPOINT_PRIMARY, ENDPOINT_SECOND, OverrunPayload, RECORD_KIND_READ_END,
+    RECORD_KIND_RECORDER_GAP, Record, raw_records, reads, records, split_dump,
 };
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::mem::{offset_of, size_of};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -274,34 +274,22 @@ fn inspect(bytes: &[u8]) -> Result<Summary, String> {
         reads: reads(&header, stream).count() as u64,
         ..Summary::default()
     };
-    let mut at = 0;
-    while at + size_of::<RecordHeader>() <= stream.len() {
-        let kind = u16::from_le_bytes(stream[at..at + 2].try_into().expect("two bytes"));
-        let len_at = at + offset_of!(RecordHeader, len);
-        let len = u32::from_le_bytes(stream[len_at..len_at + 4].try_into().expect("four bytes"));
-        let size = ssr_abi::record_size(len as usize);
-        if at + size > stream.len() {
-            break;
-        }
-        match kind {
+    for raw in raw_records(stream).flatten() {
+        match raw.header.kind {
             RECORD_KIND_READ_END => summary.read_end_markers += 1,
             RECORD_KIND_RECORDER_GAP => {
                 summary.recorder_gap_markers += 1;
-                if len == 8 {
+                if raw.payload.len() == size_of::<OverrunPayload>() {
                     summary.recorder_lost_bytes =
                         summary
                             .recorder_lost_bytes
                             .saturating_add(u64::from_le_bytes(
-                                stream[at + size_of::<RecordHeader>()
-                                    ..at + size_of::<RecordHeader>() + 8]
-                                    .try_into()
-                                    .expect("eight bytes"),
+                                raw.payload.try_into().expect("payload length checked"),
                             ));
                 }
             }
             _ => {}
         }
-        at += size;
     }
     for record in records(stream) {
         let (kind, endpoint, data_bytes) = match record {

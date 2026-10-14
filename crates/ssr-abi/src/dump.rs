@@ -3,10 +3,10 @@
 
 use zerocopy::{FromBytes, IntoBytes};
 
-use crate::record::record_size;
+use crate::record::{raw_records, record_size};
 use crate::wire::{
     ABI_VERSION, DUMP_FORMAT_VERSION, DUMP_MAGIC, DumpHeader, LEGACY_DUMP_MAGIC, OverrunPayload,
-    RECORD_KIND_READ_END, RECORD_KIND_RECORDER_GAP, RecordHeader,
+    RECORD_KIND_READ_END, RECORD_KIND_RECORDER_GAP,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -118,8 +118,10 @@ impl<'a> Iterator for Reads<'a> {
         }
         let mut start = self.offset;
         while self.offset < self.stream.len() {
-            let rest = &self.stream[self.offset..];
-            let Ok((record, _)) = RecordHeader::read_from_prefix(rest) else {
+            let Some(raw) = raw_records(&self.stream[self.offset..]).next() else {
+                break;
+            };
+            let Ok(raw) = raw else {
                 self.done = true;
                 return Some(ReadChunk {
                     bytes: &self.stream[start..],
@@ -127,8 +129,8 @@ impl<'a> Iterator for Reads<'a> {
                     lost_bytes: core::mem::take(&mut self.pending_lost),
                 });
             };
-            let size = record_size(record.len as usize);
-            if rest.len() < size {
+            let record = raw.header;
+            if raw.size < record_size(record.len as usize) {
                 self.done = true;
                 return Some(ReadChunk {
                     bytes: &self.stream[start..],
@@ -144,26 +146,23 @@ impl<'a> Iterator for Reads<'a> {
                         lost_bytes: core::mem::take(&mut self.pending_lost),
                     });
                 }
-                if let Ok(payload) = OverrunPayload::read_from_bytes(
-                    &rest[size_of::<RecordHeader>()
-                        ..size_of::<RecordHeader>() + record.len as usize],
-                ) {
+                if let Ok(payload) = OverrunPayload::read_from_bytes(raw.payload) {
                     self.pending_lost = self.pending_lost.saturating_add(payload.lost_bytes);
                 }
-                self.offset += size;
+                self.offset += raw.size;
                 start = self.offset;
                 continue;
             }
             if record.kind == RECORD_KIND_READ_END {
                 let end = self.offset;
-                self.offset += size;
+                self.offset += raw.size;
                 return Some(ReadChunk {
                     bytes: &self.stream[start..end],
                     end_qpc: Some(record.qpc),
                     lost_bytes: core::mem::take(&mut self.pending_lost),
                 });
             }
-            self.offset += size;
+            self.offset += raw.size;
         }
         self.done = true;
         (start < self.stream.len() || self.pending_lost != 0).then(|| ReadChunk {

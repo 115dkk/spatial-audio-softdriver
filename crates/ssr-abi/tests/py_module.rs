@@ -37,6 +37,13 @@ fn layouts() -> Vec<Layout> {
             offset_of!(VolumePayload, level_q16) + index * size_of::<i32>(),
         ));
     }
+    let mut legacy_volume = vec![("channel_count", 0), ("mute_mask", 4)];
+    for index in 0..16 {
+        legacy_volume.push((
+            Box::leak(format!("level_q16[{index}]").into_boxed_str()),
+            8 + index * size_of::<i32>(),
+        ));
+    }
     let mut abi = vec![
         ("abi_version", offset_of!(AbiInfo, abi_version)),
         ("struct_size", offset_of!(AbiInfo, struct_size)),
@@ -130,6 +137,12 @@ fn layouts() -> Vec<Layout> {
             format: "<II32i",
             size: size_of::<VolumePayload>(),
             fields: volume,
+        },
+        Layout {
+            python: "LEGACY_VOLUME_PAYLOAD",
+            format: "<II16i",
+            size: 72,
+            fields: legacy_volume,
         },
         Layout {
             python: "RECORD_HEADER",
@@ -229,6 +242,49 @@ fn layouts() -> Vec<Layout> {
                 reserved
             ),
         },
+        Layout {
+            python: "WAVEFORMATEX",
+            format: "<HHIIHHH",
+            size: ssr_abi::WAVEFORMATEX_BYTES,
+            fields: vec![
+                ("format_tag", 0),
+                ("channels", 2),
+                ("samples_per_sec", 4),
+                ("avg_bytes_per_sec", 8),
+                ("block_align", 12),
+                ("bits_per_sample", 14),
+                ("extra_size", 16),
+            ],
+        },
+        Layout {
+            python: "WAVEFORMATEXTENSIBLE",
+            format: "<HHIIHHHHI16s",
+            size: ssr_abi::WAVEFORMATEXTENSIBLE_BYTES,
+            fields: vec![
+                ("format_tag", 0),
+                ("channels", 2),
+                ("samples_per_sec", 4),
+                ("avg_bytes_per_sec", 8),
+                ("block_align", 12),
+                ("bits_per_sample", 14),
+                ("extra_size", 16),
+                ("valid_bits_per_sample", 18),
+                ("channel_mask", 20),
+                ("subformat", 24),
+            ],
+        },
+        Layout {
+            python: "ABI_INFO_PREFIX",
+            format: "<II",
+            size: 8,
+            fields: vec![("abi_version", 0), ("struct_size", 4)],
+        },
+        Layout {
+            python: "DRIVER_STATS_PREFIX",
+            format: "<I",
+            size: 4,
+            fields: vec![("struct_size", 0)],
+        },
     ]
 }
 
@@ -293,7 +349,29 @@ fn constants(out: &mut String) {
         FEATURE_WRITE_PACKET,
         ENDPOINT_STATE_STREAMING,
         DUMP_FORMAT_VERSION,
+        WAVE_FORMAT_PCM,
+        WAVE_FORMAT_IEEE_FLOAT,
+        WAVE_FORMAT_DTS,
+        WAVE_FORMAT_DOLBY_AC3_SPDIF,
+        WAVE_FORMAT_EXTENSIBLE,
+        WAVE_FAMILY,
+        IEC61937_FAMILY,
+        WAVEFORMATEX_BYTES,
+        WAVEFORMATEXTENSIBLE_BYTES,
+        IEC61937_FORMAT_BYTES,
     );
+    for (name, value) in [
+        ("FILE_DEVICE_UNKNOWN", 0x22),
+        ("METHOD_BUFFERED", 0),
+        ("METHOD_IN_DIRECT", 1),
+        ("METHOD_OUT_DIRECT", 2),
+        ("METHOD_NEITHER", 3),
+        ("FILE_ANY_ACCESS", 0),
+        ("FILE_READ_ACCESS", 1),
+        ("FILE_WRITE_ACCESS", 2),
+    ] {
+        writeln!(out, "{name} = {value}").unwrap();
+    }
     writeln!(out, "PCM_RATES = {:?}", ssr_abi::PCM_RATES).unwrap();
     writeln!(
         out,
@@ -307,6 +385,22 @@ fn constants(out: &mut String) {
         String::from_utf8_lossy(&ssr_abi::LEGACY_DUMP_MAGIC)
     )
     .unwrap();
+    writeln!(out, "WAVE_GUID_TAIL = bytes({:?})", ssr_abi::WAVE_GUID_TAIL).unwrap();
+    writeln!(out, "IEC61937_NAMES = {{").unwrap();
+    for (id, name) in [
+        (0x000a, "IEC 61937 E-AC-3"),
+        (0x010a, "IEC 61937 E-AC-3 JOC"),
+        (0x000b, "IEC 61937 DTS-HD"),
+        (0x010b, "IEC 61937 DTS:X E1"),
+        (0x030b, "IEC 61937 DTS:X E2"),
+        (0x000c, "IEC 61937 TrueHD"),
+        (0x010c, "IEC 61937 MAT 2.0"),
+        (0x030c, "IEC 61937 MAT 2.1"),
+        (0x070c, "IEC 61937 MAT 2.1"),
+    ] {
+        writeln!(out, "    {id}: {name:?},").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
 }
 
 fn generate() -> String {
@@ -328,6 +422,27 @@ fn generate() -> String {
         )
         .unwrap();
     }
+    out.push_str(
+        "\n\ndef records(stream):\n\
+         \x20   \"\"\"Yield complete ABI records as dictionaries; stop at a cut record.\"\"\"\n\
+         \x20   offset = 0\n\
+         \x20   while offset + RECORD_HEADER.size <= len(stream):\n\
+         \x20       values = RECORD_HEADER.unpack_from(stream, offset)\n\
+         \x20       record = dict(zip(RECORD_HEADER_FIELDS, values))\n\
+         \x20       end = offset + RECORD_HEADER.size + record[\"len\"]\n\
+         \x20       if end > len(stream):\n\
+         \x20           break\n\
+         \x20       record[\"payload\"] = bytes(stream[offset + RECORD_HEADER.size:end])\n\
+         \x20       record[\"offset\"] = offset\n\
+         \x20       total = RECORD_HEADER.size + record[\"len\"]\n\
+         \x20       record[\"size\"] = min((total + RECORD_ALIGN - 1) // RECORD_ALIGN * RECORD_ALIGN, len(stream) - offset)\n\
+         \x20       yield record\n\
+         \x20       offset += record[\"size\"]\n\n\
+         def ctl_code(device_type, function, method, access):\n\
+         \x20   return (device_type << 16) | (access << 14) | (function << 2) | method\n\n\
+         def wave_subformat(data1, family=WAVE_FAMILY):\n\
+         \x20   return struct.pack(\"<IH\", data1, family) + WAVE_GUID_TAIL\n",
+    );
     out
 }
 

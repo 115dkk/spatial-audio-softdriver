@@ -19,20 +19,13 @@ import threading
 import time
 
 from ssr_abi import (
-    ABI_INFO, ABI_VERSION, CONTROL_DEVICE_PATH, DRIVER_STATS,
-    IOCTL_SSR_GET_STATS, IOCTL_SSR_QUERY_INFO, IOCTL_SSR_READ,
-    IOCTL_SSR_SET_RATE_TRIM, RATE_TRIM, READ_MAX_BYTES, READ_REQUEST,
-    RECORD_HEADER, TRIM_LIMIT_PPM,
+    ABI_INFO, ABI_INFO_PREFIX, ABI_VERSION, CONTROL_DEVICE_PATH, DRIVER_STATS,
+    DRIVER_STATS_PREFIX, FILE_ANY_ACCESS, FILE_DEVICE_UNKNOWN, FILE_READ_ACCESS,
+    FILE_WRITE_ACCESS, IOCTL_SSR_GET_STATS, IOCTL_SSR_QUERY_INFO, IOCTL_SSR_READ,
+    IOCTL_SSR_SET_RATE_TRIM, METHOD_BUFFERED, METHOD_IN_DIRECT, METHOD_NEITHER,
+    METHOD_OUT_DIRECT, RATE_TRIM, READ_MAX_BYTES, READ_REQUEST, RECORD_HEADER,
+    TRIM_LIMIT_PPM, ctl_code,
 )
-
-FILE_DEVICE_UNKNOWN = 0x22
-METHOD_BUFFERED, METHOD_IN_DIRECT, METHOD_OUT_DIRECT, METHOD_NEITHER = range(4)
-FILE_ANY_ACCESS, FILE_READ_ACCESS, FILE_WRITE_ACCESS = 0, 1, 2
-
-
-def ctl_code(device_type, function, method, access):
-    return (device_type << 16) | (access << 14) | (function << 2) | method
-
 
 ABI_INFO_SIZE = ABI_INFO.size
 READ_REQUEST_SIZE = READ_REQUEST.size
@@ -365,11 +358,12 @@ def final_health(summary):
         ok, error, info, returned = device.ioctl(IOCTL_SSR_QUERY_INFO, b"", ABI_INFO_SIZE)
         info_good = ok and returned == ABI_INFO_SIZE
         if info_good:
-            abi_version, struct_size = struct.unpack_from("<II", info)
+            abi_version, struct_size = ABI_INFO_PREFIX.unpack_from(info)
             info_good = abi_version == ABI_VERSION and struct_size == ABI_INFO_SIZE
         summary["checks"]["query_info"] = info_good
         ok, error, stats, returned = device.ioctl(IOCTL_SSR_GET_STATS, b"", SSR_STATS_SIZE)
-        stats_good = ok and returned == SSR_STATS_SIZE and struct.unpack_from("<I", stats)[0] == SSR_STATS_SIZE
+        stats_good = (ok and returned == SSR_STATS_SIZE
+                      and DRIVER_STATS_PREFIX.unpack_from(stats)[0] == SSR_STATS_SIZE)
         summary["checks"]["get_stats"] = stats_good
         started = time.monotonic()
         ok, _, _, _ = device.ioctl(IOCTL_SSR_READ, READ_REQUEST.pack(1, 50), READ_MAX_BYTES)
