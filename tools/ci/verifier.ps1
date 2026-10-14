@@ -6,9 +6,9 @@
 # - Windows 10 / Server 2022 (build < 22000): volatile flags, set before the
 #   driver loads, take special pool, IRQL, pool tracking, I/O, deadlock, DMA,
 #   security and miscellaneous checks (0x9BB). I/O verification (0x10) is
-#   left out for now (0x9AB): on Server 2022 the device's start under it loses
-#   the runner, and driver.yml's verifier-isolation job is finding out why
-#   (ADR 0027). Server 2025's rule classes keep I/O verification.
+#   left out (0x9AB): on Server 2022 a PortCls audio driver's start under it
+#   loses the runner, ours and VB-CABLE alike (ADR 0027). Server 2025's rule
+#   classes keep I/O verification.
 # - Windows 11 / Server 2025: `/dif <classes> /now` starts rule classes on a
 #   driver that is already running; on one that is not it lands in
 #   FailedDrivers with 0xC0000C7B (STATUS_DIF_VOLATILE_DRIVER_IS_NOT_RUNNING).
@@ -40,7 +40,7 @@ $SsrVerifiedImage = 'spatialsoftreceiver.sys'
 $SsrStandardClasses = @(1, 2, 4, 5, 9, 12, 18)
 # The same checks as volatile flags where Windows 10 allows them, plus
 # deadlock detection (0x20) and DMA checking (0x80), less I/O verification
-# (0x10) while the start under it on Server 2022 is investigated (ADR 0027).
+# (0x10), under which a PortCls start loses a Server 2022 runner (ADR 0027).
 $SsrStandardFlags = 0x9AB
 $SsrPoolTrackingFlag = 0x8
 
