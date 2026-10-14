@@ -1,5 +1,5 @@
 # Feature registry (ADR 0002). A capability that is not listed here does not
-# exist. The gates in crates/bio-policy fail when:
+# exist. The gates in crates/ssr-policy fail when:
 #   * an id repeats, or a kind or status is not one of the values below,
 #   * a feature marked "implemented" lists no tests,
 #   * a listed test ("crate-name::test_fn") does not exist in that crate.
@@ -14,11 +14,11 @@ kind = "policy"
 milestone = "M0"
 status = "implemented"
 tests = [
-  "bio-policy::every_crate_root_forbids_unsafe",
-  "bio-policy::budgeted_crates_carry_the_unsafe_lint_table",
-  "bio-policy::no_unsafe_outside_budget",
-  "bio-policy::budget_names_only_existing_crates",
-  "bio-policy::unsafe_scanner_ignores_comments_strings_and_chars",
+  "ssr-policy::every_crate_root_forbids_unsafe",
+  "ssr-policy::budgeted_crates_carry_the_unsafe_lint_table",
+  "ssr-policy::no_unsafe_outside_budget",
+  "ssr-policy::budget_names_only_existing_crates",
+  "ssr-policy::unsafe_scanner_ignores_comments_strings_and_chars",
 ]
 
 [[feature]]
@@ -27,17 +27,17 @@ kind = "policy"
 milestone = "M0"
 status = "implemented"
 tests = [
-  "bio-policy::features_registry_is_well_formed",
-  "bio-policy::implemented_features_have_existing_tests",
+  "ssr-policy::features_registry_is_well_formed",
+  "ssr-policy::implemented_features_have_existing_tests",
 ]
 
 [[feature]]
-id = "policy.windows_code_stays_in_bio_sys"
+id = "policy.windows_code_stays_in_ssr_sys"
 kind = "policy"
 milestone = "M0"
 status = "implemented"
-tests = ["bio-policy::windows_code_stays_in_bio_sys"]
-note = "only bio-sys names windows, windows-sys or wasapi; only apps other than bio-replay depend on bio-sys, so engine and everything below it build and test without Windows"
+tests = ["ssr-policy::windows_code_stays_in_ssr_sys"]
+note = "only ssr-sys names windows, windows-sys or wasapi; only apps other than ssr-replay depend on ssr-sys, so engine and everything below it build and test without Windows"
 
 # ---- Contract (M0) ----
 
@@ -47,13 +47,13 @@ kind = "abi"
 milestone = "M0"
 status = "implemented"
 tests = [
-  "bio-abi::written_records_parse_back",
-  "bio-abi::unknown_kinds_are_skipped",
-  "bio-abi::a_cut_record_ends_the_iteration_with_an_error",
-  "bio-abi::a_payload_on_a_stop_record_is_an_error_but_not_the_end",
-  "bio-abi::arbitrary_bytes_never_panic",
-  "bio-abi::the_largest_data_record_fits_one_read",
-  "bio-abi::repeated_state_exposes_repeat_and_keeps_the_epoch",
+  "ssr-abi::written_records_parse_back",
+  "ssr-abi::unknown_kinds_are_skipped",
+  "ssr-abi::a_cut_record_ends_the_iteration_with_an_error",
+  "ssr-abi::a_payload_on_a_stop_record_is_an_error_but_not_the_end",
+  "ssr-abi::arbitrary_bytes_never_panic",
+  "ssr-abi::the_largest_data_record_fits_one_read",
+  "ssr-abi::repeated_state_exposes_repeat_and_keeps_the_epoch",
 ]
 
 [[feature]]
@@ -62,10 +62,10 @@ kind = "abi"
 milestone = "M0"
 status = "implemented"
 tests = [
-  "bio-abi::every_format_round_trips",
-  "bio-abi::plain_waveformatex_pcm_and_ac3_parse",
-  "bio-abi::malformed_formats_are_errors",
-  "bio-abi::subtype_aliases_parse_as_their_container",
+  "ssr-abi::every_format_round_trips",
+  "ssr-abi::plain_waveformatex_pcm_and_ac3_parse",
+  "ssr-abi::malformed_formats_are_errors",
+  "ssr-abi::subtype_aliases_parse_as_their_container",
 ]
 
 [[feature]]
@@ -73,15 +73,15 @@ id = "abi.ioctl_codes"
 kind = "abi"
 milestone = "M0"
 status = "implemented"
-tests = ["bio-abi::ioctl_literals_match_ctl_code", "bio-abi::record_kinds_and_format_bits_are_distinct"]
+tests = ["ssr-abi::ioctl_literals_match_ctl_code", "ssr-abi::record_kinds_and_format_bits_are_distinct"]
 
 [[feature]]
 id = "abi.c_header"
 kind = "abi"
 milestone = "M0"
 status = "implemented"
-tests = ["bio-abi::c_header_matches_the_rust_layout"]
-note = "include/bioatmos_abi.h is generated from src/wire.rs by cbindgen with _Static_assert lines computed from the Rust layout; BIO_ABI_BLESS=1 regenerates it"
+tests = ["ssr-abi::c_header_matches_the_rust_layout"]
+note = "include/ssr_abi.h is generated from src/wire.rs by cbindgen with _Static_assert lines computed from the Rust layout; SSR_ABI_BLESS=1 regenerates it"
 
 [[feature]]
 id = "abi.dump_file"
@@ -89,11 +89,11 @@ kind = "abi"
 milestone = "M0"
 status = "implemented"
 tests = [
-  "bio-abi::header_round_trips_and_guards_the_magic",
-  "bio-abi::format_two_reads_round_trip_boundaries_empty_reads_tail_and_gaps",
-  "bio-abi::formats_zero_and_one_are_one_unbounded_read",
-  "bio-abi::old_records_iterator_skips_recorder_markers",
-  "bio-abi::recorder_gap_inside_a_read_keeps_the_bytes_before_it",
+  "ssr-abi::header_round_trips_and_guards_the_magic",
+  "ssr-abi::format_two_reads_round_trip_boundaries_empty_reads_tail_and_gaps",
+  "ssr-abi::formats_zero_and_one_are_one_unbounded_read",
+  "ssr-abi::old_records_iterator_skips_recorder_markers",
+  "ssr-abi::recorder_gap_inside_a_read_keeps_the_bytes_before_it",
 ]
 note = "dump format 3 (format 2 plus 136-byte, 32-channel volume records) preserves each READ with recorder-only READ_END markers and reports recorder loss with RECORDER_GAP; formats 0 to 2 remain readable, including their 72-byte, 16-channel volume records"
 
@@ -103,9 +103,9 @@ kind = "types"
 milestone = "M0"
 status = "implemented"
 tests = [
-  "bio-types::angles_follow_the_left_positive_convention",
-  "bio-types::the_centre_has_no_direction",
-  "bio-types::consistency_checks_every_signal_length",
+  "ssr-types::angles_follow_the_left_positive_convention",
+  "ssr-types::the_centre_has_no_direction",
+  "ssr-types::consistency_checks_every_signal_length",
 ]
 
 [[feature]]
@@ -114,9 +114,9 @@ kind = "types"
 milestone = "M0"
 status = "implemented"
 tests = [
-  "bio-types::layout_rejects_duplicates_empty_and_nan",
-  "bio-types::layout_keeps_feed_order",
-  "bio-types::channels_are_disjoint_and_follow_the_active_length",
+  "ssr-types::layout_rejects_duplicates_empty_and_nan",
+  "ssr-types::layout_keeps_feed_order",
+  "ssr-types::channels_are_disjoint_and_follow_the_active_length",
 ]
 
 [[feature]]
@@ -124,7 +124,7 @@ id = "replay.inspect"
 kind = "tool"
 milestone = "M0"
 status = "implemented"
-tests = ["bio-replay::inspect_counts_records_and_names_each_epoch"]
+tests = ["ssr-replay::inspect_counts_records_and_names_each_epoch"]
 
 # ---- Replay chain (M1) ----
 
@@ -206,7 +206,7 @@ tests = [
   "decode::ddp_and_pcm_use_the_same_nominal_speaker_table",
   "decode::rejected_pushes_do_not_allocate_error_strings",
 ]
-note = "bed channels and LFE from pinned harletty-bridge eac3; shared bio-types::Speaker nominal positions preserve PCM/DD+ angles and exclude measured BRIR presets. Fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. Upstream eac3 allocates per frame; adapter buffers and OAMD timeline are preallocated"
+note = "bed channels and LFE from pinned harletty-bridge eac3; shared ssr-types::Speaker nominal positions preserve PCM/DD+ angles and exclude measured BRIR presets. Fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. Upstream eac3 allocates per frame; adapter buffers and OAMD timeline are preallocated"
 
 [[feature]]
 id = "decode.ddp_joc"
@@ -218,10 +218,10 @@ tests = [
   "decode::object_mapping_skips_oamd_beds_and_does_not_duplicate_downmix",
   "decode::pure_bed_joc_uses_assignments_without_lfe_object",
   "decode::unknown_object_position_is_not_silently_rendered_at_front",
-  "bio-types::room_corners_follow_bs2127_reference_layout",
-  "bio-types::room_conversion_is_symmetric_and_invertible_on_dense_grid",
-  "bio-types::room_conversion_is_continuous_away_from_directionless_centre",
-  "bio-types::room_conversion_handles_nonfinite_and_clamped_inputs",
+  "ssr-types::room_corners_follow_bs2127_reference_layout",
+  "ssr-types::room_conversion_is_symmetric_and_invertible_on_dense_grid",
+  "ssr-types::room_conversion_is_continuous_away_from_directionless_centre",
+  "ssr-types::room_conversion_handles_nonfinite_and_clamped_inputs",
   "decode::two_oamd_blocks_emit_two_scenes_and_preserve_every_sample",
   "decode::long_oamd_ramp_is_interpolated_in_room_coordinates",
   "decode::oamd_offsets_and_ramps_continue_across_access_units",
@@ -234,7 +234,7 @@ tests = [
   "decode::mixed_reconstructed_beds_and_dynamic_objects_follow_oamd_order",
   "decode::five_channel_joc_accepts_replacement_bed_but_refuses_expanded_bed",
 ]
-note = "BS.2127-1 section 10.1 room-to-direction conversion; ETSI TS 103 420 OAMD block timing, room-coordinate ramps in <=256-sample scenes, differential targets and diffuse unknown positions. Mixed reconstructed beds/dynamic objects and five-channel replacement dependent beds supported by synthetic tests only: 실제 스트림으로 확인 안 됨. Five-channel JOC on an expanded bed is refused because upstream omits fold-down metadata; ISF/alternate mapping and extended-precision OAMD remain unsupported/upstream limitations. No real Atmos sample verified: ddp_joc_external_sample_has_positioned_objects remains ignored pending BIO_DDP_JOC_SAMPLE and Omniphony comparison"
+note = "BS.2127-1 section 10.1 room-to-direction conversion; ETSI TS 103 420 OAMD block timing, room-coordinate ramps in <=256-sample scenes, differential targets and diffuse unknown positions. Mixed reconstructed beds/dynamic objects and five-channel replacement dependent beds supported by synthetic tests only: 실제 스트림으로 확인 안 됨. Five-channel JOC on an expanded bed is refused because upstream omits fold-down metadata; ISF/alternate mapping and extended-precision OAMD remain unsupported/upstream limitations. No real JOC sample verified: ddp_joc_external_sample_has_positioned_objects remains ignored pending SSR_DDP_JOC_SAMPLE and Omniphony comparison"
 
 [[feature]]
 id = "decode.truehd"
@@ -392,14 +392,14 @@ kind = "tool"
 milestone = "M1"
 status = "implemented"
 tests = [
-  "bio-replay::render_is_deterministic_and_inspect_still_works",
-  "bio-replay::endpoint_all_mixes_both_and_endpoint_zero_matches_primary_only",
-  "bio-replay::equivalent_qpc_frequencies_render_identically",
-  "bio-replay::missing_profile_fails_with_a_readable_message",
-  "bio-replay::replay_feeds_each_recorded_read_as_one_read",
-  "bio-replay::arrival_slack_above_two_hundred_ms_is_rejected_before_file_creation",
+  "ssr-replay::render_is_deterministic_and_inspect_still_works",
+  "ssr-replay::endpoint_all_mixes_both_and_endpoint_zero_matches_primary_only",
+  "ssr-replay::equivalent_qpc_frequencies_render_identically",
+  "ssr-replay::missing_profile_fails_with_a_readable_message",
+  "ssr-replay::replay_feeds_each_recorded_read_as_one_read",
+  "ssr-replay::arrival_slack_above_two_hundred_ms_is_rejected_before_file_creation",
 ]
-note = "bio-replay render prepares the BRIR for each format before its first record, so no block is dropped; output_sha256 covers the interleaved f32 samples. The hash is stable within one OS but differs between Linux and Windows (platform libm), so CI compares it per OS"
+note = "ssr-replay render prepares the BRIR for each format before its first record, so no block is dropped; output_sha256 covers the interleaved f32 samples. The hash is stable within one OS but differs between Linux and Windows (platform libm), so CI compares it per OS"
 
 [[feature]]
 id = "golden.blackbox"
@@ -536,20 +536,20 @@ kind = "platform"
 milestone = "M2"
 status = "partial"
 tests = [
-  "bio-sys::sal_header_round_trip",
-  "bio-sys::sal_rejects_truncated_and_inconsistent_lengths",
-  "bio-sys::sal_ddplus_is_eac3",
-  "bio-sys::sal_float_is_pcm",
-  "bio-sys::sal_records_parse_back_with_positions_qpc_and_drops",
-  "bio-sys::sal_format_change_bumps_epoch_for_each_format_field",
-  "bio-sys::sal_buffer_full_retry_is_transactional",
-  "bio-sys::sal_large_read_drains_in_order_across_output_buffers",
-  "bio-sys::sal_idle_stop_restart_resets_position_and_repeats_format",
-  "bio-sys::sal_invalid_format_does_not_commit_state",
-  "bio-sys::sal_idle_before_first_format_waits_without_committing_an_epoch",
-  "bio-sys::sal_translation_does_not_allocate_in_steady_state",
+  "ssr-sys::sal_header_round_trip",
+  "ssr-sys::sal_rejects_truncated_and_inconsistent_lengths",
+  "ssr-sys::sal_ddplus_is_eac3",
+  "ssr-sys::sal_float_is_pcm",
+  "ssr-sys::sal_records_parse_back_with_positions_qpc_and_drops",
+  "ssr-sys::sal_format_change_bumps_epoch_for_each_format_field",
+  "ssr-sys::sal_buffer_full_retry_is_transactional",
+  "ssr-sys::sal_large_read_drains_in_order_across_output_buffers",
+  "ssr-sys::sal_idle_stop_restart_resets_position_and_repeats_format",
+  "ssr-sys::sal_invalid_format_does_not_commit_state",
+  "ssr-sys::sal_idle_before_first_format_waits_without_committing_an_epoch",
+  "ssr-sys::sal_translation_does_not_allocate_in_steady_state",
 ]
-note = "SAL's READ results become bio_abi records, from its interface only (ADR 0005). Translation drains a large SAL READ as whole records over multiple engine reads. SAL exposes no stop signal, so 100 ms without payload by READ QPC emits StreamStop; later data emits StreamStart, resets byte_pos to zero, and repeats the unchanged format without changing epoch. READs before the first format negotiation are waited out without an epoch. Windows 2025 CI (the opt-in SAL runner) captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
+note = "SAL's READ results become ssr_abi records, from its interface only (ADR 0005). Translation drains a large SAL READ as whole records over multiple engine reads. SAL exposes no stop signal, so 100 ms without payload by READ QPC emits StreamStop; later data emits StreamStart, resets byte_pos to zero, and repeats the unchanged format without changing epoch. READs before the first format negotiation are waited out without an epoch. Windows 2025 CI (the opt-in SAL runner) captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
 
 [[feature]]
 id = "sys.wasapi_output"
@@ -557,22 +557,22 @@ kind = "platform"
 milestone = "M2"
 status = "implemented"
 tests = [
-  "bio-sys::exclusive_failure_requires_an_explicit_shared_fallback",
-  "bio-sys::playback_timestamp_uses_clock_units_and_queue_distance",
-  "bio-sys::playback_clock_is_monotonic_across_estimates_measurements_and_restarts",
-  "bio-sys::fast_dac_measurements_do_not_accumulate_nominal_period_error",
-  "bio-sys::integer_samples_clip_and_left_align",
-  "bio-sys::device_errors_keep_removed_busy_and_not_found_distinct",
-  "bio-sys::render_endpoints_include_a_default",
-  "bio-sys::exclusive_or_shared_fallback_plays_silence",
-  "bio-sys::exclusive_sink_takes_frames_at_the_device_rate",
-  "bio-sys::shared_sink_takes_frames_at_the_device_rate",
-  "bio-sys::exclusive_sink_recovers_its_cadence_after_a_missed_deadline",
-  "bio-sys::shared_silence_has_period_spaced_playback_qpcs",
-  "bio-sys::wasapi_shared_periods_do_not_allocate",
-  "bio-sys::wasapi_multichannel_periods_do_not_allocate",
-  "bio-sys::wasapi_exclusive_periods_and_a_restart_do_not_allocate",
-  "bio-sys::wasapi_opens_multichannel_layouts_on_the_cable",
+  "ssr-sys::exclusive_failure_requires_an_explicit_shared_fallback",
+  "ssr-sys::playback_timestamp_uses_clock_units_and_queue_distance",
+  "ssr-sys::playback_clock_is_monotonic_across_estimates_measurements_and_restarts",
+  "ssr-sys::fast_dac_measurements_do_not_accumulate_nominal_period_error",
+  "ssr-sys::integer_samples_clip_and_left_align",
+  "ssr-sys::device_errors_keep_removed_busy_and_not_found_distinct",
+  "ssr-sys::render_endpoints_include_a_default",
+  "ssr-sys::exclusive_or_shared_fallback_plays_silence",
+  "ssr-sys::exclusive_sink_takes_frames_at_the_device_rate",
+  "ssr-sys::shared_sink_takes_frames_at_the_device_rate",
+  "ssr-sys::exclusive_sink_recovers_its_cadence_after_a_missed_deadline",
+  "ssr-sys::shared_silence_has_period_spaced_playback_qpcs",
+  "ssr-sys::wasapi_shared_periods_do_not_allocate",
+  "ssr-sys::wasapi_multichannel_periods_do_not_allocate",
+  "ssr-sys::wasapi_exclusive_periods_and_a_restart_do_not_allocate",
+  "ssr-sys::wasapi_opens_multichannel_layouts_on_the_cable",
 ]
 note = "event-driven WAVEFORMATEXTENSIBLE output for 1..=32 channels (Float32, Int32, Int24in32, Int16), with exact masks for multichannel exclusive streams and shared autoconvert fallback; stereo retains its device-quirk negotiation. The stream starts on the first period and an exclusive stream restarts after a stall. Playback QPC never regresses and advances by at least one period across estimated/correlated readings, temporary zero correlations, and stream resets; the calculation remains frame-based and channel-independent. Device enumeration reports shared mix formats and exact exclusive support for standard speaker layouts; ignored Windows tests probe VB-CABLE and verify allocation-free N-channel periods"
 
@@ -582,8 +582,8 @@ kind = "platform"
 milestone = "M2"
 status = "implemented"
 tests = [
-  "bio-sys::mmcss_pro_audio_registration_reverts_on_drop",
-  "bio-sys::qpc_ticks_increase_and_frequency_is_nonzero",
+  "ssr-sys::mmcss_pro_audio_registration_reverts_on_drop",
+  "ssr-sys::qpc_ticks_increase_and_frequency_is_nonzero",
 ]
 note = "MMCSS Pro Audio registration that reverts on drop, and QueryPerformanceCounter"
 
@@ -593,17 +593,17 @@ kind = "tool"
 milestone = "M2"
 status = "partial"
 tests = [
-  "bio-live::paced_dump_releases_records_at_their_pace_and_restamps_them",
-  "bio-live::paced_dump_loops_with_continuous_positions_and_times",
-  "bio-live::a_dump_that_ends_on_data_keeps_looping",
-  "bio-live::looping_needs_two_data_records",
-  "bio-live::format_two_loop_span_uses_whole_recorded_reads",
-  "bio-live::tee_capture_preserves_reads_and_records_dropped_bytes",
-  "bio-live::tee_capture_stop_idle_restart_replays_like_the_live_chain",
-  "bio-live::tee_capture_read_does_not_allocate",
-  "bio-live::endpoint_parser_accepts_arbitrary_subsets_and_rejects_bad_masks",
+  "ssr-live::paced_dump_releases_records_at_their_pace_and_restamps_them",
+  "ssr-live::paced_dump_loops_with_continuous_positions_and_times",
+  "ssr-live::a_dump_that_ends_on_data_keeps_looping",
+  "ssr-live::looping_needs_two_data_records",
+  "ssr-live::format_two_loop_span_uses_whole_recorded_reads",
+  "ssr-live::tee_capture_preserves_reads_and_records_dropped_bytes",
+  "ssr-live::tee_capture_stop_idle_restart_replays_like_the_live_chain",
+  "ssr-live::tee_capture_read_does_not_allocate",
+  "ssr-live::endpoint_parser_accepts_arbitrary_subsets_and_rejects_bad_masks",
 ]
-note = "bio-live record, play and devices (ADR 0018). devices --formats reports each render endpoint's shared mix format and exact standard-layout exclusive support, with JSON for CI. play accepts headphone and physical-speaker profiles and reports output kind, channel count and mask; it accepts arbitrary endpoint subsets, installs its initial Prepared before capture starts, and reports the actual startup clock strategy plus four endpoint-local states and explicit idle/overflow/event-loss counters. play --from-dump replays a dump at its recorded pace (--loop repeats it: whole recorded READs, or only the data records when the recorder did not close a READ after the last one, as in the tool-written CI fixtures, so format and stream records play once (unrecorded_reads_loop_the_data_records); --report writes the run's figures), so the whole live path runs through a virtual cable on Windows CI (ADR 0026); record and play --record preserve READ boundaries and report recorder_lost_bytes. Game/MAT and Apple Music/JOC source and listening checks remain"
+note = "ssr-live record, play and devices (ADR 0018). devices --formats reports each render endpoint's shared mix format and exact standard-layout exclusive support, with JSON for CI. play accepts headphone and physical-speaker profiles and reports output kind, channel count and mask; it accepts arbitrary endpoint subsets, installs its initial Prepared before capture starts, and reports the actual startup clock strategy plus four endpoint-local states and explicit idle/overflow/event-loss counters. play --from-dump replays a dump at its recorded pace (--loop repeats it: whole recorded READs, or only the data records when the recorder did not close a READ after the last one, as in the tool-written CI fixtures, so format and stream records play once (unrecorded_reads_loop_the_data_records); --report writes the run's figures), so the whole live path runs through a virtual cable on Windows CI (ADR 0026); record and play --record preserve READ boundaries and report recorder_lost_bytes. Game/MAT and Apple Music/JOC source and listening checks remain"
 
 [[feature]]
 id = "ci.sal_runner"
@@ -632,11 +632,11 @@ kind = "platform"
 milestone = "M3"
 status = "implemented"
 tests = [
-  "bio-sys::ppm_to_q16_rounds_clamps_and_rejects_non_finite_values",
-  "bio-sys::installed_driver_opens_reads_and_accepts_trim",
-  "bio-abi::control_device_path_matches_generated_header",
+  "ssr-sys::ppm_to_q16_rounds_clamps_and_rejects_non_finite_values",
+  "ssr-sys::installed_driver_opens_reads_and_accepts_trim",
+  "ssr-abi::control_device_path_matches_generated_header",
 ]
-note = "BioRing opens the bio-abi CONTROL_DEVICE_PATH (SpatialSoftReceiver), validates QUERY_INFO, reads whole bio_abi records, trims the driver clock and reports driver stats. The conversion test runs on Linux; the ignored Windows device test and tools/ci/driver_e2e_check.py run after the test-signed driver is installed in the CI end-to-end stage"
+note = "DriverRing opens the ssr-abi CONTROL_DEVICE_PATH (SpatialSoftReceiver), validates QUERY_INFO, reads whole ssr_abi records, trims the driver clock and reports driver stats. The conversion test runs on Linux; the ignored Windows device test and tools/ci/driver_e2e_check.py run after the test-signed driver is installed in the CI end-to-end stage"
 
 [[feature]]
 id = "supervisor.state_machine"
@@ -677,7 +677,7 @@ kind = "platform"
 milestone = "M4"
 status = "planned"
 tests = []
-note = "one bio-plughost process per plugin under a job object; shared-memory ring one block behind, the engine never waits; crash and hang restart with state restore (ADR 0021)"
+note = "one ssr-plughost process per plugin under a job object; shared-memory ring one block behind, the engine never waits; crash and hang restart with state restore (ADR 0021)"
 
 [[feature]]
 id = "hostvst.vst3"
@@ -701,7 +701,7 @@ kind = "app"
 milestone = "M4"
 status = "planned"
 tests = []
-note = "bio-guard restores the three default device roles when the app exits abnormally (ADR 0023, proposed)"
+note = "ssr-guard restores the three default device roles when the app exits abnormally (ADR 0023, proposed)"
 
 # ---- Entrances (ADR 0024, 0025) ----
 
@@ -711,21 +711,21 @@ kind = "abi"
 milestone = "M3"
 status = "partial"
 tests = [
-  "bio-abi::endpoint_numbers_are_distinct_and_in_range",
-  "bio-abi::endpoint_mask_helpers_reject_out_of_range_values",
-  "bio-abi::writer_defaults_to_primary_and_preserves_mixed_endpoint_order",
-  "bio-abi::old_zero_reserved_bytes_are_the_primary_endpoint",
-  "bio-abi::errors_report_the_endpoint_when_a_header_is_available",
-  "bio-abi::arbitrary_endpoint_kind_length_sequences_round_trip",
-  "bio-abi::old_dump_format_is_primary_and_newer_format_is_rejected",
-  "bio-abi::repeated_state_exposes_repeat_and_keeps_the_epoch",
-  "bio-abi::c_header_matches_the_rust_layout",
-  "bio-abi::default_capabilities_match_header_and_inf",
-  "bio-abi::query_info_round_trips",
-  "bio-sys::query_info_preserves_pcm_rules_and_rejects_old_layout",
+  "ssr-abi::endpoint_numbers_are_distinct_and_in_range",
+  "ssr-abi::endpoint_mask_helpers_reject_out_of_range_values",
+  "ssr-abi::writer_defaults_to_primary_and_preserves_mixed_endpoint_order",
+  "ssr-abi::old_zero_reserved_bytes_are_the_primary_endpoint",
+  "ssr-abi::errors_report_the_endpoint_when_a_header_is_available",
+  "ssr-abi::arbitrary_endpoint_kind_length_sequences_round_trip",
+  "ssr-abi::old_dump_format_is_primary_and_newer_format_is_rejected",
+  "ssr-abi::repeated_state_exposes_repeat_and_keeps_the_epoch",
+  "ssr-abi::c_header_matches_the_rust_layout",
+  "ssr-abi::default_capabilities_match_header_and_inf",
+  "ssr-abi::query_info_round_trips",
+  "ssr-sys::query_info_preserves_pcm_rules_and_rejects_old_layout",
   "engine::endpoint_filter_ignores_unselected_endpoint_without_counting_it_invalid",
   "engine::endpoint_format_and_overrun_reset_only_their_front",
-  "bio-replay::endpoint_all_mixes_both_and_endpoint_zero_matches_primary_only",
+  "ssr-replay::endpoint_all_mixes_both_and_endpoint_zero_matches_primary_only",
 ]
 note = "the unfrozen ABI v1 carries four EndpointFormats slots and EndpointMask in a 160-byte QUERY_INFO; codec bits 1..8 stay fixed (compiled 0x1fe, default 0x6c), PCM is rates 0x3f x shapes 0x1f x channel rules (18 speaker bits or direct out 1..32); defaults and offsets are checked against the C header and INF; the driver defaults to endpoint mask 0x7 and purpose names Spatial SoftReceiver, Spatial SoftReceiver Music, and Spatial SoftReceiver PASS; driver.passthrough_endpoint owns the third mini-pair"
 
@@ -737,12 +737,12 @@ kind = "driver"
 milestone = "M3"
 status = "implemented"
 tests = [
-  "bio-abi::volume_gain_is_power_average_not_channel_zero",
-  "bio-abi::volume_records_round_trip_and_old_reader_skips_them",
-  "bio-abi::volume_32_channels_round_trips",
-  "bio-abi::invalid_volume_rejects_but_iteration_continues",
-  "bio-abi::legacy_16_channel_volume_parses_and_other_lengths_are_rejected",
-  "bio-abi::driver_core_dump_matches_expectations",
+  "ssr-abi::volume_gain_is_power_average_not_channel_zero",
+  "ssr-abi::volume_records_round_trip_and_old_reader_skips_them",
+  "ssr-abi::volume_32_channels_round_trips",
+  "ssr-abi::invalid_volume_rejects_but_iteration_continues",
+  "ssr-abi::legacy_16_channel_volume_parses_and_other_lengths_are_rejected",
+  "ssr-abi::driver_core_dump_matches_expectations",
   "engine::legacy_volume_record_attenuates_rendered_output",
   "engine::endpoint_volume_ramps_only_its_lane_at_emission",
   "engine::volume_repeat_with_the_same_value_is_a_noop",
@@ -757,10 +757,10 @@ kind = "driver"
 milestone = "M3"
 status = "partial"
 tests = [
-  "bio-abi::driver_core_dump_matches_expectations",
-  "bio-abi::the_largest_data_record_fits_one_read",
+  "ssr-abi::driver_core_dump_matches_expectations",
+  "ssr-abi::the_largest_data_record_fits_one_read",
 ]
-note = "driver/core (record ring, READ gate, DMA clock, PcmAllowed rule-based classification (six rates, five shapes, all 18 speaker bits and direct out 1..32); no kernel API or allocation) is tested by driver/core/tests/core_tests.cpp (including PcmIntersectionOrder) under ASan and UBSan with clang, gcc and MSVC. New handles receive repeated known FormatChange and current StreamStart; every lost-record endpoint receives Overrun, repeated format, and repeated current Start/Stop before later records, with the next data discontinuous. An endpoint that never had a format keeps no format-repeat request, so overwriting it never makes PrepareRead fail or READ return nothing while records are queued (FormatlessOverwriteKeepsReading). The libFuzzer model reconstructs per-endpoint format, streaming and volume state solely from consumed records. driver.yml also sets BIO_DRIVER_CORE_DUMP so bio-abi parses the stream and verifies reserved=0; partial until the kernel wrapper runs it on a test-signed PC"
+note = "driver/core (record ring, READ gate, DMA clock, PcmAllowed rule-based classification (six rates, five shapes, all 18 speaker bits and direct out 1..32); no kernel API or allocation) is tested by driver/core/tests/core_tests.cpp (including PcmIntersectionOrder) under ASan and UBSan with clang, gcc and MSVC. New handles receive repeated known FormatChange and current StreamStart; every lost-record endpoint receives Overrun, repeated format, and repeated current Start/Stop before later records, with the next data discontinuous. An endpoint that never had a format keeps no format-repeat request, so overwriting it never makes PrepareRead fail or READ return nothing while records are queued (FormatlessOverwriteKeepsReading). The libFuzzer model reconstructs per-endpoint format, streaming and volume state solely from consumed records. driver.yml also sets SSR_DRIVER_CORE_DUMP so ssr-abi parses the stream and verifies reserved=0; partial until the kernel wrapper runs it on a test-signed PC"
 
 [[feature]]
 id = "driver.kernel"
@@ -768,7 +768,7 @@ kind = "driver"
 milestone = "M3"
 status = "partial"
 tests = []
-note = "spatialsoftreceiver.sys: SysVAD HDMI render x3 (EndpointMask=0x7; endpoint 2 is Spatial SoftReceiver PASS) and the \\\\.\\SpatialSoftReceiver control device; CodecMask0..3 compile 0x1fe and default to 0x6c (EAC3/EAC3 Atmos/MAT20/MAT21); PcmRateMask/PcmShapeMask/PcmMaxMaskedChannels/PcmDirectChannels default to 0x3f/0x1f/18/0xffffffff. Two sparse PCM ranges use exact core PcmAllowed validation, tested by PcmRules and the coverage-instrumented format_fuzz target. Endpoint 0 requests shared float32 7.1 48 kHz and endpoints 1/2 float32 stereo 48 kHz through serialized VT_BLOB OEMFormat. Compile-checked on Linux (tools/kcheck.py). Windows gates in driver.yml build x64/ARM64 with /W4 /WX and code analysis, InfVerif and CodeQL, then install test-signed on windows-2022/windows-2025. The earlier two-endpoint version loaded and passed ring flow there; the new third endpoint and post-install private-key policy have not yet run on Windows. driver_flow_check.py now tests the default three-endpoint mask, and tools/ci/ioctl_fuzz.py attacks the control device (malformed lengths, fields, unknown codes, cancellation/close races, exclusive open, post-fuzz health) under Driver Verifier where the image allows it. Exact OEM property placement, the DeviceFormat result, HVCI and Atmos negotiation need a test-signed PC"
+note = "spatialsoftreceiver.sys: SysVAD HDMI render x3 (EndpointMask=0x7; endpoint 2 is Spatial SoftReceiver PASS) and the \\\\.\\SpatialSoftReceiver control device; CodecMask0..3 compile 0x1fe and default to 0x6c (EAC3/EAC3 JOC/MAT20/MAT21); PcmRateMask/PcmShapeMask/PcmMaxMaskedChannels/PcmDirectChannels default to 0x3f/0x1f/18/0xffffffff. Two sparse PCM ranges use exact core PcmAllowed validation, tested by PcmRules and the coverage-instrumented format_fuzz target. Endpoint 0 requests shared float32 7.1 48 kHz and endpoints 1/2 float32 stereo 48 kHz through serialized VT_BLOB OEMFormat. Compile-checked on Linux (tools/kcheck.py). Windows gates in driver.yml build x64/ARM64 with /W4 /WX and code analysis, InfVerif and CodeQL, then install test-signed on windows-2022/windows-2025. The earlier two-endpoint version loaded and passed ring flow there; the new third endpoint and post-install private-key policy have not yet run on Windows. driver_flow_check.py now tests the default three-endpoint mask, and tools/ci/ioctl_fuzz.py attacks the control device (malformed lengths, fields, unknown codes, cancellation/close races, exclusive open, post-fuzz health) under Driver Verifier where the image allows it. Exact OEM property placement, the DeviceFormat result, HVCI and JOC negotiation need a test-signed PC"
 
 [[feature]]
 id = "engine.two_endpoints"
@@ -876,7 +876,7 @@ tests = [
   "engine::zero_rate_bitstream_burst_qpc_does_not_panic",
   "engine::dropped_frames_are_not_counted_again_as_lane_underruns",
   "engine::metadata_change_inside_one_interval_takes_effect",
-  "bio-replay::replay_merges_a_large_record_with_small_records_by_dma_time",
+  "ssr-replay::replay_merges_a_large_record_with_small_records_by_dma_time",
 ]
 note = "ADR 0028: what one entrance does never changes a speaker-bed sample another entrance places; each occupied frame is exactly filled, explicitly dropped or counted once as underrun, discontinuity cuts are drops, and one pending ahead-drop range replaces the former eight-range accounting limit"
 
@@ -885,7 +885,7 @@ id = "driver.passthrough_endpoint"
 kind = "driver"
 milestone = "M3"
 status = "partial"
-tests = ["bio-abi::driver_core_dump_matches_expectations"]
+tests = ["ssr-abi::driver_core_dump_matches_expectations"]
 note = "Spatial SoftReceiver PASS (Korean: 공간 소프트리시버 PASS) WaveRT/topology minipair and hardware volume/mute implemented; default mask 0x7, CodecMask2 and the PCM rules (PcmRateMask2/PcmShapeMask2/PcmMaxMaskedChannels2/PcmDirectChannels2) default like endpoint 0 (0x6c; 0x3f/0x1f/18/0xffffffff), OEM stereo 48 kHz. Native PassthroughStateAndIsolation and tools/ci/test_exclusive_policy.py verify contracts; driver_flow_check.py covers three distinct shared tones. Windows load, endpoint-mask restart, exclusive PCM/bitstreams and spatial audio still need test-signed validation. Exclusive-only is a routing policy, not a shared-mode prohibition."
 
 [[feature]]
@@ -902,7 +902,7 @@ kind = "platform"
 milestone = "M4"
 status = "planned"
 tests = []
-note = "ADR 0028: BIO opens the DAC's render pin through kernel streaming while the DAC endpoint is disabled, so no app can pick the DAC; falls back to WASAPI exclusive when the pin does not open; bio-guard re-enables the endpoint"
+note = "ADR 0028: Spatial SoftReceiver opens the DAC's render pin through kernel streaming while the DAC endpoint is disabled, so no app can pick the DAC; falls back to WASAPI exclusive when the pin does not open; ssr-guard re-enables the endpoint"
 
 [[feature]]
 id = "supervisor.entrance_routing"
@@ -926,14 +926,14 @@ kind = "app"
 milestone = "M4"
 status = "planned"
 tests = []
-note = "bioasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Only asio-sys touches the ASIO SDK and carries GPL-3.0-or-later SPDX headers; releases that ship bioasio.dll are GPLv3 as a whole (ADR 0003, 0025)"
+note = "ssrasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Only asio-sys touches the ASIO SDK and carries GPL-3.0-or-later SPDX headers; releases that ship ssrasio.dll are GPLv3 as a whole (ADR 0003, 0025)"
 
 [[feature]]
 id = "driver.endpoint_identity"
 kind = "driver"
 milestone = "M3"
 status = "partial"
-tests = ["bio-abi::control_device_path_matches_generated_header", "bio-abi::c_header_matches_the_rust_layout"]
+tests = ["ssr-abi::control_device_path_matches_generated_header", "ssr-abi::c_header_matches_the_rust_layout"]
 note = "Spatial SoftReceiver package names and ROOT hardware/service/control identifiers; English/Korean INF labels in UTF-16LE BOM, Parameters EndpointName0..3 loaded at PASSIVE_LEVEL with allocation-free 31-code-unit fallback. Native core_tests::EndpointNames and tools/ci/test_endpoints.py test malformed names, INF/core English parity, Rust/C/Python/PowerShell path parity, JSON and actual C# KS-reference mapping. Tools use owned TopologyHdmi0..2/WaveHdmi0..2 identities, never display names; legacy removal identities are centralized. Real Windows topology, InfVerif, Korean install and registry-to-sink changes remain to be verified."
 
 [[feature]]
@@ -969,8 +969,8 @@ tests = [
   "engine::start_rejects_a_sink_with_another_channel_count",
   "engine::twelve_channel_output_steady_state_does_not_allocate",
   "engine::steady_state_speaker_output_does_not_allocate",
-  "bio-replay::speaker_render_writes_extensible_channels_mask_and_report",
-  "bio-replay::direct_speaker_render_writes_zero_channel_mask",
+  "ssr-replay::speaker_render_writes_extensible_channels_mask_and_report",
+  "ssr-replay::direct_speaker_render_writes_zero_channel_mask",
 ]
-note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional mono room FIR (subwoofers included), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). bio-live and bio-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
+note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional mono room FIR (subwoofers included), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). ssr-live and ssr-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
 

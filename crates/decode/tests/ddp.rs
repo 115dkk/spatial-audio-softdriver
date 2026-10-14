@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-use bio_types::Position;
 use bitstream::{Burst, DataType};
 use decode::{DecodeConfig, ddp::DdpDecoder};
+use ssr_types::Position;
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ddp/tones-5.1.eac3");
 
@@ -167,9 +167,9 @@ fn ddp_rejects_bad_access_units_without_emitting_and_recovers() {
 /// Vector redistribution rights could not be established for upstream's
 /// captured JOC fixture. This is deliberately ignored, not silently skipped.
 #[test]
-#[ignore = "requires a redistributable or locally supplied BIO_DDP_JOC_SAMPLE raw E-AC-3 stream"]
+#[ignore = "requires a redistributable or locally supplied SSR_DDP_JOC_SAMPLE raw E-AC-3 stream"]
 fn ddp_joc_external_sample_has_positioned_objects() {
-    let path = std::env::var_os("BIO_DDP_JOC_SAMPLE").expect("set BIO_DDP_JOC_SAMPLE");
+    let path = std::env::var_os("SSR_DDP_JOC_SAMPLE").expect("set SSR_DDP_JOC_SAMPLE");
     let input = std::fs::read(path).unwrap();
     let mut decoder = DdpDecoder::new(DecodeConfig::default());
     let mut start = 0;

@@ -2,7 +2,7 @@
 **/*.rs.bk
 # Diagnostic recordings and rendered output stay out of the tree; test fixtures
 # live under tests/fixtures and are named explicitly.
-*.biodump
+*.ssrdump
 /out/
 # cargo-fuzz working files
 **/fuzz/target/

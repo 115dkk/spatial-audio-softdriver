@@ -24,7 +24,7 @@ $owners = @($devices | ForEach-Object InstanceId)
 foreach ($device in $devices) {
     try {
         . (Join-Path (Split-Path $helper) 'exclusive-policy.ps1')
-        Clear-BioExclusivePolicy -InstanceId $device.InstanceId
+        Clear-SsrExclusivePolicy -InstanceId $device.InstanceId
     } catch { Write-Warning "policy cleanup: $($_.Exception.Message)"; $failed = $true }
     Write-Host "removing device $($device.InstanceId)"
     & pnputil.exe /remove-device $device.InstanceId

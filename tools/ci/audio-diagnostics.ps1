@@ -81,7 +81,7 @@ Write-Host '::endgroup::'
 Write-Host '::group::Recent audio events'
 $since = (Get-Date).AddMinutes(-30)
 Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since } -ErrorAction SilentlyContinue |
-    Where-Object { $_.ProviderName -match 'Audio|Kernel-PnP|bioatmos|Service Control Manager' } |
+    Where-Object { $_.ProviderName -match 'Audio|Kernel-PnP|spatialsoftreceiver|Service Control Manager' } |
     Select-Object -First 40 |
     ForEach-Object { Write-Host "$($_.TimeCreated.ToString('HH:mm:ss')) $($_.ProviderName) $($_.Id): $($_.Message -replace '\s+', ' ')" }
 foreach ($log in 'Microsoft-Windows-Audio/Operational', 'Microsoft-Windows-Kernel-PnP/Configuration') {

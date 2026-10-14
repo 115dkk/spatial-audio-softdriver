@@ -1,11 +1,11 @@
 # 시험서명 PC에서 Spatial SoftReceiver 드라이버 시험하기
 
-이 문서는 릴리스의 `bio-atmos-driver-test-<버전>-x64.zip`에 `README.md`로 들어갑니다. 시험서명 모드를 켠 Windows PC에서, GitHub 호스트 러너로는 할 수 없는 드라이버 시험을 하는 방법을 적습니다. 시험하는 분이 AI 도우미와 함께 따라 할 수 있도록 명령, 합격 기준, 남길 파일을 단계마다 적습니다.
+이 문서는 릴리스의 `spatial-softreceiver-driver-test-<버전>-x64.zip`에 `README.md`로 들어갑니다. 시험서명 모드를 켠 Windows PC에서, GitHub 호스트 러너로는 할 수 없는 드라이버 시험을 하는 방법을 적습니다. 시험하는 분이 AI 도우미와 함께 따라 할 수 있도록 명령, 합격 기준, 남길 파일을 단계마다 적습니다.
 
 GitHub 러너가 PR마다 이미 하는 드라이버 시험(여기서 되풀이할 필요가 없는 것):
 - 설치와 적재, 엔드포인트 마스크 `0x7`의 세 렌더 엔드포인트, 기본 형식 규칙(코덱 마스크 `0x6c`와 PCM 규칙: 표본율 `0x3f`, 표본 모양 `0x1f`, 마스크 채널 상한 18, 직접 출력 채널 `0xffffffff`)
 - 엔드포인트마다 톤을 재생해 링으로 읽어 오기(공유 모드 기본값은 엔드포인트 0이 float32 7.1/48 kHz, 엔드포인트 1과 2가 float32 stereo/48 kHz. `collect.ps1`의 DeviceFormat 관찰값은 정보이고 합격 조건이 아님)
-- 세 엔드포인트의 톤을 동시에 `bio-live --source driver`로 받아 가상 케이블에서 듣기
+- 세 엔드포인트의 톤을 동시에 `ssr-live --source driver`로 받아 가상 케이블에서 듣기
 - 독점 정책(0/1은 독점 거절, 2는 독점 허용)과 볼륨·음소거 기록
 - 일시적 Driver Verifier를 켠 채 제어 장치 IOCTL 퍼저 60초
 - 엔진: 헤드폰과 스피커 출력의 루프백(스피커는 가상 케이블이 받는 가장 넓은 레이아웃)
@@ -19,7 +19,7 @@ GitHub 러너가 PR마다 이미 하는 드라이버 시험(여기서 되풀이�
   - 게임과 음악 듣기
   - 지연을 구축기와 비교
   - USB DAC 재시작
-  - 근거: [ADR 0015](../adr/0015-latency-as-numbers.md), [ADR 0018](../adr/0018-bio-live-dev-app.md), [ADR 0019](../adr/0019-restart-a-stalled-exclusive-stream.md)
+  - 근거: [ADR 0015](../adr/0015-latency-as-numbers.md), [ADR 0018](../adr/0018-ssr-live-dev-app.md), [ADR 0019](../adr/0019-restart-a-stalled-exclusive-stream.md)
 - **M3 (우리 드라이버):** 우리 커널 드라이버의 시험입니다.
   - Driver Verifier, 메모리 무결성(HVCI)
   - 공간 음향과 Dolby Atmos 협상, 비트스트림 형식
@@ -28,14 +28,14 @@ GitHub 러너가 PR마다 이미 하는 드라이버 시험(여기서 되풀이�
 
 SAL이 없는 PC라면 M2 부분은 건너뜁니다. 둘 다 할 수 있으면 **M2를 먼저** 합니다. 우리 드라이버를 깔기 전의, 익숙한 구축기 상태에서 기준을 잡기 위해서입니다.
 
-> **이번 라운드는 드라이버와 직접 링 경로를 봅니다.** 장시간 게임과 안티치트 공존은 후속 시험으로 남기되, `bio-live --source driver`로 헤드폰까지 듣는 시험은 아래 6-1단계에서 합니다.
+> **이번 라운드는 드라이버와 직접 링 경로를 봅니다.** 장시간 게임과 안티치트 공존은 후속 시험으로 남기되, `ssr-live --source driver`로 헤드폰까지 듣는 시험은 아래 6-1단계에서 합니다.
 
 ## AI 도우미에게
 
 - 이 문서에 적힌 명령만 실행하십시오. 레지스트리와 부팅 설정은 이 문서가 적은 값만 바꾸십시오.
 - 단계마다 출력과 JSON 파일을 지우거나 고치지 말고 그대로 두십시오. 합격 여부는 각 단계의 "합격 기준"으로만 판단하고, 기준에 없는 일이 생기면 있는 그대로 적으십시오.
 - 블루스크린(버그체크)이 나면 재부팅한 뒤 다른 일보다 먼저 [8단계의 수집](#8-결과-모으기와-보내기)을 실행하십시오.
-- 결과를 공개된 곳(GitHub 이슈 등)에 올릴 때는 숫자 요약만 올리십시오. `.biodump`와 녹음 WAV에는 그때 재생한 소리가 그대로 들어 있으므로 저장소 소유자에게 따로 보냅니다.
+- 결과를 공개된 곳(GitHub 이슈 등)에 올릴 때는 숫자 요약만 올리십시오. `.ssrdump`와 녹음 WAV에는 그때 재생한 소리가 그대로 들어 있으므로 저장소 소유자에게 따로 보냅니다.
 - SAL과 구축기에서는 **출력만** 보냅니다. 덤프, 녹음, 화면, 숫자, 로그의 설정값이 여기에 해당합니다. SAL의 소스 코드, 그 소스에서 나온 패치(`sal-cli-bio-game.patch` 같은 것), SAL의 파일 자체는 보내지 마십시오. 이 저장소는 SAL을 보지 않고 만듭니다(클린룸, [ADR 0005](../adr/0005-clean-room.md)).
 
 ## 0. 준비
@@ -74,13 +74,13 @@ SAL이 없는 PC라면 M2 부분은 건너뜁니다. 둘 다 할 수 있으면 *
 ### 묶음 받기
 
 1. 릴리스 페이지에서 다음을 받습니다.
-   - `bio-atmos-driver-test-<버전>-x64.zip` (M3)
-   - `bio-atmos-tools-<버전>-windows-x86_64.zip` (M2. `bio-live.exe`, `bio-replay.exe`)
+   - `spatial-softreceiver-driver-test-<버전>-x64.zip` (M3)
+   - `spatial-softreceiver-tools-<버전>-windows-x86_64.zip` (M2. `ssr-live.exe`, `ssr-replay.exe`)
    - `SHA256SUMS.txt`
 2. 해시를 확인합니다:
 
    ```powershell
-   Get-FileHash .\bio-atmos-driver-test-*-x64.zip -Algorithm SHA256
+   Get-FileHash .\spatial-softreceiver-driver-test-*-x64.zip -Algorithm SHA256
    ```
 
    `SHA256SUMS.txt`의 값과 같아야 합니다. 도구 zip도 같은 방법으로 확인합니다.
@@ -111,10 +111,10 @@ SAL이 없는 PC라면 M2 부분은 건너뜁니다. 둘 다 할 수 있으면 *
 
 ### M2-0. 프로필 만들기
 
-`bio-live play`와 `bio-replay render`는 출력 프로필(TOML)을 읽습니다. 헤드폰이면 아래의 BRIR 프로필이고, 실제 스피커로 듣는 프로필은 6-2절에 있습니다. 도구 폴더에 `profile.toml`을 만들고, 경로를 쓰던 BRIR로 바꿉니다. Windows 경로는 작은따옴표 문자열로 씁니다.
+`ssr-live play`와 `ssr-replay render`는 출력 프로필(TOML)을 읽습니다. 헤드폰이면 아래의 BRIR 프로필이고, 실제 스피커로 듣는 프로필은 6-2절에 있습니다. 도구 폴더에 `profile.toml`을 만들고, 경로를 쓰던 BRIR로 바꿉니다. Windows 경로는 작은따옴표 문자열로 씁니다.
 
 ```toml
-name = "bio-test"
+name = "ssr-test"
 gain_db = 0.0
 limiter_ceiling_dbfs = -1.0
 
@@ -130,7 +130,7 @@ gain_db = 0.0
 장치 목록을 확인합니다:
 
 ```powershell
-.\bio-live.exe devices
+.\ssr-live.exe devices
 ```
 
 헤드폰 DAC의 이름 일부를 적어 둡니다. 아래 `--output`에 씁니다.
@@ -141,37 +141,37 @@ MAT 디코더와 블랙박스 골든 시험의 재료입니다. 구축기에서 
 
 | 덤프 이름 | 재생할 것 | 녹화 명령 |
 | --- | --- | --- |
-| `sal-game-atmos.biodump` | Atmos 게임(예: 오버워치 2)의 한 판 일부 | `.\bio-live.exe record --source sal --out sal-game-atmos.biodump --seconds 60` |
-| `sal-music-atmos.biodump` | Apple Music의 Dolby Atmos 곡 하나, 처음부터 60초 | `.\bio-live.exe record --source sal --out sal-music-atmos.biodump --seconds 60` |
-| `sal-music-stereo.biodump` | 같은 앱의 스테레오 곡 30초 | `--out sal-music-stereo.biodump --seconds 30` |
-| `sal-ddp.biodump` | E-AC-3(DD+)을 SAL로 비트스트림하는 재생(가능하면 JOC) 30초 | `--out sal-ddp.biodump --seconds 30` |
+| `sal-game-joc.ssrdump` | Atmos 게임(예: 오버워치 2)의 한 판 일부 | `.\ssr-live.exe record --source sal --out sal-game-joc.ssrdump --seconds 60` |
+| `sal-music-joc.ssrdump` | Apple Music의 Dolby Atmos 곡 하나, 처음부터 60초 | `.\ssr-live.exe record --source sal --out sal-music-joc.ssrdump --seconds 60` |
+| `sal-music-stereo.ssrdump` | 같은 앱의 스테레오 곡 30초 | `--out sal-music-stereo.ssrdump --seconds 30` |
+| `sal-ddp.ssrdump` | E-AC-3(DD+)을 SAL로 비트스트림하는 재생(가능하면 JOC) 30초 | `--out sal-ddp.ssrdump --seconds 30` |
 
 녹화마다 확인합니다:
 
 ```powershell
-.\bio-replay.exe inspect sal-game-atmos.biodump
+.\ssr-replay.exe inspect sal-game-joc.ssrdump
 ```
 
 **합격 기준**
 - `inspect`의 형식이 재생한 것과 맞음(Atmos → MAT, DD+ → E-AC-3)
 - 유실(losses)이 0
 
-**골든 기준 녹음(선택).** `sal-music-atmos`와 같은 곡의 같은 60초를 구축기로 재생하면서, 헤드폰 출력의 WASAPI 루프백을 32비트 WAV로 녹음해 `builder-music-atmos.wav`로 남깁니다. Audacity라면 호스트 "Windows WASAPI", 녹음 장치는 헤드폰 출력의 "(loopback)"입니다. 쓴 BRIR과 구축기 설정을 메모에 적습니다.
+**골든 기준 녹음(선택).** `sal-music-joc`와 같은 곡의 같은 60초를 구축기로 재생하면서, 헤드폰 출력의 WASAPI 루프백을 32비트 WAV로 녹음해 `builder-music-joc.wav`로 남깁니다. Audacity라면 호스트 "Windows WASAPI", 녹음 장치는 헤드폰 출력의 "(loopback)"입니다. 쓴 BRIR과 구축기 설정을 메모에 적습니다.
 
 ### M2-2. 듣기 (게임과 음악)
 
-구축기를 끈 상태에서 `bio-live`가 SAL 링을 받아 헤드폰으로 내게 합니다. SAL 쪽 공간 음향은 켠 그대로 둡니다.
+구축기를 끈 상태에서 `ssr-live`가 SAL 링을 받아 헤드폰으로 내게 합니다. SAL 쪽 공간 음향은 켠 그대로 둡니다.
 
 게임(독점 모드, 장치 최소 주기, 링 목표 10 ms):
 
 ```powershell
-.\bio-live.exe play --source sal --profile profile.toml --output "<DAC 이름 일부>" --target-ms 10 --report play-game.json
+.\ssr-live.exe play --source sal --profile profile.toml --output "<DAC 이름 일부>" --target-ms 10 --report play-game.json
 ```
 
 음악(링 목표 40 ms):
 
 ```powershell
-.\bio-live.exe play --source sal --profile profile.toml --output "<DAC 이름 일부>" --target-ms 40 --report play-music.json
+.\ssr-live.exe play --source sal --profile profile.toml --output "<DAC 이름 일부>" --target-ms 40 --report play-music.json
 ```
 
 같은 것을 공유 모드로 한 번 더: `--shared --report play-music-shared.json`.
@@ -184,7 +184,7 @@ Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 �
 - 게임에서 소리가 화면보다 늦게 느껴지는지
 
 **합격 기준**
-- 재생 중 `underruns` 0. 언더런이 나면 bio-live가 그 초의 줄 아래에 `underrun: ring … frames, markers …, layout …, needed …, produced …, last block … ms ago`를 찍고, `--report`의 JSON에도 `last_underrun`으로 남깁니다. 이 줄을 결과에 그대로 붙여 주십시오. 링이 비었는지(`ring`), 캡처가 멈췄는지(`last block`)를 가를 수 있습니다
+- 재생 중 `underruns` 0. 언더런이 나면 ssr-live가 그 초의 줄 아래에 `underrun: ring … frames, markers …, layout …, needed …, produced …, last block … ms ago`를 찍고, `--report`의 JSON에도 `last_underrun`으로 남깁니다. 이 줄을 결과에 그대로 붙여 주십시오. 링이 비었는지(`ring`), 캡처가 멈췄는지(`last block`)를 가를 수 있습니다
 - `output_restarts` 0. 아니면 그 DAC 이름과 함께 적습니다(ADR 0019)
 - 들리는 문제 없음
 
@@ -193,11 +193,11 @@ Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 �
 구축기는 체인 전체의 지연을 숫자로 잰 적이 없습니다(ADR 0015). 그래서 다음 셋을 함께 받습니다.
 
 1. `play-game.json`의 지연 p50과 p99(ms). 소스 기록 시각부터 장치 재생 시각까지입니다.
-2. 같은 게임, 같은 장면에서 구축기와 `bio-live`를 번갈아 들은 비교. 발소리나 총소리처럼 화면과 맞춰 볼 수 있는 소리로 합니다. 결과는 "bio-live가 더 늦음/같음/더 빠름"입니다.
+2. 같은 게임, 같은 장면에서 구축기와 `ssr-live`를 번갈아 들은 비교. 발소리나 총소리처럼 화면과 맞춰 볼 수 있는 소리로 합니다. 결과는 "ssr-live가 더 늦음/같음/더 빠름"입니다.
 3. 구축기가 로그나 설정에 남기는 단계별 버퍼와 지연 값이 있으면 그 값. 값만 적고 파일은 보내지 않습니다.
 
 **합격 기준**
-- 2에서 "bio-live가 더 늦음"이 아님
+- 2에서 "ssr-live가 더 늦음"이 아님
 - 1의 p50이 3의 합보다 크지 않음(3이 있을 때)
 - 1의 p50과 p99가 모두 1초(1000 ms) 아래. 넘으면 계측 결함입니다. 수백 초처럼 PC가 켜져 있던 시간에 가까운 값이면 그 값을 그대로 적어 주십시오
 
@@ -283,7 +283,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\exclusive_policy_check.ps1
 
 ## 2-1. 엔드포인트 볼륨과 음소거
 
-`bio-live`와 다른 링 판독기를 종료한 뒤 묶음 폴더에서 실행합니다. Python은 PATH에 있어야 합니다(`-Python py`로 런처 지정 가능).
+`ssr-live`와 다른 링 판독기를 종료한 뒤 묶음 폴더에서 실행합니다. Python은 PATH에 있어야 합니다(`-Python py`로 런처 지정 가능).
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary volume-summary.json
@@ -295,7 +295,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 - 종료 코드 0, `passed: true`이며 모든 엔드포인트에 `QueryHardwareSupport`의 VOLUME(1)·MUTE(2) 비트가 있음
 - 각 단계의 마지막 실제 변경 `VOLUME` 기록이 API 채널별 dB와 ±0.5 dB 이내이고 음소거 마스크가 일치함(재진술만으로는 합격하지 않음)
 - 원래 마스터·채널별 볼륨과 음소거가 복원됨
-- **엔진 적용 뒤:** 검사기를 종료하고 `bio-live --source driver`로 재생할 때 소리 설정의 볼륨 슬라이더를 내리면 소리가 줄고, 음소거하면 조용해짐. PCM, MAT, DD+ 각각에서 이중 감쇠가 없는지 확인
+- **엔진 적용 뒤:** 검사기를 종료하고 `ssr-live --source driver`로 재생할 때 소리 설정의 볼륨 슬라이더를 내리면 소리가 줄고, 음소거하면 조용해짐. PCM, MAT, DD+ 각각에서 이중 감쇠가 없는지 확인
 
 ## 3. 공간 음향과 Dolby Atmos 협상
 
@@ -308,11 +308,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 3. "Dolby Atmos for home theater"를 고를 수 있으면 켭니다. 그다음 녹화를 시작하고, 녹화하는 동안 Dolby Access의 데모(또는 Atmos 게임)를 재생합니다:
 
    ```powershell
-   py .\ring_record.py --seconds 30 --out atmos-ep0.biodump
+   py .\ring_record.py --seconds 30 --out joc-ep0.ssrdump
    ```
 
-   `Spatial SoftReceiver Music`은 `--out atmos-ep1.biodump`로 따로 녹화합니다.
-4. `atmos-ep0-summary.json`(화면에도 출력됨)에서 그 엔드포인트의 형식을 봅니다.
+   `Spatial SoftReceiver Music`은 `--out joc-ep1.ssrdump`로 따로 녹화합니다.
+4. `joc-ep0-summary.json`(화면에도 출력됨)에서 그 엔드포인트의 형식을 봅니다.
 
 **합격 기준**
 - "Dolby Atmos for home theater"가 목록에 있고 켤 수 있음
@@ -332,7 +332,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 3. 형식마다 시험 영상을 재생하면서 녹화합니다:
 
    ```powershell
-   py .\ring_record.py --seconds 20 --out passthrough-eac3.biodump
+   py .\ring_record.py --seconds 20 --out passthrough-eac3.ssrdump
    ```
 
    AC-3, E-AC-3, TrueHD(MAT), DTS, DTS-HD MA, DTS:X 가운데 가진 파일로 합니다.
@@ -343,7 +343,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
   | 재생한 코덱 | 형식 이름 |
   | --- | --- |
   | AC-3 | `IEC 61937 AC-3` |
-  | E-AC-3 | `IEC 61937 E-AC-3` (Atmos 표시가 있으면 `IEC 61937 E-AC-3 Atmos`) |
+  | E-AC-3 | `IEC 61937 E-AC-3` (Atmos 표시가 있으면 `IEC 61937 E-AC-3 JOC`) |
   | TrueHD | `IEC 61937 TrueHD` |
   | DTS | `IEC 61937 DTS` |
   | DTS-HD MA | `IEC 61937 DTS-HD` |
@@ -355,26 +355,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 
 ## 4-1. PCM 형식 범위
 
-드라이버는 PCM을 표 대신 규칙으로 받습니다(ADR 0024의 2026-10-13 고침): 44.1~192 kHz의 여섯 표본율, 다섯 표본 모양(16비트, 24비트 packed, 24-in-32, 32비트 정수, float32), 그리고 채널 규칙(Windows 18개 스피커 비트의 아무 조합, 또는 마스크 0의 1~32채널 직접 출력)입니다. 이 단계는 높이 채널이 있는 PCM, 24비트 packed, 176.4·192 kHz, 직접 출력 16·24채널이 Windows와 재생기에서 실제로 열리는지 봅니다. 1과 2는 도구 zip의 `bio-live.exe`로 합니다. 3과 4는 가능하면 합니다. 그런 형식을 내는 Windows 설정이나 재생기가 있어야 하기 때문입니다.
+드라이버는 PCM을 표 대신 규칙으로 받습니다(ADR 0024의 2026-10-13 고침): 44.1~192 kHz의 여섯 표본율, 다섯 표본 모양(16비트, 24비트 packed, 24-in-32, 32비트 정수, float32), 그리고 채널 규칙(Windows 18개 스피커 비트의 아무 조합, 또는 마스크 0의 1~32채널 직접 출력)입니다. 이 단계는 높이 채널이 있는 PCM, 24비트 packed, 176.4·192 kHz, 직접 출력 16·24채널이 Windows와 재생기에서 실제로 열리는지 봅니다. 1과 2는 도구 zip의 `ssr-live.exe`로 합니다. 3과 4는 가능하면 합니다. 그런 형식을 내는 Windows 설정이나 재생기가 있어야 하기 때문입니다.
 
-1. 드라이버가 알리는 규칙을 봅니다. 제어 장치를 여는 다른 프로그램(`bio-live play`, `ring_record.py`)은 먼저 끕니다:
+1. 드라이버가 알리는 규칙을 봅니다. 제어 장치를 여는 다른 프로그램(`ssr-live play`, `ring_record.py`)은 먼저 끕니다:
 
    ```powershell
-   .\bio-live.exe devices
+   .\ssr-live.exe devices
    ```
 
    **합격 기준** (레지스트리 기본값일 때)
    - 노출된 엔드포인트마다 아래 두 줄이 나옴(엔드포인트 번호만 다름)
 
      ```text
-       endpoint 0: codecs [E-AC-3, E-AC-3 Atmos, MAT 2.0, MAT 2.1]
+       endpoint 0: codecs [E-AC-3, E-AC-3 JOC, MAT 2.0, MAT 2.1]
          PCM: rates [44100, 48000, 88200, 96000, 176400, 192000] Hz; shapes [int16, int24 packed, int24-in-32, int32, float32]; masked channels <= 18; direct-out channels [1-32]
      ```
 
 2. Windows의 독점 형식 질의로 높이 채널 PCM을 봅니다:
 
    ```powershell
-   .\bio-live.exe devices --formats
+   .\ssr-live.exe devices --formats
    ```
 
    이 명령은 장치마다 48 kHz의 표준 배치(2, 4, 6, 8, 12채널)를 독점 모드로 받는지 묻습니다. 24비트 packed와 다른 표본율은 묻지 않습니다.
@@ -397,7 +397,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 4. **(가능하면) 재생기의 독점 PCM.** 독점 WASAPI 출력에서 형식을 고를 수 있는 재생기가 있으면, **`Spatial SoftReceiver PASS`** 로 아래 PCM을 하나씩 재생하면서 녹화합니다:
 
    ```powershell
-   py .\ring_record.py --seconds 20 --out pcm-direct16.biodump
+   py .\ring_record.py --seconds 20 --out pcm-direct16.ssrdump
    ```
 
    | 시험 | 보낼 PCM | 요약(`<이름>-summary.json`) 엔드포인트 2의 `formats[]` |
@@ -408,11 +408,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
    | 직접 출력 16채널 | 채널 마스크 0, 16채널 | `channel_layout`이 `direct-out`, `channels`가 16 |
    | 직접 출력 24채널 | 채널 마스크 0, 24채널 | `channel_layout`이 `direct-out`, `channels`가 24 |
 
-   `--out`의 이름은 시험마다 바꿉니다. 녹화를 끝낸 뒤 같은 재생을 6-1단계의 `bio-live play`에 `--endpoints 2`를 붙여 듣습니다. 제어 장치는 핸들을 하나만 받으므로 녹화와 듣기는 따로 합니다.
+   `--out`의 이름은 시험마다 바꿉니다. 녹화를 끝낸 뒤 같은 재생을 6-1단계의 `ssr-live play`에 `--endpoints 2`를 붙여 듣습니다. 제어 장치는 핸들을 하나만 받으므로 녹화와 듣기는 따로 합니다.
 
    **합격 기준**
    - 요약의 `formats[]`가 위 표와 맞고, `byte_pos_discontinuities`, `overrun_records`, `lost_bytes`가 0
-   - 높이 채널, 24비트 packed, 176.4·192 kHz, 직접 출력 16채널은 `bio-live` 보고의 `endpoints[2].unsupported`가 `null`이고 소리가 들림. 16채널은 기본 배치 9.1.6으로 들림(6-1단계의 표)
+   - 높이 채널, 24비트 packed, 176.4·192 kHz, 직접 출력 16채널은 `ssr-live` 보고의 `endpoints[2].unsupported`가 `null`이고 소리가 들림. 16채널은 기본 배치 9.1.6으로 들림(6-1단계의 표)
    - 직접 출력 24채널은 `--direct-layout`이 없으면 `endpoints[2].unsupported`가 `PCM with channel mask 0 has no direct layout for its channel count`이고, 다른 엔드포인트의 소리는 끊기지 않음. 소스의 채널 순서대로 24개 이름을 `--direct-layout 24=<이름,...>`으로 주면 `unsupported`가 `null`이고 소리가 들림
    - 재생기가 그 형식을 열지 못하거나 다른 형식으로 바꿔 보냈으면, 고른 형식과 재생기 쪽 메시지를 그대로 적음
 
@@ -431,10 +431,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 2. 3단계처럼 "Dolby Atmos for home theater"를 켜고 재생하면서 녹화합니다:
 
    ```powershell
-   py .\ring_record.py --seconds 30 --out writepacket-atmos.biodump
+   py .\ring_record.py --seconds 30 --out writepacket-joc.ssrdump
    ```
 
-   PCM 스테레오 재생(일반 음악)으로도 한 번 더 합니다: `--out writepacket-pcm.biodump`.
+   PCM 스테레오 재생(일반 음악)으로도 한 번 더 합니다: `--out writepacket-pcm.ssrdump`.
 3. 요약의 `qpc_written_intervals`(`min_ms`, `median_ms`, `p99_ms`, `max_ms`)를 적습니다.
 4. 되돌립니다:
 
@@ -455,7 +455,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 | --- | --- |
 | 재생 중 장치 끄고 켜기 | 2단계를 돌리는 동안 다른 관리자 창에서 `Disable-PnpDevice -InstanceId $id -Confirm:$false`, 5초 뒤 `Enable-PnpDevice -InstanceId $id -Confirm:$false` |
 | 장치 다시 시작 | `pnputil /restart-device "$id"` |
-| 절전과 깨우기 | 음악을 BIO 출력으로 재생하는 동안 절전(`rundll32 powrprof.dll,SetSuspendState 0,1,0` 또는 시작 메뉴), 깨운 뒤 2단계 |
+| 절전과 깨우기 | 음악을 Spatial SoftReceiver 출력으로 재생하는 동안 절전(`rundll32 powrprof.dll,SetSuspendState 0,1,0` 또는 시작 메뉴), 깨운 뒤 2단계 |
 | 최대 절전 | 지원하면 같은 방법으로 |
 | 재부팅 | 재부팅 뒤 장치 상태와 2단계 |
 | `Spatial SoftReceiver`와 `Spatial SoftReceiver Music`의 다른 형식 | 한쪽은 공간 음향(Atmos), 다른 쪽은 PCM 음악을 동시에 재생하며 `ring_record.py --seconds 30` |
@@ -467,10 +467,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 
 ### 6-1. 드라이버 링 종단 듣기
 
-시험서명 드라이버를 설치한 뒤, 도구 묶음의 `bio-live.exe`와 자신의 BRIR `profile.toml`로 엔진이 드라이버 링을 직접 읽는 경로를 듣습니다. 먼저 `.\bio-live.exe devices`에서 DAC 이름과 `Spatial SoftReceiver driver`의 엔드포인트 마스크·QPC 주파수, 그리고 엔드포인트마다 코덱 목록과 PCM 규칙(표본율, 표본 모양, 마스크 채널 상한, 직접 출력 채널)이 나오는지 확인합니다. 출력의 모양은 4-1단계에 있습니다.
+시험서명 드라이버를 설치한 뒤, 도구 묶음의 `ssr-live.exe`와 자신의 BRIR `profile.toml`로 엔진이 드라이버 링을 직접 읽는 경로를 듣습니다. 먼저 `.\ssr-live.exe devices`에서 DAC 이름과 `Spatial SoftReceiver driver`의 엔드포인트 마스크·QPC 주파수, 그리고 엔드포인트마다 코덱 목록과 PCM 규칙(표본율, 표본 모양, 마스크 채널 상한, 직접 출력 채널)이 나오는지 확인합니다. 출력의 모양은 4-1단계에 있습니다.
 
 ```powershell
-.\bio-live.exe play --source driver --output "<자기 DAC 이름 일부>" --profile profile.toml --report driver-listen.json
+.\ssr-live.exe play --source driver --output "<자기 DAC 이름 일부>" --profile profile.toml --report driver-listen.json
 ```
 
 1. Windows 기본 장치인 **Spatial SoftReceiver**로 게임과 시스템 소리를 보냅니다.
@@ -499,7 +499,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 **(가능하면) 출력 장치를 뽑았다 꽂기.** USB DAC라면 위 명령으로 재생하는 동안 DAC를 뽑고, 10초 뒤 다시 꽂습니다. 끝낸 뒤 보고를 `driver-replug.json`으로 남깁니다(`--report driver-replug.json`).
 
 **합격 기준**
-- 뽑은 동안 `bio-live`가 끝나지 않고 `fault: Output...`을 한 번 알림
+- 뽑은 동안 `ssr-live`가 끝나지 않고 `fault: Output...`을 한 번 알림
 - 다시 꽂으면 몇 초 안에 `output reconnected`가 나오고 소리가 돌아옴
 - 끝난 보고의 `output_reconnects`가 1 이상. `faults`에는 지나간 장애도 남으므로, 뽑았을 때의 출력 장애(`Output`)만 있으면 정상
 - 뽑을 때와 돌아올 때 큰 딸깍 소리가 없음(작은 끊김은 적어 둠)
@@ -517,7 +517,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 - ffmpeg의 9.1.4와 9.1.6에서 7·8번 채널은 와이드(±60°)가 아니라 정면 가까이(±15°, FLC/FRC)입니다. 와이드를 쓰는 소스이거나 순서가 다른 소스라면 `play`에 `--direct-layout <채널 수>=<프리셋 또는 이름 목록>`을 붙입니다. 여러 채널 수를 정하려면 여러 번 붙입니다.
 
   ```powershell
-  .\bio-live.exe play --source driver --output "<DAC 이름 일부>" --profile profile.toml --direct-layout 16=FL,FR,FC,LFE,BL,BR,WL,WR,SL,SR,TFL,TFR,TBL,TBR,TSL,TSR
+  .\ssr-live.exe play --source driver --output "<DAC 이름 일부>" --profile profile.toml --direct-layout 16=FL,FR,FC,LFE,BL,BR,WL,WR,SL,SR,TFL,TFR,TBL,TBR,TSL,TSR
   ```
 
 - 프리셋: `mono`, `stereo`, `3.0`, `quad`, `5.0`, `5.1`, `7.1`, `5.1.2`, `5.1.4`, `7.1.2`, `7.1.4`, `9.1.4`, `9.1.6`
@@ -534,7 +534,7 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
 1. 장치가 받는 레이아웃을 봅니다:
 
    ```powershell
-   .\bio-live.exe devices --formats
+   .\ssr-live.exe devices --formats
    ```
 
    쓸 장치의 공유 믹스 형식(채널 수와 마스크)과 독점으로 받는 표준 레이아웃(2.0, 4.0, 5.1, 7.1, 7.1.4)을 적습니다.
@@ -546,7 +546,7 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
 3. 재생합니다(드라이버를 깔았으면 `--source driver`, SAL PC면 `--source sal`):
 
    ```powershell
-   .\bio-live.exe play --source driver --output "<장치 이름 일부>" --profile my-speakers.toml --report speakers-listen.json
+   .\ssr-live.exe play --source driver --output "<장치 이름 일부>" --profile my-speakers.toml --report speakers-listen.json
    ```
 
 4. Windows 기본 장치인 **Spatial SoftReceiver**로 채널 확인 영상이나 5.1/7.1 시험 음원을 재생해, 소리가 각 스피커에서 나오는지 확인합니다. Atmos 음원이 있으면 위층 스피커(7.1.4)에서 높이가 들리는지도 적습니다.
@@ -581,7 +581,7 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
 
    `spatialsoftreceiver.sys`가 목록에 있어야 합니다.
 3. 검사기가 켜진 상태로 2, 3, 6단계를 다시 합니다. 3단계는 가능한 만큼만 합니다.
-4. 검사기가 켜진 상태로 제어 장치 IOCTL 퍼저를 5분 돌립니다. 다른 링 판독기(`bio-live`, `ring_record.py`)는 끕니다:
+4. 검사기가 켜진 상태로 제어 장치 IOCTL 퍼저를 5분 돌립니다. 다른 링 판독기(`ssr-live`, `ring_record.py`)는 끕니다:
 
    ```powershell
    py .\ioctl_fuzz.py --seconds 300 --summary ioctl-fuzz.json
@@ -632,7 +632,7 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
 .\collect.ps1
 ```
 
-M2의 결과(`play-*.json`, `sal-*.biodump`, `builder-*.wav`)는 묶음 폴더로 옮긴 뒤 실행하면 함께 모입니다. M2만 하고 우리 드라이버를 깔지 않았어도 이 스크립트는 돕니다. 묶음 폴더에 `bio-atmos-test-report-<무작위>-<날짜시각>.zip`이 생깁니다. 무엇이 들어갔는지는 화면과 zip 안 목록에 나옵니다.
+M2의 결과(`play-*.json`, `sal-*.ssrdump`, `builder-*.wav`)는 묶음 폴더로 옮긴 뒤 실행하면 함께 모입니다. M2만 하고 우리 드라이버를 깔지 않았어도 이 스크립트는 돕니다. 묶음 폴더에 `spatial-softreceiver-test-report-<무작위>-<날짜시각>.zip`이 생깁니다. 무엇이 들어갔는지는 화면과 zip 안 목록에 나옵니다.
 - OS 빌드, 부팅 설정, Secure Boot와 HVCI 상태
 - 장치와 서비스 상태, 드라이버 해시, 레지스트리 매개변수
 - 엔드포인트 상태와 읽기 전용 `endpoint-policy.json`(독점 허용·우선권·오류)
@@ -644,7 +644,7 @@ M2의 결과(`play-*.json`, `sal-*.biodump`, `builder-*.wav`)는 묶음 폴더�
 
 보내는 방법:
 1. **공개 이슈**에는 아래 표만 채워 올립니다. 이슈 제목은 `[시험] v<버전> <날짜>`로 합니다.
-2. **zip과 `.biodump`**는 저장소 소유자에게 따로 보냅니다. 덤프에는 재생한 소리가 들어 있습니다.
+2. **zip과 `.ssrdump`**는 저장소 소유자에게 따로 보냅니다. 덤프에는 재생한 소리가 들어 있습니다.
 
 | 단계 | 결과(합격/불합격/못 함) | 메모 |
 | --- | --- | --- |
@@ -674,7 +674,7 @@ M2의 결과(`play-*.json`, `sal-*.biodump`, `builder-*.wav`)는 묶음 폴더�
 .\uninstall.ps1
 ```
 
-장치 제거 전에 BIO 엔드포인트의 두 독점 속성을 지우고 읽어 확인한 다음, 장치·드라이버 저장소 항목·시험 인증서를 지우고 남은 것이 없는지 확인합니다(종료 코드 0). 정책 삭제 실패나 남은 엔드포인트는 종료 코드 1로 보고합니다. 다른 장치의 속성은 바꾸지 않습니다.
+장치 제거 전에 Spatial SoftReceiver 엔드포인트의 두 독점 속성을 지우고 읽어 확인한 다음, 장치·드라이버 저장소 항목·시험 인증서를 지우고 남은 것이 없는지 확인합니다(종료 코드 0). 정책 삭제 실패나 남은 엔드포인트는 종료 코드 1로 보고합니다. 다른 장치의 속성은 바꾸지 않습니다.
 
 시험을 모두 마쳤으면 다음으로 되돌립니다.
 

@@ -2,7 +2,7 @@
 //! refuses or accepts, push never panics, and every scene is consistent.
 #![no_main]
 
-use bio_types::{PcmFormat, SampleType};
+use ssr_types::{PcmFormat, SampleType};
 use decode::{DecodeConfig, pcm::PcmDecoder};
 use libfuzzer_sys::fuzz_target;
 

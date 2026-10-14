@@ -24,11 +24,11 @@ def section(text, name):
 
 class ExclusivePolicyContractTests(unittest.TestCase):
     def test_three_minipairs_and_portcls_capacity(self):
-        pairs = read("driver/bioatmos/minipairs.h")
+        pairs = read("driver/spatialsoftreceiver/minipairs.h")
         for ep, constant in enumerate(("PRIMARY", "SECOND", "PASSTHROUGH")):
-            self.assertIn(f'{{L"WaveHdmi{ep}", L"TopologyHdmi{ep}", BIO_ENDPOINT_{constant}}}', pairs)
-        adapter = read("driver/bioatmos/adapter.cpp")
-        self.assertIn("2 * ARRAYSIZE(BioMiniPairs)", adapter)
+            self.assertIn(f'{{L"WaveHdmi{ep}", L"TopologyHdmi{ep}", SSR_ENDPOINT_{constant}}}', pairs)
+        adapter = read("driver/spatialsoftreceiver/adapter.cpp")
+        self.assertIn("2 * ARRAYSIZE(SsrMiniPairs)", adapter)
         self.assertIn("Settings = {0x7,", adapter)
         self.assertIn("Settings.EndpointMask &= available", adapter)
         load = adapter.split("static void LoadSettings()", 1)[1].split('extern "C"', 1)[0]
@@ -37,7 +37,7 @@ class ExclusivePolicyContractTests(unittest.TestCase):
         self.assertEqual(DEFAULT_ENDPOINT_MASK, 7)
 
     def test_inf_interfaces_masks_names_and_serialized_oem_formats(self):
-        inf = read("driver/bioatmos/spatialsoftreceiver.inx")
+        inf = read("driver/spatialsoftreceiver/spatialsoftreceiver.inx")
         interfaces = section(inf, "SpatialSoftReceiver_Device.NT.Interfaces")
         parameters = section(inf, "SpatialSoftReceiver_Service_Parameters")
         self.assertIn("EndpointMask,0x00010001,7", parameters)
@@ -82,12 +82,12 @@ class ExclusivePolicyContractTests(unittest.TestCase):
 
     def test_kit_applies_checks_collects_and_clears_policy(self):
         install = read("tools/testkit/install.ps1")
-        self.assertLess(install.index("$identitiesMatch ="), install.index("Set-BioExclusivePolicy -"))
+        self.assertLess(install.index("$identitiesMatch ="), install.index("Set-SsrExclusivePolicy -"))
         self.assertIn("-band 0x7", install)
         self.assertIn("exclusive_policy_check.ps1", install)
         uninstall = read("tools/testkit/uninstall.ps1")
-        self.assertLess(uninstall.index("Clear-BioExclusivePolicy -"), uninstall.index("pnputil.exe /remove-device"))
-        self.assertIn("Get-BioPolicySnapshot", read("tools/testkit/collect.ps1"))
+        self.assertLess(uninstall.index("Clear-SsrExclusivePolicy -"), uninstall.index("pnputil.exe /remove-device"))
+        self.assertIn("Get-SsrPolicySnapshot", read("tools/testkit/collect.ps1"))
         kit = read("tools/ci/driver-test-kit.ps1")
         for name in ("exclusive-policy.ps1", "exclusive_policy_check.ps1", "loopback_check.py"):
             self.assertIn(f"'{name}'", kit)
@@ -96,39 +96,39 @@ class ExclusivePolicyContractTests(unittest.TestCase):
         self.assertIn("Get-SpatialEndpoints -InstanceId $InstanceId", states)
 
     def test_checker_accepts_only_matching_policy_and_initialize_results(self):
-        pwsh = os.environ.get("BIO_TEST_PWSH") or shutil.which("pwsh")
+        pwsh = os.environ.get("SSR_TEST_PWSH") or shutil.which("pwsh")
         if not pwsh:
-            self.skipTest("set BIO_TEST_PWSH to exercise the PowerShell checker without Windows COM")
+            self.skipTest("set SSR_TEST_PWSH to exercise the PowerShell checker without Windows COM")
         # Execute the actual report/exit logic with an injected transport. This
         # tests decision paths, not the Windows implementation of private keys.
         mock = '''
-class BioExclusivePolicy {
+class SsrExclusivePolicy {
     [int] $endpoint
-    BioExclusivePolicy([string] $id) { $this.endpoint = [int]$id }
+    SsrExclusivePolicy([string] $id) { $this.endpoint = [int]$id }
     [object] Read() {
         $v = [int]($this.endpoint -eq 2)
-        if ($env:BIO_POLICY_CASE -eq 'wrong_policy') { $v = 1 - $v }
-        if ($env:BIO_POLICY_CASE -eq 'missing_property') { return @{allow_exclusive=$null; exclusive_priority=$null} }
+        if ($env:SSR_POLICY_CASE -eq 'wrong_policy') { $v = 1 - $v }
+        if ($env:SSR_POLICY_CASE -eq 'missing_property') { return @{allow_exclusive=$null; exclusive_priority=$null} }
         return @{allow_exclusive=$v; exclusive_priority=$v}
     }
     [object] Probe() {
-        if ($env:BIO_POLICY_CASE -eq 'exception') { throw 'activation failed' }
-        if ($this.endpoint -ne 2 -and $env:BIO_POLICY_CASE -eq 'refused_at_format') {
+        if ($env:SSR_POLICY_CASE -eq 'exception') { throw 'activation failed' }
+        if ($this.endpoint -ne 2 -and $env:SSR_POLICY_CASE -eq 'refused_at_format') {
             # What the runners showed: IsFormatSupported already refuses.
             return @{ supported=$false; support_hr='0x8889000E'; initialize_hr=$null }
         }
-        if ($env:BIO_POLICY_CASE -eq 'unsupported') {
+        if ($env:SSR_POLICY_CASE -eq 'unsupported') {
             return @{ supported=$false; support_hr='0x88890008'; initialize_hr=$null }
         }
         $hr = if ($this.endpoint -eq 2) { '0x00000000' } else { '0x8889000E' }
-        if ($env:BIO_POLICY_CASE -eq 'wrong_hr') { $hr = '0x8889000A' }
+        if ($env:SSR_POLICY_CASE -eq 'wrong_hr') { $hr = '0x8889000A' }
         return @{ supported=$true; support_hr='0x00000000'; initialize_hr=$hr }
     }
     [void] Dispose() { }
 }
-function Get-BioPolicyTargets {
+function Get-SsrPolicyTargets {
     param([string] $InstanceId)
-    $ids = if ($env:BIO_POLICY_CASE -eq 'missing') { @(0,1) } elseif ($env:BIO_POLICY_CASE -eq 'duplicate') { @(0,1,2,2) } else { @(0,1,2) }
+    $ids = if ($env:SSR_POLICY_CASE -eq 'missing') { @(0,1) } elseif ($env:SSR_POLICY_CASE -eq 'duplicate') { @(0,1,2,2) } else { @(0,1,2) }
     foreach ($ep in $ids) { [pscustomobject]@{endpoint=$ep; name="endpoint $ep"; id=[string]$ep; state=1} }
 }
 '''
@@ -143,7 +143,7 @@ function Get-BioPolicyTargets {
                          "exception", "missing", "duplicate"):
                 with self.subTest(case=case):
                     run = subprocess.run([pwsh, "-NoProfile", "-File", str(checker), "-Summary", str(summary)],
-                                         env={**os.environ, "BIO_POLICY_CASE": case}, capture_output=True, text=True, timeout=30)
+                                         env={**os.environ, "SSR_POLICY_CASE": case}, capture_output=True, text=True, timeout=30)
                     self.assertEqual(run.returncode, 0 if case in passing else 1, run.stdout + run.stderr)
                     result = json.loads(summary.read_text(encoding="utf-8-sig"))
                     self.assertEqual(result["passed"], case in passing)

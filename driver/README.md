@@ -8,32 +8,32 @@
 
 | 파일 | 역할 |
 | --- | --- |
-| `bioatmos/adapter.cpp` | DriverEntry, PortCls 어댑터 등록, 디스패치와 PnP 수명 |
-| `bioatmos/common.cpp`, `common.h` | 어댑터 공용 상태, 세 스트림이 공유하는 DMA 타이머와 전원 상태 |
-| `bioatmos/bioatmos.h`, `minipairs.h` | 공용 선언과 `WaveHdmi0`/`TopologyHdmi0`, `WaveHdmi1`/`TopologyHdmi1`, `WaveHdmi2`/`TopologyHdmi2` 짝 |
-| `bioatmos/minwavert.cpp`, `minwavert.h` | WaveRT 미니포트, 엔드포인트별 형식 규칙(코덱 마스크와 PCM 규칙)에 따른 데이터 범위와 스트림 생성 |
-| `bioatmos/minwavertstream.cpp`, `minwavertstream.h` | 가상 DMA, 버퍼, 알림과 쓰기 패킷, 기록 생산 |
-| `bioatmos/hdmiwavtable.h` | HDMI 렌더 형식과 핀 표 |
-| `bioatmos/basetopo.cpp`, `basetopo.h` | 토폴로지 미니포트 공용 부분 |
-| `bioatmos/hdmitopo.cpp`, `hdmitopo.h`, `hdmitoptable.h` | HDMI 잭 속성과 토폴로지 표 |
-| `bioatmos/kshelper.cpp`, `kshelper.h` | KS 형식·속성 보조 함수 |
-| `bioatmos/NewDelete.cpp`, `NewDelete.h` | 커널 메모리 할당·해제 |
-| `bioatmos/control.cpp`, `control.h` | 보안 제어 장치, IOCTL, 취소 안전 READ 큐, 링과 트림 |
-| `core/bio_core.h`, `core/*.cpp` | 커널 API 없는 링, READ 조건, DMA 정수 클럭과 형식 판정 |
-| `bioatmos/spatialsoftreceiver.inx` | DCH 설치 입력; 빌드에서 StampInf로 `.inf` 생성 |
-| `bioatmos/bioatmos.vcxproj`, `bioatmos.sln` | x64/ARM64 WDM 빌드 |
+| `spatialsoftreceiver/adapter.cpp` | DriverEntry, PortCls 어댑터 등록, 디스패치와 PnP 수명 |
+| `spatialsoftreceiver/common.cpp`, `common.h` | 어댑터 공용 상태, 세 스트림이 공유하는 DMA 타이머와 전원 상태 |
+| `spatialsoftreceiver/spatialsoftreceiver.h`, `minipairs.h` | 공용 선언과 `WaveHdmi0`/`TopologyHdmi0`, `WaveHdmi1`/`TopologyHdmi1`, `WaveHdmi2`/`TopologyHdmi2` 짝 |
+| `spatialsoftreceiver/minwavert.cpp`, `minwavert.h` | WaveRT 미니포트, 엔드포인트별 형식 규칙(코덱 마스크와 PCM 규칙)에 따른 데이터 범위와 스트림 생성 |
+| `spatialsoftreceiver/minwavertstream.cpp`, `minwavertstream.h` | 가상 DMA, 버퍼, 알림과 쓰기 패킷, 기록 생산 |
+| `spatialsoftreceiver/hdmiwavtable.h` | HDMI 렌더 형식과 핀 표 |
+| `spatialsoftreceiver/basetopo.cpp`, `basetopo.h` | 토폴로지 미니포트 공용 부분 |
+| `spatialsoftreceiver/hdmitopo.cpp`, `hdmitopo.h`, `hdmitoptable.h` | HDMI 잭 속성과 토폴로지 표 |
+| `spatialsoftreceiver/kshelper.cpp`, `kshelper.h` | KS 형식·속성 보조 함수 |
+| `spatialsoftreceiver/NewDelete.cpp`, `NewDelete.h` | 커널 메모리 할당·해제 |
+| `spatialsoftreceiver/control.cpp`, `control.h` | 보안 제어 장치, IOCTL, 취소 안전 READ 큐, 링과 트림 |
+| `core/ssr_core.h`, `core/*.cpp` | 커널 API 없는 링, READ 조건, DMA 정수 클럭과 형식 판정 |
+| `spatialsoftreceiver/spatialsoftreceiver.inx` | DCH 설치 입력; 빌드에서 StampInf로 `.inf` 생성 |
+| `spatialsoftreceiver/spatialsoftreceiver.vcxproj`, `spatialsoftreceiver.sln` | x64/ARM64 WDM 빌드 |
 | `packages.config`, `Directory.Build.props` | WDK/SDK NuGet 버전과 MSBuild 연결 |
 | `../tools/build-driver.ps1` | NuGet 복원, MSBuild, 결과 수집, InfVerif |
 | `../tools/kcheck.py` | Linux의 실제 WDK/SDK 헤더 기반 컴파일 검사와 정적 분석 |
 
-ABI의 유일한 정의는 `crates/bio-abi/src/wire.rs`입니다. 커널은 그 파일에서 생성한 `crates/bio-abi/include/bioatmos_abi.h`를 읽습니다. 생성 헤더나 IOCTL 번호를 드라이버 쪽에서 따로 고치지 않습니다.
+ABI의 유일한 정의는 `crates/ssr-abi/src/wire.rs`입니다. 커널은 그 파일에서 생성한 `crates/ssr-abi/include/ssr_abi.h`를 읽습니다. 생성 헤더나 IOCTL 번호를 드라이버 쪽에서 따로 고치지 않습니다.
 
 ## 제어 장치와 기록
 
 제어 장치는 `\Device\SpatialSoftReceiver`, DOS 링크는 `\DosDevices\SpatialSoftReceiver`입니다. SYSTEM, 관리자, 대화형 사용자가 읽고 쓸 수 있도록 `IoCreateDeviceSecure`에 `D:P(A;;GA;;;SY)(A;;GRGW;;;BA)(A;;GRGW;;;IU)`를 전달합니다. 동시에 열린 제어 핸들은 하나만 허용하고, 이름이 붙은 하위 경로 열기는 거절합니다. 드라이버 디스패치는 제어 장치의 CREATE, CLOSE, CLEANUP, DEVICE_CONTROL만 제어 처리기로 보내고 다른 IRP는 `STATUS_INVALID_DEVICE_REQUEST`로 끝냅니다. PortCls 장치는 초기화 때 보존한 원래 디스패치 표로 보냅니다.
 
 - `QUERY_INFO`: ABI/드라이버 판, 링 크기, 컴파일된 형식, 기능, QPC 주파수, 엔드포인트 마스크와 엔드포인트별 형식(코덱 마스크와 PCM 규칙)을 돌려줍니다.
-- `READ`: `METHOD_OUT_DIRECT`로 온 출력 MDL에 온전한 기록만 옮깁니다. 최소 바이트, 긴급 기록(형식 변경·볼륨·정지), 기한 중 하나가 충족되면 완료합니다. 보류 READ는 하나만 허용합니다. 큐에서 꺼내 완료하는 중인 READ도 소유권을 유지해, 다른 READ가 그 기록을 먼저 가져가지 못하게 합니다. 첫 기록보다 작은 출력 버퍼는 `STATUS_BUFFER_TOO_SMALL`입니다. 한 번에 옮기는 양은 `BIO_READ_MAX_BYTES`(256 KiB)까지이고, 최소 바이트도 이 값으로 자릅니다. 데이터 기록 하나의 페이로드는 `BIO_MAX_DATA_PAYLOAD`(64 KiB)까지라 그보다 긴 구간은 여러 기록으로 나뉘므로, `record_size(BIO_MAX_DATA_PAYLOAD)` 이상인 버퍼의 READ는 항상 진행합니다.
+- `READ`: `METHOD_OUT_DIRECT`로 온 출력 MDL에 온전한 기록만 옮깁니다. 최소 바이트, 긴급 기록(형식 변경·볼륨·정지), 기한 중 하나가 충족되면 완료합니다. 보류 READ는 하나만 허용합니다. 큐에서 꺼내 완료하는 중인 READ도 소유권을 유지해, 다른 READ가 그 기록을 먼저 가져가지 못하게 합니다. 첫 기록보다 작은 출력 버퍼는 `STATUS_BUFFER_TOO_SMALL`입니다. 한 번에 옮기는 양은 `SSR_READ_MAX_BYTES`(256 KiB)까지이고, 최소 바이트도 이 값으로 자릅니다. 데이터 기록 하나의 페이로드는 `SSR_MAX_DATA_PAYLOAD`(64 KiB)까지라 그보다 긴 구간은 여러 기록으로 나뉘므로, `record_size(SSR_MAX_DATA_PAYLOAD)` 이상인 버퍼의 READ는 항상 진행합니다.
 - `SET_RATE_TRIM`: ppm × 65536 정수로 받은 트림을 ±2000 ppm으로 자릅니다. 세 엔드포인트의 DMA 클럭에 같은 값을 적용합니다.
 - `GET_STATS`: 엔드포인트별 바이트, 넘침, 유실과 현재 에포크·상태를 돌려줍니다.
 
@@ -45,11 +45,11 @@ CLEANUP은 해당 핸들의 보류 READ를 취소하고 트림을 0으로 되돌
 
 토폴로지 경로는 브리지 핀 → `KSNODETYPE_VOLUME` → `KSNODETYPE_MUTE` → HDMI 잭입니다. `KSPROPERTY_AUDIO_VOLUMELEVEL`과 `KSPROPERTY_AUDIO_MUTE`는 GET/SET/BASICSUPPORT를 지원하고, 채널 수는 엔드포인트의 기본 장치 형식과 같습니다(0은 8, 1과 2는 2). 32채널 직접 출력 스트림을 열어도 볼륨 노드의 채널 수는 바뀌지 않습니다. 볼륨은 −96~0 dB, 0.5 dB 단계이며 가장 가까운 단계로 반올림합니다(정중앙은 0에서 먼 쪽). 채널 −1의 GET은 SysVAD처럼 채널 0, SET은 모든 지원 채널입니다. 다른 음수와 범위 밖 채널은 거절합니다.
 
-초기값은 채널마다 0 dB, 음소거 해제입니다. 링 코어에 엔드포인트별로 보관하며 스트림 시작·정지·형식 변경·핸들 재열기는 값을 초기화하지 않습니다. 장치를 다시 시작하면 기본값으로 초기화하고 Windows가 저장된 설정을 다시 적용합니다. KS 속성 처리기는 **제어 상태의 링 스핀 락 하나** 아래에서 GET/SET, 시각 읽기, 상태 변경과 기록을 함께 처리합니다. 스트림 락을 역으로 잡지 않고, 락을 놓은 뒤 `BioPumpRead`를 불러 재생 중이 아니어도 변경을 전달합니다. 잠금을 소유하거나 할당하는 코드는 코어에 없습니다.
+초기값은 채널마다 0 dB, 음소거 해제입니다. 링 코어에 엔드포인트별로 보관하며 스트림 시작·정지·형식 변경·핸들 재열기는 값을 초기화하지 않습니다. 장치를 다시 시작하면 기본값으로 초기화하고 Windows가 저장된 설정을 다시 적용합니다. KS 속성 처리기는 **제어 상태의 링 스핀 락 하나** 아래에서 GET/SET, 시각 읽기, 상태 변경과 기록을 함께 처리합니다. 스트림 락을 역으로 잡지 않고, 락을 놓은 뒤 `SsrPumpRead`를 불러 재생 중이 아니어도 변경을 전달합니다. 잠금을 소유하거나 할당하는 코드는 코어에 없습니다.
 
 기록 종류 6 `VOLUME`은 136바이트 리틀엔디언 페이로드(`u32 channel_count`, `u32 mute_mask`, `i32 level_q16[32]`)입니다. 쓰지 않는 채널과 비트는 0입니다. 실제 값이 변할 때만 기록하고 QPC는 변경 시각이며, 재진술의 QPC는 재진술 시각입니다. 새 핸들과 넘침 복구의 순서는 알려진 `FormatChange` → `VOLUME` → `StreamStart/Stop`입니다(손실이 있으면 앞에 `Overrun`). 한 번도 볼륨을 받지 않은 구성된 엔드포인트도 기본값으로 재진술합니다. PCM/비트스트림 바이트 자체에는 드라이버가 게인을 곱하지 않습니다.
 
-엔진은 `bio_abi::volume_gain`의 채널별 선형 이득 전력 평균 제곱근을 엔드포인트 신호에 정확히 한 번 적용해야 합니다. 음소거 채널의 전력은 0이며 채널 0을 마스터로 취급하지 않습니다. **이 엔진 적용은 후속 작업이고 현재 드라이버 변경만으로 음량이 줄어든다고 보장하지 않습니다.** Windows가 하드웨어 제어로 인식하면 기존 소프트웨어 감쇠를 하지 않기 때문에, 엔진 적용 전에는 볼륨/음소거를 안전장치로 믿고 청취하지 마십시오.
+엔진은 `ssr_abi::volume_gain`의 채널별 선형 이득 전력 평균 제곱근을 엔드포인트 신호에 정확히 한 번 적용해야 합니다. 음소거 채널의 전력은 0이며 채널 0을 마스터로 취급하지 않습니다. **이 엔진 적용은 후속 작업이고 현재 드라이버 변경만으로 음량이 줄어든다고 보장하지 않습니다.** Windows가 하드웨어 제어로 인식하면 기존 소프트웨어 감쇠를 하지 않기 때문에, 엔진 적용 전에는 볼륨/음소거를 안전장치로 믿고 청취하지 마십시오.
 
 실기 검사는 `powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/volume_check.ps1 -Summary volume-summary.json`입니다. 다른 링 판독기는 종료해야 합니다. 검사기는 지원 비트와 dB/음소거 변경 기록을 확인하고 `finally`에서 원래 마스터·채널별 균형·음소거를 복원합니다. 수집기는 `endpoint-volumes.json`에 읽기 전용 상태를 남깁니다.
 
@@ -85,15 +85,15 @@ CLEANUP은 해당 핸들의 보류 READ를 취소하고 트림을 0으로 되돌
 | `EndpointName3` | REG_SZ | `Spatial SoftReceiver` | 예비 슬롯. 현재 미니페어 없음 |
 | `WritePacket` | DWORD | `0` | 1일 때 `IMiniportWaveRTOutputStream`과 기능 비트를 노출 |
 
-기본 코덱은 E-AC-3, E-AC-3 Atmos, MAT 2.0, MAT 2.1입니다. AC-3, TrueHD, DTS 계열은 기본으로 꺼져 있습니다. DTS:X E1/E2는 `BIO_FORMAT_DTS_HD`로 묶습니다. INF의 QWORD 플래그는 `0x000B0001`, DWORD는 `0x00010001`입니다. 값이 없거나 타입·크기가 틀리면 해당 필드의 기본값을 사용합니다. 코덱·레이트·모양·직접 출력 비트는 컴파일된 범위와 AND하고, `PcmMaxMaskedChannels`는 비트 마스크가 아닌 상한이므로 18과 최솟값을 취합니다. 옛 `FormatMask{i}`는 읽지 않습니다. 비노출 엔드포인트의 `AbiInfo.endpoints[i]` 전체는 0입니다. `EndpointMask`의 사용 가능한 비트를 가린 결과가 0이면 기본값 `0x7`을 씁니다. 슬롯 3은 예비입니다.
+기본 코덱은 E-AC-3, E-AC-3 JOC, MAT 2.0, MAT 2.1입니다. AC-3, TrueHD, DTS 계열은 기본으로 꺼져 있습니다. DTS:X E1/E2는 `SSR_FORMAT_DTS_HD`로 묶습니다. INF의 QWORD 플래그는 `0x000B0001`, DWORD는 `0x00010001`입니다. 값이 없거나 타입·크기가 틀리면 해당 필드의 기본값을 사용합니다. 코덱·레이트·모양·직접 출력 비트는 컴파일된 범위와 AND하고, `PcmMaxMaskedChannels`는 비트 마스크가 아닌 상한이므로 18과 최솟값을 취합니다. 옛 `FormatMask{i}`는 읽지 않습니다. 비노출 엔드포인트의 `AbiInfo.endpoints[i]` 전체는 0입니다. `EndpointMask`의 사용 가능한 비트를 가린 결과가 0이면 기본값 `0x7`을 씁니다. 슬롯 3은 예비입니다.
 
-PCM은 레이아웃 표가 아니라 위 표의 레이트 × 모양 × 채널 규칙입니다. 0이 아닌 `dwChannelMask`는 Windows의 18 스피커 비트(`0x3ffff`)만 쓰고 켜진 비트 수가 채널 수와 같아야 합니다. 따라서 5.1 back/side, 6.1, 7.1 wide, 높이 채널 조합과 18채널 전체를 별도 표 없이 받습니다. Windows 비트로 표현할 수 없는 위치가 있는 9.1.4/9.1.6 등은 마스크 0의 직접 출력으로 받고, 채널 순서 해석은 엔진의 별도 계약입니다. 비확장 WAVEFORMATEX는 mono=0x4, stereo=0x3으로 해석하며 3채널 이상은 거절합니다. 블록 정렬, 바이트율, 길이, GUID와 valid bits도 `core/bio_format.cpp::PcmAllowed`에서 검사합니다. 링은 8 MiB 그대로입니다.
+PCM은 레이아웃 표가 아니라 위 표의 레이트 × 모양 × 채널 규칙입니다. 0이 아닌 `dwChannelMask`는 Windows의 18 스피커 비트(`0x3ffff`)만 쓰고 켜진 비트 수가 채널 수와 같아야 합니다. 따라서 5.1 back/side, 6.1, 7.1 wide, 높이 채널 조합과 18채널 전체를 별도 표 없이 받습니다. Windows 비트로 표현할 수 없는 위치가 있는 9.1.4/9.1.6 등은 마스크 0의 직접 출력으로 받고, 채널 순서 해석은 엔진의 별도 계약입니다. 비확장 WAVEFORMATEX는 mono=0x4, stereo=0x3으로 해석하며 3채널 이상은 거절합니다. 블록 정렬, 바이트율, 길이, GUID와 valid bits도 `core/ssr_format.cpp::PcmAllowed`에서 검사합니다. 링은 8 MiB 그대로입니다.
 
 ### 성긴 데이터 범위와 교집합
 
-PCM과 IEEE_FLOAT에 각각 `KSDATARANGE_AUDIO` 하나를 만들며, 레이트·정수 폭·최대 채널의 외곽 범위만 알립니다. 중간의 지원하지 않는 값은 허용하지 않습니다. Microsoft의 [Data Ranges with Discrete Values](https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/data-ranges-with-discrete-values)는 이 표현을 허용하되 잘못 고른 중간값은 NewStream에서 거절하도록 설명합니다. 여기서는 교집합 후보도 `PcmAllowed`로 확인하고, NewStream과 SetFormat 및 전체 형식 제안은 같은 `BioValidateFormat` → core 판정 경로를 씁니다. 비트스트림 carrier 표와 RAW 모드 속성, 브리지의 ANALOG 범위는 유지합니다.
+PCM과 IEEE_FLOAT에 각각 `KSDATARANGE_AUDIO` 하나를 만들며, 레이트·정수 폭·최대 채널의 외곽 범위만 알립니다. 중간의 지원하지 않는 값은 허용하지 않습니다. Microsoft의 [Data Ranges with Discrete Values](https://learn.microsoft.com/en-us/windows-hardware/drivers/audio/data-ranges-with-discrete-values)는 이 표현을 허용하되 잘못 고른 중간값은 NewStream에서 거절하도록 설명합니다. 여기서는 교집합 후보도 `PcmAllowed`로 확인하고, NewStream과 SetFormat 및 전체 형식 제안은 같은 `SsrValidateFormat` → core 판정 경로를 씁니다. 비트스트림 carrier 표와 RAW 모드 속성, 브리지의 ANALOG 범위는 유지합니다.
 
-`BioPcmIntersection`은 양쪽 범위와 설정이 허용하면 OEM 기본 형식(0: float32 7.1 48 kHz, 1/2: float32 stereo 48 kHz)을 우선합니다. 후보 순서는 `driver/core/bio_format.cpp`의 `ChoosePcmIntersection`이 정하고 `core_tests.cpp`의 `PcmIntersectionOrder`가 시험합니다. (1) OEM 기본 형식, (2) OEM 레이트·배치의 다른 표본 모양(float32, int32, int24-in-32, int24, int16 순), (3) OEM 배치의 다른 레이트(48, 44.1, 96, 88.2, 192, 176.4 kHz 순), (4) 표준 스피커 배치(7.1 서라운드 `0x63f`, 5.1 `0x3f`, 5.1 옆 `0x60f`, 7.1.4 `0x2d63f`, 7.1 `0xff`, 쿼드 `0x33`, 스테레오, 모노 순), (5) 엔진이 기본 직접 배치를 가진 채널 수의 마스크 0(2, 8, 6, 12, 16, 10, 14, 1, 3, 4, 5채널 순)입니다. 그 밖의 직접 출력 채널 수는 앱이 그 형식을 직접 제안하면 받지만 교집합이 먼저 고르지는 않습니다. 넓은 범위를 받아도 엔진이 재생하지 못하는 32채널 직접 출력을 고르지 않게 하려는 순서입니다. 고른 후보는 구체적인 WAVEFORMATEXTENSIBLE로 반환합니다. 이것은 공유 장치 형식을 안정적으로 유지하려는 드라이버의 선택 정책이지 Windows가 요구한 OEM 우선 규칙은 아닙니다. [IMiniport::DataRangeIntersection](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/portcls/nf-portcls-iminiport-datarangeintersection)은 구체 형식 반환과 0바이트 질의의 `STATUS_BUFFER_OVERFLOW`, 짧은 버퍼의 `STATUS_BUFFER_TOO_SMALL`, 교집합 없음의 `STATUS_NO_MATCH`를 규정합니다. SysVAD 기준 커밋의 `audio/sysvad/EndpointsCommon/minwavert.cpp::DataRangeIntersection`은 채널 검사 후 PortCls로 위임하지만, 여기서는 성긴 범위의 구멍을 고르지 않도록 직접 처리합니다. KS 범위에는 개별 채널 마스크/valid bits 제약이 없으므로 특정 배치를 원하는 앱은 전체 형식을 제안해야 합니다.
+`SsrPcmIntersection`은 양쪽 범위와 설정이 허용하면 OEM 기본 형식(0: float32 7.1 48 kHz, 1/2: float32 stereo 48 kHz)을 우선합니다. 후보 순서는 `driver/core/ssr_format.cpp`의 `ChoosePcmIntersection`이 정하고 `core_tests.cpp`의 `PcmIntersectionOrder`가 시험합니다. (1) OEM 기본 형식, (2) OEM 레이트·배치의 다른 표본 모양(float32, int32, int24-in-32, int24, int16 순), (3) OEM 배치의 다른 레이트(48, 44.1, 96, 88.2, 192, 176.4 kHz 순), (4) 표준 스피커 배치(7.1 서라운드 `0x63f`, 5.1 `0x3f`, 5.1 옆 `0x60f`, 7.1.4 `0x2d63f`, 7.1 `0xff`, 쿼드 `0x33`, 스테레오, 모노 순), (5) 엔진이 기본 직접 배치를 가진 채널 수의 마스크 0(2, 8, 6, 12, 16, 10, 14, 1, 3, 4, 5채널 순)입니다. 그 밖의 직접 출력 채널 수는 앱이 그 형식을 직접 제안하면 받지만 교집합이 먼저 고르지는 않습니다. 넓은 범위를 받아도 엔진이 재생하지 못하는 32채널 직접 출력을 고르지 않게 하려는 순서입니다. 고른 후보는 구체적인 WAVEFORMATEXTENSIBLE로 반환합니다. 이것은 공유 장치 형식을 안정적으로 유지하려는 드라이버의 선택 정책이지 Windows가 요구한 OEM 우선 규칙은 아닙니다. [IMiniport::DataRangeIntersection](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/portcls/nf-portcls-iminiport-datarangeintersection)은 구체 형식 반환과 0바이트 질의의 `STATUS_BUFFER_OVERFLOW`, 짧은 버퍼의 `STATUS_BUFFER_TOO_SMALL`, 교집합 없음의 `STATUS_NO_MATCH`를 규정합니다. SysVAD 기준 커밋의 `audio/sysvad/EndpointsCommon/minwavert.cpp::DataRangeIntersection`은 채널 검사 후 PortCls로 위임하지만, 여기서는 성긴 범위의 구멍을 고르지 않도록 직접 처리합니다. KS 범위에는 개별 채널 마스크/valid bits 제약이 없으므로 특정 배치를 원하는 앱은 전체 형식을 제안해야 합니다.
 
 ### QUERY_INFO 배치 (ABI_VERSION 1, 동결 전)
 
@@ -107,15 +107,15 @@ PCM과 IEEE_FLOAT에 각각 `KSDATARANGE_AUDIO` 하나를 만들며, 레이트·
 | 56 / 60 | endpoint_mask / reserved | 각각 4 |
 | 64 / 88 / 112 / 136 | endpoints[0..3]: EndpointFormats | 각각 24 |
 
-EndpointFormats 내부는 codecs +0(u64), pcm +8(16바이트)입니다. PCM 내부는 rates +0, shapes +4, max_masked_channels +8, direct_channels +12(모두 u32)입니다. `bio-live devices`는 각 엔드포인트의 코덱 이름과 PCM 규칙을 출력합니다.
+EndpointFormats 내부는 codecs +0(u64), pcm +8(16바이트)입니다. PCM 내부는 rates +0, shapes +4, max_masked_channels +8, direct_channels +12(모두 u32)입니다. `ssr-live devices`는 각 엔드포인트의 코덱 이름과 PCM 규칙을 출력합니다.
 
 ### 이름은 설치 데이터
 
 INF의 `[Strings]`는 영어, `[Strings.0412]`는 한국어 이름을 서비스 `Parameters\EndpointName0..2`와 인터페이스 `FriendlyName`에 씁니다. 원본 `spatialsoftreceiver.inx`는 한국어를 보존하도록 **UTF-16LE BOM**으로 저장하며 StampInf가 만든 INF도 이 인코딩을 사용합니다([Microsoft 지침](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/general-guidelines-for-inf-files)).
 
-시작 시 PASSIVE_LEVEL에서 `EndpointName0..3`을 읽어 어댑터 설정에 복사하고, HDMI `KSJACK_SINK_INFORMATION.SinkDescription`에 씁니다. REG_SZ가 아니거나, 비었거나, NUL을 뺀 길이가 31 UTF-16 코드 단위를 넘거나, 잘못 종결된 값은 `core/bio_names.h`의 번호별 영어 기본값으로 돌아갑니다. 잘라서 쓰지 않습니다. 값 읽기는 스트리밍 경로에서 하지 않습니다.
+시작 시 PASSIVE_LEVEL에서 `EndpointName0..3`을 읽어 어댑터 설정에 복사하고, HDMI `KSJACK_SINK_INFORMATION.SinkDescription`에 씁니다. REG_SZ가 아니거나, 비었거나, NUL을 뺀 길이가 31 UTF-16 코드 단위를 넘거나, 잘못 종결된 값은 `core/ssr_names.h`의 번호별 영어 기본값으로 돌아갑니다. 잘라서 쓰지 않습니다. 값 읽기는 스트리밍 경로에서 하지 않습니다.
 
-나중에는 `bio-setup`(M4)이 이 레지스트리 값을 쓰고 해당 장치를 다시 시작합니다. 서명된 SYS·INF·CAT를 수정하지 않으므로 이름 변경에 재서명이 필요 없습니다. Windows 소리 설정에서 사용자가 바꾼 별칭은 싱크 설명과 다를 수 있습니다.
+나중에는 `ssr-setup`(M4)이 이 레지스트리 값을 쓰고 해당 장치를 다시 시작합니다. 서명된 SYS·INF·CAT를 수정하지 않으므로 이름 변경에 재서명이 필요 없습니다. Windows 소리 설정에서 사용자가 바꾼 별칭은 싱크 설명과 다를 수 있습니다.
 
 | 번호 | 영어 Windows | 한국어 Windows |
 | --- | --- | --- |
@@ -169,7 +169,7 @@ Visual Studio C++ 빌드 도구와 대상 아키텍처용 컴파일러가 필요
 python3 tools/kcheck.py --analyze
 ```
 
-다른 캐시 경로가 필요하면 `BIO_KCHECK_CACHE`를 설정합니다. 도구는 SHA-256으로 고정한 NuGet 헤더에 대해 x64와 ARM64를 clang의 MSVC 모드로 컴파일 검사하고 x64 정적 분석을 실행합니다. 입력 파일을 지정하지 않으면 `driver/bioatmos/*.cpp` 전체를 검사합니다.
+다른 캐시 경로가 필요하면 `SSR_KCHECK_CACHE`를 설정합니다. 도구는 SHA-256으로 고정한 NuGet 헤더에 대해 x64와 ARM64를 clang의 MSVC 모드로 컴파일 검사하고 x64 정적 분석을 실행합니다. 입력 파일을 지정하지 않으면 `driver/spatialsoftreceiver/*.cpp` 전체를 검사합니다.
 
 이는 링크나 MSVC/WDK 실제 빌드가 아닙니다. Windows CI의 x64·ARM64 Debug·Release 빌드, `/W4 /WX`, 코드 분석, InfVerif, CodeQL, 서명 검증은 별도 게이트입니다. 시험서명 PC에서는 Driver Verifier, HVCI 로드, IOCTL 퍼징, READ 취소·정리·제거 경합, 형식 협상, 세 엔드포인트의 공간음향 활성화, 쓰기 패킷/EOS와 트림을 검증해야 합니다.
 

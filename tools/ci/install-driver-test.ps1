@@ -18,10 +18,10 @@ Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $out | Out-Null
 & (Join-Path $PSScriptRoot 'driver-test-kit.ps1') -Package $Package -Version $version -OutDir $out
 if (-not $?) { throw 'driver-test-kit.ps1 failed' }
-$zip = Join-Path $out "bio-atmos-driver-test-$version-x64.zip"
+$zip = Join-Path $out "spatial-softreceiver-driver-test-$version-x64.zip"
 $expanded = Join-Path $out 'expanded'
 Expand-Archive -Path $zip -DestinationPath $expanded -Force
-$kit = Join-Path $expanded "bio-atmos-driver-test-$version-x64"
+$kit = Join-Path $expanded "spatial-softreceiver-driver-test-$version-x64"
 # Before installing, so the collect and uninstall steps run even when the
 # install fails.
 if ($env:GITHUB_OUTPUT) { Add-Content -Path $env:GITHUB_OUTPUT -Value "kit=$kit" }

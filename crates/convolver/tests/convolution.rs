@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use bio_types::Feeds;
 use convolver::{Binauralizer, ConvolverError, FilterBank};
 use proptest::prelude::*;
+use ssr_types::Feeds;
 
 fn direct_convolution(signals: &[Vec<f32>], irs: &[[Vec<f32>; 2]]) -> [Vec<f32>; 2] {
     let frames = signals[0].len();

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compiles the kernel driver's sources on Linux, without Windows.
 
-clang in MSVC mode checks every translation unit of driver/bioatmos against
+clang in MSVC mode checks every translation unit of driver/spatialsoftreceiver against
 the WDK and Windows SDK headers (taken from Microsoft's NuGet packages, pinned
 by SHA-256) for x64 and ARM64, and optionally runs the clang static analyzer.
 Nothing is linked, so this is a type and syntax check, not a build: the
@@ -10,9 +10,9 @@ exists so a driver change can be checked in the Linux container before CI.
 
     python3 tools/kcheck.py                 # both architectures
     python3 tools/kcheck.py --analyze       # plus clang --analyze (x64)
-    python3 tools/kcheck.py driver/bioatmos/control.cpp
+    python3 tools/kcheck.py driver/spatialsoftreceiver/control.cpp
 
-The packages are cached in $BIO_KCHECK_CACHE (default ~/.cache/bio-kcheck).
+The packages are cached in $SSR_KCHECK_CACHE (default ~/.cache/ssr-kcheck).
 Windows file names are case-insensitive and the headers rely on that, so the
 cache gains symlinks for every spelling an #include uses.
 """
@@ -61,7 +61,7 @@ INCLUDE_RE = re.compile(rb'#\s*include\s*[<"]([^">]+)[">]')
 
 
 def cache_dir():
-    return Path(os.environ.get("BIO_KCHECK_CACHE", Path.home() / ".cache" / "bio-kcheck"))
+    return Path(os.environ.get("SSR_KCHECK_CACHE", Path.home() / ".cache" / "ssr-kcheck"))
 
 
 def fetch(name, version, sha256, into):
@@ -171,13 +171,13 @@ def main():
     parser.add_argument("--clang", default=os.environ.get("CLANG", "clang++"))
     args = parser.parse_args()
 
-    driver = REPO / "driver" / "bioatmos"
+    driver = REPO / "driver" / "spatialsoftreceiver"
     core = REPO / "driver" / "core"
     sources = args.sources or sorted(driver.glob("*.cpp")) + sorted(core.glob("*.cpp"))
     if not sources:
         raise SystemExit("kcheck: no driver sources found")
     # driver/kcrt first, as in the vcxproj: the kernel build has no user-mode CRT.
-    extra = [REPO / "driver" / "kcrt", driver, core, REPO / "crates" / "bio-abi" / "include"]
+    extra = [REPO / "driver" / "kcrt", driver, core, REPO / "crates" / "ssr-abi" / "include"]
     roots = headers([REPO / "driver"])
 
     failed = 0

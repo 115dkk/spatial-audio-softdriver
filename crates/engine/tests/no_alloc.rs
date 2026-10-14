@@ -3,17 +3,17 @@
 use std::sync::Arc;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use bio_abi::{RECORD_FLAG_DISCONTINUITY, Record, RecordWriter, wave_format_bytes};
-use bio_types::{
-    BitstreamCodec, BitstreamFormat, Direction, Layout, MAX_OBJECTS, Object, PcmFormat, Position,
-    SampleType, SceneBlock, SourceFormat,
-};
 use brir::PreparedBrir;
 use convolver::FilterBank;
 use engine::{
     Chain, ChainConfig, ChainEvent, MIX_FRAMES, MIX_RATE, MixerConfig, Prepared, SceneMixer,
 };
 use render::PanGeometry;
+use ssr_abi::{RECORD_FLAG_DISCONTINUITY, Record, RecordWriter, wave_format_bytes};
+use ssr_types::{
+    BitstreamCodec, BitstreamFormat, Direction, Layout, MAX_OBJECTS, Object, PcmFormat, Position,
+    SampleType, SceneBlock, SourceFormat,
+};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -31,7 +31,7 @@ fn pcm_format(rate: u32) -> SourceFormat {
 
 fn pcm_record(epoch: u32, frames: usize) -> Vec<u8> {
     let pcm = vec![0_u8; frames * 2 * 4];
-    let mut record = vec![0; bio_abi::record_size(pcm.len())];
+    let mut record = vec![0; ssr_abi::record_size(pcm.len())];
     let mut writer = RecordWriter::new(&mut record);
     assert!(writer.data(epoch, 0, 1, &pcm));
     let length = writer.len();

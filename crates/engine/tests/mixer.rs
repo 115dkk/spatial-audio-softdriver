@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-use bio_types::{Direction, Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 use engine::{BedBlock, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer};
 use render::PanGeometry;
+use ssr_types::{Direction, Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 
 fn config() -> MixerConfig {
     MixerConfig {

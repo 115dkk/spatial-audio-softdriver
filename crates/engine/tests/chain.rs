@@ -5,20 +5,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bio_abi::{
-    AbiError, ENDPOINT_PASSTHROUGH, ENDPOINT_PRIMARY, ENDPOINT_SECOND, MAX_ENDPOINTS,
-    RECORD_FLAG_DISCONTINUITY, RECORD_KIND_FORMAT_CHANGE, RECORD_KIND_STREAM_STOP,
-    RECORD_KIND_VOLUME, Record, RecordHeader, RecordWriter, wave_format_bytes,
-};
-use bio_types::{
-    BitstreamCodec, BitstreamFormat, Direction, Layout, PcmFormat, SampleType, SourceFormat,
-};
 use brir::{AnglePreset, BrirSource, DirectionFile, LfePolicy, Profile};
 use engine::{
     Chain, ChainConfig, ChainEvent, EndpointFilter, MAX_ARRIVAL_SLACK_FRAMES, MIX_FRAMES, Prepared,
     partition_for,
 };
 use speakers::{PreparedSpeaker, PreparedSpeakers};
+use ssr_abi::{
+    AbiError, ENDPOINT_PASSTHROUGH, ENDPOINT_PRIMARY, ENDPOINT_SECOND, MAX_ENDPOINTS,
+    RECORD_FLAG_DISCONTINUITY, RECORD_KIND_FORMAT_CHANGE, RECORD_KIND_STREAM_STOP,
+    RECORD_KIND_VOLUME, Record, RecordHeader, RecordWriter, wave_format_bytes,
+};
+use ssr_types::{
+    BitstreamCodec, BitstreamFormat, Direction, Layout, PcmFormat, SampleType, SourceFormat,
+};
 
 struct TempDir(PathBuf);
 
@@ -152,7 +152,7 @@ fn pcm_stream(blocks: usize) -> Vec<u8> {
     }
     samples[..4].copy_from_slice(&0.2_f32.to_le_bytes());
     samples[4..8].copy_from_slice(&0.4_f32.to_le_bytes());
-    let mut stream = vec![0; bio_abi::record_size(52) + bio_abi::record_size(samples.len()) + 64];
+    let mut stream = vec![0; ssr_abi::record_size(52) + ssr_abi::record_size(samples.len()) + 64];
     let mut writer = RecordWriter::new(&mut stream);
     assert!(writer.format_change(1, 0, &wave_format_bytes(&format)));
     // The ABI timestamps the last payload byte; 100,000 ticks are the 10 ms
@@ -730,7 +730,7 @@ fn plain_stereo_ignores_direct_override_but_zero_mask_extensible_uses_it() {
     direct
         .set(
             2,
-            decode::direct::DirectLayout::new(&[bio_types::Speaker::R, bio_types::Speaker::L])
+            decode::direct::DirectLayout::new(&[ssr_types::Speaker::R, ssr_types::Speaker::L])
                 .unwrap(),
         )
         .unwrap();
@@ -741,7 +741,7 @@ fn plain_stereo_ignores_direct_override_but_zero_mask_extensible_uses_it() {
             frame[..4].copy_from_slice(&left.to_le_bytes());
         }
         let mut stream =
-            vec![0; bio_abi::record_size(format_bytes.len()) + bio_abi::record_size(samples.len())];
+            vec![0; ssr_abi::record_size(format_bytes.len()) + ssr_abi::record_size(samples.len())];
         let mut writer = RecordWriter::new(&mut stream);
         assert!(writer.format_change(1, 0, &format_bytes));
         assert!(writer.data(1, 0, 10_000, &samples));
@@ -784,9 +784,9 @@ fn legacy_volume_record_attenuates_rendered_output() {
     }
     let mut stream = vec![
         0;
-        bio_abi::record_size(40)
-            + bio_abi::record_size(legacy_volume.len())
-            + bio_abi::record_size(samples.len())
+        ssr_abi::record_size(40)
+            + ssr_abi::record_size(legacy_volume.len())
+            + ssr_abi::record_size(samples.len())
     ];
     let mut writer = RecordWriter::new(&mut stream);
     assert!(writer.format_change(1, 0, &wave_format_bytes(&format)));
@@ -829,7 +829,7 @@ fn default_chain_decodes_all_six_pcm_rates_through_record_stream() {
         let format = pcm_format(rate, 2, 3);
         let frames = rate as usize / 100;
         let samples = pcm_bytes(0.25, frames);
-        let mut stream = vec![0; bio_abi::record_size(40) + bio_abi::record_size(samples.len())];
+        let mut stream = vec![0; ssr_abi::record_size(40) + ssr_abi::record_size(samples.len())];
         let mut writer = RecordWriter::new(&mut stream);
         assert!(writer.format_change(1, 0, &wave_format_bytes(&format)));
         assert!(writer.data(1, 0, rate as u64 / 100, &samples));
@@ -864,7 +864,7 @@ fn render_records_one_at_a_time(stream: &[u8]) -> RenderedStream {
         ChainEvent::Error { .. } => errors += 1,
         _ => {}
     };
-    for record in bio_abi::records(stream) {
+    for record in ssr_abi::records(stream) {
         chain.push_record(record.unwrap(), &mut collect);
     }
     chain.finish(&mut collect);
@@ -937,7 +937,7 @@ fn timed_pcm_stream_with_lfe(
         let flags = if frame_pos == 0 { first_data_flags } else { 0 };
         assert!(writer.push(
             RecordHeader {
-                kind: bio_abi::RECORD_KIND_DATA,
+                kind: ssr_abi::RECORD_KIND_DATA,
                 flags,
                 epoch,
                 byte_pos: (frame_pos * frame_bytes) as u64,
@@ -1054,7 +1054,7 @@ fn retain_endpoint_records(stream: &[u8], endpoint: u16) -> Vec<u8> {
         let payload_len =
             u32::from_ne_bytes(stream[offset + 32..offset + 36].try_into().unwrap()) as usize;
         let owner = u16::from_ne_bytes(stream[offset + 36..offset + 38].try_into().unwrap());
-        let record_len = bio_abi::record_size(payload_len);
+        let record_len = ssr_abi::record_size(payload_len);
         let end = offset.saturating_add(record_len).min(stream.len());
         assert!(
             end - offset >= HEADER + payload_len,
@@ -1302,7 +1302,7 @@ fn driver_like_run(seed: u64, late_max_us: u64) -> (u64, u64) {
             writer.set_endpoint(endpoint as u16);
             assert!(writer.push(
                 RecordHeader {
-                    kind: bio_abi::RECORD_KIND_DATA,
+                    kind: ssr_abi::RECORD_KIND_DATA,
                     flags: 0,
                     epoch: 1,
                     byte_pos: written[endpoint] * channels[endpoint] * 4,
@@ -1380,7 +1380,7 @@ fn same_read_stop_and_first_data_match_second_endpoint_solo() {
         writer.set_endpoint(ENDPOINT_SECOND);
         assert!(writer.push(
             RecordHeader {
-                kind: bio_abi::RECORD_KIND_DATA,
+                kind: ssr_abi::RECORD_KIND_DATA,
                 flags: first_data_flags,
                 epoch: 2,
                 byte_pos: 0,
@@ -1772,7 +1772,7 @@ fn restart_after_a_stall_with_the_largest_slack_keeps_its_first_scene() {
     writer.set_endpoint(ENDPOINT_SECOND);
     assert!(writer.push(
         RecordHeader {
-            kind: bio_abi::RECORD_KIND_DATA,
+            kind: ssr_abi::RECORD_KIND_DATA,
             flags: RECORD_FLAG_DISCONTINUITY,
             epoch: 2,
             byte_pos: 1_920,
@@ -1909,7 +1909,7 @@ fn nonempty_discontinuity_does_not_move_other_endpoint() {
     writer.set_endpoint(ENDPOINT_PRIMARY);
     assert!(writer.push(
         RecordHeader {
-            kind: bio_abi::RECORD_KIND_DATA,
+            kind: ssr_abi::RECORD_KIND_DATA,
             flags: RECORD_FLAG_DISCONTINUITY,
             epoch: 1,
             byte_pos: 100 * 48 * 4,
@@ -2573,7 +2573,7 @@ fn ddp_burst_produces_a_nonzero_binaural_block() {
         encoded_rate: 48_000,
         encoded_channels: 6,
     });
-    let mut stream = vec![0; bio_abi::record_size(52) + bio_abi::record_size(burst.len()) + 64];
+    let mut stream = vec![0; ssr_abi::record_size(52) + ssr_abi::record_size(burst.len()) + 64];
     let mut writer = RecordWriter::new(&mut stream);
     assert!(writer.format_change(7, 0, &wave_format_bytes(&format)));
     assert!(writer.data(7, 0, 123, &burst));
@@ -2629,7 +2629,7 @@ fn ddp_and_speaker_paths_apply_the_same_volume_gain() {
         chain.set_prepared(prepared);
         let mut peak = 0.0_f32;
         if let Some(volume_db) = volume_db {
-            let mut levels = [0; bio_abi::MAX_VOLUME_CHANNELS];
+            let mut levels = [0; ssr_abi::MAX_VOLUME_CHANNELS];
             levels[..2].fill(volume_db * 65_536);
             chain.push_record(
                 Record::Volume {
@@ -3411,7 +3411,7 @@ fn format_decode_error_overrun_and_discontinuity_do_not_change_the_other_lane() 
                     Some("overrun") => assert!(writer.overrun(48 * 4 * 100, 100_000, 99)),
                     Some("discontinuity") => assert!(writer.push(
                         RecordHeader {
-                            kind: bio_abi::RECORD_KIND_DATA,
+                            kind: ssr_abi::RECORD_KIND_DATA,
                             flags: RECORD_FLAG_DISCONTINUITY,
                             epoch: 1,
                             byte_pos: 48 * 4 * 100,
@@ -3578,7 +3578,7 @@ fn endpoint_filter_ignores_unselected_endpoint_without_counting_it_invalid() {
 
     chain.push_record(
         Record::StreamStop {
-            endpoint: bio_abi::MAX_ENDPOINTS as u16,
+            endpoint: ssr_abi::MAX_ENDPOINTS as u16,
             epoch: 0,
             repeat: false,
             qpc: 0,

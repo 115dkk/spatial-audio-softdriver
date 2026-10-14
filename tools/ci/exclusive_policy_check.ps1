@@ -10,7 +10,7 @@ $results = @()
 $problems = @()
 try {
     . (Join-Path $PSScriptRoot 'exclusive-policy.ps1')
-    $targets = @(Get-BioPolicyTargets -InstanceId $InstanceId | Where-Object { $_.state -eq 1 })
+    $targets = @(Get-SsrPolicyTargets -InstanceId $InstanceId | Where-Object { $_.state -eq 1 })
     foreach ($ep in 0..2) {
         $matches = @($targets | Where-Object endpoint -eq $ep)
         if (-not ($ExpectMask -band (1 -shl $ep))) {
@@ -25,7 +25,7 @@ try {
         $control = $null
         $item = [ordered]@{ endpoint = $ep; name = $target.name; id = $target.id; policy = $null; probe = $null; passed = $false; error = $null }
         try {
-            $control = [BioExclusivePolicy]::new($target.id)
+            $control = [SsrExclusivePolicy]::new($target.id)
             $item.policy = $control.Read()
             $expected = if ($ep -eq 2) { 1 } else { 0 }
             $policyOk = $item.policy.allow_exclusive -eq $expected -and $item.policy.exclusive_priority -eq $expected

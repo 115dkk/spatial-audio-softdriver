@@ -37,7 +37,7 @@ function Get-SecureBootState {
     } catch { return 'unsupported' }
 }
 
-function Get-BioEndpoints([string] $InstanceId) {
+function Get-SsrEndpoints([string] $InstanceId) {
     Get-SpatialEndpoints -InstanceId $InstanceId
 }
 
@@ -98,7 +98,7 @@ try {
     # a new device's endpoints active; wait for the enabled endpoints before judging.
     $deadline = (Get-Date).AddSeconds(30)
     do {
-        $endpoints = @(Get-BioEndpoints $device.InstanceId)
+        $endpoints = @(Get-SsrEndpoints $device.InstanceId)
         $activeNow = @($endpoints | Where-Object state -eq 1).Count
         if ($problem -ne 0 -or $activeNow -ge $expectedCount) { break }
         Start-Sleep -Seconds 2
@@ -143,7 +143,7 @@ try {
         . $policyHelper
         $result.exclusive_policy = 'applying; not yet verified'
         $result | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $ResultPath
-        Set-BioExclusivePolicy -InstanceId $device.InstanceId -EndpointMask $mask
+        Set-SsrExclusivePolicy -InstanceId $device.InstanceId -EndpointMask $mask
         # Commit through IPropertyStore, then probe a fresh audio client. Do not
         # restart global audio services (that would interrupt unrelated devices).
         $checker = Join-Path (Split-Path $policyHelper) 'exclusive_policy_check.ps1'

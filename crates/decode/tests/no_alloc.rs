@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
 use assert_no_alloc::assert_no_alloc;
-use bio_types::{PcmFormat, SampleType, Speaker};
 use bitstream::{Burst, DataType};
 use decode::{
     DecodeConfig,
@@ -9,6 +8,7 @@ use decode::{
     direct::{DirectLayout, DirectLayouts},
     pcm::PcmDecoder,
 };
+use ssr_types::{PcmFormat, SampleType, Speaker};
 
 #[cfg(debug_assertions)]
 #[global_allocator]

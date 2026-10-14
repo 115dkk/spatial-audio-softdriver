@@ -70,7 +70,7 @@ SHIP = (
 )
 # Shipped although they match NOT_SHIPPED: the kit's README.
 SHIP_ALWAYS = ("docs/testing/test-signed-pc.md",)
-NOT_SHIPPED = ("*.md", "crates/bio-policy/*")
+NOT_SHIPPED = ("*.md", "crates/ssr-policy/*")
 NOT_SHIPPED_DIRS = ("tests", "benches", "fuzz")
 
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")

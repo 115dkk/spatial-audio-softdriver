@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
-use bio_types::{Direction, Layout, Position};
 use proptest::prelude::*;
 use render::{PanGeometry, RenderError};
+use ssr_types::{Direction, Layout, Position};
 
 fn layout(entries: &[(&str, f32, f32)]) -> Layout {
     Layout::new(

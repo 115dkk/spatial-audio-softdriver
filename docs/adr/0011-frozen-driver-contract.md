@@ -10,12 +10,12 @@
 
 커널은 메커니즘만 가집니다.
 
-- 형식 표는 상위집합으로 컴파일하고 레지스트리 마스크로 켭니다. 마스크는 bio-setup만 씁니다.
+- 형식 표는 상위집합으로 컴파일하고 레지스트리 마스크로 켭니다. 마스크는 ssr-setup만 씁니다.
 - 링은 종류, 플래그, 에포크, 누적 위치, QPC 두 개, 길이를 가진 기록을 쌓습니다. 모든 기록이 길이를 가지므로 사용자 모드는 모르는 종류를 건너뜁니다.
 - 형식 변경 기록은 Windows가 협상한 WAVEFORMATEXTENSIBLE을 해석하지 않고 그대로 싣습니다.
 - READ는 조건(최소 바이트, 형식 변경, 정지)이 찰 때까지 보류됩니다. 트림 IOCTL로 가상 DMA 속도를 ±2000 ppm 안에서 바꾸고, 핸들이 닫히면 0으로 돌립니다.
 - SDDL로 SYSTEM, 관리자, 대화형 사용자에게 열고 두 번째 핸들은 거절합니다.
-- 계약은 `crates/bio-abi` 한 곳에서 정의합니다. 드라이버가 include할 C 헤더(`crates/bio-abi/include/bioatmos_abi.h`)는 cbindgen으로 생성하고, 헤더 끝의 정적 단언은 Rust 쪽 `size_of`와 `offset_of`로 계산합니다. CI는 이 헤더를 MSVC로 C89, C11, C++17 세 번 컴파일합니다.
+- 계약은 `crates/ssr-abi` 한 곳에서 정의합니다. 드라이버가 include할 C 헤더(`crates/ssr-abi/include/ssr_abi.h`)는 cbindgen으로 생성하고, 헤더 끝의 정적 단언은 Rust 쪽 `size_of`와 `offset_of`로 계산합니다. CI는 이 헤더를 MSVC로 C89, C11, C++17 세 번 컴파일합니다.
 
 ## 결과
 

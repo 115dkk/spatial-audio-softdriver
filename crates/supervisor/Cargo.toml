@@ -11,6 +11,6 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-bio-types.workspace = true
+ssr-types.workspace = true
 engine.workspace = true
 brir.workspace = true

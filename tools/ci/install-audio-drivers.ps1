@@ -108,7 +108,7 @@ try {
         }
         # Generate an ephemeral test certificate in the disposable runner and
         # sign the catalogs explicitly: no Visual Studio user signing profile.
-        $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=BIO SAL runner experiment' -CertStoreLocation Cert:/LocalMachine/My
+        $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Spatial SoftReceiver SAL runner experiment' -CertStoreLocation Cert:/LocalMachine/My
         Export-Certificate -Cert $certificate -FilePath "${outputDir}package.cer" | Out-Null
         $signtool = "${env:ProgramFiles(x86)}/Windows Kits/10/bin/10.0.26100.0/x64/signtool.exe"
         $catalogs = @(Get-ChildItem $outputDir -Recurse -Filter *.cat)

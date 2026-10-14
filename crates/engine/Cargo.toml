@@ -11,8 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-bio-types.workspace = true
-bio-abi.workspace = true
+ssr-types.workspace = true
+ssr-abi.workspace = true
 decode.workspace = true
 render.workspace = true
 convolver.workspace = true

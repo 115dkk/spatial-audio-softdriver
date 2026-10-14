@@ -14,7 +14,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-Add-Type -Namespace BioCi -Name Timer -MemberDefinition @'
+Add-Type -Namespace SsrCi -Name Timer -MemberDefinition @'
 [DllImport("ntdll.dll")]
 public static extern int NtQueryTimerResolution(out uint coarsest, out uint finest, out uint current);
 [DllImport("ntdll.dll")]
@@ -26,14 +26,14 @@ $Desired = 10000
 
 function Get-TimerResolution {
     $coarsest = [uint32]0; $finest = [uint32]0; $current = [uint32]0
-    $status = [BioCi.Timer]::NtQueryTimerResolution([ref]$coarsest, [ref]$finest, [ref]$current)
+    $status = [SsrCi.Timer]::NtQueryTimerResolution([ref]$coarsest, [ref]$finest, [ref]$current)
     if ($status -ne 0) { throw ('NtQueryTimerResolution failed (0x{0:X8})' -f $status) }
     [pscustomobject]@{ Coarsest = $coarsest; Finest = $finest; Current = $current }
 }
 
 if ($Hold) {
     $current = [uint32]0
-    $status = [BioCi.Timer]::NtSetTimerResolution($Desired, $true, [ref]$current)
+    $status = [SsrCi.Timer]::NtSetTimerResolution($Desired, $true, [ref]$current)
     if ($status -ne 0) { throw ('NtSetTimerResolution failed (0x{0:X8})' -f $status) }
     # The request lasts as long as this process; the runner ends it with the job.
     while ($true) { Start-Sleep -Seconds 3600 }

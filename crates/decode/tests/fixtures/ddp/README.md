@@ -36,7 +36,7 @@ established. The crate's Apache-2.0 license alone does not establish rights to
 the captured programme.
 
 The ignored `ddp_joc_external_sample_has_positioned_objects` integration test
-reads a raw E-AC-3 stream from `BIO_DDP_JOC_SAMPLE`. Supply a locally permitted
+reads a raw E-AC-3 stream from `SSR_DDP_JOC_SAMPLE`. Supply a locally permitted
 sample, then run `cargo test -p decode ddp_joc_external_sample -- --ignored`.
 The JOC bitstream path remains unverified without that test; synthetic unit
 tests of coordinates are not a JOC decoding golden test.

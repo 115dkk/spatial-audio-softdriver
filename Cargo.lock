@@ -98,86 +98,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "bio-abi"
-version = "0.6.0"
-dependencies = [
- "bio-types",
- "cbindgen",
- "proptest",
- "thiserror",
- "zerocopy",
-]
-
-[[package]]
-name = "bio-live"
-version = "0.6.0"
-dependencies = [
- "assert_no_alloc",
- "bio-abi",
- "bio-sys",
- "bio-types",
- "brir",
- "clap",
- "engine",
- "rtrb",
- "serde_json",
- "speakers",
-]
-
-[[package]]
-name = "bio-policy"
-version = "0.6.0"
-dependencies = [
- "serde",
- "toml 1.1.8+spec-1.1.0",
-]
-
-[[package]]
-name = "bio-replay"
-version = "0.6.0"
-dependencies = [
- "bio-abi",
- "bio-types",
- "bitstream",
- "brir",
- "clap",
- "engine",
- "hound",
- "serde",
- "serde_json",
- "sha2",
- "speakers",
-]
-
-[[package]]
-name = "bio-setup"
-version = "0.6.0"
-dependencies = [
- "bio-sys",
-]
-
-[[package]]
-name = "bio-sys"
-version = "0.6.0"
-dependencies = [
- "assert_no_alloc",
- "bio-abi",
- "bio-types",
- "hound",
- "thiserror",
- "wasapi",
- "windows",
- "zerocopy",
-]
-
-[[package]]
-name = "bio-types"
-version = "0.6.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -247,12 +167,12 @@ dependencies = [
 name = "brir"
 version = "0.6.0"
 dependencies = [
- "bio-types",
  "convolver",
  "hound",
  "realfft",
  "rubato",
  "serde",
+ "ssr-types",
  "thiserror",
  "toml 1.1.8+spec-1.1.0",
 ]
@@ -361,9 +281,9 @@ name = "convolver"
 version = "0.6.0"
 dependencies = [
  "assert_no_alloc",
- "bio-types",
  "proptest",
  "realfft",
+ "ssr-types",
  "thiserror",
 ]
 
@@ -396,10 +316,10 @@ name = "decode"
 version = "0.6.0"
 dependencies = [
  "assert_no_alloc",
- "bio-types",
  "bitstream",
  "eac3",
  "proptest",
+ "ssr-types",
  "thiserror",
 ]
 
@@ -429,8 +349,6 @@ name = "engine"
 version = "0.6.0"
 dependencies = [
  "assert_no_alloc",
- "bio-abi",
- "bio-types",
  "bitstream",
  "brir",
  "convolver",
@@ -441,6 +359,8 @@ dependencies = [
  "rtrb",
  "rubato",
  "speakers",
+ "ssr-abi",
+ "ssr-types",
  "thiserror",
  "toml 1.1.8+spec-1.1.0",
 ]
@@ -710,8 +630,8 @@ name = "render"
 version = "0.6.0"
 dependencies = [
  "assert_no_alloc",
- "bio-types",
  "proptest",
+ "ssr-types",
  "thiserror",
 ]
 
@@ -843,14 +763,94 @@ dependencies = [
 name = "speakers"
 version = "0.6.0"
 dependencies = [
- "bio-types",
  "convolver",
  "hound",
  "render",
  "rubato",
  "serde",
+ "ssr-types",
  "thiserror",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "ssr-abi"
+version = "0.6.0"
+dependencies = [
+ "cbindgen",
+ "proptest",
+ "ssr-types",
+ "thiserror",
+ "zerocopy",
+]
+
+[[package]]
+name = "ssr-live"
+version = "0.6.0"
+dependencies = [
+ "assert_no_alloc",
+ "brir",
+ "clap",
+ "engine",
+ "rtrb",
+ "serde_json",
+ "speakers",
+ "ssr-abi",
+ "ssr-sys",
+ "ssr-types",
+]
+
+[[package]]
+name = "ssr-policy"
+version = "0.6.0"
+dependencies = [
+ "serde",
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "ssr-replay"
+version = "0.6.0"
+dependencies = [
+ "bitstream",
+ "brir",
+ "clap",
+ "engine",
+ "hound",
+ "serde",
+ "serde_json",
+ "sha2",
+ "speakers",
+ "ssr-abi",
+ "ssr-types",
+]
+
+[[package]]
+name = "ssr-setup"
+version = "0.6.0"
+dependencies = [
+ "ssr-sys",
+]
+
+[[package]]
+name = "ssr-sys"
+version = "0.6.0"
+dependencies = [
+ "assert_no_alloc",
+ "hound",
+ "ssr-abi",
+ "ssr-types",
+ "thiserror",
+ "wasapi",
+ "windows",
+ "zerocopy",
+]
+
+[[package]]
+name = "ssr-types"
+version = "0.6.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]
@@ -869,9 +869,9 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 name = "supervisor"
 version = "0.6.0"
 dependencies = [
- "bio-types",
  "brir",
  "engine",
+ "ssr-types",
 ]
 
 [[package]]

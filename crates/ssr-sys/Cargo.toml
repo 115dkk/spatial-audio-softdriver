@@ -1,0 +1,36 @@
+[package]
+name = "ssr-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The one crate with handwritten `unsafe` (ADR 0002, unsafe-budget.toml). It
+# cannot inherit the workspace's `unsafe_code = "forbid"`, which no module can
+# relax, so it repeats the table with `deny` and each unsafe module opts out.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+dbg_macro = "deny"
+
+[dependencies]
+ssr-types.workspace = true
+ssr-abi.workspace = true
+thiserror.workspace = true
+zerocopy.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+wasapi.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
+hound.workspace = true

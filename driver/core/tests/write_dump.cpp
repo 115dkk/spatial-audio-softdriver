@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MS-PL
 // Emits a deterministic core record stream and a text expectation file.
-#include "bio_core.h"
+#include "ssr_core.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -10,7 +10,7 @@ alignas(8) uint8_t storage[64U * 1024U];
 uint8_t stream[64U * 1024U];
 
 uint32_t RecordBytes(uint32_t payload) {
-    return (static_cast<uint32_t>(sizeof(BIO_RECORD_HEADER)) + payload + 7U) & ~7U;
+    return (static_cast<uint32_t>(sizeof(SSR_RECORD_HEADER)) + payload + 7U) & ~7U;
 }
 
 void Put16(uint8_t* out, uint32_t offset, uint16_t value) {
@@ -53,7 +53,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: write_dump PATH\n");
         return 2;
     }
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     if (!ring.Init(storage, sizeof(storage))) {
         return 1;
     }
@@ -91,12 +91,12 @@ int main(int argc, char** argv) {
     }
     const uint32_t bytes = ring.Read(stream, sizeof(stream));
 
-    BIO_DUMP_HEADER dump{};
-    memcpy(dump.magic, "BIODUMP\0", 8);
-    dump.abi_version = BIO_ABI_VERSION;
+    SSR_DUMP_HEADER dump{};
+    memcpy(dump.magic, "SSRDUMP\0", 8);
+    dump.abi_version = SSR_ABI_VERSION;
     dump.header_size = static_cast<uint32_t>(sizeof(dump));
     dump.qpc_frequency = 10000000;
-    dump.format_version = BIO_DUMP_FORMAT_VERSION;
+    dump.format_version = SSR_DUMP_FORMAT_VERSION;
     FILE* file = fopen(argv[1], "wb");
     if (file == nullptr || !WriteAll(file, &dump, sizeof(dump)) || !WriteAll(file, stream, bytes) ||
         fclose(file) != 0) {
@@ -113,10 +113,10 @@ int main(int argc, char** argv) {
         return 1;
     }
     for (uint32_t at = 0; at < bytes;) {
-        BIO_RECORD_HEADER header{};
+        SSR_RECORD_HEADER header{};
         memcpy(&header, stream + at, sizeof(header));
         uint64_t sum = 0;
-        if (header.kind == BIO_RECORD_KIND_DATA) {
+        if (header.kind == SSR_RECORD_KIND_DATA) {
             for (uint32_t i = 0; i < header.len; ++i) {
                 sum += stream[at + sizeof(header) + i];
             }

@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $evidence = Join-Path $PSScriptRoot '../../out/runner' | Resolve-Path
-$live = Join-Path $PSScriptRoot '../../target/release/bio-live.exe'
-$replay = Join-Path $PSScriptRoot '../../target/release/bio-replay.exe'
+$live = Join-Path $PSScriptRoot '../../target/release/ssr-live.exe'
+$replay = Join-Path $PSScriptRoot '../../target/release/ssr-replay.exe'
 $failures = [Collections.Generic.List[string]]::new()
 function Check($name, [scriptblock]$body) {
     $code = 1
@@ -15,9 +15,9 @@ function Check($name, [scriptblock]$body) {
     if ($code) { $failures.Add("$name (exit $code)") }
 }
 Check devices { & $live devices }
-Check hardware-tests { cargo test --locked --release -p bio-sys --test windows -- --ignored --nocapture --test-threads=1 }
+Check hardware-tests { cargo test --locked --release -p ssr-sys --test windows -- --ignored --nocapture --test-threads=1 }
 Check cable-play {
-    & $live play --from-dump "$evidence/fixtures/pcm71.biodump" --profile "$evidence/fixtures/profile.toml" --output 'CABLE Input' --seconds 5
+    & $live play --from-dump "$evidence/fixtures/pcm71.ssrdump" --profile "$evidence/fixtures/profile.toml" --output 'CABLE Input' --seconds 5
 }
 $tone = Join-Path $PSScriptRoot '../../target/release/examples/sal_tone.exe'
 function With-Stimulus($name, [scriptblock]$body) {
@@ -29,11 +29,11 @@ function With-Stimulus($name, [scriptblock]$body) {
         elseif ($sender.ExitCode) { $failures.Add("$name stimulus exit $($sender.ExitCode)") }
     } finally { if (!$sender.HasExited) { $sender.Kill() } }
 }
-With-Stimulus sal-record { & $live record --out "$evidence/sal.biodump" --seconds 8 }
-if (Test-Path "$evidence/sal.biodump") {
-    Check sal-inspect { & $replay inspect "$evidence/sal.biodump" }
+With-Stimulus sal-record { & $live record --out "$evidence/sal.ssrdump" --seconds 8 }
+if (Test-Path "$evidence/sal.ssrdump") {
+    Check sal-inspect { & $replay inspect "$evidence/sal.ssrdump" }
     Check sal-render {
-        & $replay render "$evidence/sal.biodump" --profile "$evidence/fixtures/profile.toml" --out "$evidence/sal-render.wav" --report "$evidence/sal-render.json"
+        & $replay render "$evidence/sal.ssrdump" --profile "$evidence/fixtures/profile.toml" --out "$evidence/sal-render.wav" --report "$evidence/sal-render.json"
     }
 }
 if (Select-String -Path "$evidence/hardware-tests.txt" -Pattern 'SAL open: success' -SimpleMatch -Quiet) {
@@ -42,12 +42,12 @@ if (Select-String -Path "$evidence/hardware-tests.txt" -Pattern 'SAL open: succe
         -RedirectStandardOutput "$evidence/cable-capture.txt" -RedirectStandardError "$evidence/cable-capture-error.txt"
     try {
         With-Stimulus sal-live {
-            & $live play --profile "$evidence/fixtures/profile.toml" --output 'CABLE Input' --record "$evidence/sal-live.biodump" --seconds 8
+            & $live play --profile "$evidence/fixtures/profile.toml" --output 'CABLE Input' --record "$evidence/sal-live.ssrdump" --seconds 8
         }
         if (!$listener.WaitForExit(15000)) { $listener.Kill(); $failures.Add('VB-CABLE capture timed out') }
         elseif ($listener.ExitCode) { $failures.Add("VB-CABLE capture exit $($listener.ExitCode)") }
     } finally { if (!$listener.HasExited) { $listener.Kill() } }
-    Check sal-live-inspect { & $replay inspect "$evidence/sal-live.biodump" }
+    Check sal-live-inspect { & $replay inspect "$evidence/sal-live.ssrdump" }
     $captured = Get-Content "$evidence/sal-live-inspect.txt" -Raw | ConvertFrom-Json
     if ($captured.data_bytes -le 0 -or $captured.errors.Count) { $failures.Add('live SAL capture was empty or invalid') }
     if (!(Select-String -Path "$evidence/sal-live.txt" -Pattern 'stopped: [1-9][0-9]* blocks' -Quiet) -or
@@ -59,7 +59,7 @@ if (!(Select-String -Path "$evidence/hardware-tests.txt" -Pattern 'SAL open: suc
     $failures.Add('SAL ring did not open')
 }
 $summary = @('## M2 SAL runner experiment', '', "Failed probes: $($failures -join '; ')", '',
-    'Artifacts include device enumeration, installation logs, hardware test output, BIO playback and SAL capture.',
+    'Artifacts include device enumeration, installation logs, hardware test output, Spatial SoftReceiver playback and SAL capture.',
     'Synthetic PCM is a transport probe. Licensed game/Apple Music sources and a listening/baseline comparison remain separate M2 checks.')
 $summary | Set-Content "$evidence/summary.md"
 $summary | Add-Content $env:GITHUB_STEP_SUMMARY

@@ -1,7 +1,7 @@
 //! Bounded OAMD update queue and room-coordinate ramps. No push-time allocation.
 
-use bio_types::{MAX_OBJECTS, Position};
 use eac3::{OamdElementKind, OamdObjectBlock, OamdPayload, ObjectAnchor, ObjectPcmFrame, Vec3};
+use ssr_types::{MAX_OBJECTS, Position};
 
 use super::{EMPTY_META, FRAMES, ObjectMeta, bed_position, corrupt, oamd_position, unsupported};
 use crate::{DecodeError, SceneBuffers};
@@ -258,7 +258,7 @@ impl Timeline {
         epoch: u32,
         rate: u32,
         qpc: u64,
-        out: &mut dyn FnMut(&bio_types::SceneBlock<'_>),
+        out: &mut dyn FnMut(&ssr_types::SceneBlock<'_>),
     ) {
         let end = self.clock + FRAMES as u64;
         let mut sample = self.clock;

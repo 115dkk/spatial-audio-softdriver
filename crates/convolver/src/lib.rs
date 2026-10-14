@@ -17,9 +17,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use bio_types::Feeds;
 use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use ssr_types::Feeds;
 
 const SEGMENT_ZERO_END_PARTITIONS: usize = 16;
 const SEGMENT_ONE_PARTITION_MULTIPLIER: usize = 8;

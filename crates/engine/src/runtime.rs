@@ -32,12 +32,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use bio_types::{
-    BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ClockStatus, ENGINE_ENDPOINTS,
-    EndpointStatus, EngineFault, EngineStatus, LatencyStats, OutputError, OutputFormat,
-    OutputLayout, OutputMode, OutputOpener, OutputSink, PcmFormat, SampleType, SourceFormat,
-    UnderrunSnapshot,
-};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use rubato::audioadapter::AdapterMut;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -45,14 +39,20 @@ use rubato::audioadapter_buffers::owned::InterleavedOwned;
 use rubato::{
     Adjustable, Async, FixedAsync, Resampler, SincInterpolationParameters, WindowFunction,
 };
+use ssr_types::{
+    BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ClockStatus, ENGINE_ENDPOINTS,
+    EndpointStatus, EngineFault, EngineStatus, LatencyStats, OutputError, OutputFormat,
+    OutputLayout, OutputMode, OutputOpener, OutputSink, PcmFormat, SampleType, SourceFormat,
+    UnderrunSnapshot,
+};
 
 use crate::Chain;
 use crate::chain::{ChainConfig, ChainError, ChainEvent, Prepared};
 use crate::{MAX_OUTPUT_CHANNELS, MIX_FRAMES};
 
 const DEFAULT_QPC_FREQUENCY: u64 = 10_000_000;
-const _: [(); bio_abi::MAX_ENDPOINTS] = [(); ENGINE_ENDPOINTS];
-const _: [(); ENGINE_ENDPOINTS] = [(); bio_abi::MAX_ENDPOINTS];
+const _: [(); ssr_abi::MAX_ENDPOINTS] = [(); ENGINE_ENDPOINTS];
+const _: [(); ENGINE_ENDPOINTS] = [(); ssr_abi::MAX_ENDPOINTS];
 const MAX_SCENE_RATE: u32 = 192_000;
 const SUPPORTED_SCENE_RATES: [u32; 7] = [8_000, 16_000, 32_000, 44_100, 48_000, 96_000, 192_000];
 const MAX_OUTPUT_PERIOD_FRAMES: usize = 16_384;
@@ -119,7 +119,7 @@ pub enum RealtimeThread {
 }
 
 /// Called first thing on each real-time thread, e.g. to register it with MMCSS
-/// "Pro Audio" (bio-sys provides that on Windows; tests pass nothing).
+/// "Pro Audio" (ssr-sys provides that on Windows; tests pass nothing).
 pub type ThreadHook = Arc<dyn Fn(RealtimeThread) + Send + Sync>;
 
 /// One complete allocation-free real-time loop iteration.
@@ -415,7 +415,7 @@ where
     let output_shared = Arc::clone(&shared);
     let output_config = config.clone();
     let output_thread = std::thread::Builder::new()
-        .name("bio-output".into())
+        .name("ssr-output".into())
         .spawn(move || {
             output_thread_main(
                 output_config,
@@ -507,7 +507,7 @@ where
     }
     let capture_shared = Arc::clone(&shared);
     let capture_thread = match std::thread::Builder::new()
-        .name("bio-capture-dsp".into())
+        .name("ssr-capture-dsp".into())
         .spawn(move || {
             capture_thread_main(
                 config,
@@ -1739,7 +1739,7 @@ fn output_thread_main<O: OutputOpener>(
     shared: Arc<Shared>,
     qpc_frequency: u64,
     event_producer: Producer<RtEvent>,
-    start_sender: std::sync::mpsc::SyncSender<Result<bio_types::OutputFormat, OutputError>>,
+    start_sender: std::sync::mpsc::SyncSender<Result<ssr_types::OutputFormat, OutputError>>,
     initial_layout: OutputLayout,
     capacity_frames: usize,
 ) {
@@ -3227,7 +3227,7 @@ fn encode_codec(codec: BitstreamCodec) -> (u8, u32) {
     match codec {
         BitstreamCodec::Ac3 => (0, 0),
         BitstreamCodec::Eac3 => (1, 0),
-        BitstreamCodec::Eac3Atmos => (2, 0),
+        BitstreamCodec::Eac3Joc => (2, 0),
         BitstreamCodec::TrueHd => (3, 0),
         BitstreamCodec::Mat20 => (4, 0),
         BitstreamCodec::Mat21 => (5, 0),
@@ -3241,7 +3241,7 @@ fn decode_codec(codec: u8, other: u32) -> BitstreamCodec {
     match codec {
         0 => BitstreamCodec::Ac3,
         1 => BitstreamCodec::Eac3,
-        2 => BitstreamCodec::Eac3Atmos,
+        2 => BitstreamCodec::Eac3Joc,
         3 => BitstreamCodec::TrueHd,
         4 => BitstreamCodec::Mat20,
         5 => BitstreamCodec::Mat21,
@@ -4805,7 +4805,7 @@ mod tests {
                 channel_mask: 3,
             }),
             SourceFormat::Bitstream(BitstreamFormat {
-                codec: BitstreamCodec::Eac3Atmos,
+                codec: BitstreamCodec::Eac3Joc,
                 container_rate: 192_000,
                 container_channels: 2,
                 encoded_rate: 48_000,

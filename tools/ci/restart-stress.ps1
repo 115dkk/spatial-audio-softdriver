@@ -1,23 +1,23 @@
-# Starts and stops bio-live many times on VB-CABLE, exclusive and shared, the
+# Starts and stops ssr-live many times on VB-CABLE, exclusive and shared, the
 # second half of the runs under CPU load (ADR 0026). CI only.
 #
-# bio-live died with 0xC0000005 while stopping exclusive streams under CPU
+# ssr-live died with 0xC0000005 while stopping exclusive streams under CPU
 # load, before it printed its totals; every run here must open, play, print its
 # totals and exit with 0. WER wrote no dumps on the runners, so the exclusive
 # runs under load go through cdb when the Windows SDK debuggers are installed:
 # an access violation then prints the faulting stack and every thread.
 param(
-    [Parameter(Mandatory)] [string] $BioLive,
+    [Parameter(Mandatory)] [string] $SsrLive,
     [Parameter(Mandatory)] [string] $Fixtures,
     [int] $Runs = 60,
     [double] $Seconds = 2,
     [double] $PeriodMs = 20,
-    # Folder with bio_live.pdb, for cdb's stacks.
+    # Folder with ssr_live.pdb, for cdb's stacks.
     [string] $Symbols = ''
 )
 $ErrorActionPreference = 'Stop'
 
-$dumpPath = Join-Path $Fixtures 'pcm71.biodump'
+$dumpPath = Join-Path $Fixtures 'pcm71.ssrdump'
 $profilePath = Join-Path $Fixtures 'profile.toml'
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
 $cdb = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers') -Recurse -Filter cdb.exe -ErrorAction SilentlyContinue |
@@ -47,11 +47,11 @@ try {
             # Break on a first-chance access violation, print the stacks and
             # end the process; a clean run exits through -G without stopping.
             $commands = 'sxe -c ".lastevent; .ecxr; kpn 60; ~*kn 40; q" av; g'
-            $output = & $cdb.FullName -G -lines -y $symbolPath -c $commands $BioLive @arguments 2>&1 | Out-String
+            $output = & $cdb.FullName -G -lines -y $symbolPath -c $commands $SsrLive @arguments 2>&1 | Out-String
             $crashed = $output -match 'Access violation|c0000005'
             $code = if ($crashed) { 0xC0000005 } else { 0 }
         } else {
-            $output = & $BioLive @arguments 2>&1 | Out-String
+            $output = & $SsrLive @arguments 2>&1 | Out-String
             $code = $LASTEXITCODE
         }
         if ($code -ne 0) {

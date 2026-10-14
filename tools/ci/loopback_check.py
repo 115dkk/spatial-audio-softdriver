@@ -1,20 +1,20 @@
 """End-to-end check of the live path on a CI runner with VB-CABLE.
 
-Plays a dump with bio-live into VB-CABLE's render endpoint ("Speakers (VB-Audio
+Plays a dump with ssr-live into VB-CABLE's render endpoint ("Speakers (VB-Audio
 Virtual Cable)") while recording its capture endpoint ("CABLE Output"),
-then compares the recording with bio-replay's offline render of the same dump.
+then compares the recording with ssr-replay's offline render of the same dump.
 The live path resamples (ASRC against the cable's clock), so the comparison is
 windowed: every 50 ms window of the reference must find itself in the
 recording within a few samples of the running offset, with a normalised
 correlation of at least --min-correlation. A window that misses there is looked
 for again within 50 ms, so one jump in the recording (a glitch in the shared
 audio engine or the capture) costs the windows around it rather than every
-window after it. Silence in either signal is not compared. bio-live's own
+window after it. Silence in either signal is not compared. ssr-live's own
 report must show no underrun while the dump streamed and no device restart:
 discontinuities the engine makes are judged there.
 
-    python loopback_check.py --bio-live target/release/bio-live.exe \
-        --dump fx/pcm71.biodump --profile fx/profile.toml \
+    python loopback_check.py --ssr-live target/release/ssr-live.exe \
+        --dump fx/pcm71.ssrdump --profile fx/profile.toml \
         --reference ref.wav --mode exclusive --summary out.json
 
 Exit status 0 when the recording matches, 1 otherwise. CI only.
@@ -261,18 +261,18 @@ def main():
     if sys.argv[1:2] == ["--keep-alive"]:
         return keep_alive(sys.argv[2])
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bio-live", required=True)
+    parser.add_argument("--ssr-live", required=True)
     parser.add_argument("--dump", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--reference", required=True)
     parser.add_argument("--mode", choices=["exclusive", "shared"], required=True)
     parser.add_argument("--render", default="VB-Audio Virtual Cable")
     parser.add_argument("--capture", default="CABLE Output")
-    parser.add_argument("--period-ms", type=float, help="exclusive device period for bio-live")
+    parser.add_argument("--period-ms", type=float, help="exclusive device period for ssr-live")
     parser.add_argument("--min-correlation", type=float, default=0.95)
     parser.add_argument("--min-matched", type=float, default=0.9)
     parser.add_argument("--summary", required=True)
-    parser.add_argument("--report", help="where bio-live writes its JSON report")
+    parser.add_argument("--report", help="where ssr-live writes its JSON report")
     parser.add_argument("--warm", action="store_true",
                         help="keep the render endpoint running with a silent shared stream")
     args = parser.parse_args()
@@ -289,7 +289,7 @@ def main():
     print(f"capturing {microphone.name} at {rate} Hz", flush=True)
 
     command = [
-        args.bio_live, "play",
+        args.ssr_live, "play",
         "--from-dump", args.dump,
         "--profile", args.profile,
         "--output", args.render,
@@ -313,7 +313,7 @@ def main():
         while live.poll() is None:
             if time.monotonic() - started > 120:
                 live.kill()
-                raise SystemExit("bio-live did not stop within 120 s")
+                raise SystemExit("ssr-live did not stop within 120 s")
             chunks.append(recorder.record(numframes=rate // 20))
         chunks.append(recorder.record(numframes=rate // 2))
     if warm:
@@ -321,12 +321,12 @@ def main():
     stderr = live.stderr.read() if live.stderr else ""
     print(stderr, flush=True)
     if live.returncode != 0:
-        raise SystemExit(f"bio-live exited with {live.returncode}")
+        raise SystemExit(f"ssr-live exited with {live.returncode}")
 
     captured = np.concatenate(chunks).astype(np.float32)
     summary = compare(reference, ref_rate, captured, rate, args.min_correlation)
     summary["mode"] = args.mode + (" warm" if args.warm else "")
-    summary["bio_live"] = stderr.strip().splitlines()[-1:]
+    summary["ssr_live"] = stderr.strip().splitlines()[-1:]
     problems = []
     if args.report:
         with open(args.report, encoding="utf-8") as report:

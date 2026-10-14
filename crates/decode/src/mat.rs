@@ -7,8 +7,8 @@
 //! written from ring dumps observed as a black box. Until dumps exist it
 //! refuses every burst; `features.toml` keeps `decode.mat` planned.
 
-use bio_types::SceneBlock;
 use bitstream::Burst;
+use ssr_types::SceneBlock;
 
 use crate::{DecodeConfig, DecodeError};
 

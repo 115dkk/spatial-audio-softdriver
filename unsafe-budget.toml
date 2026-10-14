@@ -5,4 +5,4 @@
 # table instead. Raising a number requires an ADR (docs/adr) first.
 [budget]
 # Capture device IOCTLs, MMCSS and QPC through the `windows` crate (ADR 0002).
-bio-sys = 32
+ssr-sys = 32

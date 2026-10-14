@@ -1,5 +1,5 @@
 # Package identities only; display names must never select an endpoint.
-# Checked against BIO_CONTROL_DEVICE_PATH in the generated ABI header.
+# Checked against SSR_CONTROL_DEVICE_PATH in the generated ABI header.
 $SpatialControlDevicePath = '\\.\SpatialSoftReceiver'
 $SpatialPackage = [pscustomobject]@{
     HardwareId = 'ROOT\SpatialSoftReceiver'

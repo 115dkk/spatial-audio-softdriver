@@ -36,7 +36,7 @@ $inf2cat = Find-KitTool 'Inf2Cat.exe' 'x86'
 $packagePath = (Resolve-Path $Package).Path
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-$kitName = "bio-atmos-driver-test-$Version-$Arch"
+$kitName = "spatial-softreceiver-driver-test-$Version-$Arch"
 $kit = Join-Path $OutDir $kitName
 Remove-Item -Recurse -Force $kit -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $kit | Out-Null

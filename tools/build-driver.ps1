@@ -31,8 +31,8 @@ function Invoke-Native {
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $driverRoot = Join-Path $repositoryRoot 'driver'
-$projectRoot = Join-Path $driverRoot 'bioatmos'
-$solutionPath = Join-Path $projectRoot 'bioatmos.sln'
+$projectRoot = Join-Path $driverRoot 'spatialsoftreceiver'
+$solutionPath = Join-Path $projectRoot 'spatialsoftreceiver.sln'
 $packagesConfig = Join-Path $driverRoot 'packages.config'
 $packagesDirectory = Join-Path $driverRoot 'packages'
 $targetTools = Join-Path $repositoryRoot 'target/tools'

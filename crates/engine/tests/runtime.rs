@@ -4,12 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use bio_abi::{ENDPOINT_PRIMARY, RecordWriter, wave_format_bytes};
-use bio_types::{
-    BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ClockStatus, Direction,
-    EngineFault, Layout, OutputError, OutputFormat, OutputLayout, OutputOpener, OutputSink,
-    PcmFormat, SampleType, SourceFormat, TrimUnsupported,
-};
 use brir::PreparedBrir;
 use convolver::FilterBank;
 use engine::{
@@ -17,6 +11,12 @@ use engine::{
     start_with, start_with_clock,
 };
 use speakers::{PreparedSpeaker, PreparedSpeakers};
+use ssr_abi::{ENDPOINT_PRIMARY, RecordWriter, wave_format_bytes};
+use ssr_types::{
+    BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ClockStatus, Direction,
+    EngineFault, Layout, OutputError, OutputFormat, OutputLayout, OutputOpener, OutputSink,
+    PcmFormat, SampleType, SourceFormat, TrimUnsupported,
+};
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 480;
@@ -61,7 +61,7 @@ fn data_record_for(endpoint: u16, qpc: u64, left: f32, right: f32, frames: usize
 }
 
 fn bytes_record_for(endpoint: u16, qpc: u64, bytes: &[u8]) -> Vec<u8> {
-    let mut record = vec![0; bio_abi::record_size(bytes.len())];
+    let mut record = vec![0; ssr_abi::record_size(bytes.len())];
     let mut writer = RecordWriter::new(&mut record);
     writer.set_endpoint(endpoint);
     assert!(writer.data(1, qpc * 8, qpc, bytes));
@@ -71,7 +71,7 @@ fn bytes_record_for(endpoint: u16, qpc: u64, bytes: &[u8]) -> Vec<u8> {
 }
 
 fn stream_start_record(endpoint: u16) -> Vec<u8> {
-    let mut record = vec![0; bio_abi::record_size(0)];
+    let mut record = vec![0; ssr_abi::record_size(0)];
     let mut writer = RecordWriter::new(&mut record);
     writer.set_endpoint(endpoint);
     assert!(writer.stream_start(1, 0));
@@ -81,7 +81,7 @@ fn stream_start_record(endpoint: u16) -> Vec<u8> {
 }
 
 fn stream_stop_record(endpoint: u16) -> Vec<u8> {
-    let mut record = vec![0; bio_abi::record_size(0)];
+    let mut record = vec![0; ssr_abi::record_size(0)];
     let mut writer = RecordWriter::new(&mut record);
     writer.set_endpoint(endpoint);
     assert!(writer.stream_stop(1, 0));
@@ -404,9 +404,9 @@ fn wait_for_thread_exit(timeout: Duration, mut exited: impl FnMut() -> bool) {
     }
 }
 
-const RECORD_QPC: usize = std::mem::offset_of!(bio_abi::RecordHeader, qpc);
-const RECORD_KIND: usize = std::mem::offset_of!(bio_abi::RecordHeader, kind);
-const RECORD_LEN: usize = std::mem::offset_of!(bio_abi::RecordHeader, len);
+const RECORD_QPC: usize = std::mem::offset_of!(ssr_abi::RecordHeader, qpc);
+const RECORD_KIND: usize = std::mem::offset_of!(ssr_abi::RecordHeader, kind);
+const RECORD_LEN: usize = std::mem::offset_of!(ssr_abi::RecordHeader, len);
 
 struct ReconnectingCapture {
     inner: RecordsCapture,
@@ -472,10 +472,10 @@ impl CaptureSource for RecordsCapture {
             // Data records in this harness use either 48 kHz stereo f32 PCM or
             // a 192 kHz stereo i16 IEC carrier, both mapped to their ABI end QPC.
             let record_frames = match kind {
-                bio_abi::RECORD_KIND_DATA if bytes % 8 == 0 && bytes <= (BLOCK * 8) as u32 => {
+                ssr_abi::RECORD_KIND_DATA if bytes % 8 == 0 && bytes <= (BLOCK * 8) as u32 => {
                     u64::from(bytes / 8)
                 }
-                bio_abi::RECORD_KIND_DATA => u64::from(bytes) * RATE as u64 / 768_000,
+                ssr_abi::RECORD_KIND_DATA => u64::from(bytes) * RATE as u64 / 768_000,
                 _ => 0,
             };
             let qpc = now.saturating_add(record_frames);
@@ -484,7 +484,7 @@ impl CaptureSource for RecordsCapture {
         let frames = if record.len() >= RECORD_LEN + 4 {
             let kind = u16::from_le_bytes(record[RECORD_KIND..RECORD_KIND + 2].try_into().unwrap());
             let bytes = u32::from_le_bytes(record[RECORD_LEN..RECORD_LEN + 4].try_into().unwrap());
-            if kind == bio_abi::RECORD_KIND_DATA {
+            if kind == ssr_abi::RECORD_KIND_DATA {
                 u64::from(bytes / 8)
             } else {
                 0
@@ -717,7 +717,7 @@ fn opener_with_period(state: Arc<SinkState>, rate: u32, period_frames: usize) ->
             channels: 2,
             channel_mask: 0x3,
             period_frames,
-            mode: bio_types::OutputMode::Exclusive,
+            mode: ssr_types::OutputMode::Exclusive,
             fell_back: false,
             mix_channels: 2,
         },
@@ -1479,7 +1479,7 @@ fn ddp_latency_uses_playback_qpc_and_source_qpc() {
         lockstep.step_period(3);
     }
     let status = engine.status();
-    if std::env::var_os("BIO_PRINT_LATENCY").is_some() {
+    if std::env::var_os("SSR_PRINT_LATENCY").is_some() {
         eprintln!("ddp latency was {:?}", status.latency);
     }
     assert!(

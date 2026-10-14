@@ -4,9 +4,9 @@
 //! into the current speaker bed before the common timeline adds lanes together.
 //! No lane drives, resets, or changes the panning state of another.
 
-use bio_abi::MAX_ENDPOINTS;
-use bio_types::{Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 use render::{PanGeometry, ramped_gain};
+use ssr_abi::MAX_ENDPOINTS;
+use ssr_types::{Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 
 pub const MIX_RATE: u32 = 48_000;
 pub const MIX_FRAMES: usize = 480;
@@ -2118,7 +2118,7 @@ fn update_history(lane: &mut Lane, scene: &SceneBlock<'_>) {
 
 #[cfg(test)]
 mod tests {
-    use bio_types::Direction;
+    use ssr_types::Direction;
 
     use super::*;
 

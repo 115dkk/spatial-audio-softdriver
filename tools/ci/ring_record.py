@@ -1,4 +1,4 @@
-"""Records the Spatial SoftReceiver driver ring into a .biodump diagnostic file.
+"""Records the Spatial SoftReceiver driver ring into a .ssrdump diagnostic file.
 
 The dump is a 32-byte DumpHeader followed by the exact bytes returned by READ.
 Parsing and Windows device access are shared with driver_flow_check.py.
@@ -33,7 +33,7 @@ from driver_flow_check import (
 )
 
 DUMP_HEADER = struct.Struct("<8sIIQII")
-DUMP_MAGIC = b"BIODUMP\0"
+DUMP_MAGIC = b"SSRDUMP\0"
 ABI_VERSION = 1
 DUMP_FORMAT_VERSION = 3
 KIND_READ_END = 0x8001
@@ -41,10 +41,10 @@ RECORDER_ENDPOINT = 0xFFFF
 ERROR_SHARING_VIOLATION = 32
 DEFAULT_TIMEOUT_MS = 50
 
-# GUID Data1 values from crates/bio-abi/src/wave.rs and ksmedia.h.
+# GUID Data1 values from crates/ssr-abi/src/wave.rs and ksmedia.h.
 IEC_NAMES = {
     0x000A: "IEC 61937 E-AC-3",
-    0x010A: "IEC 61937 E-AC-3 Atmos",
+    0x010A: "IEC 61937 E-AC-3 JOC",
     0x000B: "IEC 61937 DTS-HD",
     0x010B: "IEC 61937 DTS:X E1",
     0x030B: "IEC 61937 DTS:X E2",
@@ -234,7 +234,7 @@ def metadata(records):
 
 
 def default_output():
-    return "bio-{0}.biodump".format(dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    return "ssr-{0}.ssrdump".format(dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
 
 
 def summary_path(dump_path):
@@ -258,7 +258,7 @@ def main():
         device = ControlDevice()
     except OSError as error:
         if error.errno == ERROR_SHARING_VIOLATION:
-            print("다른 프로그램(재생 시험, bio-live 등)이 장치를 열고 있습니다.", file=sys.stderr)
+            print("다른 프로그램(재생 시험, ssr-live 등)이 장치를 열고 있습니다.", file=sys.stderr)
             return 2
         print("Spatial SoftReceiver 제어 장치를 열 수 없습니다: {0}".format(error), file=sys.stderr)
         return 1

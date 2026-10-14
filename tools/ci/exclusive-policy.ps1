@@ -3,22 +3,22 @@
 # gate on every supported OS; a successful SetValue is not proof of enforcement.
 # https://techcommunity.microsoft.com/discussions/windowspowershell/disable-exclusive-mode-for-all-audio-devices-via-ps/3653408/replies/3881222
 # https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-openpropertystore
-if (-not ('BioExclusivePolicy' -as [type])) {
+if (-not ('SsrExclusivePolicy' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public sealed class BioPolicyValues {
+public sealed class SsrPolicyValues {
     public uint? allow_exclusive, exclusive_priority;
     public ushort allow_type, priority_type;
 }
-public sealed class BioExclusiveProbe {
+public sealed class SsrExclusiveProbe {
     public bool supported;
     public int channels, rate, bits;
     public string sample, support_hr, initialize_hr;
     public bool alignment_retry;
 }
-public sealed class BioExclusivePolicy : IDisposable {
+public sealed class SsrExclusivePolicy : IDisposable {
     [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
     class EnumeratorClass { }
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -73,7 +73,7 @@ public sealed class BioExclusivePolicy : IDisposable {
     Device device;
     static void Check(int hr) { Marshal.ThrowExceptionForHR(hr); }
     static string Hex(int hr) { return "0x" + unchecked((uint)hr).ToString("X8"); }
-    public BioExclusivePolicy(string id) {
+    public SsrExclusivePolicy(string id) {
         if (IntPtr.Size != 8) throw new PlatformNotSupportedException("Use 64-bit PowerShell");
         Enumerator enumerator = (Enumerator)new EnumeratorClass();
         try { Check(enumerator.GetDevice(id, out device)); }
@@ -90,11 +90,11 @@ public sealed class BioExclusivePolicy : IDisposable {
             throw new InvalidOperationException("policy " + pid + " has unexpected variant type " + type);
         } finally { Check(PropVariantClear(ref value)); }
     }
-    public BioPolicyValues Read() {
+    public SsrPolicyValues Read() {
         Store store;
         Check(device.OpenPropertyStore(0, out store));
         try {
-            var result = new BioPolicyValues();
+            var result = new SsrPolicyValues();
             result.allow_exclusive = ReadValue(store, 3, out result.allow_type);
             result.exclusive_priority = ReadValue(store, 4, out result.priority_type);
             return result;
@@ -121,8 +121,8 @@ public sealed class BioExclusivePolicy : IDisposable {
         Check(device.Activate(ref iid, 23, IntPtr.Zero, out instance));
         return (AudioClient)instance;
     }
-    public BioExclusiveProbe Probe() {
-        var result = new BioExclusiveProbe();
+    public SsrExclusiveProbe Probe() {
+        var result = new SsrExclusiveProbe();
         IntPtr format = Marshal.AllocCoTaskMem(40);
         AudioClient client = null;
         try {
@@ -185,17 +185,17 @@ public sealed class BioExclusivePolicy : IDisposable {
 
 . (Join-Path $PSScriptRoot 'endpoints.ps1')
 
-function Get-BioPolicyTargets {
+function Get-SsrPolicyTargets {
     param([string] $InstanceId = '', [switch] $IncludeLegacy)
     Get-SpatialEndpoints -InstanceId $InstanceId -IncludeLegacy:$IncludeLegacy
 }
 
-function Get-BioPolicySnapshot {
+function Get-SsrPolicySnapshot {
     param([string] $InstanceId = '')
-    foreach ($target in Get-BioPolicyTargets -InstanceId $InstanceId) {
+    foreach ($target in Get-SsrPolicyTargets -InstanceId $InstanceId) {
         $control = $null
         try {
-            $control = [BioExclusivePolicy]::new($target.id)
+            $control = [SsrExclusivePolicy]::new($target.id)
             [pscustomobject]@{ endpoint = $target.endpoint; name = $target.name; id = $target.id; state = $target.state; policy = $control.Read(); error = $null }
         } catch {
             [pscustomobject]@{ endpoint = $target.endpoint; name = $target.name; id = $target.id; state = $target.state; policy = $null; error = $_.Exception.Message }
@@ -203,13 +203,13 @@ function Get-BioPolicySnapshot {
     }
 }
 
-function Set-BioExclusivePolicy {
+function Set-SsrExclusivePolicy {
     param([Parameter(Mandatory)] [string] $InstanceId, [int] $EndpointMask = 7)
-    $targets = @(Get-BioPolicyTargets -InstanceId $InstanceId | Where-Object { $_.state -eq 1 })
+    $targets = @(Get-SsrPolicyTargets -InstanceId $InstanceId | Where-Object { $_.state -eq 1 })
     foreach ($ep in 0..2 | Where-Object { $EndpointMask -band (1 -shl $_) }) {
         $matches = @($targets | Where-Object endpoint -eq $ep)
         if ($matches.Count -ne 1) { throw "expected one active endpoint $ep, found $($matches.Count)" }
-        $control = [BioExclusivePolicy]::new($matches[0].id)
+        $control = [SsrExclusivePolicy]::new($matches[0].id)
         try {
             $value = if ($ep -eq 2) { [uint32]1 } else { [uint32]0 }
             $control.Write($value, $value)
@@ -219,12 +219,12 @@ function Set-BioExclusivePolicy {
     }
 }
 
-function Clear-BioExclusivePolicy {
+function Clear-SsrExclusivePolicy {
     param([Parameter(Mandatory)] [string] $InstanceId)
-    # Only the newly installed BIO endpoints: remove both private properties
+    # Only the newly installed Spatial SoftReceiver endpoints: remove both private properties
     # before removing the device, so an MMDevices tombstone keeps no policy.
-    foreach ($target in Get-BioPolicyTargets -InstanceId $InstanceId -IncludeLegacy) {
-        $control = [BioExclusivePolicy]::new($target.id)
+    foreach ($target in Get-SsrPolicyTargets -InstanceId $InstanceId -IncludeLegacy) {
+        $control = [SsrExclusivePolicy]::new($target.id)
         try {
             $control.Write($null, $null)
             $readback = $control.Read()

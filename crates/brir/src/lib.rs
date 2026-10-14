@@ -19,13 +19,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bio_types::{Direction, DirectionId, Layout};
 use convolver::FilterBank;
 use realfft::RealFftPlanner;
 use rubato::audioadapter::Adapter;
 use rubato::audioadapter_buffers::owned::InterleavedOwned;
 use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 use serde::Deserialize;
+use ssr_types::{Direction, DirectionId, Layout};
 
 const HESUVI_TRACK_ORDER: [&str; 30] = [
     "FL-left",
@@ -195,7 +195,7 @@ pub enum BrirError {
     #[error("the LFE policy names {0}, which the layout lacks")]
     BadLfeDirection(String),
     #[error(transparent)]
-    Layout(#[from] bio_types::LayoutError),
+    Layout(#[from] ssr_types::LayoutError),
     #[error(transparent)]
     Convolver(#[from] convolver::ConvolverError),
     #[error("resampling failed: {0}")]
@@ -685,7 +685,7 @@ fn load_brir_source(source: &BrirSource, profile: &Profile) -> Result<LoadedBrir
     }?;
     loaded.omit_silent_directions();
     if loaded.directions.is_empty() {
-        return Err(BrirError::Layout(bio_types::LayoutError::Empty));
+        return Err(BrirError::Layout(ssr_types::LayoutError::Empty));
     }
     Ok(loaded)
 }
