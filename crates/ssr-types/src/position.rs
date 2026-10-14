@@ -127,6 +127,71 @@ pub enum Speaker {
 }
 
 impl Speaker {
+    /// Canonical short name used by profiles and direct layouts.
+    pub const fn name(self) -> &'static str {
+        use Speaker::*;
+        match self {
+            L => "L",
+            R => "R",
+            C => "C",
+            Ls => "Ls",
+            Rs => "Rs",
+            Lrs => "Lrs",
+            Rrs => "Rrs",
+            Cs => "Cs",
+            Lw => "Lw",
+            Rw => "Rw",
+            Lc => "Lc",
+            Rc => "Rc",
+            Lss => "Lss",
+            Rss => "Rss",
+            Tfl => "Tfl",
+            Tfr => "Tfr",
+            Tsl => "Tsl",
+            Tsr => "Tsr",
+            Trl => "Trl",
+            Trr => "Trr",
+            Tc => "Tc",
+            Tfc => "Tfc",
+            Trc => "Trc",
+            Lfe => "LFE",
+            Lfe2 => "LFE2",
+        }
+    }
+
+    /// Reads a canonical name or an FFmpeg channel-name alias, ignoring case.
+    pub fn from_name(name: &str) -> Option<Self> {
+        use Speaker::*;
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "l" | "fl" => L,
+            "r" | "fr" => R,
+            "c" | "fc" => C,
+            "ls" => Ls,
+            "rs" => Rs,
+            "lrs" | "bl" => Lrs,
+            "rrs" | "br" => Rrs,
+            "cs" | "bc" => Cs,
+            "lw" | "wl" => Lw,
+            "rw" | "wr" => Rw,
+            "lc" | "flc" => Lc,
+            "rc" | "frc" => Rc,
+            "lss" | "sl" => Lss,
+            "rss" | "sr" => Rss,
+            "tfl" => Tfl,
+            "tfr" => Tfr,
+            "tsl" => Tsl,
+            "tsr" => Tsr,
+            "trl" | "tbl" => Trl,
+            "trr" | "tbr" => Trr,
+            "tc" => Tc,
+            "tfc" => Tfc,
+            "trc" | "tbc" => Trc,
+            "lfe" => Lfe,
+            "lfe2" => Lfe2,
+            _ => return None,
+        })
+    }
+
     /// Nominal azimuth (positive left) and elevation (positive up), degrees.
     /// Both LFE labels are unpositioned.
     pub const fn angles(self) -> Option<(f32, f32)> {

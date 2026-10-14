@@ -2,12 +2,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use brir::{AnglePreset, BrirSource, DirectionFile, LfePolicy, Profile};
-use engine::{Chain, ChainConfig, ChainEvent, Prepared};
+use engine::{Chain, ChainConfig, ChainEvent, OutputProfile, Prepared};
 use serde_json::Value;
 use ssr_abi::{RecordWriter, dump_header, dump_header_bytes, reads, wave_format_bytes};
 use ssr_types::{PcmFormat, SampleType, SourceFormat};
@@ -287,8 +286,7 @@ fn prepared_profile(directory: &Path) -> Box<Prepared> {
         truncate: None,
         trim_leading_delay: false,
     };
-    let prepared = brir::prepare(&profile, 48_000, 480).unwrap();
-    Box::new(Prepared::new(Arc::new(prepared), 480).unwrap())
+    Box::new(OutputProfile::Headphones(profile).prepare().unwrap())
 }
 
 fn render_reads(directory: &Path, stream: &[u8], boundaries: Option<&[(usize, u64)]>) -> Vec<f32> {

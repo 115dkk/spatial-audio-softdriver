@@ -764,10 +764,10 @@ dependencies = [
 name = "speakers"
 version = "0.7.1"
 dependencies = [
+ "brir",
  "convolver",
  "hound",
  "render",
- "rubato",
  "serde",
  "ssr-types",
  "thiserror",

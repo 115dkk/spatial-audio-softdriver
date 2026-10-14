@@ -21,11 +21,10 @@ use std::sync::Arc;
 
 use convolver::FilterBank;
 use realfft::RealFftPlanner;
-use rubato::audioadapter::Adapter;
-use rubato::audioadapter_buffers::owned::InterleavedOwned;
-use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 use serde::Deserialize;
-use ssr_types::{Direction, DirectionId, Layout};
+use ssr_types::{Direction, DirectionId, Layout, Speaker};
+
+pub mod ir;
 
 const HESUVI_TRACK_ORDER: [&str; 30] = [
     "FL-left",
@@ -198,8 +197,8 @@ pub enum BrirError {
     Layout(#[from] ssr_types::LayoutError),
     #[error(transparent)]
     Convolver(#[from] convolver::ConvolverError),
-    #[error("resampling failed: {0}")]
-    Resample(String),
+    #[error(transparent)]
+    Ir(#[from] ir::IrError),
     #[error("sidecar {path}, line {line}: {detail}")]
     Sidecar {
         path: PathBuf,
@@ -252,16 +251,38 @@ pub fn canonical_name(name: &str) -> Option<&'static str> {
     if is_repeat_name(name) {
         return None;
     }
+    if let Some(speaker) = Speaker::from_name(name) {
+        return match speaker {
+            Speaker::L => Some("FL"),
+            Speaker::R => Some("FR"),
+            Speaker::C => Some("FC"),
+            Speaker::Ls | Speaker::Lss => Some("SL"),
+            Speaker::Rs | Speaker::Rss => Some("SR"),
+            Speaker::Lrs => Some("BL"),
+            Speaker::Rrs => Some("BR"),
+            Speaker::Lw => Some("WL"),
+            Speaker::Rw => Some("WR"),
+            Speaker::Tfl => Some("TFL"),
+            Speaker::Tfr => Some("TFR"),
+            Speaker::Tsl => Some("TSL"),
+            Speaker::Tsr => Some("TSR"),
+            Speaker::Trl => Some("TBL"),
+            Speaker::Trr => Some("TBR"),
+            Speaker::Tc => Some("TC"),
+            Speaker::Cs
+            | Speaker::Lc
+            | Speaker::Rc
+            | Speaker::Tfc
+            | Speaker::Trc
+            | Speaker::Lfe
+            | Speaker::Lfe2 => None,
+        };
+    }
     match name.to_ascii_uppercase().as_str() {
-        "FL" => Some("FL"),
-        "FR" => Some("FR"),
-        "FC" | "C" => Some("FC"),
-        "SL" | "LS" => Some("SL"),
-        "SR" | "RS" => Some("SR"),
-        "BL" | "LB" => Some("BL"),
-        "BR" | "RB" => Some("BR"),
-        "WL" | "FWL" => Some("WL"),
-        "WR" | "FWR" => Some("WR"),
+        "LB" => Some("BL"),
+        "RB" => Some("BR"),
+        "FWL" => Some("WL"),
+        "FWR" => Some("WR"),
         "HFL" | "LFH" => Some("HFL"),
         "HFR" | "RFH" => Some("HFR"),
         "HFC" | "CFH" => Some("HFC"),
@@ -552,7 +573,7 @@ pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<Prepare
             flat.push(ears[0].clone());
             flat.push(ears[1].clone());
         }
-        let resampled = resample_channels(&flat, loaded.rate, rate)?;
+        let resampled = ir::resample_channels(&flat, loaded.rate, rate)?;
         loaded.irs = resampled
             .as_chunks::<2>()
             .0
@@ -563,7 +584,7 @@ pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<Prepare
     }
 
     if let Some(path) = &profile.headphone_fir {
-        let headphone = read_wav(path)?;
+        let headphone = ir::read_wav(path, rate)?;
         if headphone.channels.len() != 1 && headphone.channels.len() != 2 {
             return Err(BrirError::Wav {
                 path: path.clone(),
@@ -573,11 +594,7 @@ pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<Prepare
                 ),
             });
         }
-        let headphone_channels = if headphone.rate == rate {
-            headphone.channels
-        } else {
-            resample_channels(&headphone.channels, headphone.rate, rate)?
-        };
+        let headphone_channels = headphone.channels;
         for ears in &mut loaded.irs {
             ears[0] = convolve(&ears[0], &headphone_channels[0]);
             let right_fir = if headphone_channels.len() == 1 {
@@ -697,7 +714,7 @@ fn load_ordered_wav(
     format: &'static str,
     profile: &Profile,
 ) -> Result<LoadedBrir, BrirError> {
-    let wav = read_wav(path)?;
+    let wav = ir::read_wav_raw(path)?;
     let tracks = wav.channels.len();
     if tracks < minimum_tracks || tracks > order.len() || !tracks.is_multiple_of(2) {
         return Err(BrirError::TrackCount {
@@ -791,7 +808,7 @@ fn load_direction_files(files: &[DirectionFile]) -> Result<LoadedBrir, BrirError
     let mut directions = Vec::with_capacity(files.len());
     let mut irs = Vec::with_capacity(files.len());
     for direction in files {
-        let wav = read_wav(&direction.path)?;
+        let wav = ir::read_wav_raw(&direction.path)?;
         if wav.channels.len() != 2 {
             return Err(BrirError::Wav {
                 path: direction.path.clone(),
@@ -837,7 +854,7 @@ fn load_mapped_wav(
     map_path: &Path,
     profile: &Profile,
 ) -> Result<LoadedBrir, BrirError> {
-    let wav = read_wav(wav_path)?;
+    let wav = ir::read_wav_raw(wav_path)?;
     let contents = fs::read_to_string(map_path).map_err(|source| BrirError::Io {
         path: map_path.to_path_buf(),
         source,
@@ -999,7 +1016,7 @@ fn load_folder(path: &Path, profile: &Profile) -> Result<LoadedBrir, BrirError> 
     let mut directions = Vec::with_capacity(files.len());
     let mut irs = Vec::with_capacity(files.len());
     for (name, file_path) in files {
-        let wav = read_wav(&file_path)?;
+        let wav = ir::read_wav_raw(&file_path)?;
         if wav.channels.len() != 2 {
             return Err(BrirError::Wav {
                 path: file_path,
@@ -1104,63 +1121,6 @@ fn is_silent(samples: &[f32]) -> bool {
     samples.iter().all(|sample| *sample == 0.0)
 }
 
-struct WavData {
-    rate: u32,
-    channels: Vec<Vec<f32>>,
-}
-
-fn read_wav(path: &Path) -> Result<WavData, BrirError> {
-    let mut reader = hound::WavReader::open(path).map_err(|error| map_wav_error(path, error))?;
-    let spec = reader.spec();
-    if spec.channels == 0 {
-        return Err(BrirError::Wav {
-            path: path.to_path_buf(),
-            detail: "the file has no tracks".into(),
-        });
-    }
-    let channels = usize::from(spec.channels);
-    let frames = reader.duration() as usize;
-    let mut deinterleaved = vec![Vec::with_capacity(frames); channels];
-    match (spec.sample_format, spec.bits_per_sample) {
-        (hound::SampleFormat::Int, 16 | 24 | 32) => {
-            let scale = 2.0_f32.powi(i32::from(spec.bits_per_sample) - 1);
-            for (index, sample) in reader.samples::<i32>().enumerate() {
-                let sample = sample.map_err(|error| map_wav_error(path, error))? as f32 / scale;
-                deinterleaved[index % channels].push(sample);
-            }
-        }
-        (hound::SampleFormat::Float, 32) => {
-            for (index, sample) in reader.samples::<f32>().enumerate() {
-                deinterleaved[index % channels]
-                    .push(sample.map_err(|error| map_wav_error(path, error))?);
-            }
-        }
-        (format, bits) => {
-            return Err(BrirError::Wav {
-                path: path.to_path_buf(),
-                detail: format!("unsupported {bits}-bit {format:?} samples"),
-            });
-        }
-    }
-    Ok(WavData {
-        rate: spec.sample_rate,
-        channels: deinterleaved,
-    })
-}
-
-fn map_wav_error(path: &Path, error: hound::Error) -> BrirError {
-    match error {
-        hound::Error::IoError(source) => BrirError::Io {
-            path: path.to_path_buf(),
-            source,
-        },
-        other => BrirError::Wav {
-            path: path.to_path_buf(),
-            detail: other.to_string(),
-        },
-    }
-}
-
 fn convolve(signal: &[f32], filter: &[f32]) -> Vec<f32> {
     debug_assert!(!signal.is_empty() && !filter.is_empty());
     let output_len = signal.len() + filter.len() - 1;
@@ -1220,65 +1180,6 @@ fn trim_common_leading_delay(irs: &mut [[Vec<f32>; 2]], rate: u32) -> usize {
         }
     }
     trim
-}
-
-fn resample_channels(
-    channels: &[Vec<f32>],
-    input_rate: u32,
-    output_rate: u32,
-) -> Result<Vec<Vec<f32>>, BrirError> {
-    if input_rate == output_rate {
-        return Ok(channels.to_vec());
-    }
-    if channels.is_empty() || channels.iter().any(Vec::is_empty) {
-        return Err(BrirError::Resample(
-            "cannot resample an empty channel set or signal".into(),
-        ));
-    }
-    let input_frames = channels.iter().map(Vec::len).max().unwrap_or(0);
-    let channel_count = channels.len();
-    let mut interleaved = vec![0.0; input_frames * channel_count];
-    for (channel, samples) in channels.iter().enumerate() {
-        for (frame, sample) in samples.iter().enumerate() {
-            interleaved[frame * channel_count + channel] = *sample;
-        }
-    }
-    let input = InterleavedOwned::new_from(interleaved, channel_count, input_frames)
-        .map_err(|error| BrirError::Resample(error.to_string()))?;
-    let chunk_size = input_frames.clamp(1, 1024);
-    let mut resampler = Fft::<f32>::new_custom(
-        input_rate as usize,
-        output_rate as usize,
-        chunk_size,
-        1,
-        channel_count,
-        WindowFunction::BlackmanHarris2,
-        FixedSync::Both,
-    )
-    .map_err(|error| BrirError::Resample(error.to_string()))?;
-    // Fft is rubato's high-quality band-limited sinc resampler. process_all
-    // repeatedly pumps it and removes output_delay() from the front, preserving
-    // each impulse's time origin.
-    let output = resampler
-        .process_all(&input, input_frames, None)
-        .map_err(|error| BrirError::Resample(error.to_string()))?;
-    // The resampler keeps sample amplitude, but an impulse response sampled
-    // at a higher rate has proportionally more taps: scaling by the rate ratio
-    // keeps its frequency response (DC gain included) instead of its peak, so
-    // a set measured at 96 kHz plays as loud as the same set at 48 kHz.
-    let scale = input_rate as f32 / output_rate as f32;
-    let mut deinterleaved = vec![Vec::with_capacity(output.frames()); channel_count];
-    for frame in 0..output.frames() {
-        for (channel, destination) in deinterleaved.iter_mut().enumerate() {
-            destination.push(
-                output
-                    .read_sample(channel, frame)
-                    .expect("channel and frame are within the output adapter")
-                    * scale,
-            );
-        }
-    }
-    Ok(deinterleaved)
 }
 
 #[cfg(test)]

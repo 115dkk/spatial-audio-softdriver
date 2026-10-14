@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use brir::{AnglePreset, BrirSource, DirectionFile, LfePolicy, Profile};
 use engine::{
-    Chain, ChainConfig, ChainEvent, EndpointFilter, MAX_ARRIVAL_SLACK_FRAMES, MIX_FRAMES, Prepared,
-    partition_for,
+    Chain, ChainConfig, ChainEvent, EndpointFilter, MAX_ARRIVAL_SLACK_FRAMES, MIX_FRAMES,
+    OutputProfile, Prepared,
 };
 use speakers::{PreparedSpeaker, PreparedSpeakers};
 use ssr_abi::{
@@ -2554,10 +2554,10 @@ fn ddp_burst_produces_a_nonzero_binaural_block() {
             path,
         });
     }
-    let profile = profile(files, 0.0, 0.0);
-    let prepared = brir::prepare(&profile, 48_000, partition_for(480)).unwrap();
+    let profile = OutputProfile::Headphones(profile(files, 0.0, 0.0));
+    let prepared = profile.prepare().unwrap();
     let mut chain = Chain::new(ChainConfig::default());
-    chain.set_prepared(Box::new(Prepared::new(Arc::new(prepared), 480).unwrap()));
+    chain.set_prepared(Box::new(prepared));
 
     let fixture = std::fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../decode/tests/fixtures/ddp/tones-5.1.eac3"),
@@ -3014,7 +3014,7 @@ fn unknown_encoded_rates_reach_the_selected_bitstream_decoders() {
         assert_eq!(events, ["format"]);
 
         if codec == BitstreamCodec::Eac3 {
-            let mut needs_brir = 0;
+            let mut needs_prepared = 0;
             let mut errors = 0;
             chain.push_record(
                 Record::Data {
@@ -3027,16 +3027,13 @@ fn unknown_encoded_rates_reach_the_selected_bitstream_decoders() {
                     bytes: &ddp_burst,
                 },
                 &mut |event| match event {
-                    ChainEvent::NeedsBrir {
-                        rate: 48_000,
-                        block: 480,
-                    } => needs_brir += 1,
+                    ChainEvent::NeedsPrepared => needs_prepared += 1,
                     ChainEvent::Error { .. } => errors += 1,
                     _ => {}
                 },
             );
             assert!(expect_block);
-            assert_eq!(needs_brir, 1);
+            assert_eq!(needs_prepared, 1);
             assert_eq!(errors, 0);
         } else {
             let mut burst = Vec::new();
@@ -3087,7 +3084,7 @@ fn decode_error_clears_ddp_recut_remainder_before_recovery() {
                 0.0,
             ),
             48_000,
-            partition_for(480),
+            480,
         )
         .unwrap(),
     );
@@ -3609,13 +3606,7 @@ fn sound_before_the_first_brir_is_counted_as_dropped() {
     });
     let mut needs = 0;
     chain.push_records(&pcm_stream(1), &mut |event| {
-        if matches!(
-            event,
-            ChainEvent::NeedsBrir {
-                rate: 48_000,
-                block: 480
-            }
-        ) {
+        if matches!(event, ChainEvent::NeedsPrepared) {
             needs += 1;
         }
     });
@@ -3653,40 +3644,6 @@ fn sound_before_the_first_brir_is_counted_as_dropped() {
     assert!(audible);
     assert_eq!(chain.dropped_frames(), MIX_FRAMES as u64);
     assert_eq!(chain.lane_underrun_frames(), 0);
-}
-
-#[test]
-fn needs_brir_is_emitted_once_for_repeated_common_shape_mismatch() {
-    let temp = TempDir::new("needs-brir");
-    let ir = temp.0.join("FL.wav");
-    write_stereo_ir_at_rate(&ir, 96_000, 16, 0, 1.0, 0, 1.0);
-    let profile = profile(
-        vec![DirectionFile {
-            name: "FL".into(),
-            azimuth_deg: 30.0,
-            elevation_deg: 0.0,
-            path: ir,
-        }],
-        0.0,
-        0.0,
-    );
-    let prepared = brir::prepare(&profile, 96_000, 480).unwrap();
-    let mut chain = Chain::new(ChainConfig::default());
-    chain.set_prepared(Box::new(Prepared::new(Arc::new(prepared), 480).unwrap()));
-
-    let mut needs = 0;
-    chain.push_records(&pcm_stream(2), &mut |event| {
-        if matches!(
-            event,
-            ChainEvent::NeedsBrir {
-                rate: 48_000,
-                block: 480
-            }
-        ) {
-            needs += 1;
-        }
-    });
-    assert_eq!(needs, 1);
 }
 
 #[test]

@@ -12,10 +12,12 @@ workspace = true
 
 [dependencies]
 ssr-types.workspace = true
+brir.workspace = true
 convolver.workspace = true
 render.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
 hound.workspace = true
-rubato.workspace = true

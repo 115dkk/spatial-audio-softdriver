@@ -1073,13 +1073,11 @@ fn format_and_needs_brir_events_reach_poll() {
             format,
         } if *format == pcm_format(RATE)
     )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        EngineEvent::NeedsBrir {
-            rate: RATE,
-            block: BLOCK
-        }
-    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::NeedsPrepared))
+    );
     lockstep.release();
     let report = engine.stop();
     assert_eq!(report.blocks, 0);
@@ -2904,7 +2902,8 @@ fn ended_input_drains_a_thirty_two_channel_ring_below_the_priming_threshold() {
     };
     let mut runtime = lockstep_config(ClockPreference::Trim, Arc::clone(&lockstep));
     runtime.target_ms = 0.0;
-    runtime.capacity_ms = 10.0;
+    // 1,920 frames: one decoder delivery (max_block) above an empty target.
+    runtime.capacity_ms = 40.0;
     let engine = start_with(
         runtime,
         capture,

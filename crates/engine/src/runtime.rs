@@ -1,9 +1,9 @@
 //! The real-time engine (M2): the capture/DSP thread runs the [`Chain`], the
-//! output thread feeds the device, and a two-channel crossing ring joins the
-//! two clock domains (ADR 0012).
+//! output thread feeds the device, and an N-channel 48 kHz crossing ring joins
+//! the two clock domains (ADR 0012).
 //!
 //! ```text
-//! CaptureSource ──read──▶ capture/DSP thread ──Chain──▶ crossing ring (2 ch, rtrb)
+//! CaptureSource ──read──▶ capture/DSP thread ──Chain──▶ crossing ring (N ch, 48 kHz, rtrb)
 //!                                  ▲                          │
 //!                         trim ppm │ (Trim strategy)          ▼
 //!                                  └──────────────── output thread ──▶ OutputSink
@@ -18,9 +18,9 @@
 //! happens on the control thread. [`Engine::status`] copies atomics and sorts a
 //! latency snapshot without blocking either real-time thread.
 //!
-//! The crossing ring supports scene rates of 8, 16, 32, 44.1, 48, 96 and
-//! 192 kHz. An output period may contain at most 16,384 frames. These bounds
-//! let both threads allocate their worst-case buffers before either
+//! The crossing ring carries the fixed 48 kHz scene timeline. An output period
+//! may contain at most 16,384 frames and device rates below 8 kHz are rejected.
+//! These bounds let both threads allocate their worst-case buffers before either
 //! steady-state loop.
 //!
 //! [`Chain`]: crate::Chain
@@ -53,10 +53,12 @@ use crate::{MAX_OUTPUT_CHANNELS, MIX_FRAMES};
 const DEFAULT_QPC_FREQUENCY: u64 = 10_000_000;
 const _: [(); ssr_abi::MAX_ENDPOINTS] = [(); ENGINE_ENDPOINTS];
 const _: [(); ENGINE_ENDPOINTS] = [(); ssr_abi::MAX_ENDPOINTS];
-const MAX_SCENE_RATE: u32 = 192_000;
-const SUPPORTED_SCENE_RATES: [u32; 7] = [8_000, 16_000, 32_000, 44_100, 48_000, 96_000, 192_000];
+const MIN_DEVICE_RATE: u32 = 8_000;
 const MAX_OUTPUT_PERIOD_FRAMES: usize = 16_384;
-const MAX_ASRC_INPUT_FRAMES: usize = MAX_OUTPUT_PERIOD_FRAMES * 24 + 512;
+// A 16,384-frame period at the lowest accepted 8 kHz device rate needs at
+// most six times as many 48 kHz input frames, plus rubato's 512-frame lookahead.
+const MAX_ASRC_INPUT_FRAMES: usize =
+    MAX_OUTPUT_PERIOD_FRAMES * crate::MIX_RATE.div_ceil(MIN_DEVICE_RATE) as usize + 512;
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const CHANGE_QUEUE_CAPACITY: usize = 16;
 const RETIRED_QUEUE_CAPACITY: usize = CHANGE_QUEUE_CAPACITY + 1;
@@ -154,11 +156,11 @@ pub type RtEventHook = Arc<dyn Fn(RtLoopEvent) + Send + Sync>;
 /// How the two clock domains are reconciled (ADR 0012).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ClockPreference {
-    /// Trim when the capture source accepts it and the scene rate equals the
-    /// device rate; ASRC otherwise.
+    /// Trim when the capture source accepts it and the device runs at 48 kHz;
+    /// ASRC otherwise.
     #[default]
     Auto,
-    /// Always resample the binaural signal on the output thread.
+    /// Always resample the rendered output on the output thread.
     Asrc,
     /// Always trim the source; refused at start when the source cannot.
     Trim,
@@ -168,10 +170,15 @@ pub enum ClockPreference {
 pub struct EngineConfig {
     pub chain: ChainConfig,
     /// Crossing-ring level the PI controller holds, in milliseconds of
-    /// binaural signal (the game preset uses 10, music 40).
+    /// rendered output (the game preset uses 10, music 40).
     pub target_ms: f32,
     /// Crossing-ring capacity in milliseconds; must exceed `target_ms` by at
-    /// least one source block.
+    /// least `chain.max_block` frames at 48 kHz, the largest delivery a decoder
+    /// hands over at once (one E-AC-3 sync frame by default). The controller
+    /// holds the trough at `target_ms` plus one output period only while the
+    /// ring also has room for one delivery above that, so the capacity has to
+    /// cover target, period and delivery with room to spare; the default (320
+    /// ms, 15,360 frames) is the ring the runtime always had.
     pub capacity_ms: f32,
     pub clock: ClockPreference,
     /// Size of the buffer one `CaptureSource::read` may fill.
@@ -188,7 +195,7 @@ impl Default for EngineConfig {
         Self {
             chain: ChainConfig::default(),
             target_ms: 10.0,
-            capacity_ms: 80.0,
+            capacity_ms: 320.0,
             clock: ClockPreference::Auto,
             read_buffer_bytes: 512 * 1024,
             read_wait: Duration::from_millis(20),
@@ -248,15 +255,14 @@ pub struct Rejected;
 /// What the real-time threads report to the control thread.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
-    /// A new source format; the control thread prepares a BRIR for its scene
-    /// shape (`scene_shape`) and applies it.
+    /// A new source format observed on an input endpoint.
     FormatChanged {
         endpoint: u16,
         epoch: u32,
         format: SourceFormat,
     },
-    /// Blocks are being dropped until a fitting BRIR arrives.
-    NeedsBrir { rate: u32, block: usize },
+    /// Blocks are being dropped until an output is prepared.
+    NeedsPrepared,
     /// The driver reported lost bytes.
     Overrun { lost_bytes: u64 },
     /// A rendered non-silent block could not enter the crossing ring.
@@ -392,7 +398,7 @@ where
         .target_ms_bits
         .store(config.target_ms.to_bits(), Ordering::Release);
     shared.max_target_ms_bits.store(
-        (config.capacity_ms - config.chain.max_block as f32 * 1_000.0 / MAX_SCENE_RATE as f32)
+        (config.capacity_ms - config.chain.max_block as f32 * 1_000.0 / crate::MIX_RATE as f32)
             .to_bits(),
         Ordering::Release,
     );
@@ -400,15 +406,17 @@ where
     let (capture_event_producer, capture_events) = RingBuffer::new(EVENT_QUEUE_CAPACITY);
     let (output_event_producer, output_events) = RingBuffer::new(EVENT_QUEUE_CAPACITY);
     let (retired_producer, retired) = RingBuffer::new(RETIRED_QUEUE_CAPACITY);
-    let ring_capacity_frames = capacity_frames(config.capacity_ms, MAX_SCENE_RATE);
+    let ring_capacity_frames = capacity_frames(config.capacity_ms, crate::MIX_RATE);
     let sample_capacity = ring_capacity_frames
         .checked_mul(MAX_OUTPUT_CHANNELS)
         .ok_or(StartError::Config("crossing-ring capacity overflows usize"))?;
-    let target_frames_at_max_rate = capacity_frames(config.target_ms, MAX_SCENE_RATE);
-    if ring_capacity_frames <= target_frames_at_max_rate.saturating_add(config.chain.max_block) {
+    // One whole decoder delivery must fit above the level the controller
+    // holds, or every burst drops blocks.
+    let target_frames = capacity_frames(config.target_ms, crate::MIX_RATE);
+    if ring_capacity_frames <= target_frames.saturating_add(config.chain.max_block) {
         shared.stop.store(true, Ordering::Release);
         return Err(StartError::Config(
-            "capacity_ms must exceed target_ms by at least max_block at 192 kHz",
+            "capacity_ms must exceed target_ms by at least max_block frames at 48 kHz",
         ));
     }
     let (audio_producer, audio_consumer) = RingBuffer::new(sample_capacity);
@@ -490,7 +498,6 @@ where
         ));
     }
     shared.publish_output_format(output_format);
-    shared.scene_rate.store(crate::MIX_RATE, Ordering::Release);
 
     // Chain owns the large FIR tables used by every entrance. Build and seed it
     // on the control thread, before the capture thread enters its real-time loop.
@@ -1119,10 +1126,7 @@ enum RtEvent {
         epoch: u32,
         format: SourceFormat,
     },
-    NeedsBrir {
-        rate: u32,
-        block: usize,
-    },
+    NeedsPrepared,
     Overrun {
         lost_bytes: u64,
     },
@@ -1156,7 +1160,7 @@ impl RtEvent {
                 epoch,
                 format,
             },
-            Self::NeedsBrir { rate, block } => EngineEvent::NeedsBrir { rate, block },
+            Self::NeedsPrepared => EngineEvent::NeedsPrepared,
             Self::Overrun { lost_bytes } => EngineEvent::Overrun { lost_bytes },
             Self::CaptureFault => {
                 EngineEvent::Fault(EngineFault::CaptureLost("capture source failed".into()))
@@ -1518,9 +1522,7 @@ fn handle_chain_event(
                 format,
             });
         }
-        ChainEvent::NeedsBrir { rate, block } => {
-            events.push(RtEvent::NeedsBrir { rate, block });
-        }
+        ChainEvent::NeedsPrepared => events.push(RtEvent::NeedsPrepared),
         ChainEvent::Overrun { lost_bytes, .. } => {
             shared.lost_bytes.fetch_add(lost_bytes, Ordering::Relaxed);
             events.push(RtEvent::Overrun { lost_bytes });
@@ -1562,6 +1564,7 @@ fn push_block(
     if frames == 0 {
         return;
     }
+    debug_assert_eq!(block.rate, crate::MIX_RATE);
     let samples = frames.saturating_mul(block.channels);
     if audio.slots() < samples || timing.slots() == 0 {
         if !(block.idle && block.silent) {
@@ -1592,6 +1595,8 @@ fn push_block(
         }
     }
     *stream_frame = stream_frame.saturating_add(frames as u64);
+    let previous_rate = shared.scene_rate.swap(crate::MIX_RATE, Ordering::Release);
+    debug_assert!(previous_rate == 0 || previous_rate == crate::MIX_RATE);
     if block.idle {
         shared.idle_blocks.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -1748,8 +1753,8 @@ fn select_output_clock(
     if format.channels != layout.channels {
         return Err("the output sink channel count does not match the requested layout");
     }
-    if format.rate == 0 || format.period_frames == 0 {
-        return Err("the output format has a zero rate or period");
+    if format.rate < MIN_DEVICE_RATE || format.period_frames == 0 {
+        return Err("the output format rate is below 8 kHz or its period is zero");
     }
     if format.period_frames > MAX_OUTPUT_PERIOD_FRAMES {
         return Err("the output period exceeds the runtime's 16,384-frame limit");
@@ -3078,17 +3083,6 @@ struct Rendered {
     output_frames: usize,
 }
 
-trait ClockStrategy {
-    fn render(
-        &mut self,
-        audio: &mut Consumer<f32>,
-        output: &mut [f32],
-        scene_rate: u32,
-        device_rate: u32,
-        stream_frame: &mut u64,
-    ) -> Rendered;
-}
-
 struct DirectClock;
 
 impl DirectClock {
@@ -3114,33 +3108,8 @@ impl DirectClock {
     }
 }
 
-impl ClockStrategy for DirectClock {
-    fn render(
-        &mut self,
-        audio: &mut Consumer<f32>,
-        output: &mut [f32],
-        _scene_rate: u32,
-        _device_rate: u32,
-        stream_frame: &mut u64,
-    ) -> Rendered {
-        let available_samples = audio.slots().min(output.len());
-        let samples = available_samples - available_samples % 2;
-        if samples != 0 {
-            let (popped, _) = audio.pop_partial_slice(&mut output[..samples]);
-            debug_assert_eq!(popped.len(), samples);
-        }
-        let frames = samples / 2;
-        *stream_frame = stream_frame.saturating_add(frames as u64);
-        Rendered {
-            source_frames: frames,
-            output_frames: frames,
-        }
-    }
-}
-
 struct AsrcClock {
     resampler: Option<Async<f32>>,
-    prepared: Vec<(u32, Async<f32>)>,
     input: InterleavedOwned<f32>,
     nominal_ratio: f64,
     scene_rate: u32,
@@ -3162,25 +3131,20 @@ impl AsrcClock {
         // documented high-quality starting point. Stereo uses the combined-sinc
         // optimization, making cubic suitable for a 48 kHz real-time stream.
         let parameters = SincInterpolationParameters::new(256, WindowFunction::BlackmanHarris2);
-        let mut prepared = Vec::with_capacity(SUPPORTED_SCENE_RATES.len());
-        for scene_rate in SUPPORTED_SCENE_RATES {
-            let ratio = f64::from(device_rate) / f64::from(scene_rate);
-            if let Ok(resampler) = Async::new_sinc(
-                ratio,
-                ASRC_MAX_RELATIVE_RATIO,
-                &parameters,
-                period_frames,
-                channels,
-                FixedAsync::Output,
-            ) {
-                prepared.push((scene_rate, resampler));
-            }
-        }
+        let ratio = f64::from(device_rate) / f64::from(crate::MIX_RATE);
+        let resampler = Async::new_sinc(
+            ratio,
+            ASRC_MAX_RELATIVE_RATIO,
+            &parameters,
+            period_frames,
+            channels,
+            FixedAsync::Output,
+        )
+        .ok();
         Self {
-            resampler: None,
-            prepared,
+            resampler,
             input: InterleavedOwned::new(0.0, channels, MAX_ASRC_INPUT_FRAMES),
-            nominal_ratio: 1.0,
+            nominal_ratio: ratio,
             scene_rate: 0,
             device_rate,
             period_output_frames: period_frames,
@@ -3194,32 +3158,16 @@ impl AsrcClock {
 
     fn reset(&mut self, scene_rate: u32, device_rate: u32) {
         self.ratio_frozen = false;
+        debug_assert!(scene_rate == 0 || scene_rate == crate::MIX_RATE);
         if scene_rate == 0 || device_rate != self.device_rate {
-            self.resampler = None;
-            return;
-        }
-        if self.scene_rate == scene_rate
-            && let Some(resampler) = &mut self.resampler
-        {
-            resampler.reset();
-            return;
-        }
-        if let Some(active) = self.resampler.take() {
-            self.prepared.push((self.scene_rate, active));
-        }
-        let Some(index) = self
-            .prepared
-            .iter()
-            .position(|(prepared_rate, _)| *prepared_rate == scene_rate)
-        else {
             self.scene_rate = 0;
             return;
-        };
-        let (_, mut resampler) = self.prepared.swap_remove(index);
-        resampler.reset();
-        self.nominal_ratio = f64::from(device_rate) / f64::from(scene_rate);
-        self.resampler = Some(resampler);
-        self.scene_rate = scene_rate;
+        }
+        if let Some(resampler) = &mut self.resampler {
+            resampler.reset();
+        }
+        self.nominal_ratio = f64::from(device_rate) / f64::from(crate::MIX_RATE);
+        self.scene_rate = crate::MIX_RATE;
     }
 
     fn set_ppm(&mut self, ppm: f64, scene_rate: u32, device_rate: u32) {
@@ -3243,17 +3191,6 @@ impl AsrcClock {
         let ratio = resampler.resample_ratio();
         let _ = resampler.set_resample_ratio(ratio, false);
         self.ratio_frozen = true;
-    }
-
-    fn render(
-        &mut self,
-        audio: &mut Consumer<f32>,
-        output: &mut [f32],
-        scene_rate: u32,
-        device_rate: u32,
-        stream_frame: &mut u64,
-    ) -> Rendered {
-        <Self as ClockStrategy>::render(self, audio, output, scene_rate, device_rate, stream_frame)
     }
 
     fn buffered_frames(&self) -> usize {
@@ -3303,7 +3240,7 @@ impl AsrcClock {
     }
 }
 
-impl ClockStrategy for AsrcClock {
+impl AsrcClock {
     fn render(
         &mut self,
         audio: &mut Consumer<f32>,
@@ -3939,6 +3876,24 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            select_output_clock(
+                ClockPreference::Asrc,
+                false,
+                output_format(MIN_DEVICE_RATE - 1),
+                OutputLayout::STEREO,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            select_output_clock(
+                ClockPreference::Asrc,
+                false,
+                output_format(MIN_DEVICE_RATE),
+                OutputLayout::STEREO,
+            ),
+            Ok(ClockMode::Asrc)
+        );
     }
 
     #[test]
@@ -4366,6 +4321,25 @@ mod tests {
         assert_eq!(trough_setpoint_frames(480.0, 960.0, 1_536.0, 1_000.0), 0.0);
     }
 
+    #[test]
+    fn the_default_ring_never_caps_the_setpoint_for_a_dd_plus_delivery() {
+        // A DD+ sync frame lands as up to four mixer blocks (40 ms). The
+        // setpoint keeps one late delivery's worth above the target only while
+        // the ring has room for that delivery after the take; at 80 ms the
+        // 20 ms period was capped to a 20 ms trough and underran.
+        let config = EngineConfig::default();
+        let capacity = capacity_frames(config.capacity_ms, crate::MIX_RATE) as f64;
+        let target = f64::from(config.target_ms) * 48.0;
+        let delivery = 4.0 * crate::MIX_FRAMES as f64;
+        for take in [144.0, 480.0, 960.0, 1_920.0, 4_096.0] {
+            assert_eq!(
+                trough_setpoint_frames(target, take, delivery, capacity),
+                target + f64::min(take, delivery),
+                "{take}-frame period"
+            );
+        }
+    }
+
     /// Drives the real output state (ring, priming, ASRC) with whole blocks
     /// landing in step with the periods, as a paced source does, and returns
     /// the underruns and the periods that carried audio.
@@ -4536,6 +4510,7 @@ mod tests {
         let (event_producer, _event_out) = RingBuffer::<RtEvent>::new(4);
         let mut events = EventWriter::new(event_producer, Arc::clone(&shared));
         let mut stream_frame = 11;
+        assert_eq!(shared.scene_rate.load(Ordering::Acquire), 0);
         let samples = [
             1.0, 2.0, 3.0, // channel 0
             11.0, 12.0, 13.0, // channel 1
@@ -4577,6 +4552,7 @@ mod tests {
         assert_eq!(marker.layout.channels, 4);
         assert_eq!(marker.layout.channel_mask, 0x33);
         assert_eq!(stream_frame, 14);
+        assert_eq!(shared.scene_rate.load(Ordering::Acquire), crate::MIX_RATE);
         assert_eq!(shared.blocks.load(Ordering::Acquire), 1);
         assert_eq!(shared.status().dropped_frames, 7);
     }
@@ -4843,97 +4819,6 @@ mod tests {
             }
         }
         writer.join().unwrap();
-    }
-
-    #[test]
-    fn an_unwritable_96_khz_cadence_tail_starts_its_short_drain_at_full_gain() {
-        let shared = Arc::new(Shared::new());
-        shared.scene_rate.store(96_000, Ordering::Release);
-        shared
-            .clock_mode
-            .store(ClockMode::Asrc.as_u32(), Ordering::Release);
-        let period_frames = 441;
-        let source_frames = 8_000;
-        let frequency = 997.0;
-        let (mut audio_in, audio) = RingBuffer::<f32>::new(source_frames * 2);
-        for frame in 0..source_frames {
-            let sample = (2.0 * std::f32::consts::PI * frequency * frame as f32 / 96_000.0).sin();
-            audio_in.push(sample).unwrap();
-            audio_in.push(sample).unwrap();
-        }
-        let (_timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
-        let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
-        let mut output = OutputState::new(
-            audio,
-            timing,
-            44_100,
-            period_frames,
-            0.0,
-            DEFAULT_QPC_FREQUENCY,
-            events,
-            shared,
-            OutputLayout::STEREO,
-            source_frames,
-        );
-        output.asrc.reset(96_000, 44_100);
-        let delay = output.asrc.output_delay();
-        assert_eq!(delay, 58);
-        assert_eq!(boundary_fade_frames(44_100), 88);
-
-        let mut stream_frame = 0;
-        let mut period = vec![0.0; period_frames * 2];
-        for _ in 0..6 {
-            period.fill(0.0);
-            let rendered = output.asrc.render(
-                &mut output.audio,
-                &mut period,
-                96_000,
-                44_100,
-                &mut stream_frame,
-            );
-            assert_eq!(rendered.output_frames, period_frames);
-        }
-        // What fill records after a take the resampler consumed.
-        output.asrc_tail_pending = true;
-
-        assert!(output.begin_reopen_tail());
-        assert_eq!(output.drain_fade_lead_frames, 0);
-        assert_eq!(output.drain_real_frames, delay);
-        assert_eq!(output.drain_fade_frames, delay);
-        let mut drain = vec![0.0; period_frames * 2];
-        output.asrc.flush(&mut drain);
-        let raw_first = drain[0];
-        output.apply_asrc_drain_fade(&mut drain);
-        assert_eq!(
-            drain[0], raw_first,
-            "the unwritable tail must begin at full gain"
-        );
-        assert!(drain[delay * 2..].iter().all(|sample| *sample == 0.0));
-
-        let mut boundary: Vec<_> = period
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|frame| frame[0])
-            .collect();
-        boundary.extend(
-            drain[..delay * 2]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|frame| frame[0]),
-        );
-        let tone_step = 2.0 * (std::f32::consts::PI * frequency / 44_100.0).sin();
-        let max_step = boundary
-            .windows(2)
-            .map(|pair| (pair[1] - pair[0]).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(
-            max_step <= tone_step + 0.05,
-            "cadence boundary step {max_step} exceeded tone bound {}",
-            tone_step + 0.05
-        );
-        assert_eq!(asrc_drain_gain(delay - 1, delay, delay, 0), 0.0);
     }
 
     #[test]

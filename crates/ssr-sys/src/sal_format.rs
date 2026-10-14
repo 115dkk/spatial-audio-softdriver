@@ -138,11 +138,14 @@ impl SalHeader {
         );
         b[12..14].copy_from_slice(&self.block_align.to_le_bytes());
         b[14..16].copy_from_slice(&self.bits.to_le_bytes());
-        b[16..18].copy_from_slice(&22_u16.to_le_bytes());
+        let len = if iec { 52 } else { 40 };
+        // cbSize counts the bytes after WAVEFORMATEX's 18, the IEC 61937
+        // extension included, as ssr_abi::wave_format_bytes writes it.
+        b[16..18].copy_from_slice(&((len - 18) as u16).to_le_bytes());
         b[18..20].copy_from_slice(&self.valid_bits.to_le_bytes());
         b[20..24].copy_from_slice(&self.channel_mask.to_le_bytes());
         b[24..40].copy_from_slice(&self.subformat);
-        (b, if iec { 52 } else { 40 })
+        (b, len)
     }
 
     fn same_format(&self, other: &Self) -> bool {

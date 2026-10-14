@@ -29,11 +29,34 @@ pub use ports::{
     OutputOpener, OutputSink, TrimUnsupported,
 };
 pub use position::{Speaker, direction_to_room, room_to_direction};
+
+/// Named channel layout shared by direct inputs and speaker-profile masks.
+pub fn channel_layout_preset(name: &str) -> Option<&'static [Speaker]> {
+    use Speaker::*;
+    Some(match name.to_ascii_lowercase().as_str() {
+        "mono" => &[C],
+        "stereo" | "2.0" => &[L, R],
+        "3.0" => &[L, R, C],
+        "quad" => &[L, R, Lrs, Rrs],
+        "5.0" => &[L, R, C, Lrs, Rrs],
+        "5.1" => &[L, R, C, Lfe, Lrs, Rrs],
+        "7.1" => &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss],
+        "5.1.2" => &[L, R, C, Lfe, Lrs, Rrs, Tfl, Tfr],
+        "5.1.4" => &[L, R, C, Lfe, Lrs, Rrs, Tfl, Tfr, Trl, Trr],
+        "7.1.2" => &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss, Tfl, Tfr],
+        "7.1.4" => &[L, R, C, Lfe, Lrs, Rrs, Lss, Rss, Tfl, Tfr, Trl, Trr],
+        "9.1.4" => &[L, R, C, Lfe, Lrs, Rrs, Lc, Rc, Lss, Rss, Tfl, Tfr, Trl, Trr],
+        "9.1.6" => &[
+            L, R, C, Lfe, Lrs, Rrs, Lc, Rc, Lss, Rss, Tfl, Tfr, Trl, Trr, Tsl, Tsr,
+        ],
+        _ => return None,
+    })
+}
 pub use scene::{MAX_OBJECTS, Object, Position, SceneBlock};
 pub use status::{
     ChainErrorCounts, ChainErrorKind, ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault,
     EngineStatus, LatencyStats, UnderrunSnapshot,
 };
 
-/// The scene sample rate every decoder produces unless the source says otherwise.
+/// The fixed scene sample rate every decoder produces.
 pub const SCENE_RATE: u32 = 48_000;
