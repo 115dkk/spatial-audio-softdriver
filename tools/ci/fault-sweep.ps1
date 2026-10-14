@@ -1,8 +1,12 @@
 # Sweeps the driver's own fault switch on a CI runner: the N-th resource
 # acquisition after the image loads fails once (Parameters\FaultInjectAt),
-# for N = 1, 2, 3, ... up to the number a clean load makes. Each step
-# restarts the device, so the previous instance unloads and writes what it
-# still held (the volatile Diagnostics subkey); every count must be zero.
+# for N = 1, 2, 3, ... up to the number a clean load makes. Each instance
+# writes what it still held when its image unloads (the volatile Diagnostics
+# subkey), and every count must be zero. An instance whose start fails
+# unloads at once, so the sweep enables and disables the device in separate
+# steps and reads each instance's report right after the step that unloaded
+# it; a restart would unload one instance and load the next in one go, and
+# the second report would overwrite the first.
 #
 # Driver Verifier cannot do this on the runners: on Server 2022 its volatile
 # settings list the driver but intercept none of its calls, and on Server
@@ -57,6 +61,22 @@ function Test-SsrUnloadReport($Report, [long] $PreviousUnloads, [int] $InjectedA
     $problems
 }
 
+function Disable-SsrDevice([string] $InstanceId, [int] $SettleSeconds) {
+    $text = (& pnputil.exe /disable-device $InstanceId 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "pnputil /disable-device failed ($LASTEXITCODE): $text" }
+    Start-Sleep -Seconds $SettleSeconds
+}
+
+function Enable-SsrDevice([string] $InstanceId, [int] $SettleSeconds) {
+    # The problem code the start left (0 when the device started).
+    $text = (& pnputil.exe /enable-device $InstanceId 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "pnputil /enable-device failed ($LASTEXITCODE): $text" }
+    Start-Sleep -Seconds $SettleSeconds
+    $problem = Get-SsrProblemCode $InstanceId
+    if ($problem -eq 38) { throw "the driver image did not unload before this start (problem 38): $text" }
+    $problem
+}
+
 function Invoke-SsrFaultSweep {
     param(
         [Parameter(Mandatory)] [string] $InstanceId,
@@ -67,46 +87,43 @@ function Invoke-SsrFaultSweep {
     )
     $steps = @()
     $failures = @()
-    $restart = {
-        param([int] $Label)
-        $before = Get-SsrUnloadReport
-        $previous = if ($before -and $null -ne $before.Unloads) { $before.Unloads } else { 0 }
-        $cycle = @(Invoke-SsrRestartCycles -InstanceId $InstanceId -Count 1 -SettleSeconds $SettleSeconds)[0]
-        [pscustomobject]@{ Label = $Label; Previous = $previous; Report = (Get-SsrUnloadReport); Cycle = $cycle }
-    }
+    $unloads = { $r = Get-SsrUnloadReport; if ($r -and $null -ne $r.Unloads) { [long]$r.Unloads } else { 0 } }
 
-    # Two clean restarts: the second report describes one whole clean load,
-    # whose call count bounds the sweep.
+    # One clean instance's whole life (start, settle, unload) bounds the sweep.
+    Disable-SsrDevice $InstanceId $SettleSeconds
     Set-SsrFaultInjectAt 0
-    $null = & $restart 0
-    $clean = & $restart 0
-    $problems = @(Test-SsrUnloadReport $clean.Report $clean.Previous 0)
+    $problem = Enable-SsrDevice $InstanceId $SettleSeconds
+    if ($problem -ne 0) { throw "a clean start left problem $problem" }
+    $before = & $unloads
+    Disable-SsrDevice $InstanceId $SettleSeconds
+    $clean = Get-SsrUnloadReport
+    $problems = @(Test-SsrUnloadReport $clean $before 0)
     if ($problems.Count) { throw "a clean load: $($problems -join '; ')" }
-    $calls = [int]$clean.Report.FaultCalls
+    $calls = [int]$clean.FaultCalls
     if ($calls -lt 1) { throw 'a clean load passed no fault point; the driver has no fault switch' }
     if ($calls -gt $Max) { throw "a clean load passed $calls fault points, more than the sweep's $Max" }
     Write-Host "a clean load passes $calls fault points"
 
-    # Each restart starts the instance told to fail call $next and unloads the
-    # one before it, whose report arrives with that restart.
-    $injected = 0
-    $startProblem = $clean.Cycle.Problem
-    for ($at = 1; $at -le $calls + 1; ++$at) {
-        $next = if ($at -le $calls) { $at } else { 0 }
-        Set-SsrFaultInjectAt $next
-        $step = & $restart $next
-        $problems = @(Test-SsrUnloadReport $step.Report $step.Previous $injected)
-        $steps += [pscustomobject]@{
-            FailedCall = $injected
-            StartProblem = $startProblem
-            Problems = $problems
-            Report = $step.Report
+    for ($at = 1; $at -le $calls; ++$at) {
+        Set-SsrFaultInjectAt $at
+        $before = & $unloads
+        $problem = Enable-SsrDevice $InstanceId $SettleSeconds
+        # A failed start unloads the image at once; a start that survived the
+        # failure unloads at the disable.
+        if ((& $unloads) -le $before) {
+            Disable-SsrDevice $InstanceId $SettleSeconds
+            $report = Get-SsrUnloadReport
+        } else {
+            $report = Get-SsrUnloadReport
+            Disable-SsrDevice $InstanceId $SettleSeconds
         }
-        if ($problems.Count) { $failures += "call ${injected}: $($problems -join '; ')" }
-        $injected = $next
-        $startProblem = $step.Cycle.Problem
+        $problems = @(Test-SsrUnloadReport $report $before $at)
+        $steps += [pscustomobject]@{ FailedCall = $at; StartProblem = $problem; Problems = $problems; Report = $report }
+        if ($problems.Count) { $failures += "call ${at}: $($problems -join '; ')" }
     }
     Set-SsrFaultInjectAt 0
-    if ($failures.Count) { throw "fault sweep: $($failures.Count) instances left something behind or ignored the switch: $($failures -join ' | ')" }
+    $problem = Enable-SsrDevice $InstanceId $SettleSeconds
+    if ($problem -ne 0) { $failures += "the clean start after the sweep left problem $problem" }
+    if ($failures.Count) { throw "fault sweep: $($failures.Count) problems: $($failures -join ' | ')" }
     $steps
 }

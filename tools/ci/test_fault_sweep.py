@@ -14,42 +14,49 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 # A driver that passes $env:SSR_CALLS fault points per load, leaks one pool
-# block when call $env:SSR_LEAK_AT fails, and ignores its switch when
-# $env:SSR_IGNORE is set. Each restart unloads the running instance (writing
-# its report) and loads one configured with the current FaultInjectAt.
+# block when call $env:SSR_LEAK_AT fails, ignores its switch when
+# $env:SSR_IGNORE is set, and survives (starts anyway) when the failed call
+# is $env:SSR_SURVIVE_AT. As on Windows, an instance whose start fails unloads
+# at once and writes its report; one that started unloads at the disable.
 MODEL = r"""
 $global:SsrAt = 0
 $global:SsrRunning = $null
 $global:SsrReport = $null
-$global:SsrRestarts = 0
-function New-Instance {
+$global:SsrActions = [System.Collections.Generic.List[string]]::new()
+function Write-Report($instance) {
+    $unloads = if ($global:SsrReport) { $global:SsrReport.Unloads + 1 } else { 1 }
+    $global:SsrReport = [pscustomobject]@{
+        Unloads = $unloads; FaultCalls = $instance.Calls; FaultInjectedAt = $instance.Injected
+        OutstandingPool = $instance.Pool; OutstandingTimers = 0; OutstandingDma = 0
+    }
+}
+function Set-SsrFaultInjectAt([int] $At) { $global:SsrAt = $At }
+function Get-SsrUnloadReport { $global:SsrReport }
+function Disable-SsrDevice([string] $InstanceId, [int] $SettleSeconds) {
+    $global:SsrActions.Add('disable')
+    if ($global:SsrRunning) { Write-Report $global:SsrRunning; $global:SsrRunning = $null }
+}
+function Enable-SsrDevice([string] $InstanceId, [int] $SettleSeconds) {
+    $global:SsrActions.Add("enable $global:SsrAt")
     $calls = [int]$env:SSR_CALLS
     $injected = 0
     if ($global:SsrAt -ge 1 -and $global:SsrAt -le $calls -and -not $env:SSR_IGNORE) { $injected = $global:SsrAt }
     $leak = if ($injected -ne 0 -and $injected -eq [int]$env:SSR_LEAK_AT) { 1 } else { 0 }
-    @{ Calls = $calls; Injected = $injected; Pool = $leak }
-}
-function Set-SsrFaultInjectAt([int] $At) { $global:SsrAt = $At }
-function Get-SsrUnloadReport { $global:SsrReport }
-function Invoke-SsrRestartCycles {
-    param([string] $InstanceId, [int] $Count, [int] $SettleSeconds)
-    $global:SsrRestarts++
-    if ($global:SsrRunning) {
-        $unloads = if ($global:SsrReport) { $global:SsrReport.Unloads + 1 } else { 1 }
-        $global:SsrReport = [pscustomobject]@{
-            Unloads = $unloads; FaultCalls = $global:SsrRunning.Calls; FaultInjectedAt = $global:SsrRunning.Injected
-            OutstandingPool = $global:SsrRunning.Pool; OutstandingTimers = 0; OutstandingDma = 0
-        }
+    $instance = @{ Calls = $calls; Injected = $injected; Pool = $leak }
+    if ($injected -ne 0 -and $injected -ne [int]$env:SSR_SURVIVE_AT) {
+        Write-Report $instance
+        return 10
     }
-    $global:SsrRunning = New-Instance
-    [pscustomobject]@{ Cycle = 1; PnputilExit = 0; Status = 'OK'; Problem = 0 }
+    $global:SsrRunning = $instance
+    0
 }
-$global:SsrRunning = New-Instance
+# The install left a clean instance running.
+$global:SsrRunning = @{ Calls = [int]$env:SSR_CALLS; Injected = 0; Pool = 0 }
 """
 
 
 class FaultSweepTests(unittest.TestCase):
-    def run_ps(self, body, *, calls=5, leak_at=0, ignore=False):
+    def run_ps(self, body, *, calls=5, leak_at=0, ignore=False, survive_at=0):
         pwsh = os.environ.get("SSR_TEST_PWSH") or shutil.which("pwsh")
         if not pwsh:
             self.skipTest("set SSR_TEST_PWSH to run tools/ci/fault-sweep.ps1")
@@ -58,7 +65,7 @@ class FaultSweepTests(unittest.TestCase):
             f"{MODEL}\n"
             f"try {{\n{body}\n}} catch {{ Write-Output \"ERROR $($_.Exception.Message)\"; exit 1 }}\n"
         )
-        env = dict(os.environ, SSR_CALLS=str(calls), SSR_LEAK_AT=str(leak_at))
+        env = dict(os.environ, SSR_CALLS=str(calls), SSR_LEAK_AT=str(leak_at), SSR_SURVIVE_AT=str(survive_at))
         env.pop("SSR_IGNORE", None)
         if ignore:
             env["SSR_IGNORE"] = "1"
@@ -69,20 +76,36 @@ class FaultSweepTests(unittest.TestCase):
                                   text=True, env=env, timeout=120)
 
     SWEEP = ("$steps = @(Invoke-SsrFaultSweep -InstanceId 'ROOT\\MEDIA\\0000' -SettleSeconds 0)\n"
-             "Write-Output \"STEPS $(($steps | ForEach-Object FailedCall) -join ',') RESTARTS $global:SsrRestarts AT $global:SsrAt\"")
+             "Write-Output \"STEPS $(($steps | ForEach-Object FailedCall) -join ',') AT $global:SsrAt\"\n"
+             "Write-Output \"ACTIONS $($global:SsrActions -join ',')\"")
 
-    def test_a_clean_driver_is_swept_once_per_fault_point_and_left_with_the_switch_off(self):
-        result = self.run_ps(self.SWEEP, calls=5)
+    def lines(self, result):
+        return {line.split(" ", 1)[0]: line.split(" ", 1)[1] for line in result.stdout.splitlines()
+                if line.startswith(("STEPS ", "ACTIONS "))}
+
+    def test_a_clean_driver_is_swept_once_per_fault_point_and_left_running_clean(self):
+        result = self.run_ps(self.SWEEP, calls=3)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        line = next(line for line in result.stdout.splitlines() if line.startswith("STEPS "))
-        # Two clean restarts, then one per call and one to unload the last.
-        self.assertEqual(line, "STEPS 0,1,2,3,4,5 RESTARTS 8 AT 0")
+        lines = self.lines(result)
+        self.assertEqual(lines["STEPS"], "1,2,3 AT 0")
+        # The install's instance goes, one clean life is measured, each call
+        # is failed in its own instance, and a clean start ends it.
+        self.assertEqual(lines["ACTIONS"],
+                         "disable,enable 0,disable,enable 1,disable,enable 2,disable,enable 3,disable,enable 0")
+
+    def test_a_start_that_survives_its_failure_is_judged_at_the_disable(self):
+        result = self.run_ps(self.SWEEP, calls=3, survive_at=2)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_ps(self.SWEEP, calls=3, survive_at=2, leak_at=2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("call 2: OutstandingPool 1 at unload", result.stdout)
 
     def test_a_leak_after_one_failed_call_names_that_call(self):
         result = self.run_ps(self.SWEEP, calls=5, leak_at=3)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("call 3: OutstandingPool 1 at unload", result.stdout)
         self.assertNotIn("call 2:", result.stdout)
+        self.assertNotIn("call 4:", result.stdout)
 
     def test_a_driver_that_ignores_its_switch_fails_the_sweep(self):
         result = self.run_ps(self.SWEEP, calls=3, ignore=True)

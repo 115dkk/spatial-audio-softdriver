@@ -664,6 +664,61 @@ jobs:
             ${{ runner.temp }}/fuzz-*.json
           if-no-files-found: ignore
 
+  # Diagnosis, not a gate: on Server 2022 the install of the RAII/C++23 driver
+  # takes the runner down when the KS trace and Driver Verifier are both on,
+  # and passes with either alone (ADR 0027, 2026-10-14). One Verifier check
+  # at a time, with the trace on, says which check trips. Remove once found.
+  verifier-isolation:
+    name: which Verifier check stops the 2022 install (0x${{ matrix.flag }})
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 15
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        flag: ['1', '2', '8', '10', '20', '80', '100', '800']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: spatialsoftreceiver-Release-x64
+          path: ${{ runner.temp }}/package
+
+      - name: Start the audio services
+        shell: pwsh
+        run: |
+          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
+            Set-Service -Name $name -StartupType Automatic
+            Start-Service -Name $name
+          }
+
+      - name: Start the driver's KS request trace (tools/ci/ks-trace.ps1)
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Start
+
+      - name: Driver Verifier with only flag 0x${{ matrix.flag }}
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          Invoke-SsrVerifier @('/volatile', '/flags', '0x${{ matrix.flag }}', '/adddriver', $SsrVerifiedImage) | Out-Null
+          Get-SsrVerifierState | Select-Object Level, Listed | Format-List
+
+      - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
+        id: install
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
+        if: always() && steps.install.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          ./tools/ci/ks-trace.ps1 -Stop
+          Add-Content $env:GITHUB_STEP_SUMMARY "`nVerifier flag 0x${{ matrix.flag }} with the KS trace: install ${{ steps.install.outcome }}`n"
+
   codeql:
     name: CodeQL Windows driver suites
     runs-on: windows-2022
