@@ -2217,14 +2217,15 @@ struct OutputState {
     have_last_output: bool,
     latency: LatencyWriter,
     cadence: CadenceGuard,
-    reopen_tail_periods: usize,
+    /// Periods of the resampler's tail still owed to the current sink, by a
+    /// reopen or by the end of capture, whichever writes them.
+    tail_periods: usize,
     drain_real_frames: usize,
     drain_fade_frames: usize,
     drain_fade_lead_frames: usize,
     period_signal_end: usize,
     drain_frames_written: usize,
     drain_fade_prepared: bool,
-    drain_tail_pending: bool,
     asrc_tail_pending: bool,
 }
 
@@ -2278,14 +2279,13 @@ impl OutputState {
             have_last_output: false,
             latency,
             cadence: CadenceGuard::new(),
-            reopen_tail_periods: 0,
+            tail_periods: 0,
             drain_real_frames: 0,
             drain_fade_frames: 0,
             drain_fade_lead_frames: 0,
             period_signal_end: 0,
             drain_frames_written: 0,
             drain_fade_prepared: false,
-            drain_tail_pending: false,
             asrc_tail_pending: false,
         }
     }
@@ -2312,6 +2312,7 @@ impl OutputState {
             self.strategy_mode = mode;
             self.controller.reset();
             self.asrc.reset(scene_rate, self.device_rate);
+            self.asrc_tail_pending = false;
             self.priming = true;
             self.fade_in_remaining = boundary_fade_frames(self.device_rate);
             self.latency.reset(&self.shared);
@@ -2335,6 +2336,20 @@ impl OutputState {
                 self.discard(excess);
                 self.priming = false;
             }
+        }
+        if mode == ClockMode::Asrc
+            && self.asrc_tail_pending
+            && self.tail_periods == 0
+            && self.shared.capture_done.load(Ordering::Acquire)
+            && self.drained()
+        {
+            // The end of capture became visible while the device asked for
+            // this period, after the take that emptied the ring went out: the
+            // resampler's tail goes here instead of an empty period.
+            self.plan_sent_period_tail();
+            self.fill_tail_period(buffer);
+            self.tail_periods = self.tail_periods.saturating_sub(1);
+            return;
         }
 
         let frames = buffer.len() / self.channels;
@@ -2390,7 +2405,7 @@ impl OutputState {
                 produced.output_frames,
                 self.asrc.real_output_frames,
             )));
-            self.drain_tail_pending = true;
+            self.tail_periods = self.asrc.drain_periods();
             self.asrc_tail_pending = false;
             self.apply_asrc_drain_lead_fade(buffer);
         }
@@ -2916,7 +2931,7 @@ impl OutputState {
         self.latency.reset(&self.shared);
         self.cadence.reset();
         self.drain_fade_prepared = false;
-        self.drain_tail_pending = false;
+        self.tail_periods = 0;
         self.asrc_tail_pending = false;
     }
 
@@ -2931,79 +2946,64 @@ impl OutputState {
             && self.drained()
     }
 
-    /// Writes what the resampler still holds after the last rendered period.
-    /// When that period was rendered before the end of capture was visible,
-    /// no fade was planned in it, so the whole fade lies in the drain.
+    /// Plans the tail of a resampler whose last rendered period already went
+    /// to the sink: no fade was planned in that period, so all of it lies in
+    /// the tail, and the ratio stays as it is until the tail is out.
+    fn plan_sent_period_tail(&mut self) {
+        self.asrc.freeze_ratio();
+        self.prepare_asrc_drain_fade(None);
+        self.tail_periods = self.asrc.drain_periods();
+        self.asrc_tail_pending = false;
+    }
+
+    /// One period of the resampler's tail: what it still holds, faded as
+    /// planned, then silence.
+    fn fill_tail_period(&mut self, buffer: &mut [f32]) {
+        buffer.fill(0.0);
+        self.asrc.flush(buffer);
+        self.apply_drain_fade_in(buffer);
+        self.apply_asrc_drain_fade(buffer);
+        self.apply_mute(buffer);
+    }
+
+    /// Writes what the resampler still holds once capture has ended, then
+    /// nothing more. A reopen drain the end interrupted continues where it
+    /// was rather than starting over.
     fn write_terminal_tail<S: OutputSink>(&mut self, sink: &mut S) -> Result<(), OutputError> {
-        if self.strategy_mode == ClockMode::Asrc
-            && self.asrc_tail_pending
-            && !self.drain_tail_pending
-        {
-            self.asrc.freeze_ratio();
-            self.prepare_asrc_drain_fade(None);
-            self.drain_tail_pending = true;
-            self.asrc_tail_pending = false;
+        if self.strategy_mode != ClockMode::Asrc {
+            return Ok(());
         }
-        self.write_drain_tail(sink)
+        if self.asrc_tail_pending && self.tail_periods == 0 {
+            self.plan_sent_period_tail();
+        }
+        for _ in 0..self.tail_periods {
+            sink.next_period(&mut |buffer| self.fill_tail_period(buffer))?;
+            self.tail_periods -= 1;
+        }
+        Ok(())
     }
 
     fn begin_reopen_tail(&mut self) -> bool {
         self.asrc.freeze_ratio();
-        self.reopen_tail_periods = if self.strategy_mode == ClockMode::Asrc {
-            self.asrc.drain_periods()
-        } else {
-            0
-        };
-        if self.reopen_tail_periods != 0 {
-            if !self.drain_fade_prepared {
-                self.prepare_asrc_drain_fade(None);
-            }
-            true
-        } else {
-            false
+        // A tail already written in full (the end of capture came first) is
+        // not planned again.
+        if self.strategy_mode == ClockMode::Asrc
+            && self.tail_periods == 0
+            && !self.drain_fade_prepared
+        {
+            self.plan_sent_period_tail();
         }
+        self.tail_periods != 0
     }
 
     fn write_reopen_tail_period<S: OutputSink>(
         &mut self,
         sink: &mut S,
     ) -> Result<bool, OutputError> {
-        debug_assert!(self.reopen_tail_periods != 0);
-        let mut fill = |buffer: &mut [f32]| {
-            buffer.fill(0.0);
-            self.asrc.flush(buffer);
-            self.apply_drain_fade_in(buffer);
-            self.apply_asrc_drain_fade(buffer);
-            self.apply_mute(buffer);
-        };
-        sink.next_period(&mut fill)?;
-        self.reopen_tail_periods -= 1;
-        Ok(self.reopen_tail_periods == 0)
-    }
-
-    fn write_drain_tail<S: OutputSink>(&mut self, sink: &mut S) -> Result<(), OutputError> {
-        if self.strategy_mode != ClockMode::Asrc || !self.drain_tail_pending {
-            return Ok(());
-        }
-        self.drain_tail_pending = false;
-        let periods = self.asrc.drain_periods();
-        if periods == 0 {
-            return Ok(());
-        }
-        if !self.drain_fade_prepared {
-            self.prepare_asrc_drain_fade(None);
-        }
-        for _ in 0..periods {
-            let mut fill = |buffer: &mut [f32]| {
-                buffer.fill(0.0);
-                self.asrc.flush(buffer);
-                self.apply_drain_fade_in(buffer);
-                self.apply_asrc_drain_fade(buffer);
-                self.apply_mute(buffer);
-            };
-            sink.next_period(&mut fill)?;
-        }
-        Ok(())
+        debug_assert!(self.tail_periods != 0);
+        sink.next_period(&mut |buffer| self.fill_tail_period(buffer))?;
+        self.tail_periods = self.tail_periods.saturating_sub(1);
+        Ok(self.tail_periods == 0)
     }
 }
 
@@ -4989,13 +4989,18 @@ mod tests {
     /// A 48 kHz scene into a 44.1 kHz ASRC whose ring holds exactly one take
     /// of a 997 Hz tone, rendered with capture still running.
     fn asrc_after_one_whole_take() -> (OutputState, Arc<Shared>, Vec<f32>) {
+        asrc_after_one_whole_take_with_period(441)
+    }
+
+    fn asrc_after_one_whole_take_with_period(
+        period_frames: usize,
+    ) -> (OutputState, Arc<Shared>, Vec<f32>) {
         let shared = Arc::new(Shared::new());
         shared.scene_rate.store(48_000, Ordering::Release);
         shared
             .clock_mode
             .store(ClockMode::Asrc.as_u32(), Ordering::Release);
         shared.capture_started.store(true, Ordering::Release);
-        let period_frames = 441;
         let (mut audio_in, audio) = RingBuffer::<f32>::new(4_096 * 2);
         let (mut timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
         let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
@@ -5033,7 +5038,7 @@ mod tests {
         output.fill(&mut period);
         assert_eq!(output.audio.slots(), 0, "the take did not empty the ring");
         assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
-        assert!(!output.drain_tail_pending, "capture had not ended yet");
+        assert_eq!(output.tail_periods, 0, "capture had not ended yet");
         (output, shared, period)
     }
 
@@ -5074,7 +5079,7 @@ mod tests {
         // underrun, and the tail is written once.
         assert_eq!(sink.periods.len(), 1);
         assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
-        assert!(!output.drain_tail_pending);
+        assert_eq!(output.tail_periods, 0);
         assert!(output.write_terminal_tail(&mut sink).is_ok());
         assert_eq!(sink.periods.len(), 1, "the tail was written twice");
 
@@ -5100,6 +5105,82 @@ mod tests {
         assert!(
             step <= tone_step + 0.05,
             "the tail step {step} exceeded the tone bound {}",
+            tone_step + 0.05
+        );
+    }
+
+    #[test]
+    fn the_end_of_capture_seen_while_the_device_asks_for_a_period_puts_the_tail_in_it() {
+        let (mut output, shared, period) = asrc_after_one_whole_take();
+        let delay = output.asrc.output_delay();
+
+        // The output thread is waiting inside the sink when capture ends, so
+        // the end is first seen by the period the device asks for next.
+        shared.capture_done.store(true, Ordering::Release);
+        let mut next = vec![0.0; 441 * 2];
+        output.fill(&mut next);
+
+        assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
+        assert_eq!(output.tail_periods, 0);
+        assert!(output.ended());
+        let mut sink = TailSink {
+            periods: Vec::new(),
+            period_frames: 441,
+        };
+        output.write_terminal_tail(&mut sink).unwrap();
+        assert!(sink.periods.is_empty(), "the tail was written twice");
+
+        let mut frames = left(&period);
+        frames.extend(left(&next));
+        let signal_end = 441 + delay;
+        let pre_fade_peak = frames[441..signal_end - 88]
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        assert!(
+            pre_fade_peak > 0.5,
+            "the period lost the tail before its fade: peak {pre_fade_peak}"
+        );
+        assert_eq!(frames[signal_end - 1], 0.0);
+        assert!(frames[signal_end..].iter().all(|sample| *sample == 0.0));
+        let tone_step = 2.0 * (std::f32::consts::PI * 997.0 / 44_100.0).sin();
+        let step = max_step(&frames[220..signal_end]);
+        assert!(
+            step <= tone_step + 0.05,
+            "the tail step {step} exceeded the tone bound {}",
+            tone_step + 0.05
+        );
+    }
+
+    #[test]
+    fn the_end_of_capture_during_a_reopen_drain_writes_only_the_periods_left() {
+        let (mut output, shared, period) = asrc_after_one_whole_take_with_period(44);
+        let delay = output.asrc.output_delay();
+        assert_eq!(output.asrc.drain_periods(), 3);
+        let mut sink = TailSink {
+            periods: Vec::new(),
+            period_frames: 44,
+        };
+        assert!(output.begin_reopen_tail());
+        assert!(!output.write_reopen_tail_period(&mut sink).unwrap());
+
+        shared.capture_done.store(true, Ordering::Release);
+        assert!(output.ended());
+        output.write_terminal_tail(&mut sink).unwrap();
+        assert_eq!(sink.periods.len(), 3, "the end restarted the reopen drain");
+
+        let mut frames = left(&period);
+        for tail in &sink.periods {
+            frames.extend(left(tail));
+        }
+        let signal_end = 44 + delay;
+        assert_eq!(frames[signal_end - 1], 0.0);
+        assert!(frames[signal_end - 2] != 0.0);
+        assert!(frames[signal_end..].iter().all(|sample| *sample == 0.0));
+        let tone_step = 2.0 * (std::f32::consts::PI * 997.0 / 44_100.0).sin();
+        let step = max_step(&frames[..signal_end]);
+        assert!(
+            step <= tone_step + 0.05,
+            "the interrupted tail stepped {step}, above the tone bound {}",
             tone_step + 0.05
         );
     }
