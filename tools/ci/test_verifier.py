@@ -112,7 +112,7 @@ class VerifierScriptTests(unittest.TestCase):
         return [line[len("CALL "):] for line in result.stdout.splitlines() if line.startswith("CALL ")]
 
     STATE = ("$s = Get-SsrVerifierState\n"
-             "Write-Output \"STATE $($s.Flags) $($s.FaultsInjected) $($s.Listed) $($s.Loads) "
+             "Write-Output \"STATE $($s.Flags) $($s.FaultsInjected) $($s.PoolAttempted) $($s.Listed) $($s.Loads) "
              "$($s.Unloads) $($s.CurrentNonPagedPoolAllocations) $($s.CurrentPagedPoolAllocations)\"")
 
     def state_line(self, result):
@@ -121,15 +121,15 @@ class VerifierScriptTests(unittest.TestCase):
 
     def test_query_is_parsed_for_our_driver_only(self):
         result = self.run_ps(self.STATE, dif=False)
-        self.assertEqual(self.state_line(result), f"STATE {0x9bf} 42 True 3 2 7 0")
+        self.assertEqual(self.state_line(result), f"STATE {0x9bf} 42 812 True 3 2 7 0")
 
     def test_the_older_query_shape_is_parsed_too(self):
         result = self.run_ps(self.STATE, dif=False, query=LEGACY_QUERY)
-        self.assertEqual(self.state_line(result), f"STATE {0x9bb} 42 True 3 2 7 0")
+        self.assertEqual(self.state_line(result), f"STATE {0x9bb} 42  True 3 2 7 0")
 
     def test_an_unlisted_driver_reads_as_not_listed(self):
         result = self.run_ps(self.STATE, dif=False, query="No drivers are currently verified.")
-        self.assertEqual(self.state_line(result), "STATE   False    ")
+        self.assertEqual(self.state_line(result), "STATE    False    ")
 
     def test_server_2022_sets_faults_first_then_all_flags_before_the_load(self):
         result = self.run_ps(
@@ -200,15 +200,21 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("/flags 0x209BB", workflow)
         package = workflow.split("\n  package:\n", 1)[1].split("\n  faults:\n", 1)[0]
         faults = workflow.split("\n  faults:\n", 1)[1].split("\n  codeql:\n", 1)[0]
-        for job, mode in ((package, "Standard"), (faults, "Faults")):
-            install = job.index("install-driver-test.ps1")
-            # Volatile flags before the first load, /dif once the driver runs.
-            self.assertLess(job.index(f"Enable-SsrVerifier -Mode {mode} -When BeforeLoad"), install)
-            self.assertGreater(job.index(f"Enable-SsrVerifier -Mode {mode} -When Loaded"), install)
-        self.assertIn("os: [windows-2022, windows-2025]", faults)
-        self.assertIn("Invoke-SsrRestartCycles", faults)
-        self.assertIn("uninstall.ps1", faults)
+        install = package.index("install-driver-test.ps1")
+        # Volatile flags before the first load, /dif once the driver runs.
+        self.assertLess(package.index("Enable-SsrVerifier -Mode Standard -When BeforeLoad"), install)
+        self.assertGreater(package.index("Enable-SsrVerifier -Mode Standard -When Loaded"), install)
         self.assertIn("Invoke-SsrRestartCycles -InstanceId $device.InstanceId -Count 5", package)
+        # The load path through the driver's own switch on both images; the
+        # running image through Verifier's systematic failures where /dif exists.
+        self.assertIn("os: [windows-2022, windows-2025]", faults)
+        self.assertGreater(faults.index("Invoke-SsrFaultSweep"), faults.index("install-driver-test.ps1"))
+        self.assertIn("Enable-SsrVerifier -Mode Faults -When Loaded", faults)
+        self.assertIn("Disable-SsrVerifierFaults", faults)
+        self.assertIn("uninstall.ps1", faults)
+        for job in (package, faults):
+            self.assertIn("timeout-minutes: 5", job.split("run: ./tools/ci/install-driver-test.ps1", 1)[0].rsplit("- name:", 1)[1])
+            self.assertIn("hang-dump.ps1", job)
 
 
 if __name__ == "__main__":

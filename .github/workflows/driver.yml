@@ -247,11 +247,19 @@ jobs:
           Enable-SsrVerifier -Mode Standard -When BeforeLoad
 
       # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
-      # by the tester's own install.ps1.
+      # by the tester's own install.ps1. It takes under a minute; one that
+      # does not return is a driver that never finished starting.
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
         id: install
+        timeout-minutes: 5
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      - name: Where the install waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.install.outcome == 'failure' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tools/ci/hang-dump.ps1 -Processes drvinst, rundll32
 
       - name: Driver Verifier on the running driver (Server 2025, tools/ci/verifier.ps1)
         if: steps.install.outputs.loaded == 'true'
@@ -513,18 +521,25 @@ jobs:
           & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
           if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
 
-  # Error branches only run when something fails. Driver Verifier fails the
-  # driver's own allocations on purpose (tools/ci/verifier.ps1 -Mode Faults):
-  # randomized low-resources simulation where volatile settings allow it
-  # (Server 2022), systematic low-resources simulation where `/dif ... /now`
-  # exists (Server 2025), which fails each distinct call stack once. A start
-  # that fails is expected here; a bugcheck (a leak at unload, a double free,
-  # a wrong IRQL) loses the runner and fails the job.
+  # Error branches only run when something fails. Driver Verifier cannot make
+  # the load path fail on these runners: Server 2022's volatile settings list
+  # the driver but intercept none of its calls, and Server 2025's
+  # `/dif ... /now` attaches to the running image only and is gone after the
+  # next unload (ADR 0027, 2026-10-14). So the driver has its own switch:
+  # Parameters\FaultInjectAt fails the N-th resource acquisition after the
+  # image loads, and the unload writes what the instance still held. The sweep
+  # restarts the device once per fault point of a clean load (DriverEntry,
+  # AddDevice, StartDevice and whatever the endpoint builder opens) and needs
+  # every instance to leave nothing behind and the last, clean one to bring
+  # all three endpoints back. On Server 2025 the running image then gets
+  # Verifier's systematic failures while it plays and is fuzzed, and must
+  # play correctly once they stop. A bugcheck loses the runner and fails the
+  # job.
   faults:
-    name: driver under injected allocation failures (${{ matrix.os }})
+    name: driver error branches under injected failures (${{ matrix.os }})
     needs: build
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -545,55 +560,78 @@ jobs:
             Start-Service -Name $name
           }
 
-      # Server 2022: randomized failures from the first load, so the install
-      # itself may meet one. Server 2025: systematic failures once the driver
-      # runs, so the restarts below meet them (tools/ci/verifier.ps1).
-      - name: Driver Verifier with injected allocation failures before the driver loads (Server 2022)
-        shell: pwsh
-        run: |
-          . ./tools/ci/verifier.ps1
-          Enable-SsrVerifier -Mode Faults -When BeforeLoad
-
-      # What follows only needs the device node and the kit.
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
         id: install
-        continue-on-error: true
+        timeout-minutes: 5
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
 
-      - name: Driver Verifier with injected allocation failures on the running driver (Server 2025)
-        if: steps.install.outputs.loaded == 'true'
+      - name: Where the install waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.install.outcome == 'failure' }}
+        timeout-minutes: 15
         shell: pwsh
-        run: |
-          . ./tools/ci/verifier.ps1
-          Enable-SsrVerifier -Mode Faults -When Loaded
+        run: ./tools/ci/hang-dump.ps1 -Processes drvinst, rundll32
 
-      - name: Restart the device 30 times under injected failures
-        id: cycles
-        if: ${{ !cancelled() && steps.install.outputs.kit != '' }}
-        timeout-minutes: 20
+      - name: Fail each fault point of a load once (tools/ci/fault-sweep.ps1)
+        id: sweep
+        if: steps.install.outputs.loaded == 'true'
+        timeout-minutes: 40
         shell: pwsh
         run: |
-          . ./tools/ci/verifier.ps1
+          . ./tools/ci/fault-sweep.ps1
           . ./tools/ci/package-identities.ps1
           $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
           if (-not $device) { throw 'install created no Spatial SoftReceiver device' }
-          $cycles = @(Invoke-SsrRestartCycles -InstanceId $device.InstanceId -Count 30)
-          $failed = @($cycles | Where-Object Problem -ne 0).Count
+          $steps = @(Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Max 400)
+          $failedStarts = @($steps | Where-Object { $_.FailedCall -gt 0 -and $_.StartProblem -ne 0 }).Count
+          $summary = "fault sweep (${{ matrix.os }}): $($steps.Count - 1) fault points failed one at a time ($failedStarts of them failed the start); every instance unloaded holding nothing"
+          Write-Host $summary
+          Add-Content $env:GITHUB_STEP_SUMMARY "`n$summary`n"
+          $deadline = (Get-Date).AddSeconds(60)
+          while ($true) {
+            try { ./tools/ci/endpoint-states.ps1 -InstanceId $device.InstanceId; break }
+            catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Seconds 3 }
+          }
+
+      - name: Where the sweep waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.sweep.outcome == 'failure' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tools/ci/hang-dump.ps1 -Processes pnputil
+
+      - uses: actions/setup-python@v7
+        if: ${{ matrix.os == 'windows-2025' && steps.sweep.outcome == 'success' }}
+        with:
+          python-version: "3.13"
+
+      # Runtime allocations (streams, packets, notifications, control-device
+      # opens and READs) under Verifier's systematic low-resources simulation
+      # on the running image. Failures are expected while it is on; the run
+      # afterwards must pass.
+      - name: Play and fuzz under systematic failures, then play clean (Server 2025)
+        if: ${{ matrix.os == 'windows-2025' && steps.sweep.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          python -m pip install --quiet -r tools/ci/requirements.txt
+          Enable-SsrVerifier -Mode Faults -When Loaded | Out-Null
+          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'flow-faults.json')
+          Write-Host "flow check under failures exited $LASTEXITCODE (failures expected)"
+          python tools/ci/ioctl_fuzz.py --seconds 30 --seed ${{ github.run_id }} --summary (Join-Path $env:RUNNER_TEMP 'fuzz-faults.json')
+          Write-Host "fuzzer under failures exited $LASTEXITCODE"
           $state = Get-SsrVerifierState
-          $summary = "faults (${{ matrix.os }}): 30 restarts, $failed left a problem code (expected under injection); verifier faults injected: $($state.FaultsInjected); loads $($state.Loads), unloads $($state.Unloads)"
+          Disable-SsrVerifierFaults
+          $summary = "systematic failures (${{ matrix.os }}): $($state.FaultsInjected) allocations failed on purpose of $($state.PoolAttempted)"
           Write-Host $summary
           Add-Content $env:GITHUB_STEP_SUMMARY "`n$summary`n"
           if (-not $state.Listed) { throw 'Driver Verifier is not checking spatialsoftreceiver.sys' }
-          if ($state.Loads -lt 2) { throw "verifier saw $($state.Loads) loads; the restarts did not reload the image under it" }
-          # No failure injected means no error branch ran: the job tested
-          # nothing. A count verifier does not print on this image is a warning.
-          if ($null -eq $state.FaultsInjected) { Write-Host '::warning::verifier /query printed no count of deliberately failed allocations' }
-          elseif ($state.FaultsInjected -eq 0) { throw 'verifier failed no allocation on purpose in 30 restarts' }
+          if (-not $state.FaultsInjected) { throw 'verifier failed no allocation on purpose' }
+          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'flow-after-faults.json')
+          if ($LASTEXITCODE -ne 0) { throw "the driver did not play correctly after the failures stopped (exit $LASTEXITCODE)" }
 
-      # The last restart may have left the device started or failed; either
-      # way the uninstall removes it, and the image unload is where Pool
-      # Tracking checks for leaks.
+      # The uninstall unloads the last image; on Server 2025 that is the one
+      # Verifier watched, and its pool tracking checks for leaks there.
       - name: Uninstall as a tester would (tools/testkit/uninstall.ps1)
         if: always() && steps.install.outputs.kit != ''
         shell: pwsh
@@ -601,13 +639,15 @@ jobs:
           & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
           if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
 
-      - name: Driver Verifier after the unload
+      - name: Keep the flow summaries
         if: always()
-        shell: pwsh
-        run: |
-          . ./tools/ci/verifier.ps1
-          $state = Get-SsrVerifierState
-          Write-Host "listed $($state.Listed), loads $($state.Loads), unloads $($state.Unloads), current nonpaged allocations $($state.CurrentNonPagedPoolAllocations)"
+        uses: actions/upload-artifact@v7
+        with:
+          name: faults-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/flow-*.json
+            ${{ runner.temp }}/fuzz-*.json
+          if-no-files-found: ignore
 
   codeql:
     name: CodeQL Windows driver suites

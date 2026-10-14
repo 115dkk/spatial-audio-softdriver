@@ -116,6 +116,12 @@ function Enable-SsrVerifier {
     $state
 }
 
+function Disable-SsrVerifierFaults {
+    # Stops systematic failures on a running driver (Server 2025) and leaves
+    # the other checks on, so a run after it shows the driver recovered.
+    if (Test-SsrDifVerifier) { Invoke-SsrVerifier @('/faultssystematic', 'disableruntime') | Out-Null }
+}
+
 function Get-SsrVerifierState {
     # `verifier /query` has two shapes. Windows 10 and later print
     # `Verifier Flags: 0x...`, `Pool Allocations Failed Deliberately: N` and,
@@ -129,6 +135,7 @@ function Get-SsrVerifierState {
         Level = $null
         Flags = $null
         FaultsInjected = $null
+        PoolAttempted = $null
         Listed = $false
         Loads = $null
         Unloads = $null
@@ -142,6 +149,7 @@ function Get-SsrVerifierState {
         $state.Level = $Matches[1]
         $state.Flags = [Convert]::ToInt64($Matches[1], 16)
     }
+    if ($text -match '(?im)^\s*Pool Allocations Attempted:\s*(\d+)') { $state.PoolAttempted = [long]$Matches[1] }
     if ($text -match '(?im)^\s*Pool Allocations Failed Deliberately:\s*(\d+)') { $state.FaultsInjected = [long]$Matches[1] }
     elseif ($text -match '(?im)^\s*AllocationsFailedDeliberately:\s*(\d+)') { $state.FaultsInjected = [long]$Matches[1] }
     $name = [regex]::Escape($SsrVerifiedImage)
