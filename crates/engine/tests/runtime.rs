@@ -128,8 +128,10 @@ fn assert_tone_step_bound(frames: &[f32], frequency: f32) {
     let tone_step = 2.0 * (std::f32::consts::PI * frequency / 44_100.0).sin();
     // The 256-tap ASRC can overshoot a full-scale sine slightly at the finite
     // input boundary; leave a small filter-ringing allowance while still being
-    // far below the pre-fix zero-to-full-scale restart.
-    let margin = 0.05;
+    // far below the pre-fix zero-to-full-scale restart. The ringing's phase
+    // follows the ratio: at the EOF boundary it reached 0.051 above the tone's
+    // step over corrections of 0 to 2,000 ppm in 50 ppm steps (0.039 at 2,000).
+    let margin = 0.06;
     let max_step = frames
         .windows(2)
         .map(|pair| (pair[1] - pair[0]).abs())
@@ -3162,11 +3164,13 @@ fn asrc_eof_fades_through_the_real_tail_and_stays_silent() {
         .rposition(|sample| *sample != 0.0)
         .expect("EOF emitted no tail signal");
     // Pinned for this fixture: the third period here is the final rendered
-    // one, its padded take held 105 output frames of real input, and the
-    // signal ends the 117-frame delay after them. The arithmetic behind the
-    // pin is checked against known input by the engine's unit tests; here a
-    // tail that is skipped, repeated or cut short moves the end.
-    let predicted_signal_end = 2 * 441 + 105 + 117;
+    // one, its padded take held 111 output frames of real input, and the
+    // signal ends the 117-frame delay after them. The take follows the ratio:
+    // after its first 0.2 s window the controller drains the 150 ms the burst
+    // left at 1,000 ppm (it was 105 frames at 2,000 ppm). The arithmetic
+    // behind the pin is checked against known input by the engine's unit
+    // tests; here a tail that is skipped, repeated or cut short moves the end.
+    let predicted_signal_end = 2 * 441 + 111 + 117;
     assert!(
         last_nonzero.abs_diff(predicted_signal_end - 1) <= 2,
         "EOF last nonzero frame {last_nonzero} missed the pinned end {}",
