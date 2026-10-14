@@ -174,7 +174,11 @@ pub struct EngineConfig {
     pub target_ms: f32,
     /// Crossing-ring capacity in milliseconds; must exceed `target_ms` by at
     /// least `chain.max_block` frames at 48 kHz, the largest delivery a decoder
-    /// hands over at once (one E-AC-3 sync frame by default).
+    /// hands over at once (one E-AC-3 sync frame by default). The controller
+    /// holds the trough at `target_ms` plus one output period only while the
+    /// ring also has room for one delivery above that, so the capacity has to
+    /// cover target, period and delivery with room to spare; the default (320
+    /// ms, 15,360 frames) is the ring the runtime always had.
     pub capacity_ms: f32,
     pub clock: ClockPreference,
     /// Size of the buffer one `CaptureSource::read` may fill.
@@ -191,7 +195,7 @@ impl Default for EngineConfig {
         Self {
             chain: ChainConfig::default(),
             target_ms: 10.0,
-            capacity_ms: 80.0,
+            capacity_ms: 320.0,
             clock: ClockPreference::Auto,
             read_buffer_bytes: 512 * 1024,
             read_wait: Duration::from_millis(20),
@@ -4315,6 +4319,25 @@ mod tests {
             480.0
         );
         assert_eq!(trough_setpoint_frames(480.0, 960.0, 1_536.0, 1_000.0), 0.0);
+    }
+
+    #[test]
+    fn the_default_ring_never_caps_the_setpoint_for_a_dd_plus_delivery() {
+        // A DD+ sync frame lands as up to four mixer blocks (40 ms). The
+        // setpoint keeps one late delivery's worth above the target only while
+        // the ring has room for that delivery after the take; at 80 ms the
+        // 20 ms period was capped to a 20 ms trough and underran.
+        let config = EngineConfig::default();
+        let capacity = capacity_frames(config.capacity_ms, crate::MIX_RATE) as f64;
+        let target = f64::from(config.target_ms) * 48.0;
+        let delivery = 4.0 * crate::MIX_FRAMES as f64;
+        for take in [144.0, 480.0, 960.0, 1_920.0, 4_096.0] {
+            assert_eq!(
+                trough_setpoint_frames(target, take, delivery, capacity),
+                target + f64::min(take, delivery),
+                "{take}-frame period"
+            );
+        }
     }
 
     /// Drives the real output state (ring, priming, ASRC) with whole blocks
