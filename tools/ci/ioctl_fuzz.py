@@ -29,16 +29,16 @@ def ctl_code(device_type, function, method, access):
     return (device_type << 16) | (access << 14) | (function << 2) | method
 
 
-IOCTL_BIO_QUERY_INFO = ctl_code(FILE_DEVICE_UNKNOWN, 0x900, METHOD_BUFFERED, FILE_READ_ACCESS)
-IOCTL_BIO_READ = ctl_code(FILE_DEVICE_UNKNOWN, 0x901, METHOD_OUT_DIRECT, FILE_READ_ACCESS)
-IOCTL_BIO_SET_RATE_TRIM = ctl_code(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-IOCTL_BIO_GET_STATS = ctl_code(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_READ_ACCESS)
+IOCTL_SSR_QUERY_INFO = ctl_code(FILE_DEVICE_UNKNOWN, 0x900, METHOD_BUFFERED, FILE_READ_ACCESS)
+IOCTL_SSR_READ = ctl_code(FILE_DEVICE_UNKNOWN, 0x901, METHOD_OUT_DIRECT, FILE_READ_ACCESS)
+IOCTL_SSR_SET_RATE_TRIM = ctl_code(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+IOCTL_SSR_GET_STATS = ctl_code(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_READ_ACCESS)
 
 ABI_VERSION = 1
 ABI_INFO_SIZE = 160
 READ_REQUEST_SIZE = 8
 RATE_TRIM_SIZE = 8
-BIO_STATS_SIZE = 144
+SSR_STATS_SIZE = 144
 RECORD_HEADER_SIZE = 40
 READ_MAX_BYTES = 256 * 1024
 TRIM_LIMIT_Q16 = 2000 * 65536
@@ -54,19 +54,19 @@ PENDING_WAIT_MS = 100
 CANCEL_WAIT_MS = 5000
 
 KNOWN = {
-    "QUERY_INFO": IOCTL_BIO_QUERY_INFO,
-    "READ": IOCTL_BIO_READ,
-    "SET_RATE_TRIM": IOCTL_BIO_SET_RATE_TRIM,
-    "GET_STATS": IOCTL_BIO_GET_STATS,
+    "QUERY_INFO": IOCTL_SSR_QUERY_INFO,
+    "READ": IOCTL_SSR_READ,
+    "SET_RATE_TRIM": IOCTL_SSR_SET_RATE_TRIM,
+    "GET_STATS": IOCTL_SSR_GET_STATS,
 }
 STRUCT_SIZES = {
     "QUERY_INFO": (0, ABI_INFO_SIZE),
     "READ": (READ_REQUEST_SIZE, RECORD_HEADER_SIZE),
     "SET_RATE_TRIM": (RATE_TRIM_SIZE, 0),
-    "GET_STATS": (0, BIO_STATS_SIZE),
+    "GET_STATS": (0, SSR_STATS_SIZE),
 }
 
-# Mirrors driver/bioatmos/control.cpp. QUERY_INFO and GET_STATS ignore input;
+# Mirrors driver/spatialsoftreceiver/control.cpp. QUERY_INFO and GET_STATS ignore input;
 # SET_RATE_TRIM accepts extensions but reserved must be zero; READ accepts
 # extensions and any non-empty output MDL. Runtime ring state can still turn an
 # otherwise accepted READ into BUFFER_TOO_SMALL, so only successes are judged.
@@ -74,7 +74,7 @@ def expects_success(name, input_size, output_size, reserved=0):
     if name == "QUERY_INFO":
         return output_size >= ABI_INFO_SIZE
     if name == "GET_STATS":
-        return output_size >= BIO_STATS_SIZE
+        return output_size >= SSR_STATS_SIZE
     if name == "SET_RATE_TRIM":
         return input_size >= RATE_TRIM_SIZE and reserved == 0
     if name == "READ":
@@ -315,15 +315,15 @@ def exercise_races(summary, rng):
     try:
         for action in ("cancel", "stats_trim", "close"):
             request = struct.pack("<II", READ_MAX_BYTES, 0xFFFFFFFF)
-            operation = device.begin(IOCTL_BIO_READ, request, READ_MAX_BYTES)
+            operation = device.begin(IOCTL_SSR_READ, request, READ_MAX_BYTES)
             if action == "cancel":
                 thread = threading.Thread(target=device.cancel, args=(operation,))
                 thread.start()
                 thread.join()
                 device.finish(operation)
             elif action == "stats_trim":
-                stats = device.begin(IOCTL_BIO_GET_STATS, b"", BIO_STATS_SIZE)
-                trim = device.begin(IOCTL_BIO_SET_RATE_TRIM,
+                stats = device.begin(IOCTL_SSR_GET_STATS, b"", SSR_STATS_SIZE)
+                trim = device.begin(IOCTL_SSR_SET_RATE_TRIM,
                                     struct.pack("<iI", rng.choice(TRIM_EXTREMES), 0), 0)
                 device.cancel(operation)
                 device.finish(stats)
@@ -344,17 +344,17 @@ def exercise_races(summary, rng):
 def final_health(summary):
     device = WindowsDevice()
     try:
-        ok, error, info, returned = device.ioctl(IOCTL_BIO_QUERY_INFO, b"", ABI_INFO_SIZE)
+        ok, error, info, returned = device.ioctl(IOCTL_SSR_QUERY_INFO, b"", ABI_INFO_SIZE)
         info_good = ok and returned == ABI_INFO_SIZE
         if info_good:
             abi_version, struct_size = struct.unpack_from("<II", info)
             info_good = abi_version == ABI_VERSION and struct_size == ABI_INFO_SIZE
         summary["checks"]["query_info"] = info_good
-        ok, error, stats, returned = device.ioctl(IOCTL_BIO_GET_STATS, b"", BIO_STATS_SIZE)
-        stats_good = ok and returned == BIO_STATS_SIZE and struct.unpack_from("<I", stats)[0] == BIO_STATS_SIZE
+        ok, error, stats, returned = device.ioctl(IOCTL_SSR_GET_STATS, b"", SSR_STATS_SIZE)
+        stats_good = ok and returned == SSR_STATS_SIZE and struct.unpack_from("<I", stats)[0] == SSR_STATS_SIZE
         summary["checks"]["get_stats"] = stats_good
         started = time.monotonic()
-        ok, _, _, _ = device.ioctl(IOCTL_BIO_READ, struct.pack("<II", 1, 50), READ_MAX_BYTES)
+        ok, _, _, _ = device.ioctl(IOCTL_SSR_READ, struct.pack("<II", 1, 50), READ_MAX_BYTES)
         summary["checks"]["read_bounded"] = ok and time.monotonic() - started < 2.0
     finally:
         device.close()

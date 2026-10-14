@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
-use bio_types::{PcmFormat, Position, SampleType, SceneBlock, Speaker};
 use decode::{
     DecodeConfig, DecodeError,
     direct::{DirectLayout, DirectLayoutOverride, DirectLayouts, parse_speaker, preset},
     pcm::{PcmDecoder, default_mask, speaker_position},
 };
 use proptest::prelude::*;
+use ssr_types::{PcmFormat, Position, SampleType, SceneBlock, Speaker};
 
 fn format(bits: u16, valid: u16, sample_type: SampleType, channels: u16) -> PcmFormat {
     PcmFormat {

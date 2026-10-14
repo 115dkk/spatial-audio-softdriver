@@ -3,7 +3,7 @@
 The driver test job installs the test-signed package (ADR 0027). When the
 runner's kernel loads it, this script plays a different tone into each render
 endpoint at the same time through WASAPI shared mode, reads the record stream
-from \\\\.\\SpatialSoftReceiver with IOCTL_BIO_READ meanwhile, and checks per endpoint:
+from \\\\.\\SpatialSoftReceiver with IOCTL_SSR_READ meanwhile, and checks per endpoint:
 
 * a format change and a stream start came before the data,
 * the data bytes follow each other (byte_pos) with no gap and no overrun,
@@ -32,9 +32,9 @@ import numpy as np
 
 from endpoints import CONTROL_DEVICE_PATH, ENDPOINT_NUMBERS, enumerate_endpoints, find_speaker
 
-IOCTL_BIO_QUERY_INFO = (0x22 << 16) | (1 << 14) | (0x900 << 2)
-IOCTL_BIO_READ = (0x22 << 16) | (1 << 14) | (0x901 << 2) | 2
-IOCTL_BIO_GET_STATS = (0x22 << 16) | (1 << 14) | (0x903 << 2)
+IOCTL_SSR_QUERY_INFO = (0x22 << 16) | (1 << 14) | (0x900 << 2)
+IOCTL_SSR_READ = (0x22 << 16) | (1 << 14) | (0x901 << 2) | 2
+IOCTL_SSR_GET_STATS = (0x22 << 16) | (1 << 14) | (0x903 << 2)
 READ_MAX_BYTES = 256 * 1024
 MAX_DATA_PAYLOAD = 64 * 1024
 
@@ -46,7 +46,7 @@ FLAG_DISCONTINUITY = 0x0001
 FLAG_REPEAT = 0x0002
 RECORD_ALIGN = 8
 
-# crates/bio-abi/src/wire.rs: RecordHeader, AbiInfo, BioStats.
+# crates/ssr-abi/src/wire.rs: RecordHeader, AbiInfo, DriverStats.
 MAX_ENDPOINTS = 4
 HEADER = struct.Struct("<HHIQQQIHH")
 ABI_INFO = struct.Struct("<IIIIQIIIIQQII" + "QIIII" * MAX_ENDPOINTS)
@@ -321,10 +321,10 @@ class ControlDevice:
         return out.raw[:returned.value]
 
     def query_info(self):
-        return parse_abi_info(self.ioctl(IOCTL_BIO_QUERY_INFO, b"", ABI_INFO.size))
+        return parse_abi_info(self.ioctl(IOCTL_SSR_QUERY_INFO, b"", ABI_INFO.size))
 
     def stats(self):
-        raw = self.ioctl(IOCTL_BIO_GET_STATS, b"", STATS_HEAD.size + MAX_ENDPOINTS * ENDPOINT_STATS.size)
+        raw = self.ioctl(IOCTL_SSR_GET_STATS, b"", STATS_HEAD.size + MAX_ENDPOINTS * ENDPOINT_STATS.size)
         size, opens, lateness, _ = STATS_HEAD.unpack_from(raw)
         endpoints = [dict(zip(["total_bytes", "overruns", "lost_bytes", "epoch", "state"],
                               ENDPOINT_STATS.unpack_from(raw, STATS_HEAD.size + i * ENDPOINT_STATS.size)))
@@ -332,7 +332,7 @@ class ControlDevice:
         return {"struct_size": size, "open_count": opens, "max_timer_lateness_us": lateness, "endpoints": endpoints}
 
     def read(self, min_bytes, timeout_ms):
-        return self.ioctl(IOCTL_BIO_READ, struct.pack("<II", min_bytes, timeout_ms), READ_MAX_BYTES)
+        return self.ioctl(IOCTL_SSR_READ, struct.pack("<II", min_bytes, timeout_ms), READ_MAX_BYTES)
 
     def close(self):
         self.kernel32.CloseHandle(self.handle)

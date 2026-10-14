@@ -1,6 +1,6 @@
-"""End-to-end driver ring check through bio-live and VB-CABLE.
+"""End-to-end driver ring check through ssr-live and VB-CABLE.
 
-Starts bio-live on the Spatial SoftReceiver control ring, plays a distinct shared-mode tone
+Starts ssr-live on the Spatial SoftReceiver control ring, plays a distinct shared-mode tone
 into each of the three endpoints (primary, music, passthrough), captures CABLE
 Output, then requires every tone to stand at least 20 dB above nearby spectral
 bins. A 20 dB margin is
@@ -56,7 +56,7 @@ LATENCY_CEILING_MS = 1_000
 
 
 def check_report(report):
-    """Returns failures for missing state and discontinuities in a bio-live report."""
+    """Returns failures for missing state and discontinuities in a ssr-live report."""
     problems = []
     for key in LOSS_COUNTERS:
         if key not in report:
@@ -109,7 +109,7 @@ def check_report(report):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bio-live", required=True)
+    parser.add_argument("--ssr-live", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--seconds", type=float, default=8.0)
     parser.add_argument("--render", default="VB-Audio Virtual Cable")
@@ -119,8 +119,8 @@ def main():
     parser.add_argument("--min-margin-db", type=float, default=20.0)
     parser.add_argument(
         "--record",
-        help="also have bio-live write the READ stream it captured to this dump, "
-        "so a failure can be replayed offline (bio-replay render)",
+        help="also have ssr-live write the READ stream it captured to this dump, "
+        "so a failure can be replayed offline (ssr-replay render)",
     )
     args = parser.parse_args()
 
@@ -135,7 +135,7 @@ def main():
     microphone = sc.get_microphone(args.capture)
     rate = 48_000
     command = [
-        args.bio_live,
+        args.ssr_live,
         "play",
         "--source",
         "driver",
@@ -178,14 +178,14 @@ def main():
             chunks.append(recorder.record(numframes=rate // 20))
         if live.poll() is None:
             live.kill()
-            errors.append("bio-live timed out")
+            errors.append("ssr-live timed out")
         for player in players:
             player.join()
         chunks.append(recorder.record(numframes=rate // 2))
 
     stderr = live.stderr.read() if live.stderr else ""
     if live.returncode:
-        errors.append(f"bio-live exited with {live.returncode}: {stderr}")
+        errors.append(f"ssr-live exited with {live.returncode}: {stderr}")
     captured = np.concatenate(chunks).astype(np.float32)
     mono = captured.mean(axis=1)
     tones = {}
@@ -206,7 +206,7 @@ def main():
             report = json.load(source)
         errors.extend(check_report(report))
     else:
-        errors.append("bio-live did not write its report")
+        errors.append("ssr-live did not write its report")
     summary = {
         "render_endpoints": rows,
         "tones": tones,

@@ -6,8 +6,8 @@ name: CI
 #
 #   lint      fmt, clippy -D warnings (also for the x64 and ARM64 Windows
 #             targets, so cfg(windows) code is linted from Linux), the
-#             bio-policy gates (forbid unsafe, unsafe budget, feature registry,
-#             Windows code only in bio-sys), the release gate's unit tests and
+#             ssr-policy gates (forbid unsafe, unsafe budget, feature registry,
+#             Windows code only in ssr-sys), the release gate's unit tests and
 #             the CI tools' unit tests
 #   test      cargo test on Linux, Windows Server 2022 and 2025 (x64) and
 #             Windows 11 (ARM64), debug and release; on x64 Windows also the
@@ -15,8 +15,8 @@ name: CI
 #   replay    the replay fixtures rendered twice (hashes must match) and,
 #             on pull requests, against the base commit (reported, not failed)
 #   audio     Windows Server 2022 and 2025 with a virtual audio cable
-#             (VB-CABLE): the device tests bio-sys keeps #[ignore]d, the live
-#             path played into the cable and recorded back against bio-replay's
+#             (VB-CABLE): the device tests ssr-sys keeps #[ignore]d, the live
+#             path played into the cable and recorded back against ssr-replay's
 #             offline render, and soaks (exclusive, shared, under CPU load and
 #             under full page heap) that must end without faults, restarts or
 #             underruns
@@ -71,7 +71,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       # Type-checking needs no linker, so the Windows targets are linted here
-      # too; the cfg(windows) modules of bio-sys and bio-live are otherwise
+      # too; the cfg(windows) modules of ssr-sys and ssr-live are otherwise
       # compiled on Windows but never linted.
       - name: cargo clippy for Windows x64 and ARM64 (deny warnings)
         run: |
@@ -79,8 +79,8 @@ jobs:
             cargo clippy --workspace --all-targets --locked --target "$target" -- -D warnings
           done
 
-      - name: Policy gates (crates/bio-policy)
-        run: cargo test -p bio-policy --locked -- --nocapture
+      - name: Policy gates (crates/ssr-policy)
+        run: cargo test -p ssr-policy --locked -- --nocapture
 
       - name: Release gate unit tests
         run: python3 -m unittest discover -s .github/scripts -p "test_*.py" -v
@@ -89,12 +89,12 @@ jobs:
         with:
           python-version: "3.13"
 
-      # BIO_TEST_PWSH runs the tests that compile the tools' inline C# and run
+      # SSR_TEST_PWSH runs the tests that compile the tools' inline C# and run
       # their PowerShell logic (endpoint lookup, exclusive-policy verdicts);
       # PowerShell 7 ships on the hosted images.
       - name: CI tool unit tests (tools/ci)
         env:
-          BIO_TEST_PWSH: pwsh
+          SSR_TEST_PWSH: pwsh
         run: |
           python -m pip install --quiet -r tools/ci/requirements.txt
           python -m unittest discover -s tools/ci -p "test_*.py" -v
@@ -125,7 +125,7 @@ jobs:
           shared-key: test-${{ matrix.profile }}
 
       # --no-fail-fast: one failing test binary must not hide the others,
-      # many of which (bio-sys, bio-live platform) run only on Windows.
+      # many of which (ssr-sys, ssr-live platform) run only on Windows.
       - name: cargo test --workspace
         shell: bash
         run: cargo test --workspace --all-targets --locked --no-fail-fast $PROFILE_FLAG
@@ -159,16 +159,16 @@ jobs:
         with:
           shared-key: replay
 
-      - name: Generate the fixtures (apps/bio-replay/examples/replay_fixtures.rs)
+      - name: Generate the fixtures (apps/ssr-replay/examples/replay_fixtures.rs)
         shell: bash
-        run: cargo run --locked -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
+        run: cargo run --locked -q -p ssr-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
 
       - name: Render every dump twice with this commit; the hashes must match
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release -p bio-replay
-          bin=target/release/bio-replay
+          cargo build --locked --release -p ssr-replay
+          bin=target/release/ssr-replay
           fx="$RUNNER_TEMP/fx"
           {
             echo "## Replay output (${{ matrix.os }})"
@@ -178,7 +178,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           for d in pcm71 ddp51; do
             for run in 1 2; do
-              "$bin" render "$fx/$d.biodump" --profile "$fx/profile.toml" \
+              "$bin" render "$fx/$d.ssrdump" --profile "$fx/profile.toml" \
                 --out "$RUNNER_TEMP/$d-$run.wav" --report "$RUNNER_TEMP/$d-$run.json"
             done
             a=$(jq -r .output_sha256 "$RUNNER_TEMP/$d-1.json")
@@ -202,11 +202,11 @@ jobs:
           base="$RUNNER_TEMP/base"
           git worktree add --detach "$base" "$BASE_SHA"
           echo >> "$GITHUB_STEP_SUMMARY"
-          if ! (cd "$base" && cargo build --release -q -p bio-replay); then
-            echo "Base ${BASE_SHA:0:12} does not build bio-replay; nothing to compare." >> "$GITHUB_STEP_SUMMARY"
+          if ! (cd "$base" && cargo build --release -q -p ssr-replay); then
+            echo "Base ${BASE_SHA:0:12} does not build ssr-replay; nothing to compare." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          base_bin="$base/target/release/bio-replay"
+          base_bin="$base/target/release/ssr-replay"
           if ! "$base_bin" render --help > /dev/null 2>&1; then
             echo "Base ${BASE_SHA:0:12} has no render command; nothing to compare." >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -217,7 +217,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           for d in pcm71 ddp51; do
             head=$(jq -r .output_sha256 "$RUNNER_TEMP/$d-1.json")
-            if "$base_bin" render "$fx/$d.biodump" --profile "$fx/profile.toml" \
+            if "$base_bin" render "$fx/$d.ssrdump" --profile "$fx/profile.toml" \
                 --out "$RUNNER_TEMP/$d-base.wav" --report "$RUNNER_TEMP/$d-base.json"; then
               old=$(jq -r .output_sha256 "$RUNNER_TEMP/$d-base.json")
               if [ "$old" = "$head" ]; then verdict="unchanged"; else verdict="**changed** (base \`$old\`)"; fi
@@ -275,22 +275,22 @@ jobs:
           Write-Host "MMCSS $($mmcss.Status) ($($mmcss.StartType))"
           if ($mmcss.Status -ne 'Running') { throw "MMCSS is $($mmcss.Status)" }
 
-      - name: Build bio-live and bio-replay; write the fixtures
+      - name: Build ssr-live and ssr-replay; write the fixtures
         id: build
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release -p bio-live -p bio-replay
-          cargo run --locked --release -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
-          target/release/bio-live.exe devices
+          cargo build --locked --release -p ssr-live -p ssr-replay
+          cargo run --locked --release -q -p ssr-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
+          target/release/ssr-live.exe devices
 
       # The exclusive cadence tests run at a 20 ms period, longer than a PCM
       # block; exclusive_cadence_at_each_period prints the rate the sink
       # keeps at 3 to 40 ms (ADR 0026).
-      - name: Device tests bio-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
+      - name: Device tests ssr-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
         env:
-          BIO_TEST_EXCLUSIVE_PERIOD_MS: "20"
-        run: cargo test --locked --release -p bio-sys --test windows -- --ignored --test-threads=1 --nocapture
+          SSR_TEST_EXCLUSIVE_PERIOD_MS: "20"
+        run: cargo test --locked --release -p ssr-sys --test windows -- --ignored --test-threads=1 --nocapture
 
       # The stages below run even when an earlier one failed, so one CI round
       # reports on all of them; the job still fails.
@@ -314,7 +314,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           status=0
           for d in pcm71 ddp51; do
-            target/release/bio-replay.exe render "$fx/$d.biodump" --profile "$fx/profile.toml" \
+            target/release/ssr-replay.exe render "$fx/$d.ssrdump" --profile "$fx/profile.toml" \
               --out "$RUNNER_TEMP/$d-ref.wav" --report "$RUNNER_TEMP/$d-ref.json"
             # shared-warm keeps the endpoint running with a silent shared
             # stream, as other apps do on a desktop; shared starts it cold.
@@ -323,8 +323,8 @@ jobs:
               warm=()
               if [ "$run" = shared-warm ]; then warm=(--warm); fi
               s="$RUNNER_TEMP/loopback-$d-$run.json"
-              python tools/ci/loopback_check.py --bio-live target/release/bio-live.exe \
-                --dump "$fx/$d.biodump" --profile "$fx/profile.toml" \
+              python tools/ci/loopback_check.py --ssr-live target/release/ssr-live.exe \
+                --dump "$fx/$d.ssrdump" --profile "$fx/profile.toml" \
                 --reference "$RUNNER_TEMP/$d-ref.wav" --mode "$mode" "${warm[@]}" --period-ms 20 --summary "$s" \
                 --report "$RUNNER_TEMP/loopback-$d-$run-report.json" || status=1
               if [ -f "$s" ]; then
@@ -346,12 +346,12 @@ jobs:
         run: |
           set -uo pipefail
           python -m pip install --quiet -r tools/ci/requirements.txt
-          cargo build --locked --release -p bio-sys --example format_probe --example cable_capture || exit 1
+          cargo build --locked --release -p ssr-sys --example format_probe --example cable_capture || exit 1
           out="$RUNNER_TEMP/multichannel"
           python tools/ci/multichannel_loopback_check.py \
             --format-probe target/release/examples/format_probe.exe \
             --cable-capture target/release/examples/cable_capture.exe \
-            --bio-live target/release/bio-live.exe --bio-replay target/release/bio-replay.exe \
+            --ssr-live target/release/ssr-live.exe --ssr-replay target/release/ssr-replay.exe \
             --work "$out" --summary "$out/summary.json"
           status=$?
           {
@@ -375,7 +375,7 @@ jobs:
         shell: pwsh
         run: |
           $fx = Join-Path $env:RUNNER_TEMP 'fx'
-          $live = 'target/release/bio-live.exe'
+          $live = 'target/release/ssr-live.exe'
           Add-Content $env:GITHUB_STEP_SUMMARY "`n## Soaks (${{ matrix.os }})`n"
           Add-Content $env:GITHUB_STEP_SUMMARY '| soak | ran | underruns | restarts | latency p50 / p99 | ring trough | clock | verdict |'
           Add-Content $env:GITHUB_STEP_SUMMARY '| --- | --- | --- | --- | --- | --- | --- | --- |'
@@ -390,7 +390,7 @@ jobs:
           )
           foreach ($s in $soaks) {
             try {
-              ./tools/ci/soak.ps1 -BioLive $live -Fixtures $fx @s
+              ./tools/ci/soak.ps1 -SsrLive $live -Fixtures $fx @s
             } catch {
               Write-Host "::error::$($_.Exception.Message)"
               $failed += $s.Name
@@ -402,7 +402,7 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         run: >-
-          ./tools/ci/restart-stress.ps1 -BioLive target/release/bio-live.exe
+          ./tools/ci/restart-stress.ps1 -SsrLive target/release/ssr-live.exe
           -Fixtures (Join-Path $env:RUNNER_TEMP 'fx') -Symbols (Resolve-Path target/release).Path
 
       - name: Crash stacks (cdb on any dump)
@@ -421,8 +421,8 @@ jobs:
             ${{ runner.temp }}/soak-*.json
             ${{ runner.temp }}/soak-*.log
             ${{ runner.temp }}/dumps
-            target/release/bio_live.pdb
-            target/release/bio_replay.pdb
+            target/release/ssr_live.pdb
+            target/release/ssr_replay.pdb
           if-no-files-found: ignore
           retention-days: 14
 
@@ -471,7 +471,7 @@ jobs:
           shared-key: miri
 
       - name: cargo miri test
-        run: cargo +nightly miri test --locked -p bio-types -p bio-abi --lib
+        run: cargo +nightly miri test --locked -p ssr-types -p ssr-abi --lib
 
   fuzz:
     name: fuzz ${{ matrix.target }}
@@ -480,9 +480,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - crate: bio-abi
+          - crate: ssr-abi
             target: records
-          - crate: bio-abi
+          - crate: ssr-abi
             target: dump
           - crate: bitstream
             target: deframer

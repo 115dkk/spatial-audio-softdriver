@@ -72,14 +72,14 @@ class DumpTest(unittest.TestCase):
     def test_dump_records_round_trip_contract_fields(self):
         frames = tone_frames(4, 0.02)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tones.biodump"
+            path = Path(directory) / "tones.ssrdump"
             make_dump(path, frames, LAYOUTS[4][0])
             data = path.read_bytes()
         magic, abi, header_size, qpc_hz, version, reserved = struct.unpack_from(
             "<8sIIQII", data
         )
         self.assertEqual((magic, abi, header_size, qpc_hz, version, reserved),
-                         (b"BIODUMP\0", 1, 32, 10_000_000, 1, 0))
+                         (b"SSRDUMP\0", 1, 32, 10_000_000, 1, 0))
         records = []
         at = header_size
         while at < len(data):

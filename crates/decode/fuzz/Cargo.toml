@@ -16,7 +16,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 decode = { path = ".." }
 bitstream = { path = "../../bitstream" }
-bio-types = { path = "../../bio-types" }
+ssr-types = { path = "../../ssr-types" }
 
 [[bin]]
 name = "pcm"

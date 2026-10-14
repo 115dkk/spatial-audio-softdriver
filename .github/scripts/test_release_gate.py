@@ -8,14 +8,14 @@ class ShipsTest(unittest.TestCase):
     def test_build_inputs_ship(self):
         for path in [
             "crates/engine/src/lib.rs",
-            "apps/bio-replay/src/main.rs",
+            "apps/ssr-replay/src/main.rs",
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
-            "crates/bio-abi/include/bioatmos_abi.h",
-            "driver/bioatmos/minwavert.cpp",
-            "driver/bioatmos/spatialsoftreceiver.inx",
-            "driver/core/bio_ring.cpp",
+            "crates/ssr-abi/include/ssr_abi.h",
+            "driver/spatialsoftreceiver/minwavert.cpp",
+            "driver/spatialsoftreceiver/spatialsoftreceiver.inx",
+            "driver/core/ssr_ring.cpp",
             "tools/build-driver.ps1",
             "tools/testkit/install.ps1",
             "tools/ci/driver-test-kit.ps1",
@@ -43,9 +43,9 @@ class ShipsTest(unittest.TestCase):
         for path in [
             "crates/engine/tests/clock.rs",
             "crates/convolver/benches/perf.rs",
-            "crates/bio-abi/fuzz/fuzz_targets/records.rs",
+            "crates/ssr-abi/fuzz/fuzz_targets/records.rs",
             "crates/engine/README.md",
-            "crates/bio-policy/tests/gates.rs",
+            "crates/ssr-policy/tests/gates.rs",
             "features.toml",
             "unsafe-budget.toml",
             "docs/adr/0001-shell.md",
@@ -77,7 +77,7 @@ serde = { version = "1.0.229" }
     LOCK = """version = 4
 
 [[package]]
-name = "bio-abi"
+name = "ssr-abi"
 version = "0.1.0"
 dependencies = [
  "zerocopy",
@@ -100,7 +100,7 @@ checksum = "00"
 
     def test_lock_rewrite_leaves_registry_packages_alone(self):
         lock = g.set_lock_versions(self.LOCK, "0.1.0", "0.2.0")
-        self.assertIn('name = "bio-abi"\nversion = "0.2.0"', lock)
+        self.assertIn('name = "ssr-abi"\nversion = "0.2.0"', lock)
         self.assertIn('name = "unrelated"\nversion = "0.1.0"', lock)
 
     def test_latest_tag_ignores_suffixed_tags(self):

@@ -23,7 +23,7 @@ DllMain도 문제입니다. EqualizerAPO-XT에서는 복제 방지가 걸린 플
 
 ### 프로세스
 
-- 플러그인 하나에 플러그인 호스트 프로세스(`bio-plughost.exe`) 하나를 둡니다. 업믹스 플러그인은 한 번에 하나만 쓰므로 여러 플러그인을 한 프로세스에 묶는 방식은 두지 않습니다.
+- 플러그인 하나에 플러그인 호스트 프로세스(`ssr-plughost.exe`) 하나를 둡니다. 업믹스 플러그인은 한 번에 하나만 쓰므로 여러 플러그인을 한 프로세스에 묶는 방식은 두지 않습니다.
 - 앱은 호스트를 Job 객체에 넣어 띄웁니다. `KILL_ON_JOB_CLOSE`로 앱이 죽으면 호스트도 끝나게 하고(마지막 Job 핸들이 닫힐 때 작동하므로 Job 핸들은 호스트에 물려주지 않음), `DIE_ON_UNHANDLED_EXCEPTION`과 호스트의 `SetErrorMode`로 오류 대화상자를 줄입니다. 플러그인이 직접 띄우는 대화상자까지 없애지는 못하므로 시한 감시가 따로 있습니다.
 - 공유 메모리와 이벤트는 이름 없는 객체로 만들고, 상속 가능한 핸들로 만들어 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`(그리고 `bInheritHandles = TRUE`)로 그 핸들만 물려줍니다. 앱은 넘긴 뒤 자기 쪽에 필요 없는 끝을 닫습니다. 이것은 이름 선점과 불필요한 핸들 유출을 막는 충돌 격리이지 보안 경계가 아닙니다. 같은 사용자 권한으로 도는 악성 플러그인은 막지 못합니다.
 - 호스트를 다시 띄울 때마다 공유 메모리 구역을 새로 만듭니다. 그래서 죽은 호스트가 남긴 슬롯을 새 세션이 읽는 일이 없습니다.
@@ -35,7 +35,7 @@ DllMain도 문제입니다. EqualizerAPO-XT에서는 복제 방지가 걸린 플
 
 - 겹친 I/O를 쓰는 파이프입니다. 앱이 무작위 이름과 `FILE_FLAG_FIRST_PIPE_INSTANCE`로 서버 끝을 만들고, 클라이언트 끝은 이름으로 열지 않고 상속으로 넘깁니다. Windows의 익명 파이프는 겹친 I/O를 지원하지 않아 상대가 멈추면 읽기와 쓰기가 막히기 때문입니다.
 - 앱 쪽의 읽기와 쓰기는 전용 I/O 스레드에서 하고, 감시는 파이프를 기다리지 않는 별도 경로에서 합니다. 멈춘 호스트를 끝내야 할 스레드가 파이프에 먼저 묶이면 안 되기 때문입니다. 호스트를 끝낼 때는 남은 I/O를 취소하고 회수합니다.
-- 메시지는 `길이 u32 | 종류 u16 | 플래그 u16 | 요청 번호 u32 | 본문`(리틀 엔디언)입니다. 모든 메시지가 길이를 가지므로 모르는 종류는 건너뜁니다(`bio-abi` 기록과 같은 원칙). 길이는 할당 전에 상한(상태 덩어리 64 MiB, 그 밖의 메시지 64 KiB)과 비교하고, 넘으면 연결을 끊습니다.
+- 메시지는 `길이 u32 | 종류 u16 | 플래그 u16 | 요청 번호 u32 | 본문`(리틀 엔디언)입니다. 모든 메시지가 길이를 가지므로 모르는 종류는 건너뜁니다(`ssr-abi` 기록과 같은 원칙). 길이는 할당 전에 상한(상태 덩어리 64 MiB, 그 밖의 메시지 64 KiB)과 비교하고, 넘으면 연결을 끊습니다.
 - 첫 메시지는 매직과 규약 버전을 담은 `Hello`이고, major가 다르면 연결을 끊습니다. 앱은 `Load`, `Configure`(레이트, 최대 프레임, 버스 모양), `Activate`, `SetState`, `GetState`, `OpenEditor`, `Shutdown`을 보내고, 호스트는 `Loaded`(이름, 지연, 버스), `LatencyChanged`, `State`, `ParamsChanged`, `Fault`를 돌려줍니다.
 
 ### 상태별 시한
@@ -102,9 +102,9 @@ DllMain도 문제입니다. EqualizerAPO-XT에서는 복제 방지가 걸린 플
 | `hostvst-proto` | 메시지 부호화, 상태별 시한과 실패 판단 | 없음 | 없음 |
 | `hostvst-sys` | VST 2 ABI, VST 3 COM 호출, DLL 적재, 프로세스·Job·공유 메모리·파이프·이벤트, MMCSS | 격리 크레이트(ADR 0022) | 있음 |
 | `hostvst` | 앱 쪽 `PluginProcess`(띄우기, 명령, 감시), 호스트 쪽 실행 루프, VST 2와 VST 3을 묶는 `Plugin` 트레이트 | 없음 | `hostvst-sys`를 거쳐서만 |
-| `apps/bio-plughost` | `hostvst`의 실행 루프를 부르는 얇은 실행 파일. 앱과 함께 서명하고 배포 | 없음 | 없음 |
+| `apps/ssr-plughost` | `hostvst`의 실행 루프를 부르는 얇은 실행 파일. 앱과 함께 서명하고 배포 | 없음 | 없음 |
 
-`engine`은 `streamring`과 `hostvst-proto`만 의존합니다. `streamring`과 hostvst 계열은 `bio-*` 크레이트에 의존하지 않으므로(게이트로 검사), 나중에 별도 저장소로 떼어 crates.io에 HostVST로 낼 수 있습니다. 2026-10-12에 `hostvst`와 `hostvst-sys`라는 이름은 crates.io에 없었습니다.
+`engine`은 `streamring`과 `hostvst-proto`만 의존합니다. `streamring`과 hostvst 계열은 `ssr-*` 크레이트에 의존하지 않으므로(게이트로 검사), 나중에 별도 저장소로 떼어 crates.io에 HostVST로 낼 수 있습니다. 2026-10-12에 `hostvst`와 `hostvst-sys`라는 이름은 crates.io에 없었습니다.
 
 ### 형식과 라이선스
 

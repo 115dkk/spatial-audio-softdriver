@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Continue'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $alphabet = 'abcdefghijkmnopqrstuvwxyz23456789'.ToCharArray()
 $random = -join (1..6 | ForEach-Object { $alphabet[(Get-Random -Maximum $alphabet.Length)] })
-$name = "bio-atmos-test-report-$random-$stamp"
+$name = "spatial-softreceiver-test-report-$random-$stamp"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $work = Join-Path $OutDir $name
 $zip = Join-Path $OutDir "$name.zip"
@@ -73,20 +73,20 @@ Save-Text 'endpoint-policy.json' {
     $policyHelper = Join-Path $PSScriptRoot 'exclusive-policy.ps1'
     if (-not (Test-Path -LiteralPath $policyHelper)) { $policyHelper = Join-Path $PSScriptRoot '..\ci\exclusive-policy.ps1' }
     . $policyHelper
-    @(Get-BioPolicySnapshot) | ConvertTo-Json -Depth 6
+    @(Get-SsrPolicySnapshot) | ConvertTo-Json -Depth 6
 }
 Save-Text 'endpoint-volumes.json' {
     $volumeHelper = Join-Path $PSScriptRoot 'endpoint-volume.ps1'
     if (-not (Test-Path -LiteralPath $volumeHelper)) { $volumeHelper = Join-Path $PSScriptRoot '..\ci\endpoint-volume.ps1' }
     . $volumeHelper
-    @(Get-BioVolumeSnapshot) | ConvertTo-Json -Depth 6
+    @(Get-SsrVolumeSnapshot) | ConvertTo-Json -Depth 6
 }
 
 $setup = 'C:\Windows\INF\setupapi.dev.log'
 if (Test-Path $setup) {
     $setupHits = Select-String -Path $setup -Pattern 'spatialsoftreceiver' -Context 20,40
-    $setupHits | Out-String -Width 4096 | Set-Content -Encoding UTF8 (Join-Path $work 'setupapi-bioatmos.txt')
-    $collected.Add('setupapi-bioatmos.txt')
+    $setupHits | Out-String -Width 4096 | Set-Content -Encoding UTF8 (Join-Path $work 'setupapi-spatialsoftreceiver.txt')
+    $collected.Add('setupapi-spatialsoftreceiver.txt')
 }
 $since = (Get-Date).AddDays(-7)
 Save-Text 'events-system.txt' {
@@ -117,21 +117,21 @@ foreach ($dump in @($eligibleDumps | Select-Object -First 3)) {
     $collected.Add($dump.Name)
 }
 # The kit's own results and the M2 runs moved into this folder (play-*.json
-# from bio-live play --report).
+# from ssr-live play --report).
 foreach ($pattern in '*-summary.json', 'driver-flow*.json', 'play-*.json') {
     foreach ($file in Get-ChildItem (Join-Path $PSScriptRoot $pattern) -File -ErrorAction SilentlyContinue) {
         Copy-Item $file.FullName $work
         $collected.Add($file.Name)
     }
 }
-$biodumps = @(Get-ChildItem (Join-Path $PSScriptRoot '*.biodump') -File -ErrorAction SilentlyContinue)
-$biodumps | Select-Object Name, Length, LastWriteTime | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $work 'biodumps.json')
-$collected.Add('biodumps.json')
-$total = ($biodumps | Measure-Object Length -Sum).Sum
+$ssrdumps = @(Get-ChildItem (Join-Path $PSScriptRoot '*.ssrdump') -File -ErrorAction SilentlyContinue)
+$ssrdumps | Select-Object Name, Length, LastWriteTime | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $work 'ssrdumps.json')
+$collected.Add('ssrdumps.json')
+$total = ($ssrdumps | Measure-Object Length -Sum).Sum
 if (-not $total) { $total = 0 }
 if ($total -le 200MB) {
-    foreach ($file in $biodumps) { Copy-Item $file.FullName $work; $collected.Add($file.Name) }
-} else { Write-Warning '.biodump 파일 합계가 200 MB를 넘어 목록만 수집합니다.' }
+    foreach ($file in $ssrdumps) { Copy-Item $file.FullName $work; $collected.Add($file.Name) }
+} else { Write-Warning '.ssrdump 파일 합계가 200 MB를 넘어 목록만 수집합니다.' }
 
 # Recordings (M2 builder loopback WAVs) and screenshots, up to 300 MB together.
 $media = @(Get-ChildItem (Join-Path $PSScriptRoot '*') -Include '*.wav', '*.png', '*.jpg' -File -ErrorAction SilentlyContinue)

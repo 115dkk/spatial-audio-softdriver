@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use bio_types::Speaker;
+use ssr_types::Speaker;
 
 use crate::pcm::MAX_PCM_CHANNELS;
 

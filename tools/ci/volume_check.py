@@ -1,4 +1,4 @@
-"""Separate-process BIO volume capture and pure comparison for volume_check.ps1."""
+"""Separate-process Spatial SoftReceiver volume capture and pure comparison for volume_check.ps1."""
 
 import argparse
 import json

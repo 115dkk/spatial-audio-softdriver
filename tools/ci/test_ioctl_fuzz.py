@@ -7,14 +7,14 @@ from unittest import mock
 import ioctl_fuzz
 from ioctl_fuzz import (
     ABI_INFO_SIZE,
-    BIO_STATS_SIZE,
+    SSR_STATS_SIZE,
     ERROR_IO_PENDING,
     ERROR_OPERATION_ABORTED,
     WAIT_TIMEOUT,
-    IOCTL_BIO_GET_STATS,
-    IOCTL_BIO_QUERY_INFO,
-    IOCTL_BIO_READ,
-    IOCTL_BIO_SET_RATE_TRIM,
+    IOCTL_SSR_GET_STATS,
+    IOCTL_SSR_QUERY_INFO,
+    IOCTL_SSR_READ,
+    IOCTL_SSR_SET_RATE_TRIM,
     RATE_TRIM_SIZE,
     READ_REQUEST_SIZE,
     WindowsDevice,
@@ -27,7 +27,7 @@ from ioctl_fuzz import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CONTROL = ROOT / "driver" / "bioatmos" / "control.cpp"
+CONTROL = ROOT / "driver" / "spatialsoftreceiver" / "control.cpp"
 
 
 class PendingKernel:
@@ -75,33 +75,33 @@ class IoctlFuzzTests(unittest.TestCase):
     def test_expectation_table_matches_control_checks(self):
         source = CONTROL.read_text(encoding="utf-8")
         snippets = [
-            "if (input < sizeof(BIO_READ_REQUEST)) status = STATUS_INVALID_PARAMETER;",
+            "if (input < sizeof(SSR_READ_REQUEST)) status = STATUS_INVALID_PARAMETER;",
             "else if (!output || !irp->MdlAddress) status = STATUS_BUFFER_TOO_SMALL;",
-            "if (output < sizeof(BIO_ABI_INFO)) { status = STATUS_BUFFER_TOO_SMALL; break; }",
-            "if (output < sizeof(BIO_STATS)) status = STATUS_BUFFER_TOO_SMALL;",
-            "if (input < sizeof(BIO_RATE_TRIM) || static_cast<BIO_RATE_TRIM*>(buffer)->reserved) status = STATUS_INVALID_PARAMETER;",
+            "if (output < sizeof(SSR_ABI_INFO)) { status = STATUS_BUFFER_TOO_SMALL; break; }",
+            "if (output < sizeof(SSR_STATS)) status = STATUS_BUFFER_TOO_SMALL;",
+            "if (input < sizeof(SSR_RATE_TRIM) || static_cast<SSR_RATE_TRIM*>(buffer)->reserved) status = STATUS_INVALID_PARAMETER;",
             "default: status = STATUS_INVALID_DEVICE_REQUEST; break;",
         ]
         for snippet in snippets:
             self.assertIn(snippet, source)
         self.assertTrue(expects_success("QUERY_INFO", 0, ABI_INFO_SIZE))
         self.assertFalse(expects_success("QUERY_INFO", 0, ABI_INFO_SIZE - 1))
-        self.assertTrue(expects_success("GET_STATS", 100, BIO_STATS_SIZE))
-        self.assertFalse(expects_success("GET_STATS", 0, BIO_STATS_SIZE - 1))
+        self.assertTrue(expects_success("GET_STATS", 100, SSR_STATS_SIZE))
+        self.assertFalse(expects_success("GET_STATS", 0, SSR_STATS_SIZE - 1))
         self.assertTrue(expects_success("READ", READ_REQUEST_SIZE, 1))
         self.assertFalse(expects_success("READ", READ_REQUEST_SIZE - 1, 4096))
         self.assertFalse(expects_success("READ", READ_REQUEST_SIZE, 0))
         self.assertTrue(expects_success("SET_RATE_TRIM", RATE_TRIM_SIZE, 0, 0))
         self.assertFalse(expects_success("SET_RATE_TRIM", RATE_TRIM_SIZE, 0, 1))
         self.assertFalse(expects_success("unknown", 1024, 1024))
-        self.assertEqual(len({IOCTL_BIO_QUERY_INFO, IOCTL_BIO_READ,
-                              IOCTL_BIO_SET_RATE_TRIM, IOCTL_BIO_GET_STATS}), 4)
+        self.assertEqual(len({IOCTL_SSR_QUERY_INFO, IOCTL_SSR_READ,
+                              IOCTL_SSR_SET_RATE_TRIM, IOCTL_SSR_GET_STATS}), 4)
 
     def bounded(self, kernel, errors):
         device = pending_device(kernel)
         with mock.patch.object(ioctl_fuzz.ctypes, "get_last_error",
                                side_effect=errors, create=True):
-            return device, device.bounded_ioctl(IOCTL_BIO_READ, b"\xff" * 8, 4096)
+            return device, device.bounded_ioctl(IOCTL_SSR_READ, b"\xff" * 8, 4096)
 
     def test_a_request_pending_past_the_wait_is_cancelled(self):
         kernel = PendingKernel([WAIT_TIMEOUT, 0])
@@ -137,7 +137,7 @@ class IoctlFuzzTests(unittest.TestCase):
     def test_summary_is_json_and_marks_unexpected_success(self):
         summary = new_summary(7, 3.5)
         bad = {
-            "kind": "known", "name": "QUERY_INFO", "code": IOCTL_BIO_QUERY_INFO,
+            "kind": "known", "name": "QUERY_INFO", "code": IOCTL_SSR_QUERY_INFO,
             "input": b"", "output_size": 1, "expect_success": False,
         }
         record_result(summary, bad, True, 0, 1)

@@ -1,0 +1,33 @@
+# cargo-fuzz targets for the driver contract. A workspace of its own: it needs
+# nightly and libFuzzer, which the main workspace must not depend on. Run with
+#   cargo +nightly fuzz run records          (from crates/ssr-abi)
+[package]
+name = "ssr-abi-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+ssr-abi = { path = ".." }
+
+[[bin]]
+name = "records"
+path = "fuzz_targets/records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dump"
+path = "fuzz_targets/dump.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

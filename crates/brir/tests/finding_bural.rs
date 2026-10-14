@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bio_types::Feeds;
 use brir::{
     AnglePreset, BrirError, BrirSource, LfePolicy, Profile, Truncation, canonical_name,
     load_profile, prepare, preset_angles,
 };
 use convolver::Binauralizer;
 use hound::{SampleFormat, WavSpec, WavWriter};
+use ssr_types::Feeds;
 
 const CANONICAL: [&str; 21] = [
     "FL", "FR", "FC", "SL", "SR", "BL", "BR", "WL", "WR", "HFL", "HFR", "HFC", "HBL", "HBR", "TFL",
@@ -27,7 +27,7 @@ impl TestDirectory {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "bio-brir-finding-bural-{name}-{}-{nonce}",
+            "ssr-brir-finding-bural-{name}-{}-{nonce}",
             std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();

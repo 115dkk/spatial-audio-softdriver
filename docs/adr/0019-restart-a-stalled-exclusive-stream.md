@@ -18,7 +18,7 @@
 
 - 마감을 30 ms 놓쳐도 재시작 한 번으로 정상 주기로 돌아옵니다(하드웨어 시험 `exclusive_sink_recovers_its_cadence_after_a_missed_deadline`). 재시작할 때 소리가 잠깐 끊기지만, 멈춤이 이어지는 것보다는 훨씬 짧습니다.
 - 대기가 문턱을 넘지 않는 장치에서는 아무 일도 일어나지 않습니다.
-- 다른 USB DAC나 드라이버도 같은지는 모릅니다. SAL PC에서 들을 때도 `bio-live play`의 `device restarts` 숫자를 함께 봅니다.
+- 다른 USB DAC나 드라이버도 같은지는 모릅니다. SAL PC에서 들을 때도 `ssr-live play`의 `device restarts` 숫자를 함께 봅니다.
 
 ## 수정 (2026-10-13, 끊김의 경계, 재연결, 실시간 경계)
 

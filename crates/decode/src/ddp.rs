@@ -7,7 +7,7 @@
 //! The upstream decoder allocates per frame; this adapter adds no allocations
 //! in `push`, including error paths (owned error details are empty).
 //!
-//! Nominal bed positions come from `bio_types::Speaker`, shared with PCM;
+//! Nominal bed positions come from `ssr_types::Speaker`, shared with PCM;
 //! measured BRIR directions remain separate. OAMD room coordinates are axis
 //! converted, then mapped to directions using ITU-R BS.2127-1 §10.1.
 //!
@@ -24,9 +24,9 @@
 //! direction-only renderer. ISF/alternate-object mappings and a five-channel
 //! JOC payload on an expanded bed still require information upstream omits.
 
-use bio_types::{MAX_OBJECTS, Position, SceneBlock, Speaker, room_to_direction};
 use bitstream::{Burst, DataType};
 use eac3::{BedChannel, CorePcmFrame, ObjectPcmFrame, ParsedEmdfPayloadData, StreamType, Vec3};
+use ssr_types::{MAX_OBJECTS, Position, SceneBlock, Speaker, room_to_direction};
 
 use crate::{DecodeConfig, DecodeError, SceneBuffers};
 

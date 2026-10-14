@@ -62,7 +62,7 @@ jobs:
         id: drivers
         timeout-minutes: 25
         run: ./tools/ci/install-audio-drivers.ps1 -PackagePath "$env:RUNNER_TEMP/sal-test-package"
-      - name: Preserve driver diagnostics before the BIO build
+      - name: Preserve driver diagnostics before the Spatial SoftReceiver build
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -70,14 +70,14 @@ jobs:
           path: out/runner/
           if-no-files-found: error
           retention-days: 30
-      - name: Build BIO tools and fixtures
+      - name: Build Spatial SoftReceiver tools and fixtures
         if: always() && !cancelled()
         run: |
-          cargo build --locked --release -p bio-live -p bio-replay
+          cargo build --locked --release -p ssr-live -p ssr-replay
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo run --locked --release -p bio-replay --example replay_fixtures -- out/runner/fixtures
+          cargo run --locked --release -p ssr-replay --example replay_fixtures -- out/runner/fixtures
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cargo build --locked --release -p bio-sys --examples
+          cargo build --locked --release -p ssr-sys --examples
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Exercise audio devices and SAL ring
         if: always() && !cancelled()

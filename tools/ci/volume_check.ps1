@@ -1,5 +1,5 @@
 # Validates hardware endpoint volume/mute and their driver-ring records.
-# Stop bio-live/other ring readers first. Original volume/balance/mute is restored.
+# Stop ssr-live/other ring readers first. Original volume/balance/mute is restored.
 param(
     [string] $Summary = (Join-Path (Get-Location) 'volume-summary.json'),
     [string] $Python = 'python'
@@ -34,7 +34,7 @@ try {
         Start-Sleep -Milliseconds 50
     }
     $info = Get-Content -Raw -LiteralPath $ready | ConvertFrom-Json
-    $targets = @(Get-BioVolumeTargets | Where-Object { $_.state -eq 1 })
+    $targets = @(Get-SsrVolumeTargets | Where-Object { $_.state -eq 1 })
     foreach ($ep in 0..3) {
         if (-not ($info.endpoint_mask -band (1 -shl $ep))) { continue }
         $found = @($targets | Where-Object { $_.endpoint -eq $ep })
@@ -44,7 +44,7 @@ try {
         $original = $null
         $item = [ordered]@{ endpoint = $ep; name = $target.name; original = $null; restored = $null; stages = @() }
         try {
-            $control = [BioEndpointVolume]::new($target.id)
+            $control = [SsrEndpointVolume]::new($target.id)
             $original = $control.Snapshot()
             $item.original = $original
             if (($original.hardware_support -band 3) -ne 3) { throw "endpoint $ep lacks hardware volume/mute support" }
@@ -57,7 +57,7 @@ try {
             $control.SetMute($false)
             Start-Sleep -Milliseconds 200
             foreach ($name in 'level', 'mute_on', 'mute_off') {
-                $start = [BioEndpointVolume]::Qpc()
+                $start = [SsrEndpointVolume]::Qpc()
                 switch ($name) {
                     'level' { $control.SetMaster(-20) }
                     'mute_on' { $control.SetMute($true) }
@@ -65,7 +65,7 @@ try {
                 }
                 Start-Sleep -Milliseconds 250
                 $expected = $control.Snapshot()
-                $end = [BioEndpointVolume]::Qpc()
+                $end = [SsrEndpointVolume]::Qpc()
                 $item.stages += [ordered]@{ name = $name; start_qpc = $start; end_qpc = $end; expected = $expected }
             }
         } catch {

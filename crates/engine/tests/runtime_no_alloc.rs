@@ -5,15 +5,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use assert_no_alloc::AllocDisabler;
-use bio_abi::{RecordWriter, VolumePayload, wave_format_bytes};
-use bio_types::{
-    CaptureError, CaptureSource, Direction, Layout, OutputError, OutputFormat, OutputLayout,
-    OutputOpener, OutputSink, PcmFormat, SampleType, SourceFormat, TrimUnsupported,
-};
 use brir::PreparedBrir;
 use convolver::FilterBank;
 use engine::{ClockPreference, EngineConfig, LiveChange, Prepared, RtSection, start_with_clock};
 use speakers::{PreparedSpeaker, PreparedSpeakers};
+use ssr_abi::{RecordWriter, VolumePayload, wave_format_bytes};
+use ssr_types::{
+    CaptureError, CaptureSource, Direction, Layout, OutputError, OutputFormat, OutputLayout,
+    OutputOpener, OutputSink, PcmFormat, SampleType, SourceFormat, TrimUnsupported,
+};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -45,21 +45,21 @@ fn records(blocks: usize) -> Vec<Vec<u8>> {
             frame[..4].copy_from_slice(&0.1_f32.to_le_bytes());
             frame[4..].copy_from_slice(&0.1_f32.to_le_bytes());
         }
-        let mut record = vec![0; bio_abi::record_size(pcm.len())];
+        let mut record = vec![0; ssr_abi::record_size(pcm.len())];
         let mut writer = RecordWriter::new(&mut record);
         assert!(writer.data(1, (block * BLOCK * 8) as u64, (block * BLOCK) as u64, &pcm));
         let len = writer.len();
         record.truncate(len);
         records.push(record);
         if block == WARMUP as usize {
-            let mut levels = [0; bio_abi::MAX_VOLUME_CHANNELS];
+            let mut levels = [0; ssr_abi::MAX_VOLUME_CHANNELS];
             levels[..2].fill(-6 * 65_536);
             let payload = VolumePayload {
                 channel_count: 2,
                 mute_mask: 0,
                 level_q16: levels,
             };
-            let mut volume = vec![0; bio_abi::record_size(std::mem::size_of::<VolumePayload>())];
+            let mut volume = vec![0; ssr_abi::record_size(std::mem::size_of::<VolumePayload>())];
             let mut writer = RecordWriter::new(&mut volume);
             assert!(writer.volume((block * BLOCK) as u64, false, &payload));
             let len = writer.len();
@@ -211,7 +211,7 @@ impl OutputSink for Sink {
             channels: self.layout.channels,
             channel_mask: self.layout.channel_mask,
             period_frames: self.period_frames,
-            mode: bio_types::OutputMode::Exclusive,
+            mode: ssr_types::OutputMode::Exclusive,
             fell_back: false,
             mix_channels: self.layout.channels,
         }

@@ -1,7 +1,7 @@
 //! PCM adapter: interleaved samples to one object per channel at the standard
 //! position of its channel-mask bit; LFE goes to the scene's LFE signal.
 
-use bio_types::{PcmFormat, Position, SampleType, SceneBlock, Speaker};
+use ssr_types::{PcmFormat, Position, SampleType, SceneBlock, Speaker};
 
 use crate::{DecodeConfig, DecodeError, SceneBuffers};
 

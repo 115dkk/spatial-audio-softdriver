@@ -7,7 +7,7 @@ name: Driver
 #              that call no kernel API) built with clang and gcc under ASan
 #              and UBSan, its tests, libFuzzer on the ring, the DMA clock and
 #              the format classifier for two minutes each, and the record
-#              stream it writes parsed back by bio-abi
+#              stream it writes parsed back by ssr-abi
 #   core-msvc  the same core with MSVC and /fsanitize=address on Windows
 #   kcheck     every kernel source compiled by clang in MSVC mode against the
 #              WDK headers, x64 and ARM64, plus the clang static analyzer, as
@@ -21,7 +21,7 @@ name: Driver
 #              root device node, service and Parameters defaults. The driver
 #              loads, the audio stack must build all three render endpoints,
 #              tools/ci/driver_flow_check.py plays a tone into each and reads
-#              the ring back, bio-live then renders the ring to VB-CABLE while
+#              the ring back, ssr-live then renders the ring to VB-CABLE while
 #              a tone plays into each endpoint and both tones must come back
 #              out (tools/ci/driver_e2e_check.py), an IOCTL fuzzer attacks
 #              the control device (tools/ci/ioctl_fuzz.py), all under Driver
@@ -73,16 +73,16 @@ jobs:
           for cc in "clang clang++" "gcc g++"; do
             set -- $cc
             cmake -S driver/core -B "$RUNNER_TEMP/core-$1" -G Ninja \
-              -DCMAKE_C_COMPILER="$1" -DCMAKE_CXX_COMPILER="$2" -DBIO_SANITIZE=ON
+              -DCMAKE_C_COMPILER="$1" -DCMAKE_CXX_COMPILER="$2" -DSSR_SANITIZE=ON
             cmake --build "$RUNNER_TEMP/core-$1"
             "$RUNNER_TEMP/core-$1/core_tests"
-            "$RUNNER_TEMP/core-$1/write_dump" "$RUNNER_TEMP/core-$1/core.biodump"
+            "$RUNNER_TEMP/core-$1/write_dump" "$RUNNER_TEMP/core-$1/core.ssrdump"
           done
 
-      - name: The record stream the core writes parses back in bio-abi
+      - name: The record stream the core writes parses back in ssr-abi
         env:
-          BIO_DRIVER_CORE_DUMP: ${{ runner.temp }}/core-clang/core.biodump
-        run: cargo test --locked -p bio-abi --test driver_core -- --nocapture
+          SSR_DRIVER_CORE_DUMP: ${{ runner.temp }}/core-clang/core.ssrdump
+        run: cargo test --locked -p ssr-abi --test driver_core -- --nocapture
 
       - name: libFuzzer on the ring and READ gate (120 s)
         run: |
@@ -133,19 +133,19 @@ jobs:
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
           $build = Join-Path $env:RUNNER_TEMP 'core-msvc'
-          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && cmake -S driver/core -B `"$build`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBIO_SANITIZE=ON && cmake --build `"$build`""
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && cmake -S driver/core -B `"$build`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSSR_SANITIZE=ON && cmake --build `"$build`""
           if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
           # The ASan runtime DLL sits next to the compiler.
           $cl = cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && where cl" | Select-Object -First 1
           $env:PATH = "$(Split-Path $cl);$env:PATH"
           & "$build\core_tests.exe"
           if ($LASTEXITCODE -ne 0) { throw "core_tests failed ($LASTEXITCODE)" }
-          & "$build\write_dump.exe" "$build\core.biodump"
+          & "$build\write_dump.exe" "$build\core.ssrdump"
           if ($LASTEXITCODE -ne 0) { throw "write_dump failed ($LASTEXITCODE)" }
-          "BIO_DRIVER_CORE_DUMP=$build\core.biodump" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SSR_DRIVER_CORE_DUMP=$build\core.ssrdump" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: The record stream the MSVC build writes parses back in bio-abi
-        run: cargo test --locked -p bio-abi --test driver_core -- --nocapture
+      - name: The record stream the MSVC build writes parses back in ssr-abi
+        run: cargo test --locked -p ssr-abi --test driver_core -- --nocapture
 
   kcheck:
     name: kernel sources on Linux (kcheck)
@@ -155,7 +155,7 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ~/.cache/bio-kcheck
+          path: ~/.cache/ssr-kcheck
           key: kcheck-${{ hashFiles('tools/kcheck.py') }}
 
       - name: Compile and analyse every kernel source for x64 and ARM64
@@ -178,7 +178,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: bioatmos-${{ matrix.configuration }}-${{ matrix.platform }}
+          name: spatialsoftreceiver-${{ matrix.configuration }}-${{ matrix.platform }}
           path: target/driver/${{ matrix.configuration }}/${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 14
@@ -201,7 +201,7 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          name: bioatmos-Release-x64
+          name: spatialsoftreceiver-Release-x64
           path: ${{ runner.temp }}/package
 
       # The audio services are manual on Server images; endpoints appear only
@@ -349,7 +349,7 @@ jobs:
         run: ./tools/ci/ks-trace.ps1 -Stop -Label flow
 
       # The whole path a listener uses: applications play into the three Spatial
-      # SoftReceiver endpoints, bio-live reads the driver's ring, renders through the
+      # SoftReceiver endpoints, ssr-live reads the driver's ring, renders through the
       # fixture BRIR and plays to VB-CABLE, which is recorded back. Each
       # endpoint's tone must stand 20 dB above its neighbourhood, and the
       # report must show no underrun, dropped frame, lane underrun or lost
@@ -373,26 +373,26 @@ jobs:
           ./tools/ci/timer-resolution.ps1
           Start-Service -Name MMCSS
 
-      - name: Build bio-live; write the fixture profile
+      - name: Build ssr-live; write the fixture profile
         id: e2e-build
         if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release -p bio-live -p bio-replay
-          cargo run --locked --release -q -p bio-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
-          target/release/bio-live.exe devices
+          cargo build --locked --release -p ssr-live -p ssr-replay
+          cargo run --locked --release -q -p ssr-replay --example replay_fixtures -- "$RUNNER_TEMP/fx"
+          target/release/ssr-live.exe devices
 
-      - name: All three endpoints through bio-live to VB-CABLE (tools/ci/driver_e2e_check.py)
+      - name: All three endpoints through ssr-live to VB-CABLE (tools/ci/driver_e2e_check.py)
         if: ${{ !cancelled() && steps.e2e-build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
-          python tools/ci/driver_e2e_check.py --bio-live target/release/bio-live.exe \
+          python tools/ci/driver_e2e_check.py --ssr-live target/release/ssr-live.exe \
             --profile "$RUNNER_TEMP/fx/profile.toml" --seconds 8 \
             --report "$RUNNER_TEMP/driver-e2e-report.json" --summary "$RUNNER_TEMP/driver-e2e.json" \
-            --record "$RUNNER_TEMP/driver-e2e.biodump"
+            --record "$RUNNER_TEMP/driver-e2e.ssrdump"
 
       - name: Is Driver Verifier checking spatialsoftreceiver.sys
         id: verified
@@ -447,7 +447,7 @@ jobs:
           New-Item -ItemType Directory -Force $out | Out-Null
           & (Join-Path '${{ steps.install.outputs.kit }}' 'collect.ps1') -OutDir $out
           if ($LASTEXITCODE -ne 0) { throw "collect.ps1 exited $LASTEXITCODE" }
-          $zip = Get-ChildItem $out -Filter 'bio-atmos-test-report-*.zip' | Select-Object -First 1
+          $zip = Get-ChildItem $out -Filter 'spatial-softreceiver-test-report-*.zip' | Select-Object -First 1
           if (-not $zip) { throw 'collect.ps1 wrote no report zip' }
           Write-Host "report: $($zip.Name), $($zip.Length) bytes"
 
@@ -459,13 +459,13 @@ jobs:
             ${{ runner.temp }}/driver-flow.json
             ${{ runner.temp }}/driver-e2e.json
             ${{ runner.temp }}/driver-e2e-report.json
-            ${{ runner.temp }}/driver-e2e.biodump
+            ${{ runner.temp }}/driver-e2e.ssrdump
             ${{ runner.temp }}/ioctl-fuzz.json
             ${{ runner.temp }}/volume.json
             ${{ runner.temp }}/exclusive-policy.json
             ${{ runner.temp }}/aeb-trace
-            ${{ runner.temp }}/bioatmos-ks-*.etl
-            ${{ runner.temp }}/bioatmos-ks-*.xml
+            ${{ runner.temp }}/spatialsoftreceiver-ks-*.etl
+            ${{ runner.temp }}/spatialsoftreceiver-ks-*.xml
             ${{ runner.temp }}/report/*.zip
           if-no-files-found: ignore
 
@@ -516,7 +516,7 @@ jobs:
         with:
           category: windows-driver
 
-  # Diagnosis only: SysVAD itself (the sample driver/bioatmos is reduced from,
+  # Diagnosis only: SysVAD itself (the sample driver/spatialsoftreceiver is reduced from,
   # at the same commit) built with the NuGet WDK, test-signed and installed,
   # then seen through the same tools. It targets Windows 11 22H2 and later
   # (build 22621: its INF floor, and kernel routines Server 2022 lacks), so it

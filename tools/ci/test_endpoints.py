@@ -61,9 +61,9 @@ class EndpointTests(unittest.TestCase):
             find_speaker(sc, 0, sample())
 
     def test_inf_english_defaults_equal_core_table_and_korean_labels(self):
-        path = ROOT / "driver/bioatmos/spatialsoftreceiver.inx"
+        path = ROOT / "driver/spatialsoftreceiver/spatialsoftreceiver.inx"
         self.assertTrue(path.read_bytes().startswith(b"\xff\xfe"))
-        inf = read("driver/bioatmos/spatialsoftreceiver.inx")
+        inf = read("driver/spatialsoftreceiver/spatialsoftreceiver.inx")
         english = inf.split("[Strings]\n")[1].split("[Strings.0412]")[0]
         korean = inf.split("[Strings.0412]\n")[1]
         # Windows selects one complete section; no per-key English fallback.
@@ -74,7 +74,7 @@ class EndpointTests(unittest.TestCase):
             if key not in {"DiskName", "SpatialSoftReceiver.DeviceDesc", "SpatialSoftReceiver.ServiceDesc",
                            "Endpoint0Name", "Endpoint1Name", "Endpoint2Name"}:
                 self.assertEqual(en_tokens[key], ko_tokens[key], key)
-        defaults = re.findall(r'u"([^"]+)"', read("driver/core/bio_names.h"))
+        defaults = re.findall(r'u"([^"]+)"', read("driver/core/ssr_names.h"))
         for ep in range(3):
             self.assertEqual(re.search(rf'Endpoint{ep}Name\s*=\s*"([^"]+)"', english)[1], defaults[ep])
             self.assertIn(f"HKR,Parameters,EndpointName{ep},0x00000000,%Endpoint{ep}Name%", inf)
@@ -95,7 +95,7 @@ class EndpointTests(unittest.TestCase):
             for token in re.findall(r'%([^%\n]+)%', inf.split('[Strings]')[0]):
                 if not token.isdecimal():
                     self.assertIn(token, lang)
-        project = read("driver/bioatmos/bioatmos.vcxproj")
+        project = read("driver/spatialsoftreceiver/spatialsoftreceiver.vcxproj")
         self.assertIn("<TargetName>spatialsoftreceiver</TargetName>", project)
         self.assertIn('<Inf Include="spatialsoftreceiver.inx"', project)
         self.assertIn("$(OutDir)spatialsoftreceiver.inf", project)
@@ -104,19 +104,19 @@ class EndpointTests(unittest.TestCase):
             self.assertIn(f"'spatialsoftreceiver.{extension}'", builder)
 
     def test_control_paths_equal_generated_contract(self):
-        header = read("crates/bio-abi/include/bioatmos_abi.h")
-        literal = re.search(r'^#define BIO_CONTROL_DEVICE_PATH (".*")$', header, re.M)[1]
+        header = read("crates/ssr-abi/include/ssr_abi.h")
+        literal = re.search(r'^#define SSR_CONTROL_DEVICE_PATH (".*")$', header, re.M)[1]
         contract = json.loads(literal)
         self.assertEqual(CONTROL_DEVICE_PATH, contract)
         ps = read("tools/ci/package-identities.ps1")
         self.assertEqual(re.search(r"\$SpatialControlDevicePath = '([^']+)'", ps)[1], contract)
-        ring = read("crates/bio-sys/src/bio_ring.rs")
+        ring = read("crates/ssr-sys/src/driver_ring.rs")
         self.assertIn("Device::open(CONTROL_DEVICE_PATH)", ring)
         for filename in ("driver_flow_check.py", "ioctl_fuzz.py"):
             source = read("tools/ci/" + filename)
             self.assertIn("import CONTROL_DEVICE_PATH", source)
             self.assertNotIn('r"\\\\.\\SpatialSoftReceiver"', source)
-        kernel = read("driver/bioatmos/control.cpp")
+        kernel = read("driver/spatialsoftreceiver/control.cpp")
         for prefix in ("Device", "DosDevices"):
             self.assertIn(json.dumps("\\" + prefix + "\\" + contract.split("\\")[-1]), kernel)
 
@@ -124,7 +124,7 @@ class EndpointTests(unittest.TestCase):
         kit = read("tools/ci/driver-test-kit.ps1")
         for name in ("endpoints.py", "endpoints.ps1", "package-identities.ps1"):
             self.assertIn(f"'{name}'", kit)
-        self.assertIn('bio-atmos-driver-test-$Version-$Arch', kit)
+        self.assertIn('spatial-softreceiver-driver-test-$Version-$Arch', kit)
         identities = read("tools/ci/package-identities.ps1")
         for legacy in ("ROOT\\BioAtmos", "bioatmos.inf", "Service = 'bioatmos'"):
             self.assertIn(legacy, identities)
@@ -139,9 +139,9 @@ class EndpointTests(unittest.TestCase):
             self.assertNotIn("$EndpointNames", source)
 
     def test_powershell_ownership_filter_does_not_trust_names(self):
-        pwsh = os.environ.get("BIO_TEST_PWSH") or shutil.which("pwsh")
+        pwsh = os.environ.get("SSR_TEST_PWSH") or shutil.which("pwsh")
         if not pwsh:
-            self.skipTest("set BIO_TEST_PWSH to test the PowerShell ownership filter")
+            self.skipTest("set SSR_TEST_PWSH to test the PowerShell ownership filter")
         helper = str(ROOT / "tools/ci/endpoints.ps1").replace("'", "''")
         script = r'''
 $ErrorActionPreference = 'Stop'
@@ -167,9 +167,9 @@ if ($found.Count -ne 1 -or $found[0] -ne 'ROOT\MEDIA\0001') { throw 'legacy inst
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
     def test_actual_csharp_filter_mapping(self):
-        pwsh = os.environ.get("BIO_TEST_PWSH") or shutil.which("pwsh")
+        pwsh = os.environ.get("SSR_TEST_PWSH") or shutil.which("pwsh")
         if not pwsh:
-            self.skipTest("set BIO_TEST_PWSH to compile and test actual C# mapping on Linux")
+            self.skipTest("set SSR_TEST_PWSH to compile and test actual C# mapping on Linux")
         # Runs only pure MapFilter, not Windows COM or PnP enumeration.
         helper = str(ROOT / "tools/ci/endpoints.ps1").replace("'", "''")
         script = r'''

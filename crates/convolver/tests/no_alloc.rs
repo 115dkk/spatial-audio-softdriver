@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use bio_types::Feeds;
 use convolver::{Binauralizer, FilterBank};
+use ssr_types::Feeds;
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;

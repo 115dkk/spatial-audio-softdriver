@@ -15,7 +15,7 @@
 //! MDAP rings around the object direction. Geometry construction allocates;
 //! [`PanGeometry::gains`] does not.
 
-use bio_types::{Layout, Position};
+use ssr_types::{Layout, Position};
 
 const GAIN_EPSILON: f32 = 1.0e-6;
 const HULL_SIDE_EPSILON: f32 = 2.0e-5;
@@ -961,24 +961,24 @@ mod hull_reference_tests {
     fn spread_zero_matches_point_vbap_exactly() {
         let layouts = [
             Layout::new(vec![
-                bio_types::Direction::new("FL", 30.0, 0.0),
-                bio_types::Direction::new("FR", -30.0, 0.0),
-                bio_types::Direction::new("FC", 0.0, 0.0),
-                bio_types::Direction::new("SL", 90.0, 0.0),
-                bio_types::Direction::new("SR", -90.0, 0.0),
-                bio_types::Direction::new("BL", 150.0, 0.0),
-                bio_types::Direction::new("BR", -150.0, 0.0),
-                bio_types::Direction::new("TFL", 45.0, 45.0),
-                bio_types::Direction::new("TFR", -45.0, 45.0),
-                bio_types::Direction::new("TBL", 135.0, 45.0),
-                bio_types::Direction::new("TBR", -135.0, 45.0),
+                ssr_types::Direction::new("FL", 30.0, 0.0),
+                ssr_types::Direction::new("FR", -30.0, 0.0),
+                ssr_types::Direction::new("FC", 0.0, 0.0),
+                ssr_types::Direction::new("SL", 90.0, 0.0),
+                ssr_types::Direction::new("SR", -90.0, 0.0),
+                ssr_types::Direction::new("BL", 150.0, 0.0),
+                ssr_types::Direction::new("BR", -150.0, 0.0),
+                ssr_types::Direction::new("TFL", 45.0, 45.0),
+                ssr_types::Direction::new("TFR", -45.0, 45.0),
+                ssr_types::Direction::new("TBL", 135.0, 45.0),
+                ssr_types::Direction::new("TBR", -135.0, 45.0),
             ])
             .unwrap(),
             Layout::new(vec![
-                bio_types::Direction::new("FL", 30.0, 0.0),
-                bio_types::Direction::new("FR", -30.0, 0.0),
-                bio_types::Direction::new("SL", 110.0, 0.0),
-                bio_types::Direction::new("SR", -110.0, 0.0),
+                ssr_types::Direction::new("FL", 30.0, 0.0),
+                ssr_types::Direction::new("FR", -30.0, 0.0),
+                ssr_types::Direction::new("SL", 110.0, 0.0),
+                ssr_types::Direction::new("SR", -110.0, 0.0),
             ])
             .unwrap(),
         ];

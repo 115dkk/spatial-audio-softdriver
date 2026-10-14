@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use bio_types::Feeds;
 use convolver::{Binauralizer, FilterBank};
+use ssr_types::Feeds;
 
 fn round_up(value: usize, multiple: usize) -> usize {
     value.div_ceil(multiple) * multiple

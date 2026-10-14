@@ -1,6 +1,6 @@
 //! Buffers an adapter owns and lends to the scenes it emits.
 
-use bio_types::{MAX_OBJECTS, Object, Position, SceneBlock};
+use ssr_types::{MAX_OBJECTS, Object, Position, SceneBlock};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Meta {

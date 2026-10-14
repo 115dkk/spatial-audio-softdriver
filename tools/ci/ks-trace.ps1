@@ -1,5 +1,5 @@
 # Starts, or stops and prints, an ETW session on the driver's KS request trace
-# (driver/bioatmos/kstrace.cpp, provider BioAtmos.Driver.Ks): every create and
+# (driver/spatialsoftreceiver/kstrace.cpp, provider SpatialSoftReceiver.Driver.Ks): every create and
 # KS IOCTL that reached PortCls through our dispatch, with the process that
 # sent it, the property set, id, flags and pin, the client's data range or
 # format, and the status PortCls returned. Run -Start before the device is
@@ -14,8 +14,8 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 $Provider = '{a63636ab-03aa-4a58-9dcd-86c273eb95fd}'
-$Session = "BioAtmosKs-$Label"
-$etl = Join-Path $env:RUNNER_TEMP "bioatmos-ks-$Label.etl"
+$Session = "SpatialSoftReceiverKs-$Label"
+$etl = Join-Path $env:RUNNER_TEMP "spatialsoftreceiver-ks-$Label.etl"
 
 if ($Start) {
     Remove-Item -LiteralPath $etl -ErrorAction SilentlyContinue
@@ -26,7 +26,7 @@ if (-not $Stop) { Write-Host 'ks-trace.ps1: pass -Start or -Stop'; exit 0 }
 
 & logman.exe stop $Session -ets 2>&1 | Write-Host
 if (-not (Test-Path -LiteralPath $etl)) { Write-Host "no trace file at $etl"; exit 0 }
-$xml = Join-Path $env:RUNNER_TEMP "bioatmos-ks-$Label.xml"
+$xml = Join-Path $env:RUNNER_TEMP "spatialsoftreceiver-ks-$Label.xml"
 & tracerpt.exe $etl -o $xml -of XML -y 2>&1 | Select-Object -Last 3 | Write-Host
 
 # Process names, with the services each svchost carries.

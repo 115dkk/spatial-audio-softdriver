@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MS-PL
 // Dependency-free unit tests for the driver core.
-#include "bio_core.h"
-#include "bio_names.h"
+#include "ssr_core.h"
+#include "ssr_names.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -15,7 +15,7 @@ int failures = 0;
 alignas(8) uint8_t storage[64U * 1024U];
 
 uint32_t RecordBytes(uint32_t payload) {
-    return (static_cast<uint32_t>(sizeof(BIO_RECORD_HEADER)) + payload + 7U) & ~7U;
+    return (static_cast<uint32_t>(sizeof(SSR_RECORD_HEADER)) + payload + 7U) & ~7U;
 }
 
 void Put16(uint8_t* out, uint32_t offset, uint16_t value) {
@@ -47,38 +47,38 @@ void Wave(uint8_t* out, uint32_t id, uint16_t family) {
 }
 
 void EndpointNames() {
-    char16_t output[bio::kEndpointNameCapacity]{};
+    char16_t output[ssr::kEndpointNameCapacity]{};
     const char16_t custom[] = u"\uacf5\uac04 \uc18c\ud504\ud2b8\ub4dc\ub77c\uc774\ubc84 \uc74c\uc545";
-    bio::EndpointName(1, true, custom, sizeof(custom), output);
+    ssr::EndpointName(1, true, custom, sizeof(custom), output);
     CHECK(memcmp(output, custom, sizeof(custom)) == 0);
     char16_t boundary[33]{};
     for (size_t i = 0; i < 31; ++i) boundary[i] = u'x';
-    bio::EndpointName(2, true, boundary, 64, output);
+    ssr::EndpointName(2, true, boundary, 64, output);
     CHECK(output[30] == u'x' && output[31] == 0);
     boundary[31] = u'x';
-    bio::EndpointName(2, true, boundary, sizeof(boundary), output);
-    CHECK(memcmp(output, bio::kEndpointNames[2], sizeof(output)) == 0);
+    ssr::EndpointName(2, true, boundary, sizeof(boundary), output);
+    CHECK(memcmp(output, ssr::kEndpointNames[2], sizeof(output)) == 0);
     const char16_t empty[] = u"";
     const char16_t embedded[] = {u'a', 0, u'b', 0};
     const char16_t unterminated[] = {u'a', u'b'};
     for (size_t ep = 0; ep < 4; ++ep) {
-        bio::EndpointName<char16_t>(ep, false, nullptr, 0, output);
-        CHECK(memcmp(output, bio::kEndpointNames[ep], sizeof(output)) == 0);
-        bio::EndpointName(ep, false, custom, sizeof(custom), output);
-        CHECK(memcmp(output, bio::kEndpointNames[ep], sizeof(output)) == 0);
-        bio::EndpointName(ep, true, empty, sizeof(empty), output);
-        CHECK(memcmp(output, bio::kEndpointNames[ep], sizeof(output)) == 0);
-        bio::EndpointName(ep, true, embedded, sizeof(embedded), output);
-        CHECK(memcmp(output, bio::kEndpointNames[ep], sizeof(output)) == 0);
-        bio::EndpointName(ep, true, unterminated, sizeof(unterminated), output);
-        CHECK(memcmp(output, bio::kEndpointNames[ep], sizeof(output)) == 0);
-        bio::EndpointName(ep, true, custom, sizeof(custom) - 1, output);
-        CHECK(memcmp(output, bio::kEndpointNames[ep], sizeof(output)) == 0);
+        ssr::EndpointName<char16_t>(ep, false, nullptr, 0, output);
+        CHECK(memcmp(output, ssr::kEndpointNames[ep], sizeof(output)) == 0);
+        ssr::EndpointName(ep, false, custom, sizeof(custom), output);
+        CHECK(memcmp(output, ssr::kEndpointNames[ep], sizeof(output)) == 0);
+        ssr::EndpointName(ep, true, empty, sizeof(empty), output);
+        CHECK(memcmp(output, ssr::kEndpointNames[ep], sizeof(output)) == 0);
+        ssr::EndpointName(ep, true, embedded, sizeof(embedded), output);
+        CHECK(memcmp(output, ssr::kEndpointNames[ep], sizeof(output)) == 0);
+        ssr::EndpointName(ep, true, unterminated, sizeof(unterminated), output);
+        CHECK(memcmp(output, ssr::kEndpointNames[ep], sizeof(output)) == 0);
+        ssr::EndpointName(ep, true, custom, sizeof(custom) - 1, output);
+        CHECK(memcmp(output, ssr::kEndpointNames[ep], sizeof(output)) == 0);
     }
 }
 
 void AlignmentAndRead() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     const uint8_t data[3] = {1, 2, 3};
     CHECK(ring.Data(0, 7, 8, data, sizeof(data), nullptr, 0));
@@ -87,9 +87,9 @@ void AlignmentAndRead() {
     CHECK(ring.Read(out, RecordBytes(3) - 1U) == 0);
     CHECK(ring.FirstRecordBytes() == RecordBytes(3));
     CHECK(ring.Read(out, sizeof(out)) == RecordBytes(3));
-    BIO_RECORD_HEADER header{};
+    SSR_RECORD_HEADER header{};
     memcpy(&header, out, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_DATA);
+    CHECK(header.kind == SSR_RECORD_KIND_DATA);
     CHECK(header.len == 3);
     CHECK(header.reserved == 0);
     CHECK(memcmp(out + sizeof(header), data, sizeof(data)) == 0);
@@ -99,41 +99,41 @@ void AlignmentAndRead() {
 }
 
 void PassthroughStateAndIsolation() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
-    CHECK(ring.ConfigureVolume(BIO_ENDPOINT_PASSTHROUGH, 8));
+    CHECK(ring.ConfigureVolume(SSR_ENDPOINT_PASSTHROUGH, 8));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
     const uint8_t data[3] = {3, 4, 5};
-    CHECK(ring.FormatChange(BIO_ENDPOINT_PASSTHROUGH, 1, format, sizeof(format)));
-    CHECK(ring.SetVolume(BIO_ENDPOINT_PASSTHROUGH, -1, -20 * 65536, 2));
-    CHECK(ring.SetMute(BIO_ENDPOINT_PASSTHROUGH, 1, true, 3));
-    CHECK(ring.StreamStart(BIO_ENDPOINT_PASSTHROUGH, 4));
+    CHECK(ring.FormatChange(SSR_ENDPOINT_PASSTHROUGH, 1, format, sizeof(format)));
+    CHECK(ring.SetVolume(SSR_ENDPOINT_PASSTHROUGH, -1, -20 * 65536, 2));
+    CHECK(ring.SetMute(SSR_ENDPOINT_PASSTHROUGH, 1, true, 3));
+    CHECK(ring.StreamStart(SSR_ENDPOINT_PASSTHROUGH, 4));
     ring.DiscardQueued();
-    CHECK(ring.Data(BIO_ENDPOINT_PASSTHROUGH, 5, 0, data, sizeof(data), nullptr, 0));
-    CHECK(ring.StreamStop(BIO_ENDPOINT_PASSTHROUGH, 6));
+    CHECK(ring.Data(SSR_ENDPOINT_PASSTHROUGH, 5, 0, data, sizeof(data), nullptr, 0));
+    CHECK(ring.StreamStop(SSR_ENDPOINT_PASSTHROUGH, 6));
     uint8_t out[1024];
     const uint32_t bytes = ring.Read(out, sizeof(out));
-    const uint16_t kinds[] = {BIO_RECORD_KIND_FORMAT_CHANGE, BIO_RECORD_KIND_VOLUME,
-        BIO_RECORD_KIND_STREAM_START, BIO_RECORD_KIND_DATA, BIO_RECORD_KIND_STREAM_STOP};
+    const uint16_t kinds[] = {SSR_RECORD_KIND_FORMAT_CHANGE, SSR_RECORD_KIND_VOLUME,
+        SSR_RECORD_KIND_STREAM_START, SSR_RECORD_KIND_DATA, SSR_RECORD_KIND_STREAM_STOP};
     uint32_t count = 0;
     for (uint32_t at = 0; at < bytes;) {
-        BIO_RECORD_HEADER header{};
+        SSR_RECORD_HEADER header{};
         memcpy(&header, out + at, sizeof(header));
-        CHECK(header.endpoint == BIO_ENDPOINT_PASSTHROUGH);
+        CHECK(header.endpoint == SSR_ENDPOINT_PASSTHROUGH);
         CHECK(count < 5);
         if (count < 5) CHECK(header.kind == kinds[count]);
-        if (count < 3) CHECK(header.flags == BIO_RECORD_FLAG_REPEAT);
-        if (header.kind == BIO_RECORD_KIND_DATA) {
+        if (count < 3) CHECK(header.flags == SSR_RECORD_FLAG_REPEAT);
+        if (header.kind == SSR_RECORD_KIND_DATA) {
             CHECK(header.byte_pos == 0);
-            CHECK(header.flags == BIO_RECORD_FLAG_DISCONTINUITY);
+            CHECK(header.flags == SSR_RECORD_FLAG_DISCONTINUITY);
             CHECK(memcmp(out + at + sizeof(header), data, sizeof(data)) == 0);
         }
         ++count;
         at += RecordBytes(header.len);
     }
     CHECK(count == 5);
-    BIO_STATS stats{};
+    SSR_STATS stats{};
     ring.FillStats(&stats, 1, 0);
     CHECK(stats.endpoints[2].total_bytes == sizeof(data));
     CHECK(stats.endpoints[2].epoch == 1);
@@ -144,7 +144,7 @@ void PassthroughStateAndIsolation() {
 }
 
 void WrapIntegrity() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t payload[997];
     uint8_t out[2048];
@@ -152,7 +152,7 @@ void WrapIntegrity() {
         memset(payload, static_cast<int>(round & 0xffU), sizeof(payload));
         CHECK(ring.Data(static_cast<uint16_t>(round & 1U), round, 0, payload, sizeof(payload), nullptr, 0));
         CHECK(ring.Read(out, sizeof(out)) == RecordBytes(sizeof(payload)));
-        BIO_RECORD_HEADER header{};
+        SSR_RECORD_HEADER header{};
         memcpy(&header, out, sizeof(header));
         CHECK(header.len == sizeof(payload));
         CHECK(memcmp(out + sizeof(header), payload, sizeof(payload)) == 0);
@@ -160,7 +160,7 @@ void WrapIntegrity() {
 }
 
 void UrgentAndStats() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
@@ -174,9 +174,9 @@ void UrgentAndStats() {
     CHECK(!ring.UrgentQueued());
     CHECK(ring.StreamStop(0, 3));
     CHECK(ring.UrgentQueued());
-    BIO_STATS stats{};
+    SSR_STATS stats{};
     ring.FillStats(&stats, 4, 17);
-    CHECK(stats.struct_size == sizeof(BIO_STATS));
+    CHECK(stats.struct_size == sizeof(SSR_STATS));
     CHECK(stats.open_count == 4);
     CHECK(stats.max_timer_lateness_us == 17);
     CHECK(stats.endpoints[0].epoch == 1);
@@ -184,7 +184,7 @@ void UrgentAndStats() {
 }
 
 void OverrunRecovery() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
@@ -205,22 +205,22 @@ void OverrunRecovery() {
     bool saw_overrun = false;
     bool saw_repeat = false;
     bool saw_discontinuous = false;
-    uint64_t read_data[BIO_MAX_ENDPOINTS]{};
+    uint64_t read_data[SSR_MAX_ENDPOINTS]{};
     for (uint32_t at = 0; at < got;) {
-        BIO_RECORD_HEADER header{};
+        SSR_RECORD_HEADER header{};
         memcpy(&header, all + at, sizeof(header));
-        if (header.kind == BIO_RECORD_KIND_OVERRUN && header.endpoint == 0) {
+        if (header.kind == SSR_RECORD_KIND_OVERRUN && header.endpoint == 0) {
             saw_overrun = true;
         }
-        if (header.kind == BIO_RECORD_KIND_FORMAT_CHANGE && header.endpoint == 0 &&
-            header.flags == BIO_RECORD_FLAG_REPEAT) {
+        if (header.kind == SSR_RECORD_KIND_FORMAT_CHANGE && header.endpoint == 0 &&
+            header.flags == SSR_RECORD_FLAG_REPEAT) {
             saw_repeat = true;
             CHECK(header.epoch == ring.Endpoint(0).epoch);
         }
-        if (header.kind == BIO_RECORD_KIND_DATA) {
+        if (header.kind == SSR_RECORD_KIND_DATA) {
             read_data[header.endpoint] += header.len;
             if (header.endpoint == 0 && header.len == 32) {
-                saw_discontinuous = (header.flags & BIO_RECORD_FLAG_DISCONTINUITY) != 0;
+                saw_discontinuous = (header.flags & SSR_RECORD_FLAG_DISCONTINUITY) != 0;
             }
         }
         at += RecordBytes(header.len);
@@ -235,7 +235,7 @@ void OverrunRecovery() {
 }
 
 void StreamStartDoesNotRepeatFormat() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
@@ -247,23 +247,23 @@ void StreamStartDoesNotRepeatFormat() {
     uint8_t out[256];
     const uint32_t got = ring.Read(out, sizeof(out));
     uint32_t at = 0;
-    BIO_RECORD_HEADER header{};
+    SSR_RECORD_HEADER header{};
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_FORMAT_CHANGE);
+    CHECK(header.kind == SSR_RECORD_KIND_FORMAT_CHANGE);
     CHECK(header.flags == 0);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_STREAM_START);
+    CHECK(header.kind == SSR_RECORD_KIND_STREAM_START);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_DATA);
-    CHECK(header.flags == BIO_RECORD_FLAG_DISCONTINUITY);
+    CHECK(header.kind == SSR_RECORD_KIND_DATA);
+    CHECK(header.flags == SSR_RECORD_FLAG_DISCONTINUITY);
     at += RecordBytes(header.len);
     CHECK(at == got);
 }
 
 void DiscardQueuedRestatesCurrentState() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
@@ -280,20 +280,20 @@ void DiscardQueuedRestatesCurrentState() {
     uint8_t out[256];
     const uint32_t got = ring.Read(out, sizeof(out), 6);
     uint32_t at = 0;
-    BIO_RECORD_HEADER header{};
+    SSR_RECORD_HEADER header{};
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_FORMAT_CHANGE);
-    CHECK(header.flags == BIO_RECORD_FLAG_REPEAT);
+    CHECK(header.kind == SSR_RECORD_KIND_FORMAT_CHANGE);
+    CHECK(header.flags == SSR_RECORD_FLAG_REPEAT);
     CHECK(header.reserved == 0);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_STREAM_START);
-    CHECK(header.flags == BIO_RECORD_FLAG_REPEAT);
+    CHECK(header.kind == SSR_RECORD_KIND_STREAM_START);
+    CHECK(header.flags == SSR_RECORD_FLAG_REPEAT);
     CHECK(header.reserved == 0);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_DATA);
-    CHECK(header.flags == BIO_RECORD_FLAG_DISCONTINUITY);
+    CHECK(header.kind == SSR_RECORD_KIND_DATA);
+    CHECK(header.flags == SSR_RECORD_FLAG_DISCONTINUITY);
     CHECK(header.reserved == 0);
     at += RecordBytes(header.len);
     CHECK(at == got);
@@ -302,7 +302,7 @@ void DiscardQueuedRestatesCurrentState() {
 }
 
 void DropBeforeFormatChangeRestatesOldState() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
@@ -322,7 +322,7 @@ void DropBeforeFormatChangeRestatesOldState() {
 
     const uint32_t got = ring.Read(out, sizeof(out));
     uint32_t at = 0;
-    BIO_RECORD_HEADER previous[4]{};
+    SSR_RECORD_HEADER previous[4]{};
     while (at < got) {
         previous[0] = previous[1];
         previous[1] = previous[2];
@@ -331,18 +331,18 @@ void DropBeforeFormatChangeRestatesOldState() {
         at += RecordBytes(previous[3].len);
     }
     CHECK(at == got);
-    CHECK(previous[0].kind == BIO_RECORD_KIND_OVERRUN);
+    CHECK(previous[0].kind == SSR_RECORD_KIND_OVERRUN);
     CHECK(previous[0].flags == 0);
-    CHECK(previous[1].kind == BIO_RECORD_KIND_FORMAT_CHANGE);
-    CHECK(previous[1].flags == BIO_RECORD_FLAG_REPEAT);
-    CHECK(previous[2].kind == BIO_RECORD_KIND_STREAM_STOP);
-    CHECK(previous[2].flags == BIO_RECORD_FLAG_REPEAT);
-    CHECK(previous[3].kind == BIO_RECORD_KIND_FORMAT_CHANGE);
+    CHECK(previous[1].kind == SSR_RECORD_KIND_FORMAT_CHANGE);
+    CHECK(previous[1].flags == SSR_RECORD_FLAG_REPEAT);
+    CHECK(previous[2].kind == SSR_RECORD_KIND_STREAM_STOP);
+    CHECK(previous[2].flags == SSR_RECORD_FLAG_REPEAT);
+    CHECK(previous[3].kind == SSR_RECORD_KIND_FORMAT_CHANGE);
     CHECK(previous[3].flags == 0);
 }
 
 void StoppedEndpointRestatesAfterOverrun() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
@@ -354,23 +354,23 @@ void StoppedEndpointRestatesAfterOverrun() {
     CHECK(ring.SourceGap(0, 4, 64));
     CHECK(ring.PrepareRead(5));
     const uint32_t got = ring.Read(out, sizeof(out), 5);
-    const uint16_t kinds[] = {BIO_RECORD_KIND_OVERRUN, BIO_RECORD_KIND_FORMAT_CHANGE,
-                              BIO_RECORD_KIND_STREAM_STOP};
+    const uint16_t kinds[] = {SSR_RECORD_KIND_OVERRUN, SSR_RECORD_KIND_FORMAT_CHANGE,
+                              SSR_RECORD_KIND_STREAM_STOP};
     uint32_t at = 0;
     for (uint32_t i = 0; i < 3; ++i) {
-        BIO_RECORD_HEADER header{};
+        SSR_RECORD_HEADER header{};
         memcpy(&header, out + at, sizeof(header));
         CHECK(header.kind == kinds[i]);
         CHECK(header.endpoint == 0);
         CHECK(header.reserved == 0);
-        if (i != 0) CHECK(header.flags == BIO_RECORD_FLAG_REPEAT);
+        if (i != 0) CHECK(header.flags == SSR_RECORD_FLAG_REPEAT);
         at += RecordBytes(header.len);
     }
     CHECK(at == got);
 }
 
 void SourceGapRecovery() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t format[52];
     Wave(format, 0x030c, 0x0cea);
@@ -381,7 +381,7 @@ void SourceGapRecovery() {
 
     const uint8_t other[3] = {4, 5, 6};
     const uint8_t resumed[2] = {7, 8};
-    CHECK(!ring.SourceGap(BIO_MAX_ENDPOINTS, 3, 10));
+    CHECK(!ring.SourceGap(SSR_MAX_ENDPOINTS, 3, 10));
     CHECK(!ring.SourceGap(0, 3, 0));
     CHECK(ring.SourceGap(0, 3, 100));
     CHECK(ring.QueuedBytes() == 0);
@@ -390,34 +390,34 @@ void SourceGapRecovery() {
 
     const uint32_t got = ring.Read(out, sizeof(out));
     uint32_t at = 0;
-    BIO_RECORD_HEADER header{};
+    SSR_RECORD_HEADER header{};
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_DATA);
+    CHECK(header.kind == SSR_RECORD_KIND_DATA);
     CHECK(header.endpoint == 1);
     CHECK(header.flags == 0);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_OVERRUN);
+    CHECK(header.kind == SSR_RECORD_KIND_OVERRUN);
     CHECK(header.endpoint == 0);
-    BIO_OVERRUN_PAYLOAD overrun{};
+    SSR_OVERRUN_PAYLOAD overrun{};
     memcpy(&overrun, out + at + sizeof(header), sizeof(overrun));
     CHECK(overrun.lost_bytes == 100);
     CHECK(header.byte_pos == 100);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_FORMAT_CHANGE);
+    CHECK(header.kind == SSR_RECORD_KIND_FORMAT_CHANGE);
     CHECK(header.endpoint == 0);
-    CHECK(header.flags == BIO_RECORD_FLAG_REPEAT);
+    CHECK(header.flags == SSR_RECORD_FLAG_REPEAT);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_STREAM_STOP);
+    CHECK(header.kind == SSR_RECORD_KIND_STREAM_STOP);
     CHECK(header.endpoint == 0);
-    CHECK(header.flags == BIO_RECORD_FLAG_REPEAT);
+    CHECK(header.flags == SSR_RECORD_FLAG_REPEAT);
     at += RecordBytes(header.len);
     memcpy(&header, out + at, sizeof(header));
-    CHECK(header.kind == BIO_RECORD_KIND_DATA);
+    CHECK(header.kind == SSR_RECORD_KIND_DATA);
     CHECK(header.endpoint == 0);
-    CHECK(header.flags == BIO_RECORD_FLAG_DISCONTINUITY);
+    CHECK(header.flags == SSR_RECORD_FLAG_DISCONTINUITY);
     CHECK(header.byte_pos == 100);
     at += RecordBytes(header.len);
     CHECK(at == got);
@@ -429,9 +429,9 @@ void SourceGapRecovery() {
 }
 
 void VolumeStateAndRecovery() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
-    CHECK(!ring.ConfigureVolume(BIO_MAX_ENDPOINTS, 2));
+    CHECK(!ring.ConfigureVolume(SSR_MAX_ENDPOINTS, 2));
     CHECK(!ring.ConfigureVolume(0, 0));
     CHECK(!ring.ConfigureVolume(0, 33));
     CHECK(ring.ConfigureVolume(0, 12));
@@ -444,32 +444,32 @@ void VolumeStateAndRecovery() {
     ring.DiscardQueued(10);
     uint8_t out[64U * 1024U];
     uint32_t got = ring.Read(out, sizeof(out));
-    CHECK(got == 2 * (RecordBytes(sizeof(BIO_VOLUME_PAYLOAD)) + RecordBytes(0)));
-    BIO_RECORD_HEADER h{};
+    CHECK(got == 2 * (RecordBytes(sizeof(SSR_VOLUME_PAYLOAD)) + RecordBytes(0)));
+    SSR_RECORD_HEADER h{};
     memcpy(&h, out, sizeof(h));
-    CHECK(h.kind == BIO_RECORD_KIND_VOLUME && h.flags == BIO_RECORD_FLAG_REPEAT && h.qpc == 10);
-    BIO_VOLUME_PAYLOAD value{};
+    CHECK(h.kind == SSR_RECORD_KIND_VOLUME && h.flags == SSR_RECORD_FLAG_REPEAT && h.qpc == 10);
+    SSR_VOLUME_PAYLOAD value{};
     memcpy(&value, out + sizeof(h), sizeof(value));
     CHECK(value.channel_count == 12 && value.mute_mask == 0);
     for (int32_t level : value.level_q16) CHECK(level == 0);
     CHECK(ring.SetVolume(0, -1, -20 * 65536, 11));
     CHECK(ring.UrgentQueued());
-    CHECK(bio::ReadGate::ShouldComplete(ring, 4096, 4096, 11, UINT64_MAX));
+    CHECK(ssr::ReadGate::ShouldComplete(ring, 4096, 4096, 11, UINT64_MAX));
     CHECK(ring.SetMute(0, -1, true, 12));
     CHECK(ring.SetMute(0, 4, false, 13));
     CHECK(ring.Endpoint(0).volume.mute_mask == (0xfffU & ~(1U << 4U)));
     CHECK(ring.Endpoint(1).volume.mute_mask == 0);
     got = ring.Read(out, sizeof(out));
-    CHECK(got == 3 * RecordBytes(sizeof(BIO_VOLUME_PAYLOAD)));
+    CHECK(got == 3 * RecordBytes(sizeof(SSR_VOLUME_PAYLOAD)));
     CHECK(!ring.UrgentQueued());
     for (uint32_t at = 0, i = 0; at < got; at += RecordBytes(h.len), ++i) {
         memcpy(&h, out + at, sizeof(h));
-        CHECK(h.kind == BIO_RECORD_KIND_VOLUME && h.flags == 0 && h.qpc == 11 + i);
+        CHECK(h.kind == SSR_RECORD_KIND_VOLUME && h.flags == 0 && h.qpc == 11 + i);
     }
     CHECK(ring.SetVolume(0, -1, -20 * 65536, 14));
     CHECK(ring.QueuedBytes() == 0); // no changed value, no event
     CHECK(ring.SetVolume(0, 0, INT32_MIN, 15));
-    CHECK(ring.Endpoint(0).volume.level_q16[0] == BIO_VOLUME_MIN_Q16);
+    CHECK(ring.Endpoint(0).volume.level_q16[0] == SSR_VOLUME_MIN_Q16);
     CHECK(ring.SetVolume(0, 1, INT32_MAX, 15));
     CHECK(ring.Endpoint(0).volume.level_q16[1] == 0);
     CHECK(ring.SetVolume(0, 2, -16384, 15));
@@ -479,25 +479,25 @@ void VolumeStateAndRecovery() {
     CHECK(ring.StreamStart(0, 17));
     ring.DiscardQueued(18);
     got = ring.Read(out, sizeof(out));
-    const uint16_t kinds[] = {BIO_RECORD_KIND_FORMAT_CHANGE, BIO_RECORD_KIND_VOLUME,
-        BIO_RECORD_KIND_STREAM_START, BIO_RECORD_KIND_VOLUME, BIO_RECORD_KIND_STREAM_STOP};
+    const uint16_t kinds[] = {SSR_RECORD_KIND_FORMAT_CHANGE, SSR_RECORD_KIND_VOLUME,
+        SSR_RECORD_KIND_STREAM_START, SSR_RECORD_KIND_VOLUME, SSR_RECORD_KIND_STREAM_STOP};
     uint32_t at = 0;
     for (uint16_t kind : kinds) {
         memcpy(&h, out + at, sizeof(h));
-        CHECK(h.kind == kind && h.flags == BIO_RECORD_FLAG_REPEAT);
+        CHECK(h.kind == kind && h.flags == SSR_RECORD_FLAG_REPEAT);
         at += RecordBytes(h.len);
     }
     CHECK(at == got);
     CHECK(ring.SourceGap(0, 19, 100));
     got = ring.Read(out, sizeof(out), 20);
-    const uint16_t recovery[] = {BIO_RECORD_KIND_OVERRUN, BIO_RECORD_KIND_FORMAT_CHANGE,
-        BIO_RECORD_KIND_VOLUME, BIO_RECORD_KIND_STREAM_START};
+    const uint16_t recovery[] = {SSR_RECORD_KIND_OVERRUN, SSR_RECORD_KIND_FORMAT_CHANGE,
+        SSR_RECORD_KIND_VOLUME, SSR_RECORD_KIND_STREAM_START};
     at = 0;
     for (uint16_t kind : recovery) {
         memcpy(&h, out + at, sizeof(h));
         CHECK(h.kind == kind && h.qpc == 20);
-        if (kind != BIO_RECORD_KIND_OVERRUN) CHECK(h.flags == BIO_RECORD_FLAG_REPEAT);
-        if (kind == BIO_RECORD_KIND_VOLUME) {
+        if (kind != SSR_RECORD_KIND_OVERRUN) CHECK(h.flags == SSR_RECORD_FLAG_REPEAT);
+        if (kind == SSR_RECORD_KIND_VOLUME) {
             memcpy(&value, out + at + sizeof(h), sizeof(value));
             CHECK(memcmp(&value, &ring.Endpoint(0).volume, sizeof(value)) == 0);
         }
@@ -512,10 +512,10 @@ void VolumeStateAndRecovery() {
     bool recovered = false;
     for (at = 0; at < got; at += RecordBytes(h.len)) {
         memcpy(&h, out + at, sizeof(h));
-        if (h.kind == BIO_RECORD_KIND_VOLUME && h.endpoint == 1) {
+        if (h.kind == SSR_RECORD_KIND_VOLUME && h.endpoint == 1) {
             memcpy(&value, out + at + sizeof(h), sizeof(value));
             CHECK(value.level_q16[0] == -30 * 65536 && value.level_q16[1] == -30 * 65536);
-            CHECK(h.flags == BIO_RECORD_FLAG_REPEAT);
+            CHECK(h.flags == SSR_RECORD_FLAG_REPEAT);
             recovered = true;
         }
     }
@@ -523,62 +523,62 @@ void VolumeStateAndRecovery() {
 }
 
 void EndpointBounds() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     const uint8_t data[1] = {1};
-    for (uint16_t ep = 2; ep < BIO_MAX_ENDPOINTS; ++ep) {
+    for (uint16_t ep = 2; ep < SSR_MAX_ENDPOINTS; ++ep) {
         CHECK(ring.StreamStart(ep, ep));
         CHECK(ring.Data(ep, ep, ep, data, sizeof(data), nullptr, 0));
         CHECK(ring.Endpoint(ep).total_bytes == 1);
     }
-    CHECK(!ring.StreamStart(BIO_MAX_ENDPOINTS, 0));
-    CHECK(!ring.Data(BIO_MAX_ENDPOINTS, 0, 0, data, sizeof(data), nullptr, 0));
-    CHECK(ring.Endpoint(BIO_MAX_ENDPOINTS).total_bytes == 0);
+    CHECK(!ring.StreamStart(SSR_MAX_ENDPOINTS, 0));
+    CHECK(!ring.Data(SSR_MAX_ENDPOINTS, 0, 0, data, sizeof(data), nullptr, 0));
+    CHECK(ring.Endpoint(SSR_MAX_ENDPOINTS).total_bytes == 0);
 }
 
 void ReadRules() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
-    CHECK(bio::ReadGate::ShouldComplete(ring, 0, 64, 1, 9));
-    CHECK(!bio::ReadGate::ShouldComplete(ring, 10, 64, 1, 9));
+    CHECK(ssr::ReadGate::ShouldComplete(ring, 0, 64, 1, 9));
+    CHECK(!ssr::ReadGate::ShouldComplete(ring, 10, 64, 1, 9));
     uint8_t data[16]{};
     CHECK(ring.Data(0, 0, 0, data, sizeof(data), nullptr, 0));
-    CHECK(bio::ReadGate::ShouldComplete(ring, 1000, 48, 1, 9));
+    CHECK(ssr::ReadGate::ShouldComplete(ring, 1000, 48, 1, 9));
     ring.DiscardQueued();
-    CHECK(bio::ReadGate::ShouldComplete(ring, 10, 64, 9, 9));
-    CHECK(bio::ReadGate::Deadline(UINT64_MAX - 1U, 10000000, 1) == UINT64_MAX);
-    CHECK(bio::ReadGate::Deadline(5, 10000000, 2) == 20005);
+    CHECK(ssr::ReadGate::ShouldComplete(ring, 10, 64, 9, 9));
+    CHECK(ssr::ReadGate::Deadline(UINT64_MAX - 1U, 10000000, 1) == UINT64_MAX);
+    CHECK(ssr::ReadGate::Deadline(5, 10000000, 2) == 20005);
 }
 
 void PayloadAndReadLimits() {
     alignas(8) static uint8_t big[1024U * 1024U];
-    static uint8_t data[bio::kMaxDataPayload + 8U];
-    static uint8_t out[bio::kReadMaxBytes + 4096U];
-    bio::RecordRing ring;
+    static uint8_t data[ssr::kMaxDataPayload + 8U];
+    static uint8_t out[ssr::kReadMaxBytes + 4096U];
+    ssr::RecordRing ring;
     CHECK(ring.Init(big, sizeof(big)));
-    CHECK(!ring.Data(0, 1, 0, data, bio::kMaxDataPayload + 1U, nullptr, 0));
-    CHECK(!ring.Data(0, 1, 0, data, bio::kMaxDataPayload, data, 1));
+    CHECK(!ring.Data(0, 1, 0, data, ssr::kMaxDataPayload + 1U, nullptr, 0));
+    CHECK(!ring.Data(0, 1, 0, data, ssr::kMaxDataPayload, data, 1));
     CHECK(ring.QueuedBytes() == 0);
-    CHECK(ring.Data(0, 1, 0, data, bio::kMaxDataPayload - 8U, data, 8));
+    CHECK(ring.Data(0, 1, 0, data, ssr::kMaxDataPayload - 8U, data, 8));
     const uint32_t largest = ring.FirstRecordBytes();
-    CHECK(largest == sizeof(BIO_RECORD_HEADER) + bio::kMaxDataPayload);
-    CHECK(largest <= bio::ReadGate::Capacity(UINT32_MAX));
-    CHECK(bio::ReadGate::Capacity(100) == 100);
-    CHECK(bio::ReadGate::Capacity(bio::kReadMaxBytes + 1U) == bio::kReadMaxBytes);
+    CHECK(largest == sizeof(SSR_RECORD_HEADER) + ssr::kMaxDataPayload);
+    CHECK(largest <= ssr::ReadGate::Capacity(UINT32_MAX));
+    CHECK(ssr::ReadGate::Capacity(100) == 100);
+    CHECK(ssr::ReadGate::Capacity(ssr::kReadMaxBytes + 1U) == ssr::kReadMaxBytes);
     // Five largest records queued: one READ with a huge buffer takes three,
     // never more than kReadMaxBytes.
-    for (uint32_t i = 0; i < 4U; ++i) CHECK(ring.Data(0, 2U + i, 0, data, bio::kMaxDataPayload, nullptr, 0));
-    const uint32_t capacity = bio::ReadGate::Capacity(sizeof(out));
-    CHECK(bio::ReadGate::ShouldComplete(ring, UINT32_MAX, capacity, 0, UINT64_MAX));
+    for (uint32_t i = 0; i < 4U; ++i) CHECK(ring.Data(0, 2U + i, 0, data, ssr::kMaxDataPayload, nullptr, 0));
+    const uint32_t capacity = ssr::ReadGate::Capacity(sizeof(out));
+    CHECK(ssr::ReadGate::ShouldComplete(ring, UINT32_MAX, capacity, 0, UINT64_MAX));
     const uint32_t moved = ring.Read(out, capacity);
     CHECK(moved == 3U * largest);
-    CHECK(moved <= bio::kReadMaxBytes);
+    CHECK(moved <= ssr::kReadMaxBytes);
     CHECK(ring.QueuedBytes() == 2U * largest);
-    CHECK(!bio::ReadGate::ShouldComplete(ring, UINT32_MAX, capacity, 0, UINT64_MAX));
+    CHECK(!ssr::ReadGate::ShouldComplete(ring, UINT32_MAX, capacity, 0, UINT64_MAX));
 }
 
 void ClockRules() {
-    bio::DmaClock clock;
+    ssr::DmaClock clock;
     clock.Start(0, 10000000, 192000, 4);
     CHECK(clock.Advance(10000000) == 192000);
     CHECK(clock.SetTrim(3000 * 65536) == 2000 * 65536);
@@ -615,7 +615,7 @@ uint64_t Random64(uint64_t* state) {
     return value;
 }
 
-NativeU128 Native(bio::U128 value) {
+NativeU128 Native(ssr::U128 value) {
     return (static_cast<NativeU128>(value.high) << 64U) | value.low;
 }
 
@@ -624,13 +624,13 @@ void U128Rules() {
     for (uint32_t i = 0; i < 10000U; ++i) {
         const uint64_t a = Random64(&random);
         const uint64_t b = Random64(&random);
-        CHECK(Native(bio::U128Multiply(a, b)) ==
+        CHECK(Native(ssr::U128Multiply(a, b)) ==
               static_cast<NativeU128>(a) * static_cast<NativeU128>(b));
-        bio::U128 numerator{Random64(&random), Random64(&random)};
-        bio::U128 denominator{Random64(&random), Random64(&random)};
+        ssr::U128 numerator{Random64(&random), Random64(&random)};
+        ssr::U128 denominator{Random64(&random), Random64(&random)};
         if (denominator.high == 0 && denominator.low == 0) denominator.low = 1;
-        bio::U128 remainder{};
-        const bio::U128 quotient = bio::U128Divide(numerator, denominator, &remainder);
+        ssr::U128 remainder{};
+        const ssr::U128 quotient = ssr::U128Divide(numerator, denominator, &remainder);
         CHECK(Native(quotient) == Native(numerator) / Native(denominator));
         CHECK(Native(remainder) == Native(numerator) % Native(denominator));
     }
@@ -647,13 +647,13 @@ uint64_t ReferenceMulDivCeil(uint64_t a, uint64_t b, uint64_t c) {
 void MulDivRules() {
     const uint64_t values[] = {0, 1, 2, UINT64_MAX - 1U, UINT64_MAX};
     for (uint64_t a : values) for (uint64_t b : values) for (uint64_t c : values)
-        CHECK(bio::MulDivCeil(a, b, c) == ReferenceMulDivCeil(a, b, c));
+        CHECK(ssr::MulDivCeil(a, b, c) == ReferenceMulDivCeil(a, b, c));
     uint64_t random = UINT64_C(0xd1b54a32d192ed03);
     for (uint32_t i = 0; i < 10000U; ++i) {
         const uint64_t a = Random64(&random);
         const uint64_t b = Random64(&random);
         const uint64_t c = Random64(&random);
-        CHECK(bio::MulDivCeil(a, b, c) == ReferenceMulDivCeil(a, b, c));
+        CHECK(ssr::MulDivCeil(a, b, c) == ReferenceMulDivCeil(a, b, c));
     }
 }
 
@@ -661,15 +661,15 @@ void RandomClockRules() {
     const uint64_t frequencies[] = {10000000, 24000000, 3000000000, UINT64_C(1) << 48U};
     const uint32_t rates[] = {1, 192000, 176400, 3072000, UINT32_MAX};
     const uint32_t aligns[] = {1, 4, 8, 32};
-    const int32_t trims[] = {-BIO_TRIM_LIMIT_PPM * 65536, 0, 1,
-                             BIO_TRIM_LIMIT_PPM * 65536};
+    const int32_t trims[] = {-SSR_TRIM_LIMIT_PPM * 65536, 0, 1,
+                             SSR_TRIM_LIMIT_PPM * 65536};
     constexpr uint64_t trimDenominator = UINT64_C(1000000) * 65536U;
     uint64_t random = UINT64_C(0x94d049bb133111eb);
     for (uint32_t scenario = 0; scenario < 80U; ++scenario) {
         const uint64_t frequency = frequencies[scenario % 4U];
         const uint32_t rate = rates[(scenario / 4U) % 5U];
         const uint32_t align = aligns[(scenario / 20U) % 4U];
-        bio::DmaClock clock;
+        ssr::DmaClock clock;
         clock.Start(0, frequency, rate, align);
         uint64_t now = 0;
         uint64_t returned = 0;
@@ -680,9 +680,9 @@ void RandomClockRules() {
         for (uint32_t call = 0; call < 64U; ++call) {
             int32_t trim = trims[(call + scenario) % 4U];
             if ((call & 7U) == 7U) {
-                const uint32_t span = static_cast<uint32_t>(BIO_TRIM_LIMIT_PPM * 2 + 1);
+                const uint32_t span = static_cast<uint32_t>(SSR_TRIM_LIMIT_PPM * 2 + 1);
                 trim = static_cast<int32_t>(Random64(&random) % span) * 65536 -
-                       BIO_TRIM_LIMIT_PPM * 65536;
+                       SSR_TRIM_LIMIT_PPM * 65536;
             }
             CHECK(clock.SetTrim(trim) == trim);
             uint64_t ticks;
@@ -719,28 +719,28 @@ void RandomClockRules() {}
 void Formats() {
     uint8_t wave[52];
     const uint32_t ids[] = {0x000a, 0x010a, 0x000b, 0x010b, 0x030b, 0x000c, 0x010c, 0x030c, 0x070c};
-    const uint64_t bits[] = {BIO_FORMAT_EAC3, BIO_FORMAT_EAC3_ATMOS, BIO_FORMAT_DTS_HD,
-        BIO_FORMAT_DTS_HD, BIO_FORMAT_DTS_HD, BIO_FORMAT_TRUEHD, BIO_FORMAT_MAT20,
-        BIO_FORMAT_MAT21, BIO_FORMAT_MAT21};
+    const uint64_t bits[] = {SSR_FORMAT_EAC3, SSR_FORMAT_EAC3_JOC, SSR_FORMAT_DTS_HD,
+        SSR_FORMAT_DTS_HD, SSR_FORMAT_DTS_HD, SSR_FORMAT_TRUEHD, SSR_FORMAT_MAT20,
+        SSR_FORMAT_MAT21, SSR_FORMAT_MAT21};
     for (uint32_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) {
         Wave(wave, ids[i], 0x0cea);
-        CHECK(bio::CodecBit(wave, sizeof(wave)) == bits[i]);
-        CHECK(bio::FormatAllowed(BIO_ENDPOINT_FORMATS{bits[i], {}}, wave, sizeof(wave)));
+        CHECK(ssr::CodecBit(wave, sizeof(wave)) == bits[i]);
+        CHECK(ssr::FormatAllowed(SSR_ENDPOINT_FORMATS{bits[i], {}}, wave, sizeof(wave)));
     }
-    CHECK(bio::CodecBit(wave, 17) == 0);
+    CHECK(ssr::CodecBit(wave, 17) == 0);
     Put16(wave, 16, 100);
-    CHECK(bio::CodecBit(wave, sizeof(wave)) == 0);
+    CHECK(ssr::CodecBit(wave, sizeof(wave)) == 0);
     uint8_t plain[18]{};
     Put16(plain, 0, 0x0092);
-    CHECK(bio::CodecBit(plain, sizeof(plain)) == BIO_FORMAT_AC3);
+    CHECK(ssr::CodecBit(plain, sizeof(plain)) == SSR_FORMAT_AC3);
     Put16(plain, 0, 0x0008);
-    CHECK(bio::CodecBit(plain, sizeof(plain)) == BIO_FORMAT_DTS);
+    CHECK(ssr::CodecBit(plain, sizeof(plain)) == SSR_FORMAT_DTS);
 }
 
 // Overwriting an endpoint that never had a format leaves no format to
 // restate; that must not leave a recovery request behind that blocks READ.
 void FormatlessOverwriteKeepsReading() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     uint8_t payload[1024]{};
     for (uint64_t i = 0; i < 80; ++i) CHECK(ring.Data(0, i, i, payload, sizeof(payload), nullptr, 0));
@@ -751,7 +751,7 @@ void FormatlessOverwriteKeepsReading() {
 }
 
 void Volume32() {
-    bio::RecordRing ring;
+    ssr::RecordRing ring;
     CHECK(ring.Init(storage, sizeof(storage)));
     CHECK(ring.ConfigureVolume(0, 32));
     CHECK(ring.SetMute(0, -1, true, 1));
@@ -770,15 +770,15 @@ struct IntersectionRule {
     bool direct_only;
 };
 
-bool IntersectionAccept(const bio::PcmCandidate& value, void* opaque) {
+bool IntersectionAccept(const ssr::PcmCandidate& value, void* opaque) {
     const auto& rule = *static_cast<IntersectionRule*>(opaque);
     return value.rate == rule.rate && value.channels <= rule.max_channels &&
            value.bits == rule.bits && value.floating == rule.floating &&
            (!rule.direct_only || value.channel_mask == 0);
 }
 
-bool PcmIntersectionAllowed(const bio::PcmCandidate& value, void* opaque) {
-    const auto& enabled = *static_cast<BIO_PCM_FORMATS*>(opaque);
+bool PcmIntersectionAllowed(const ssr::PcmCandidate& value, void* opaque) {
+    const auto& enabled = *static_cast<SSR_PCM_FORMATS*>(opaque);
     uint8_t wave[40]{};
     Put16(wave, 0, 0xfffe);
     Put16(wave, 2, value.channels);
@@ -794,42 +794,42 @@ bool PcmIntersectionAllowed(const bio::PcmCandidate& value, void* opaque) {
     Put16(wave, 28, 0);
     const uint8_t tail[10] = {0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71};
     memcpy(wave + 30, tail, sizeof(tail));
-    return bio::PcmAllowed(enabled, wave, sizeof(wave));
+    return ssr::PcmAllowed(enabled, wave, sizeof(wave));
 }
 
 void PcmIntersectionOrder() {
-    const bio::PcmCandidate oem{8, 48000, 0x63f, 32, 32, true};
-    bio::PcmCandidate result{};
+    const ssr::PcmCandidate oem{8, 48000, 0x63f, 32, 32, true};
+    ssr::PcmCandidate result{};
     IntersectionRule rule{96000, 32, 32, true, false};
-    CHECK(bio::ChoosePcmIntersection(BIO_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
+    CHECK(ssr::ChoosePcmIntersection(SSR_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
     CHECK(result.rate == 96000 && result.channels == 8 && result.channel_mask == 0x63f && result.floating);
     rule = {96000, 2, 32, true, false};
-    CHECK(bio::ChoosePcmIntersection(BIO_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
+    CHECK(ssr::ChoosePcmIntersection(SSR_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
     CHECK(result.channels == 2 && result.channel_mask == 3);
     rule = {44100, 32, 16, false, false};
-    CHECK(bio::ChoosePcmIntersection(BIO_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
+    CHECK(ssr::ChoosePcmIntersection(SSR_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
     CHECK(result.rate == 44100 && result.channels == 8 && result.channel_mask == 0x63f && result.bits == 16);
-    auto direct = BIO_DEFAULT_PCM; direct.max_masked_channels = 0;
+    auto direct = SSR_DEFAULT_PCM; direct.max_masked_channels = 0;
     rule = {48000, 32, 32, true, true};
-    CHECK(bio::ChoosePcmIntersection(direct, oem, IntersectionAccept, &rule, &result));
+    CHECK(ssr::ChoosePcmIntersection(direct, oem, IntersectionAccept, &rule, &result));
     CHECK(result.channels == 2 && result.channel_mask == 0);
     rule = {32000, 32, 32, true, false};
-    CHECK(!bio::ChoosePcmIntersection(BIO_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
+    CHECK(!ssr::ChoosePcmIntersection(SSR_DEFAULT_PCM, oem, IntersectionAccept, &rule, &result));
 
-    auto enabled = BIO_DEFAULT_PCM;
+    auto enabled = SSR_DEFAULT_PCM;
     enabled.rates = 1U;
-    CHECK(bio::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
+    CHECK(ssr::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
     CHECK(result.rate == 44100);
-    enabled = BIO_DEFAULT_PCM;
+    enabled = SSR_DEFAULT_PCM;
     enabled.shapes = 1U;
-    CHECK(bio::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
+    CHECK(ssr::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
     CHECK(result.bits == 16 && result.valid_bits == 16 && !result.floating);
     enabled = {};
-    CHECK(!bio::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
-    enabled = BIO_DEFAULT_PCM;
+    CHECK(!ssr::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
+    enabled = SSR_DEFAULT_PCM;
     enabled.max_masked_channels = 2;
     enabled.direct_channels = 1U << 1U;
-    CHECK(bio::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
+    CHECK(ssr::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
     CHECK(result.channels == 2);
 }
 
@@ -849,54 +849,54 @@ void PcmRules() {
         uint16_t channels = 0;
         for (auto m = mask; m; m &= m - 1) ++channels;
         make(channels, mask);
-        CHECK(bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
+        CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
         // Keep byte-rate/alignment valid so this specifically checks popcount.
         make(static_cast<uint16_t>(channels + 1), mask);
-        CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
+        CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
     }
     const uint16_t direct[] = {0, 1, 2, 16, 24, 32, 33};
     for (uint16_t channels : direct) {
         make(channels, 0);
-        CHECK(bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40) == (channels >= 1 && channels <= 32));
+        CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40) == (channels >= 1 && channels <= 32));
     }
-    make(1, 0x40000); CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
-    for (uint32_t rate : BIO_PCM_RATES) {
-        make(2, 3, rate); CHECK(bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
+    make(1, 0x40000); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
+    for (uint32_t rate : SSR_PCM_RATES) {
+        make(2, 3, rate); CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
     }
-    make(2, 3, 32000); CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
+    make(2, 3, 32000); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
     const uint16_t widths[] = {16, 24, 32, 32, 32};
     const uint16_t valid[] = {16, 24, 24, 32, 32};
     for (uint32_t i = 0; i < 5; ++i) {
         make(2, 3, 48000, widths[i], valid[i], i == 4 ? 3 : 1);
-        CHECK(bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
-        auto enabled = BIO_DEFAULT_PCM; enabled.shapes &= ~(1U << i);
-        CHECK(!bio::PcmAllowed(enabled, wave, 40));
-        Put16(wave, 18, 20); CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
+        CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
+        auto enabled = SSR_DEFAULT_PCM; enabled.shapes &= ~(1U << i);
+        CHECK(!ssr::PcmAllowed(enabled, wave, 40));
+        Put16(wave, 18, 20); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
     }
     make(2, 3);
-    auto enabled = BIO_DEFAULT_PCM; enabled.rates &= ~2U;
-    CHECK(!bio::PcmAllowed(enabled, wave, 40));
-    enabled = BIO_DEFAULT_PCM; enabled.max_masked_channels = 1;
-    CHECK(!bio::PcmAllowed(enabled, wave, 40));
-    make(32, 0); enabled = BIO_DEFAULT_PCM; enabled.direct_channels &= 0x7fffffff;
-    CHECK(!bio::PcmAllowed(enabled, wave, 40));
+    auto enabled = SSR_DEFAULT_PCM; enabled.rates &= ~2U;
+    CHECK(!ssr::PcmAllowed(enabled, wave, 40));
+    enabled = SSR_DEFAULT_PCM; enabled.max_masked_channels = 1;
+    CHECK(!ssr::PcmAllowed(enabled, wave, 40));
+    make(32, 0); enabled = SSR_DEFAULT_PCM; enabled.direct_channels &= 0x7fffffff;
+    CHECK(!ssr::PcmAllowed(enabled, wave, 40));
     const uint16_t plainChannels[] = {1, 2, 3};
     for (uint16_t channels : plainChannels) {
         make(channels, 0, 48000, 16, 16, 1);
         Put16(wave, 0, 1); Put16(wave, 16, 0);
-        CHECK(bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 18) == (channels <= 2));
+        CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 18) == (channels <= 2));
         Put16(wave, 0, 3); Put16(wave, 14, 32);
         Put16(wave, 12, static_cast<uint16_t>(channels * 4)); Put32(wave, 8, 48000U * channels * 4);
-        CHECK(bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 18) == (channels <= 2));
+        CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 18) == (channels <= 2));
     }
     make(2, 3);
-    for (uint32_t n = 0; n < 40; ++n) CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, n));
-    CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, nullptr, 40));
-    Put16(wave, 16, 65535); CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
-    make(2, 3); wave[35] ^= 1; CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
-    make(2, 3); Put16(wave, 12, 7); CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
-    make(2, 3); Put32(wave, 8, 1); CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
-    make(32, 0, UINT32_MAX); CHECK(!bio::PcmAllowed(BIO_DEFAULT_PCM, wave, 40));
+    for (uint32_t n = 0; n < 40; ++n) CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, n));
+    CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, nullptr, 40));
+    Put16(wave, 16, 65535); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
+    make(2, 3); wave[35] ^= 1; CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
+    make(2, 3); Put16(wave, 12, 7); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
+    make(2, 3); Put32(wave, 8, 1); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
+    make(32, 0, UINT32_MAX); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
 }
 
 }  // namespace

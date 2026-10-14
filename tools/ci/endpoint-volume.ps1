@@ -1,10 +1,10 @@
 # Shared read/control access to IAudioEndpointVolume. Dot-source; no changes on load.
-if (-not ('BioEndpointVolume' -as [type])) {
+if (-not ('SsrEndpointVolume' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public sealed class BioVolumeSnapshot {
+public sealed class SsrVolumeSnapshot {
     public float master_db;
     public float[] channels_db;
     public bool mute;
@@ -12,7 +12,7 @@ public sealed class BioVolumeSnapshot {
     public float minimum_db, maximum_db, step_db;
 }
 
-public sealed class BioEndpointVolume : IDisposable {
+public sealed class SsrEndpointVolume : IDisposable {
     [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
     class EnumeratorClass { }
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -62,7 +62,7 @@ public sealed class BioEndpointVolume : IDisposable {
     Volume volume;
     Guid context = new Guid("3481a551-10b8-4c0f-9272-94c37d65f180");
     static void Check(int result) { Marshal.ThrowExceptionForHR(result); }
-    public BioEndpointVolume(string id) {
+    public SsrEndpointVolume(string id) {
         Enumerator enumerator = (Enumerator)new EnumeratorClass();
         Device device = null;
         object instance = null;
@@ -78,11 +78,11 @@ public sealed class BioEndpointVolume : IDisposable {
             Marshal.ReleaseComObject(enumerator);
         }
     }
-    public BioVolumeSnapshot Snapshot() {
-        var result = new BioVolumeSnapshot();
+    public SsrVolumeSnapshot Snapshot() {
+        var result = new SsrVolumeSnapshot();
         uint count;
         Check(volume.GetChannelCount(out count));
-        if (count == 0 || count > 16) throw new InvalidOperationException("endpoint channel count outside BIO contract");
+        if (count == 0 || count > 16) throw new InvalidOperationException("endpoint channel count outside Spatial SoftReceiver contract");
         result.channels_db = new float[count];
         for (uint i = 0; i < count; ++i) Check(volume.GetChannelVolumeLevel(i, out result.channels_db[i]));
         Check(volume.GetMasterVolumeLevel(out result.master_db));
@@ -94,7 +94,7 @@ public sealed class BioEndpointVolume : IDisposable {
     public void SetMaster(float db) { Check(volume.SetMasterVolumeLevel(db, ref context)); }
     public void SetChannel(uint channel, float db) { Check(volume.SetChannelVolumeLevel(channel, db, ref context)); }
     public void SetMute(bool mute) { Check(volume.SetMute(mute, ref context)); }
-    public void Restore(BioVolumeSnapshot original) {
+    public void Restore(SsrVolumeSnapshot original) {
         // Try every restoration even when one property call fails. Restore
         // master first, then the saved per-channel balance, then mute.
         Exception failure = null;
@@ -114,16 +114,16 @@ public sealed class BioEndpointVolume : IDisposable {
 
 . (Join-Path $PSScriptRoot 'endpoints.ps1')
 
-function Get-BioVolumeTargets {
+function Get-SsrVolumeTargets {
     param([string] $InstanceId = '', [switch] $IncludeLegacy)
     Get-SpatialEndpoints -InstanceId $InstanceId -IncludeLegacy:$IncludeLegacy
 }
 
-function Get-BioVolumeSnapshot {
-    foreach ($target in Get-BioVolumeTargets) {
+function Get-SsrVolumeSnapshot {
+    foreach ($target in Get-SsrVolumeTargets) {
         $control = $null
         try {
-            $control = [BioEndpointVolume]::new($target.id)
+            $control = [SsrEndpointVolume]::new($target.id)
             [pscustomobject]@{ endpoint = $target.endpoint; name = $target.name; state = $target.state; volume = $control.Snapshot(); error = $null }
         } catch {
             [pscustomobject]@{ endpoint = $target.endpoint; name = $target.name; state = $target.state; volume = $null; error = $_.Exception.Message }

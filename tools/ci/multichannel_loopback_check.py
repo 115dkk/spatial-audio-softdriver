@@ -54,7 +54,7 @@ def _record(kind, epoch, byte_pos, qpc, payload=b""):
 
 
 def make_dump(path, frames, channel_mask):
-    """Write a bio-abi format-1 dump containing float32 interleaved PCM."""
+    """Write a ssr-abi format-1 dump containing float32 interleaved PCM."""
     channels = frames.shape[1]
     block = channels * 4
     wave = struct.pack("<HHIIHHHHI16s", 0xFFFE, channels, RATE, RATE * block, block,
@@ -70,7 +70,7 @@ def make_dump(path, frames, channel_mask):
         qpc = ((at + len(chunk)) // block) * 10_000_000 // RATE
         stream += _record(1, 1, at, qpc, chunk)
     stream += _record(4, 1, len(payload), frames.shape[0] * 10_000_000 // RATE)
-    header = struct.pack("<8sIIQII", b"BIODUMP\0", 1, 32, 10_000_000, 1, 0)
+    header = struct.pack("<8sIIQII", b"SSRDUMP\0", 1, 32, 10_000_000, 1, 0)
     Path(path).write_bytes(header + stream)
 
 
@@ -148,8 +148,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--format-probe", required=True)
     parser.add_argument("--cable-capture", required=True)
-    parser.add_argument("--bio-live", required=True)
-    parser.add_argument("--bio-replay", required=True)
+    parser.add_argument("--ssr-live", required=True)
+    parser.add_argument("--ssr-replay", required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--summary", required=True)
     parser.add_argument("--channels", type=int)
@@ -178,27 +178,27 @@ def main():
         return 2
     mask, _ = LAYOUTS[channels]
     profile = work / "multichannel-profile.toml"
-    dump = work / "multichannel.biodump"
+    dump = work / "multichannel.ssrdump"
     reference = work / "multichannel-reference.wav"
     captured = work / "multichannel-captured.wav"
     report = work / "multichannel-live-report.json"
     profile.write_text(profile_text(channels), encoding="utf-8")
     frames = tone_frames(channels, args.seconds)
     make_dump(dump, frames, mask)
-    subprocess.run([args.bio_replay, "render", str(dump), "--profile", str(profile),
+    subprocess.run([args.ssr_replay, "render", str(dump), "--profile", str(profile),
                     "--out", str(reference)], check=True)
     capture = subprocess.Popen([args.cable_capture, "--endpoint", args.capture,
         "--seconds", str(args.seconds + 2), "--channels", str(channels), "--mask", hex(mask),
         "--exclusive", str(captured)])
     time.sleep(0.5)
     mode = ["--shared"] if args.mode == "shared" else ["--period-ms", str(args.period_ms)]
-    live = subprocess.run([args.bio_live, "play", "--from-dump", str(dump), "--profile",
+    live = subprocess.run([args.ssr_live, "play", "--from-dump", str(dump), "--profile",
         str(profile), "--output", args.render, *mode,
         "--seconds", str(args.seconds + 0.5), "--report", str(report)], timeout=120)
     capture_rc = capture.wait(timeout=30)
     problems = []
     if live.returncode:
-        problems.append(f"bio-live exited with {live.returncode}")
+        problems.append(f"ssr-live exited with {live.returncode}")
     if capture_rc:
         problems.append(f"cable_capture exited with {capture_rc}")
     ref, ref_rate = sf.read(reference, dtype="float32", always_2d=True)

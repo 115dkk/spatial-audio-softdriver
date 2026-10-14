@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bio_types::Feeds;
 use brir::{
     AnglePreset, BrirError, BrirSource, DirectionFile, LfePolicy, Profile, load_profile, prepare,
     standard_angles,
 };
 use convolver::Binauralizer;
 use hound::{SampleFormat, WavSpec, WavWriter};
+use ssr_types::Feeds;
 
 const HESUVI_TRACKS: [&str; 30] = [
     "FL-left",
@@ -55,7 +55,7 @@ impl TestDirectory {
             .unwrap()
             .as_nanos();
         let path =
-            std::env::temp_dir().join(format!("bio-brir-{name}-{}-{nonce}", std::process::id()));
+            std::env::temp_dir().join(format!("ssr-brir-{name}-{}-{nonce}", std::process::id()));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -616,9 +616,9 @@ fn gains_and_lfe_route_become_linear() {
 }
 
 #[test]
-#[ignore = "requires BIO_DEMO_HESUVI"]
+#[ignore = "requires SSR_DEMO_HESUVI"]
 fn prepares_demo_hesuvi_from_environment() {
-    let path = std::env::var_os("BIO_DEMO_HESUVI").expect("BIO_DEMO_HESUVI is not set");
+    let path = std::env::var_os("SSR_DEMO_HESUVI").expect("SSR_DEMO_HESUVI is not set");
     let prepared = prepare(&profile(BrirSource::Hesuvi(path.into())), 48_000, 480).unwrap();
     let names: Vec<&str> = prepared
         .layout

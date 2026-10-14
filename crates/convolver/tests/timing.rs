@@ -4,8 +4,8 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bio_types::Feeds;
 use convolver::{Binauralizer, FilterBank};
+use ssr_types::Feeds;
 
 fn measure_case(inputs: usize, ir_frames: usize, iterations: usize) -> (f64, f64) {
     const PARTITION: usize = 480;

@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use bio_types::{Direction, Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 use engine::{BedBlock, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer};
 use render::PanGeometry;
+use ssr_types::{Direction, Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;

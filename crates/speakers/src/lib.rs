@@ -8,12 +8,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bio_types::{Direction, Layout, Speaker};
 use convolver::FilterBank;
 use rubato::audioadapter::Adapter;
 use rubato::audioadapter_buffers::owned::InterleavedOwned;
 use rubato::{Fft, FixedSync, Resampler, WindowFunction};
 use serde::Deserialize;
+use ssr_types::{Direction, Layout, Speaker};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpeakerRange {
@@ -200,7 +200,7 @@ pub enum SpeakerError {
     #[error("speaker layout cannot be panned: {0}")]
     Geometry(#[from] render::RenderError),
     #[error(transparent)]
-    Layout(#[from] bio_types::LayoutError),
+    Layout(#[from] ssr_types::LayoutError),
     #[error(transparent)]
     Convolver(#[from] convolver::ConvolverError),
     #[error("{path}: not a readable mono WAV: {detail}")]

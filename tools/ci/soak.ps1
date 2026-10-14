@@ -2,15 +2,15 @@
 # fault, device restart, lost byte or underrun while the source streams.
 # CI only (ci.yml, audio): the render endpoint is VB-CABLE's "Speakers (VB-Audio Virtual Cable)".
 #
-#   ./tools/ci/soak.ps1 -BioLive target/release/bio-live.exe -Fixtures $fx `
+#   ./tools/ci/soak.ps1 -SsrLive target/release/ssr-live.exe -Fixtures $fx `
 #       -Name exclusive -Minutes 5 [-Shared] [-CpuLoad] [-PageHeap]
 #
 # -CpuLoad keeps every logical processor busy at normal priority, so the
 # real-time threads have to win through MMCSS. -PageHeap turns on full page
-# heap (gflags +hpa) for bio-live.exe, so a heap overrun in the FFI code
+# heap (gflags +hpa) for ssr-live.exe, so a heap overrun in the FFI code
 # faults at once instead of corrupting memory quietly.
 param(
-    [Parameter(Mandatory)] [string] $BioLive,
+    [Parameter(Mandatory)] [string] $SsrLive,
     [Parameter(Mandatory)] [string] $Fixtures,
     [Parameter(Mandatory)] [string] $Name,
     [double] $Minutes = 2,
@@ -23,14 +23,14 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$dumpPath = Join-Path $Fixtures "$Dump.biodump"
+$dumpPath = Join-Path $Fixtures "$Dump.ssrdump"
 $profilePath = Join-Path $Fixtures 'profile.toml'
 $report = Join-Path $env:RUNNER_TEMP "soak-$Name.json"
 $log = Join-Path $env:RUNNER_TEMP "soak-$Name.log"
 
 $seconds = $Minutes * 60
 
-$ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\bio-live.exe'
+$ifeo = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\ssr-live.exe'
 $burners = @()
 try {
     if ($PageHeap) {
@@ -49,9 +49,9 @@ try {
         '--output', 'VB-Audio Virtual Cable', '--loop', '--seconds', $seconds, '--report', $report)
     if ($Shared) { $arguments += '--shared' }
     if ($PeriodMs -gt 0) { $arguments += @('--period-ms', $PeriodMs) }
-    Write-Host "bio-live $($arguments -join ' ')"
-    & $BioLive @arguments 2>&1 | Tee-Object -FilePath $log
-    if ($LASTEXITCODE -ne 0) { throw "bio-live exited with $LASTEXITCODE" }
+    Write-Host "ssr-live $($arguments -join ' ')"
+    & $SsrLive @arguments 2>&1 | Tee-Object -FilePath $log
+    if ($LASTEXITCODE -ne 0) { throw "ssr-live exited with $LASTEXITCODE" }
 }
 finally {
     $burners | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }

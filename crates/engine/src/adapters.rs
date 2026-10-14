@@ -10,14 +10,14 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bio_types::{
+use ssr_types::{
     CaptureError, CaptureSource, OutputError, OutputFormat, OutputLayout, OutputOpener, OutputSink,
     TrimUnsupported,
 };
 
-const RECORD_HEADER_BYTES: usize = size_of::<bio_abi::RecordHeader>();
-const RECORD_LENGTH_OFFSET: usize = std::mem::offset_of!(bio_abi::RecordHeader, len);
-const RECORD_QPC_OFFSET: usize = std::mem::offset_of!(bio_abi::RecordHeader, qpc);
+const RECORD_HEADER_BYTES: usize = size_of::<ssr_abi::RecordHeader>();
+const RECORD_LENGTH_OFFSET: usize = std::mem::offset_of!(ssr_abi::RecordHeader, len);
+const RECORD_QPC_OFFSET: usize = std::mem::offset_of!(ssr_abi::RecordHeader, qpc);
 const QPC_FREQUENCY: u64 = 10_000_000;
 
 /// Replays a dump's record stream, handing out whole records only.
@@ -35,7 +35,7 @@ impl DumpCapture {
         Self::with_format(stream, 1)
     }
 
-    /// `stream` and `format_version` come from [`bio_abi::split_dump`].
+    /// `stream` and `format_version` come from [`ssr_abi::split_dump`].
     pub fn with_format(stream: Vec<u8>, format_version: u32) -> Self {
         Self {
             stream,
@@ -70,7 +70,7 @@ impl CaptureSource for DumpCapture {
                     .try_into()
                     .expect("four bytes were sliced"),
             ) as usize;
-            let size = bio_abi::record_size(payload_len);
+            let size = ssr_abi::record_size(payload_len);
             if rest.len() < size {
                 return Err(CaptureError::Io(format!(
                     "record at offset {source} needs {size} bytes, but only {} remain",
@@ -78,11 +78,11 @@ impl CaptureSource for DumpCapture {
                 )));
             }
             if self.format_version >= 2
-                && (kind == bio_abi::RECORD_KIND_READ_END
-                    || kind == bio_abi::RECORD_KIND_RECORDER_GAP)
+                && (kind == ssr_abi::RECORD_KIND_READ_END
+                    || kind == ssr_abi::RECORD_KIND_RECORDER_GAP)
             {
                 source += size;
-                if kind == bio_abi::RECORD_KIND_READ_END {
+                if kind == ssr_abi::RECORD_KIND_READ_END {
                     self.last_read_qpc = Some(u64::from_le_bytes(
                         rest[RECORD_QPC_OFFSET..RECORD_QPC_OFFSET + 8]
                             .try_into()
@@ -150,7 +150,7 @@ impl OutputOpener for WavOpener {
                 channels: layout.channels,
                 channel_mask: layout.channel_mask,
                 period_frames: self.period_frames,
-                mode: bio_types::OutputMode::Exclusive,
+                mode: ssr_types::OutputMode::Exclusive,
                 fell_back: false,
                 mix_channels: layout.channels,
             },
@@ -245,7 +245,7 @@ impl OutputOpener for NullOpener {
                 channels: layout.channels,
                 channel_mask: layout.channel_mask,
                 period_frames: self.period_frames,
-                mode: bio_types::OutputMode::Exclusive,
+                mode: ssr_types::OutputMode::Exclusive,
                 fell_back: false,
                 mix_channels: layout.channels,
             },
@@ -294,7 +294,7 @@ fn frames_to_qpc(frames: u64, rate: u32) -> u64 {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use bio_abi::RecordWriter;
+    use ssr_abi::RecordWriter;
 
     use super::*;
 
@@ -306,7 +306,7 @@ mod tests {
         assert!(writer.data(1, 8, 1, &[2; 32]));
         let len = writer.len();
         stream.truncate(len);
-        let first_size = bio_abi::record_size(8);
+        let first_size = ssr_abi::record_size(8);
         let mut capture = DumpCapture::new(stream);
         let mut buffer = vec![0; first_size];
         assert_eq!(capture.read(&mut buffer, Duration::ZERO), Ok(first_size));
@@ -324,7 +324,7 @@ mod tests {
         let first = writer.len();
         assert!(writer.read_end(1));
         assert!(writer.data(1, 0, 2, &[3; 8]));
-        let second = bio_abi::record_size(8);
+        let second = ssr_abi::record_size(8);
         assert!(writer.read_end(3));
         let len = writer.len();
         stream.truncate(len);

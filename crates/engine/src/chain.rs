@@ -6,16 +6,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bio_abi::{
-    AbiError, MAX_ENDPOINTS, RECORD_ALIGN, RECORD_FLAG_DISCONTINUITY, Record, RecordHeader,
-    VolumePayload, volume_gain,
-};
-use bio_types::{BitstreamCodec, Feeds, OutputLayout, SceneBlock, SourceFormat};
 use brir::PreparedBrir;
 use convolver::Binauralizer;
 use decode::{DecodeConfig, DecodeError, Decoders, MAX_SCENE_FRAMES, Route};
 use render::PanGeometry;
 use speakers::{BiquadCoefficients, CrossoverCoefficients, PreparedSpeakers};
+use ssr_abi::{
+    AbiError, MAX_ENDPOINTS, RECORD_ALIGN, RECORD_FLAG_DISCONTINUITY, Record, RecordHeader,
+    VolumePayload, volume_gain,
+};
+use ssr_types::{BitstreamCodec, Feeds, OutputLayout, SceneBlock, SourceFormat};
 
 use crate::MAX_OUTPUT_CHANNELS;
 use crate::limiter::Limiter;
@@ -26,8 +26,8 @@ use crate::mixer::{
 const DEFAULT_LFE_GAIN: f32 = 1.0;
 const SPEAKER_TAIL_LIMIT_FRAMES: usize = 6 * MIX_RATE as usize;
 const BRIR_TAIL_MARGIN_FRAMES: usize = 2 * MIX_RATE as usize;
-static SILENT_TAIL_BED: [f32; bio_types::Layout::MAX_DIRECTIONS * MIX_FRAMES] =
-    [0.0; bio_types::Layout::MAX_DIRECTIONS * MIX_FRAMES];
+static SILENT_TAIL_BED: [f32; ssr_types::Layout::MAX_DIRECTIONS * MIX_FRAMES] =
+    [0.0; ssr_types::Layout::MAX_DIRECTIONS * MIX_FRAMES];
 
 /// Which render endpoints a chain consumes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -112,7 +112,7 @@ pub fn scene_shape(format: &SourceFormat) -> Option<(u32, usize)> {
                 BitstreamCodec::Mat20
                     | BitstreamCodec::Mat21
                     | BitstreamCodec::Eac3
-                    | BitstreamCodec::Eac3Atmos
+                    | BitstreamCodec::Eac3Joc
             ) && (stream.encoded_rate == 0 || supported_scene_rate(stream.encoded_rate))
         }
     };
@@ -216,7 +216,7 @@ impl OutputKind {
 enum PreparedOutput {
     Headphones {
         brir: Arc<PreparedBrir>,
-        lfe_route: Option<(bio_types::DirectionId, f32)>,
+        lfe_route: Option<(ssr_types::DirectionId, f32)>,
         binauralizer: Binauralizer,
     },
     Speakers {
@@ -900,7 +900,7 @@ fn next_for_endpoint<'a>(cursor: &mut RecordCursor<'a>, endpoint: usize) {
             continue;
         }
         let physical_size = padded_record_size(header.len as usize).min(rest.len());
-        let Some(item) = bio_abi::records(&rest[..physical_size]).next() else {
+        let Some(item) = ssr_abi::records(&rest[..physical_size]).next() else {
             // The parser skips kinds it does not know. Step over this one
             // record and keep looking for the endpoint's next record.
             cursor.offset = cursor
@@ -1403,7 +1403,7 @@ impl Chain {
                             BitstreamCodec::Mat20
                                 | BitstreamCodec::Mat21
                                 | BitstreamCodec::Eac3
-                                | BitstreamCodec::Eac3Atmos
+                                | BitstreamCodec::Eac3Joc
                         ) =>
                     {
                         (stream.encoded_rate != 0 && !supported_scene_rate(stream.encoded_rate))
@@ -2128,7 +2128,7 @@ impl Chain {
 
 #[cfg(test)]
 mod tests {
-    use bio_types::{BitstreamFormat, PcmFormat, SampleType};
+    use ssr_types::{BitstreamFormat, PcmFormat, SampleType};
 
     use super::*;
 
@@ -2147,7 +2147,7 @@ mod tests {
             channel_count: 2,
             mute_mask: if muted { 3 } else { 0 },
             level_q16: {
-                let mut levels = [0; bio_abi::MAX_VOLUME_CHANNELS];
+                let mut levels = [0; ssr_abi::MAX_VOLUME_CHANNELS];
                 levels[..2].fill(gain_db * 65_536);
                 levels
             },
@@ -2203,7 +2203,7 @@ mod tests {
                     qpc: 10,
                     channel_count: channels,
                     mute_mask: mask,
-                    levels: [0; bio_abi::MAX_VOLUME_CHANNELS],
+                    levels: [0; ssr_abi::MAX_VOLUME_CHANNELS],
                 },
                 &mut |event| {
                     if let ChainEvent::Volume { muted: value, .. } = event {
@@ -2310,8 +2310,8 @@ mod tests {
     }
 
     fn identity_prepared(ir_frames: usize, delayed_tap: usize) -> Box<Prepared> {
-        use bio_types::{Direction, Layout};
         use brir::PreparedBrir;
+        use ssr_types::{Direction, Layout};
 
         let mut ir = vec![0.0_f32; ir_frames];
         ir[delayed_tap] = 1.0;
@@ -2468,12 +2468,12 @@ mod tests {
         bass_to: Vec<usize>,
         device_channels: usize,
     ) -> speakers::PreparedSpeakers {
-        let layout = bio_types::Layout::new(
+        let layout = ssr_types::Layout::new(
             speakers
                 .iter()
                 .enumerate()
                 .map(|(index, speaker)| {
-                    bio_types::Direction::new(speaker.name.clone(), 30.0 - 60.0 * index as f32, 0.0)
+                    ssr_types::Direction::new(speaker.name.clone(), 30.0 - 60.0 * index as f32, 0.0)
                 })
                 .collect(),
         )
@@ -2974,7 +2974,7 @@ mod tests {
             let ir = [1.0_f32];
             let filters = [[ir.as_slice(), ir.as_slice()]];
             Arc::new(PreparedBrir {
-                layout: bio_types::Layout::new(vec![bio_types::Direction::new("front", 0.0, 0.0)])
+                layout: ssr_types::Layout::new(vec![ssr_types::Direction::new("front", 0.0, 0.0)])
                     .unwrap(),
                 bank: Arc::new(convolver::FilterBank::new(&filters, MIX_FRAMES).unwrap()),
                 rate: MIX_RATE,
@@ -3078,7 +3078,7 @@ directions = []
             Some((MIX_RATE, MIX_FRAMES))
         );
         assert_eq!(
-            scene_shape(&bitstream(BitstreamCodec::Eac3Atmos, 44_100)),
+            scene_shape(&bitstream(BitstreamCodec::Eac3Joc, 44_100)),
             Some((MIX_RATE, MIX_FRAMES))
         );
         assert_eq!(

@@ -19,8 +19,8 @@ pub mod mat;
 pub mod pcm;
 mod scene;
 
-use bio_types::{SceneBlock, SourceFormat};
 use bitstream::Burst;
+use ssr_types::{SceneBlock, SourceFormat};
 
 pub use scene::SceneBuffers;
 
@@ -51,7 +51,7 @@ impl Default for DecodeConfig {
 pub enum DecodeError {
     /// The format-change record names a codec no adapter decodes.
     #[error("no decoder handles {0:?}")]
-    UnsupportedCodec(bio_types::BitstreamCodec),
+    UnsupportedCodec(ssr_types::BitstreamCodec),
     /// The stream is valid but uses something this adapter does not support.
     #[error("unsupported {codec} stream: {detail}")]
     Unsupported {
@@ -117,7 +117,7 @@ impl Decoders {
     /// Activates the adapter for `format` (a format-change record), resetting
     /// it. Does not allocate.
     pub fn select(&mut self, format: &SourceFormat, epoch: u32) -> Result<Route, DecodeError> {
-        use bio_types::BitstreamCodec as C;
+        use ssr_types::BitstreamCodec as C;
         self.epoch = epoch;
         let (active, route) = match format {
             SourceFormat::Pcm(p) => {
@@ -126,7 +126,7 @@ impl Decoders {
             }
             SourceFormat::Bitstream(b) => match b.codec {
                 C::Mat20 | C::Mat21 => (Active::Mat, Route::Bitstream),
-                C::Eac3 | C::Eac3Atmos => (Active::Ddp, Route::Bitstream),
+                C::Eac3 | C::Eac3Joc => (Active::Ddp, Route::Bitstream),
                 other => {
                     self.active = Active::None;
                     return Err(DecodeError::UnsupportedCodec(other));

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MS-PL
 // libFuzzer target for the exact virtual DMA clock.
-#include "bio_core.h"
+#include "ssr_core.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -30,7 +30,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         !Take(data, size, &at, &alignSeed)) return 0;
     frequency = frequency % (UINT64_C(1) << 48U) + 1U;
     const uint32_t align = alignSeed % 256U + 1U;
-    bio::DmaClock clock;
+    ssr::DmaClock clock;
     clock.Start(0, frequency, rate, align);
     constexpr uint64_t trimDenominator = UINT64_C(1000000) * 65536U;
     const NativeU128 denominator = static_cast<NativeU128>(frequency) * trimDenominator;
@@ -44,7 +44,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         uint64_t ticks;
         (void)Take(data, size, &at, &trim);
         (void)Take(data, size, &at, &ticks);
-        constexpr int32_t limit = BIO_TRIM_LIMIT_PPM * 65536;
+        constexpr int32_t limit = SSR_TRIM_LIMIT_PPM * 65536;
         trim = trim < -limit ? -limit : (trim > limit ? limit : trim);
         ticks %= frequency * 8U + 1U;
         (void)clock.SetTrim(trim);

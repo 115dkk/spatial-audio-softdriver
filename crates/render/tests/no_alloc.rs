@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use bio_types::{Direction, Layout, Position};
 use render::PanGeometry;
+use ssr_types::{Direction, Layout, Position};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;

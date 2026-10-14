@@ -4,14 +4,14 @@
 #     ./tools/ci/crash-dumps.ps1 -Folder $dumps                  # turn on WER local dumps
 #     ./tools/ci/crash-dumps.ps1 -Folder $dumps -Report -Symbols target/release
 #
-# A soak saw bio-live end with 0xC0000005 and no output; the dump and cdb's
+# A soak saw ssr-live end with 0xC0000005 and no output; the dump and cdb's
 # stacks say where. -Report never fails the step: the step that ran the
 # program has already failed.
 param(
     [Parameter(Mandatory)] [string] $Folder,
     [switch] $Report,
     [string] $Symbols = '',
-    [string[]] $Programs = @('bio-live.exe', 'bio-replay.exe')
+    [string[]] $Programs = @('ssr-live.exe', 'ssr-replay.exe')
 )
 $ErrorActionPreference = 'Stop'
 
