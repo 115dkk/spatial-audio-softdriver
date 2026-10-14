@@ -231,17 +231,20 @@ jobs:
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start
 
-      # Driver Verifier watches the driver from the moment it loads, without
-      # a reboot. Which options a running system takes differs by Windows
-      # version (volatile flags on Server 2022, `/dif ... /now` rule classes on
-      # Server 2025); tools/ci/verifier.ps1 picks them and fails the step when
-      # verifier refuses one or asks for a reboot. A violation bugchecks the
-      # runner, which fails the job.
-      - name: Driver Verifier for spatialsoftreceiver.sys (standard checks, tools/ci/verifier.ps1)
+      # Driver Verifier without a reboot. How differs by Windows version
+      # (tools/ci/verifier.ps1): Server 2022 takes volatile flags before the
+      # driver first loads, so it is checked from DriverEntry on; Server 2025
+      # takes `/dif ... /now` rule classes only once the driver runs, so it is
+      # checked from just after the install, and the restarts at the end run
+      # DriverEntry, AddDevice and StartDevice under it. Each step does its
+      # part on its image and fails when verifier refuses a setting, asks for
+      # a reboot, or does not list the driver afterwards. A violation
+      # bugchecks the runner, which fails the job.
+      - name: Driver Verifier before the driver loads (Server 2022, tools/ci/verifier.ps1)
         shell: pwsh
         run: |
           . ./tools/ci/verifier.ps1
-          Enable-SsrVerifier -Mode Standard
+          Enable-SsrVerifier -Mode Standard -When BeforeLoad
 
       # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
       # by the tester's own install.ps1.
@@ -249,6 +252,13 @@ jobs:
         id: install
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      - name: Driver Verifier on the running driver (Server 2025, tools/ci/verifier.ps1)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          Enable-SsrVerifier -Mode Standard -When Loaded
 
       # Stopped before the diagnostics below open the filters themselves.
       - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
@@ -533,19 +543,28 @@ jobs:
             Start-Service -Name $name
           }
 
-      - name: Driver Verifier with injected allocation failures (tools/ci/verifier.ps1)
+      # Server 2022: randomized failures from the first load, so the install
+      # itself may meet one. Server 2025: systematic failures once the driver
+      # runs, so the restarts below meet them (tools/ci/verifier.ps1).
+      - name: Driver Verifier with injected allocation failures before the driver loads (Server 2022)
         shell: pwsh
         run: |
           . ./tools/ci/verifier.ps1
-          Enable-SsrVerifier -Mode Faults
+          Enable-SsrVerifier -Mode Faults -When BeforeLoad
 
-      # The install may itself meet an injected failure; what follows only
-      # needs the device node and the kit.
+      # What follows only needs the device node and the kit.
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
         id: install
         continue-on-error: true
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      - name: Driver Verifier with injected allocation failures on the running driver (Server 2025)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          Enable-SsrVerifier -Mode Faults -When Loaded
 
       - name: Restart the device 30 times under injected failures
         id: cycles
@@ -564,9 +583,11 @@ jobs:
           Write-Host $summary
           Add-Content $env:GITHUB_STEP_SUMMARY "`n$summary`n"
           if (-not $state.Listed) { throw 'Driver Verifier is not checking spatialsoftreceiver.sys' }
-          # Whether verifier reports its injection count on this image is
-          # learned from the first runs; until then a missing count is a warning.
-          if ($null -eq $state.FaultsInjected) { Write-Host '::warning::verifier /query printed no AllocationsFailedDeliberately count' }
+          if ($state.Loads -lt 2) { throw "verifier saw $($state.Loads) loads; the restarts did not reload the image under it" }
+          # No failure injected means no error branch ran: the job tested
+          # nothing. A count verifier does not print on this image is a warning.
+          if ($null -eq $state.FaultsInjected) { Write-Host '::warning::verifier /query printed no count of deliberately failed allocations' }
+          elseif ($state.FaultsInjected -eq 0) { throw 'verifier failed no allocation on purpose in 30 restarts' }
 
       # The last restart may have left the device started or failed; either
       # way the uninstall removes it, and the image unload is where Pool
