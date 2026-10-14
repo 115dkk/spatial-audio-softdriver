@@ -353,6 +353,10 @@ tests = [
   "engine::pcm_dump_renders_pans_convolves_and_applies_gain",
   "engine::ddp_burst_produces_a_nonzero_binaural_block",
   "engine::unknown_encoded_rates_reach_the_selected_bitstream_decoders",
+  "engine::unavailable_mat_is_unsupported_on_the_format_event_and_ignores_data",
+  "decode::unavailable_mat_selection_is_unsupported_and_leaves_no_active_adapter",
+  "engine::filtered_malformed_records_are_attributed_and_out_of_range_records_are_skipped",
+  "engine::identical_errors_are_marked_repeat_until_the_epoch_changes",
   "engine::decode_error_clears_ddp_recut_remainder_before_recovery",
   "engine::overrun_and_discontinuity_reset_without_panicking",
   "engine::sound_before_the_first_brir_is_counted_as_dropped",
@@ -379,13 +383,13 @@ tests = [
   "engine::dump_capture_paces_and_restamps_records_from_the_first_record",
   "engine::dump_capture_loops_with_continuous_positions_and_times",
   "engine::repeated_format_initializes_once_and_subsequent_restatements_are_noops",
-  "engine::repeated_unsupported_format_is_reported_only_once",
+  "engine::repeated_format_record_is_processed_only_once",
   "engine::repeated_stream_start_is_state_dependent_and_sample_exact",
   "engine::repeated_stream_stop_is_state_dependent_and_sample_exact",
   "engine::stopped_tail_survives_overrun_restatement_and_idle_sample_exactly",
   "engine::wav_sink_writes_readable_float_stereo",
 ]
-note = "records to binaural blocks: deframe, decode, VBAP, convolve, gain, linked peak limiter without look-ahead. One-record push follows READ chunk/start semantics, endpoint masks select low endpoint bits, arrival slack is bounded, and idle QPC advancement keeps BRIR and limiter state moving after capture stops"
+note = "records to binaural blocks: deframe, decode, VBAP, convolve, gain, linked peak limiter without look-ahead. One-record push follows READ chunk/start semantics, endpoint masks select low endpoint bits, arrival slack is bounded, idle QPC advancement keeps BRIR and limiter state moving after capture stops, every chain error is emitted with repeat annotation, and out-of-range endpoint records are counted separately"
 
 [[feature]]
 id = "replay.render"
@@ -430,6 +434,7 @@ tests = [
   "engine::a_stopped_source_lets_the_brir_tail_play_and_counts_no_underrun",
   "engine::format_seqlock_round_trips_formats",
   "engine::endpoint_format_support_and_volume_share_one_seqlock_generation",
+  "engine::format_events_carry_mat_unsupported_reason_and_pcm_support",
   "engine::idle_blocks_are_dropped_silently_when_the_ring_is_full",
   "engine::a_full_ring_counts_overflowed_frames",
   "engine::an_overflow_burst_reports_its_frames_without_flooding_the_event_queue",
@@ -437,6 +442,8 @@ tests = [
   "engine::priming_covers_a_decoder_sized_delivery",
   "engine::unsupported_format_is_counted_without_changing_endpoint_fault_semantics",
   "engine::malformed_records_are_counted_by_endpoint_and_without_attribution",
+  "engine::repeated_chain_errors_are_all_counted",
+  "engine::status_publishes_skipped_out_of_range_records",
   "engine::corrupt_payload_is_counted_without_marking_the_endpoint_unsupported",
   "engine::only_errors_without_an_endpoint_use_unattributed_counters",
   "ssr-live::chain_error_report_uses_all_stable_snake_case_names",
@@ -449,7 +456,7 @@ tests = [
   "engine::target_change_rejects_values_outside_crossing_capacity",
   "engine::boundary_fades_are_frame_common_end_at_zero_and_leave_normal_flow_exact",
   "engine::layout_boundary_fades_out_the_old_sink_without_dropping_its_remainder",
-  "engine::repeated_unsupported_format_publishes_support_each_time_but_one_error",
+  "engine::repeated_unsupported_format_publishes_reason_and_every_error",
   "engine::queued_volume_transitions_preserve_the_gain_before_each_reservation",
   "engine::full_volume_transition_queue_merges_the_newest_two_without_changing_earlier_gain",
   "engine::starvation_counts_an_underrun_and_installs_a_resume_fade",
@@ -759,7 +766,7 @@ tests = [
   "ssr-abi::default_capabilities_match_header_and_inf",
   "ssr-abi::query_info_round_trips",
   "ssr-sys::query_info_preserves_pcm_rules_and_rejects_old_layout",
-  "engine::endpoint_filter_ignores_unselected_endpoint_without_counting_it_invalid",
+  "engine::filtered_malformed_records_are_attributed_and_out_of_range_records_are_skipped",
   "engine::endpoint_format_and_overrun_reset_only_their_front",
   "ssr-replay::endpoint_all_mixes_both_and_endpoint_zero_matches_primary_only",
 ]

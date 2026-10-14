@@ -664,14 +664,6 @@ impl DelayLine {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FormatSupport {
-    Supported,
-    UnsupportedFormat,
-    UnsupportedSceneRate,
-    UnsupportedDirectLayout,
-}
-
 #[derive(Debug)]
 pub enum ChainEvent<'a> {
     Block(BlockOut<'a>),
@@ -682,7 +674,7 @@ pub enum ChainEvent<'a> {
         endpoint: u16,
         epoch: u32,
         format: SourceFormat,
-        support: FormatSupport,
+        unsupported: Option<ssr_types::UnsupportedReason>,
     },
     NeedsPrepared,
     Overrun {
@@ -692,6 +684,7 @@ pub enum ChainEvent<'a> {
     Error {
         endpoint: Option<u16>,
         error: ChainError,
+        repeat: bool,
     },
     Volume {
         endpoint: u16,
@@ -742,16 +735,18 @@ fn emit_front_error(
 ) {
     let kind = chain_error_kind(&error);
     let epoch = front.format.map_or(0, |value| value.0);
-    if front.error_epoch == epoch && front.error_kind == Some(kind) {
+    let repeat = front.error_epoch == epoch && front.error_kind == Some(kind);
+    if repeat {
         *suppressed_errors = suppressed_errors.saturating_add(1);
     } else {
         front.error_epoch = epoch;
         front.error_kind = Some(kind);
-        out(ChainEvent::Error {
-            endpoint: Some(endpoint),
-            error,
-        });
     }
+    out(ChainEvent::Error {
+        endpoint: Some(endpoint),
+        error,
+        repeat,
+    });
 }
 
 fn qpc_before_end(qpc: u64, bytes_through_end: usize, byte_rate: u64, frequency: u64) -> u64 {
@@ -1253,7 +1248,11 @@ impl Chain {
         out: &mut dyn FnMut(ChainEvent<'_>),
     ) {
         let Some(endpoint) = endpoint.filter(|value| (*value as usize) < MAX_ENDPOINTS) else {
-            out(ChainEvent::Error { endpoint, error });
+            out(ChainEvent::Error {
+                endpoint,
+                error,
+                repeat: false,
+            });
             return;
         };
         emit_front_error(
@@ -1364,23 +1363,15 @@ impl Chain {
                         }
                     }
                 };
-                let support = match error.as_ref() {
-                    Some(ChainError::UnsupportedSceneRate(_)) => {
-                        FormatSupport::UnsupportedSceneRate
-                    }
-                    Some(ChainError::Decode(DecodeError::NoDirectLayout(_))) => {
-                        FormatSupport::UnsupportedDirectLayout
-                    }
-                    Some(ChainError::Decode(
-                        DecodeError::UnsupportedCodec(_) | DecodeError::Unsupported { .. },
-                    )) => FormatSupport::UnsupportedFormat,
-                    _ => FormatSupport::Supported,
-                };
+                let unsupported = error
+                    .as_ref()
+                    .map(chain_error_kind)
+                    .and_then(ssr_types::ChainErrorKind::unsupported_reason);
                 out(ChainEvent::FormatChanged {
                     endpoint,
                     epoch,
                     format,
-                    support,
+                    unsupported,
                 });
                 if let Some(error) = error {
                     self.emit_error(Some(endpoint), error, out);
@@ -1820,7 +1811,7 @@ impl Chain {
         let endpoint = error_endpoint(&error);
         if endpoint.is_some_and(|value| value as usize >= MAX_ENDPOINTS) {
             self.skipped_records = self.skipped_records.saturating_add(1);
-        } else if endpoint.is_none_or(|value| self.config.endpoints.includes(value)) {
+        } else {
             self.emit_error(endpoint, ChainError::Record(error), out);
         }
     }
@@ -2122,11 +2113,11 @@ mod tests {
     }
 
     #[test]
-    fn repeated_unsupported_format_publishes_support_each_time_but_one_error() {
+    fn repeated_unsupported_format_publishes_reason_and_every_error() {
         let mut chain = Chain::new(ChainConfig::default());
         let unsupported = bitstream(BitstreamCodec::Ac3, 48_000);
-        let mut support = Vec::new();
-        let mut errors = 0;
+        let mut reasons = Vec::new();
+        let mut repeats = Vec::new();
 
         for qpc in [10, 20] {
             chain.push_record(
@@ -2138,28 +2129,28 @@ mod tests {
                     format: unsupported,
                 },
                 &mut |event| match event {
-                    ChainEvent::FormatChanged { support: value, .. } => support.push(value),
-                    ChainEvent::Error { .. } => errors += 1,
+                    ChainEvent::FormatChanged { unsupported, .. } => reasons.push(unsupported),
+                    ChainEvent::Error { repeat, .. } => repeats.push(repeat),
                     _ => {}
                 },
             );
         }
 
         assert_eq!(
-            support,
+            reasons,
             [
-                FormatSupport::UnsupportedFormat,
-                FormatSupport::UnsupportedFormat
+                Some(ssr_types::UnsupportedReason::Format),
+                Some(ssr_types::UnsupportedReason::Format)
             ]
         );
-        assert_eq!(errors, 1);
+        assert_eq!(repeats, [false, true]);
     }
 
     #[test]
-    fn identical_errors_are_suppressed_until_the_epoch_changes() {
+    fn identical_errors_are_marked_repeat_until_the_epoch_changes() {
         let mut chain = Chain::new(ChainConfig::default());
         let unsupported = bitstream(BitstreamCodec::Ac3, 48_000);
-        let mut errors = 0;
+        let mut repeats = Vec::new();
 
         for epoch in 1..=2 {
             for _ in 0..1_000 {
@@ -2171,10 +2162,16 @@ mod tests {
                         repeat: false,
                         format: unsupported,
                     },
-                    &mut |event| errors += usize::from(matches!(event, ChainEvent::Error { .. })),
+                    &mut |event| {
+                        if let ChainEvent::Error { repeat, .. } = event {
+                            repeats.push(repeat);
+                        }
+                    },
                 );
             }
-            assert_eq!(errors, epoch as usize);
+            assert_eq!(repeats.len(), epoch as usize * 1_000);
+            assert!(!repeats[(epoch as usize - 1) * 1_000]);
+            assert!(repeats[epoch as usize * 1_000 - 1]);
         }
 
         assert_eq!(chain.suppressed_errors(), 1_998);

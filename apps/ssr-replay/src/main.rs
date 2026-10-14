@@ -481,7 +481,14 @@ fn render_dump(
                 event_error = Some(error);
             }
         }
-        ChainEvent::Error { error, .. } => report.errors.push(error.to_string()),
+        // The chain marks a run of identical errors after its first; the
+        // report keeps one line per run, as it always has.
+        ChainEvent::Error {
+            error,
+            repeat: false,
+            ..
+        } => report.errors.push(error.to_string()),
+        ChainEvent::Error { repeat: true, .. } => {}
         ChainEvent::Volume {
             endpoint,
             gain,
@@ -525,7 +532,14 @@ fn render_dump(
                 finish_error = Some(error);
             }
         }
-        ChainEvent::Error { error, .. } => report.errors.push(error.to_string()),
+        // The chain marks a run of identical errors after its first; the
+        // report keeps one line per run, as it always has.
+        ChainEvent::Error {
+            error,
+            repeat: false,
+            ..
+        } => report.errors.push(error.to_string()),
+        ChainEvent::Error { repeat: true, .. } => {}
         ChainEvent::Volume {
             endpoint,
             gain,

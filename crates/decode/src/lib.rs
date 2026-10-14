@@ -125,7 +125,14 @@ impl Decoders {
                 (Active::Pcm, Route::Pcm)
             }
             SourceFormat::Bitstream(b) => match b.codec {
-                C::Mat20 | C::Mat21 => (Active::Mat, Route::Bitstream),
+                C::Mat20 | C::Mat21 if mat::AVAILABLE => (Active::Mat, Route::Bitstream),
+                C::Mat20 | C::Mat21 => {
+                    self.active = Active::None;
+                    return Err(DecodeError::Unsupported {
+                        codec: "MAT 2.1",
+                        detail: "the decoder is built from ring dumps, none recorded yet",
+                    });
+                }
                 C::Eac3 | C::Eac3Joc => (Active::Ddp, Route::Bitstream),
                 other => {
                     self.active = Active::None;

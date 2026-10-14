@@ -12,6 +12,9 @@ use ssr_types::SceneBlock;
 
 use crate::{DecodeConfig, DecodeError};
 
+/// Whether this adapter can decode MAT bursts; flip this when it decodes them.
+pub const AVAILABLE: bool = false;
+
 #[derive(Debug)]
 pub struct MatDecoder {
     _config: DecodeConfig,
