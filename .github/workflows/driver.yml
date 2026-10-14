@@ -699,20 +699,28 @@ jobs:
 
   # Diagnosis, not a gate (ADR 0027, 2026-10-14): on Server 2022 the runner is
   # lost when Driver Verifier's I/O verification (0x10) is on while the driver
-  # installs, for master's driver and this one alike, with or without the KS
-  # trace (master's workflow never had Verifier on). The last round lost the
-  # runner in the first step, before any audio stream: loading, adding and
-  # starting the device, with the endpoint builder probing the filters at the
-  # same time. This round keeps the audio services disabled while the device
-  # starts and starts them in a later step, so the step a lost runner was in
-  # says which of the two it is. (SysVAD, the control, does not install on
-  # this image.) Remove once found.
+  # installs, for master's driver and this one alike, before any audio stream
+  # and with the audio services disabled: in loading, adding and starting the
+  # device. This round bisects the start with the driver's own fault switch:
+  # FaultInjectAt=k makes the k-th resource acquisition fail, so the start
+  # unwinds there (the load sweep shows every such unwinding is clean without
+  # Verifier). The smallest k whose runner is lost brackets the trigger; k=0
+  # is the full start. Fault points of a load, in order: 1 PcAddAdapterDevice,
+  # 2 the control device, 3 the adapter object, 4 the ring, 5-6 timers,
+  # 7 PcRegisterAdapterPowerManagement, then per endpoint 0, 1, 2 (8-14,
+  # 15-21, 22-28): topology and wave miniports, PcNewPort and
+  # PcRegisterSubdevice for each, PcRegisterPhysicalConnection. Remove once
+  # found.
   verifier-isolation:
-    name: 2022 install in steps with I/O verification
+    name: 2022 start under I/O verification failing at fault point ${{ matrix.fault_at }}
     needs: build
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 12
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        fault_at: [0, 1, 2, 3, 7, 8, 11, 14, 28]
     steps:
       - uses: actions/checkout@v7
 
@@ -721,19 +729,20 @@ jobs:
           name: spatialsoftreceiver-Release-x64
           path: ${{ runner.temp }}/package
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-
-      - name: Keep the audio services off; Python for the flow check
+      - name: Keep the audio services off
         shell: pwsh
         run: |
           foreach ($name in 'Audiosrv', 'AudioEndpointBuilder') {
             Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
             Set-Service -Name $name -StartupType Disabled
           }
-          Get-Service AudioEndpointBuilder, Audiosrv | Format-Table Name, Status, StartType | Out-String | Write-Host
-          python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
+
+      - name: Fail fault point ${{ matrix.fault_at }} of the first load (Parameters\FaultInjectAt)
+        shell: pwsh
+        run: |
+          . ./tools/ci/fault-sweep.ps1
+          Set-SsrFaultInjectAt ${{ matrix.fault_at }}
+          Get-ItemProperty (Join-Path $SsrServiceKey 'Parameters') | Format-List FaultInjectAt | Out-String | Write-Host
 
       - name: Driver Verifier with I/O verification only (0x10)
         shell: pwsh
@@ -742,66 +751,24 @@ jobs:
           Invoke-SsrVerifier @('/volatile', '/flags', '0x10', '/adddriver', $SsrVerifiedImage) | Out-Null
           if (-not (Get-SsrVerifierState).Listed) { throw "Driver Verifier does not list $SsrVerifiedImage" }
 
-      - name: 1 load, add and start the device with no audio service running
+      - name: Load, add and start the device
         id: install
+        continue-on-error: true
         timeout-minutes: 5
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package') -SkipExclusivePolicy
 
-      - name: 2 the started device, before anything opens it
-        shell: pwsh
-        run: |
-          . ./tools/ci/verifier.ps1
-          . ./tools/ci/package-identities.ps1
-          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
-          Write-Host "device $($device.InstanceId): status $($device.Status), problem $(Get-SsrProblemCode $device.InstanceId)"
-          Get-SsrVerifierState | Select-Object Level, Listed, Loads, Unloads | Format-List | Out-String | Write-Host
-          Start-Sleep -Seconds 20
-
-      - name: 3 start the audio services; the endpoint builder probes the filters
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
-            Set-Service -Name $name -StartupType Automatic
-            Start-Service -Name $name
-          }
-          Start-Sleep -Seconds 30
-          . ./tools/ci/package-identities.ps1
-          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
-          ./tools/ci/endpoint-states.ps1 -InstanceId $device.InstanceId
-
-      - name: 4 exclusive-mode probe on every endpoint (opens streams)
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          # As install.ps1 runs it: Windows PowerShell, for its COM interop.
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path '${{ steps.install.outputs.kit }}' 'exclusive_policy_check.ps1') -ExpectMask 7 -Summary (Join-Path $env:RUNNER_TEMP 'policy.json')
-          Write-Host "exclusive probe exited $LASTEXITCODE"
-
-      - name: 5 shared playback and the control device READ (tools/ci/driver_flow_check.py)
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'flow.json')
-          Write-Host "flow check exited $LASTEXITCODE"
-
-      - name: 6 restart the device (unload and load under verification)
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          . ./tools/ci/verifier.ps1
-          . ./tools/ci/package-identities.ps1
-          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
-          Invoke-SsrRestartCycles -InstanceId $device.InstanceId -Count 2 | Format-Table | Out-String | Write-Host
-
-      - name: Result
+      - name: The runner survived
         if: always()
         shell: pwsh
         run: |
-          . ./tools/ci/verifier.ps1
-          Get-SsrVerifierState | Select-Object Level, Listed, Loads, Unloads | Format-List | Out-String | Write-Host
-          Add-Content $env:GITHUB_STEP_SUMMARY "`nI/O verification during install: the runner survived every step`n"
+          . ./tools/ci/fault-sweep.ps1
+          . ./tools/ci/package-identities.ps1
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
+          $problem = if ($device) { Get-SsrProblemCode $device.InstanceId } else { 'no device' }
+          $line = "I/O verification, FaultInjectAt=${{ matrix.fault_at }}: the runner survived the start (problem $problem, install ${{ steps.install.outcome }})"
+          Write-Host $line
+          Add-Content $env:GITHUB_STEP_SUMMARY "`n$line`n"
 
   codeql:
     name: CodeQL Windows driver suites
