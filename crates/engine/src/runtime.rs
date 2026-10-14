@@ -40,10 +40,10 @@ use rubato::{
     Adjustable, Async, FixedAsync, Resampler, SincInterpolationParameters, WindowFunction,
 };
 use ssr_types::{
-    BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ClockStatus, ENGINE_ENDPOINTS,
-    EndpointStatus, EngineFault, EngineStatus, LatencyStats, OutputError, OutputFormat,
-    OutputLayout, OutputMode, OutputOpener, OutputSink, PcmFormat, SampleType, SourceFormat,
-    UnderrunSnapshot,
+    BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ChainErrorCounts, ChainErrorKind,
+    ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault, EngineStatus, LatencyStats,
+    OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener, OutputSink, PcmFormat,
+    SampleType, SourceFormat, UnderrunSnapshot,
 };
 
 use crate::Chain;
@@ -408,6 +408,7 @@ where
     let (audio_producer, audio_consumer) = RingBuffer::new(sample_capacity);
     let (timing_producer, timing_consumer) = RingBuffer::new(TIMING_QUEUE_CAPACITY);
     let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
+    let (clock_sender, clock_receiver) = std::sync::mpsc::sync_channel(0);
     let initial_layout = prepared
         .as_ref()
         .map_or(OutputLayout::STEREO, |prepared| prepared.layout());
@@ -426,6 +427,7 @@ where
                 qpc_frequency,
                 output_event_producer,
                 start_sender,
+                clock_receiver,
                 initial_layout,
                 ring_capacity_frames,
             );
@@ -447,55 +449,40 @@ where
             )));
         }
     };
-    if output_format.channels != initial_layout.channels {
-        shared.stop.store(true, Ordering::Release);
-        let _ = output_thread.join();
-        return Err(StartError::Config(
-            "the output sink channel count does not match the requested layout",
-        ));
-    }
-    if output_format.rate == 0 || output_format.period_frames == 0 {
-        shared.stop.store(true, Ordering::Release);
-        let _ = output_thread.join();
-        return Err(StartError::Config(
-            "the output format has a zero rate or period",
-        ));
-    }
-    if output_format.period_frames > MAX_OUTPUT_PERIOD_FRAMES {
-        shared.stop.store(true, Ordering::Release);
-        let _ = output_thread.join();
-        return Err(StartError::Config(
-            "the output period exceeds the runtime's 16,384-frame limit",
-        ));
-    }
-    if config.clock == ClockPreference::Trim && output_format.rate != crate::MIX_RATE {
-        shared.stop.store(true, Ordering::Release);
-        let _ = output_thread.join();
-        return Err(StartError::Config(
-            "Trim requires a 48 kHz output device for the common mix rate",
-        ));
-    }
-
     // Probe rate trim on the thread that owns the capture source. The probe and
     // the source move together into the capture thread, so no adapter call crosses
-    // threads. The clock strategy is fixed once here and never follows format changes.
+    // threads. Reopens use the stored capability rather than the current mode.
     let mut capture = capture;
     let trim_supported = capture.set_rate_trim(0.0).is_ok();
     if config.clock == ClockPreference::Trim && !trim_supported {
         shared.stop.store(true, Ordering::Release);
+        drop(clock_sender);
         let _ = output_thread.join();
         return Err(StartError::TrimUnsupported);
     }
-    let initial_mode = match config.clock {
-        ClockPreference::Trim => ClockMode::Trim,
-        ClockPreference::Auto if trim_supported && output_format.rate == crate::MIX_RATE => {
-            ClockMode::Trim
-        }
-        ClockPreference::Auto | ClockPreference::Asrc => ClockMode::Asrc,
-    };
+    shared
+        .trim_available
+        .store(trim_supported, Ordering::Release);
+    let initial_mode =
+        match select_output_clock(config.clock, trim_supported, output_format, initial_layout) {
+            Ok(mode) => mode,
+            Err(error) => {
+                shared.stop.store(true, Ordering::Release);
+                drop(clock_sender);
+                let _ = output_thread.join();
+                return Err(StartError::Config(error));
+            }
+        };
     shared
         .clock_mode
         .store(initial_mode.as_u32(), Ordering::Release);
+    if clock_sender.send(()).is_err() {
+        shared.stop.store(true, Ordering::Release);
+        let _ = output_thread.join();
+        return Err(StartError::Thread(
+            "output thread ended during clock selection".to_owned(),
+        ));
+    }
     shared.publish_output_format(output_format);
     shared.scene_rate.store(crate::MIX_RATE, Ordering::Release);
 
@@ -642,6 +629,7 @@ struct EndpointShared {
     unsupported: AtomicU32,
     volume_bits: AtomicU32,
     muted: AtomicBool,
+    chain_errors: [AtomicU64; ChainErrorKind::COUNT],
 }
 
 impl EndpointShared {
@@ -656,6 +644,7 @@ impl EndpointShared {
             unsupported: AtomicU32::new(UNSUPPORTED_NONE),
             volume_bits: AtomicU32::new(0.0_f32.to_bits()),
             muted: AtomicBool::new(false),
+            chain_errors: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
@@ -681,6 +670,14 @@ impl EndpointShared {
         self.volume_bits.store(db.to_bits(), Ordering::Relaxed);
         self.muted.store(muted, Ordering::Relaxed);
         self.format_seq.fetch_add(1, Ordering::Release);
+    }
+
+    fn note_chain_error(&self, kind: ChainErrorKind) {
+        self.chain_errors[kind.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn read_chain_errors(&self) -> ChainErrorCounts {
+        ChainErrorCounts::from_fn(|kind| self.chain_errors[kind.index()].load(Ordering::Relaxed))
     }
 
     fn read(&self) -> (Option<SourceFormat>, u32, u32, f32, bool) {
@@ -722,6 +719,7 @@ struct Shared {
     scene_rate: AtomicU32,
     device_rate: AtomicU32,
     clock_mode: AtomicU32,
+    trim_available: AtomicBool,
     trim_ppm_bits: AtomicU64,
     mute: AtomicBool,
     blocks: AtomicU64,
@@ -765,6 +763,7 @@ struct Shared {
     ring_level_bits: AtomicU32,
     clock_ppm_bits: AtomicU64,
     endpoints: [EndpointShared; ENGINE_ENDPOINTS],
+    unattributed_chain_errors: [AtomicU64; ChainErrorKind::COUNT],
     fault: AtomicU32,
     output_error_seq: AtomicU32,
     output_error: [AtomicU32; 256],
@@ -780,6 +779,7 @@ impl Shared {
             scene_rate: AtomicU32::new(0),
             device_rate: AtomicU32::new(0),
             clock_mode: AtomicU32::new(ClockMode::Asrc.as_u32()),
+            trim_available: AtomicBool::new(false),
             trim_ppm_bits: AtomicU64::new(0.0_f64.to_bits()),
             mute: AtomicBool::new(false),
             blocks: AtomicU64::new(0),
@@ -817,6 +817,7 @@ impl Shared {
             ring_level_bits: AtomicU32::new(0.0_f32.to_bits()),
             clock_ppm_bits: AtomicU64::new(0.0_f64.to_bits()),
             endpoints: std::array::from_fn(|_| EndpointShared::new()),
+            unattributed_chain_errors: std::array::from_fn(|_| AtomicU64::new(0)),
             fault: AtomicU32::new(FAULT_NONE),
             output_error_seq: AtomicU32::new(0),
             output_error: std::array::from_fn(|_| AtomicU32::new(0)),
@@ -953,6 +954,25 @@ impl Shared {
         }
     }
 
+    fn note_chain_error(&self, endpoint: Option<u16>, kind: ChainErrorKind) {
+        match endpoint {
+            Some(endpoint) => {
+                if let Some(status) = self.endpoints.get(endpoint as usize) {
+                    status.note_chain_error(kind);
+                }
+            }
+            None => {
+                self.unattributed_chain_errors[kind.index()].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn read_unattributed_chain_errors(&self) -> ChainErrorCounts {
+        ChainErrorCounts::from_fn(|kind| {
+            self.unattributed_chain_errors[kind.index()].load(Ordering::Relaxed)
+        })
+    }
+
     fn read_endpoint(&self, endpoint: usize) -> EndpointStatus {
         let status = &self.endpoints[endpoint];
         let (format, epoch, unsupported_code, volume_db, muted) = status.read();
@@ -972,6 +992,7 @@ impl Shared {
             volume_db,
             muted,
             unsupported,
+            chain_errors: status.read_chain_errors(),
         }
     }
 
@@ -1036,11 +1057,14 @@ impl Shared {
     fn status(&self) -> EngineStatus {
         EngineStatus {
             endpoints: std::array::from_fn(|endpoint| self.read_endpoint(endpoint)),
+            unattributed_chain_errors: self.read_unattributed_chain_errors(),
             latency: self.latency(),
             ring_level_ms: f32::from_bits(self.ring_level_bits.load(Ordering::Acquire)),
             underruns: self.underruns.load(Ordering::Acquire),
             last_underrun: self.last_underrun(),
             output_restarts: self.output_restarts.load(Ordering::Acquire),
+            output_rate: self.device_rate.load(Ordering::Acquire),
+            trim_available: self.trim_available.load(Ordering::Acquire),
             output_channels: self.output_channels.load(Ordering::Acquire) as u16,
             output_channel_mask: self.output_channel_mask.load(Ordering::Acquire),
             output_reopens: self.output_reopens.load(Ordering::Acquire),
@@ -1273,7 +1297,12 @@ fn capture_rt_step<C: CaptureSource>(
         };
     }
 
-    let requested_trim = f64::from_bits(shared.trim_ppm_bits.load(Ordering::Acquire));
+    let requested_trim =
+        if ClockMode::from_u32(shared.clock_mode.load(Ordering::Acquire)) == ClockMode::Trim {
+            f64::from_bits(shared.trim_ppm_bits.load(Ordering::Acquire))
+        } else {
+            0.0
+        };
     if trim_supported
         && (!applied_trim.is_finite() || (requested_trim - *applied_trim).abs() > 0.1)
         && capture.set_rate_trim(requested_trim).is_ok()
@@ -1486,6 +1515,7 @@ fn handle_chain_event(
             muted,
         } => shared.publish_volume(endpoint, gain, muted),
         ChainEvent::Error { endpoint, error } => {
+            shared.note_chain_error(endpoint, crate::chain::chain_error_kind(&error));
             if let Some(endpoint) = endpoint {
                 match error {
                     ChainError::UnsupportedSceneRate(_) => {
@@ -1593,6 +1623,78 @@ fn boundary_fade_frames(rate: u32) -> usize {
     ((f64::from(rate) * BOUNDARY_FADE_MS / 1_000.0).round() as usize).max(1)
 }
 
+/// Gain of drain frame `frame` of an ASRC tail. The old resampler's last
+/// `real_frames` drained frames are real signal; the boundary fade ends at zero
+/// on the last of them, over its last `fade_frames` (the rest of the fade,
+/// `lead_frames`, lies in the last rendered period when the delay is shorter
+/// than the fade). Real frames before the fade play at full level and frames
+/// after the signal are silent.
+fn asrc_drain_gain(
+    frame: usize,
+    real_frames: usize,
+    fade_frames: usize,
+    lead_frames: usize,
+) -> f32 {
+    if frame >= real_frames {
+        return 0.0;
+    }
+    let fade_start = real_frames - fade_frames.min(real_frames);
+    if frame < fade_start {
+        return 1.0;
+    }
+    let total = lead_frames + fade_frames;
+    if total <= 1 {
+        return 0.0;
+    }
+    let offset = lead_frames + (frame - fade_start);
+    (total - 1 - offset) as f32 / (total - 1) as f32
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TailFade {
+    /// Fade frames in the final rendered period, ending at `period_signal_end`.
+    lead_frames: usize,
+    /// Frame of the final rendered period after the signal's last; frames
+    /// from here to the period's end become zero. Unused without a period.
+    period_signal_end: usize,
+    /// Real-signal frames in the drain, and the fade's frames among them.
+    drain_real_frames: usize,
+    drain_fade_frames: usize,
+}
+
+/// Plans the ASRC boundary fade across the last rendered period and its drain.
+/// `rendered` is `(period_frames, real_output_frames)` of the final rendered
+/// period when the fade may still touch it, or `None` when that period already
+/// went to the sink.
+fn plan_asrc_tail_fade(delay: usize, fade: usize, rendered: Option<(usize, usize)>) -> TailFade {
+    let Some((period_frames, real_output_frames)) = rendered else {
+        return TailFade {
+            lead_frames: 0,
+            period_signal_end: 0,
+            drain_real_frames: delay,
+            drain_fade_frames: fade.min(delay),
+        };
+    };
+    let signal_end = real_output_frames.saturating_add(delay);
+    if signal_end >= period_frames {
+        let drain_real_frames = signal_end - period_frames;
+        let drain_fade_frames = fade.min(drain_real_frames);
+        TailFade {
+            lead_frames: fade.saturating_sub(drain_fade_frames).min(period_frames),
+            period_signal_end: period_frames,
+            drain_real_frames,
+            drain_fade_frames,
+        }
+    } else {
+        TailFade {
+            lead_frames: fade.min(signal_end),
+            period_signal_end: signal_end,
+            drain_real_frames: 0,
+            drain_fade_frames: 0,
+        }
+    }
+}
+
 fn apply_fade_in(
     buffer: &mut [f32],
     channels: usize,
@@ -1621,25 +1723,55 @@ fn apply_fade_in(
     *remaining = remaining.saturating_sub(audible_frames);
 }
 
-fn valid_output_format(format: OutputFormat, layout: OutputLayout) -> bool {
-    format.channels == layout.channels
-        && format.rate != 0
-        && format.period_frames != 0
-        && format.period_frames <= MAX_OUTPUT_PERIOD_FRAMES
-}
-
-fn reopened_clock_mode(
+fn select_output_clock(
     preference: ClockPreference,
     trim_available: bool,
-    device_rate: u32,
-) -> Option<ClockMode> {
-    match preference {
-        ClockPreference::Trim => (device_rate == crate::MIX_RATE).then_some(ClockMode::Trim),
-        ClockPreference::Auto if trim_available && device_rate == crate::MIX_RATE => {
-            Some(ClockMode::Trim)
-        }
-        ClockPreference::Auto | ClockPreference::Asrc => Some(ClockMode::Asrc),
+    format: OutputFormat,
+    layout: OutputLayout,
+) -> Result<ClockMode, &'static str> {
+    if format.channels != layout.channels {
+        return Err("the output sink channel count does not match the requested layout");
     }
+    if format.rate == 0 || format.period_frames == 0 {
+        return Err("the output format has a zero rate or period");
+    }
+    if format.period_frames > MAX_OUTPUT_PERIOD_FRAMES {
+        return Err("the output period exceeds the runtime's 16,384-frame limit");
+    }
+    match preference {
+        ClockPreference::Trim if format.rate != crate::MIX_RATE => {
+            Err("Trim requires a 48 kHz output device for the common mix rate")
+        }
+        ClockPreference::Trim => Ok(ClockMode::Trim),
+        ClockPreference::Auto if trim_available && format.rate == crate::MIX_RATE => {
+            Ok(ClockMode::Trim)
+        }
+        ClockPreference::Auto | ClockPreference::Asrc => Ok(ClockMode::Asrc),
+    }
+}
+
+fn configure_reopened_output(
+    output: &mut OutputState,
+    shared: &Shared,
+    preference: ClockPreference,
+    layout: OutputLayout,
+    format: OutputFormat,
+) -> Result<(), &'static str> {
+    let mode = select_output_clock(
+        preference,
+        shared.trim_available.load(Ordering::Acquire),
+        format,
+        layout,
+    )?;
+    if mode != ClockMode::Trim {
+        shared
+            .trim_ppm_bits
+            .store(0.0_f64.to_bits(), Ordering::Release);
+    }
+    shared.clock_mode.store(mode.as_u32(), Ordering::Release);
+    output.reconfigure(mode, layout, format.rate, format.period_frames);
+    shared.publish_output_format(format);
+    Ok(())
 }
 
 fn wait_for_stop(shared: &Shared, duration: Duration) -> bool {
@@ -1666,6 +1798,12 @@ fn is_unsupported(error: &ChainError) -> bool {
             | ChainError::Decode(decode::DecodeError::NoDirectLayout(_))
             | ChainError::UnsupportedSceneRate(_)
     )
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReopenStep {
+    ChangeLayout(OutputLayout),
+    GrowCadence(Duration),
 }
 
 #[derive(Debug)]
@@ -1730,6 +1868,13 @@ fn output_rt_step<S: OutputSink>(
     OutputStep::Continue
 }
 
+fn complete_reopen_step(reopen: ReopenStep) -> OutputStep {
+    match reopen {
+        ReopenStep::ChangeLayout(layout) => OutputStep::ChangeLayout(layout),
+        ReopenStep::GrowCadence(period) => OutputStep::GrowCadence(period),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn output_thread_main<O: OutputOpener>(
     config: EngineConfig,
@@ -1740,6 +1885,7 @@ fn output_thread_main<O: OutputOpener>(
     qpc_frequency: u64,
     event_producer: Producer<RtEvent>,
     start_sender: std::sync::mpsc::SyncSender<Result<ssr_types::OutputFormat, OutputError>>,
+    clock_receiver: std::sync::mpsc::Receiver<()>,
     initial_layout: OutputLayout,
     capacity_frames: usize,
 ) {
@@ -1755,7 +1901,7 @@ fn output_thread_main<O: OutputOpener>(
         }
     };
     let format = sink.format();
-    if start_sender.send(Ok(format)).is_err() {
+    if start_sender.send(Ok(format)).is_err() || clock_receiver.recv().is_err() {
         return;
     }
 
@@ -1774,17 +1920,26 @@ fn output_thread_main<O: OutputOpener>(
         initial_layout,
         capacity_frames,
     );
+    let mut draining_reopen = None;
     while !shared.stop.load(Ordering::Acquire) {
         let mut step = None;
         let mut work = || {
-            step = Some(output_rt_step(
-                &mut output,
-                &mut sink,
-                &shared,
-                qpc_frequency,
-                &mut sink_restart_baseline,
-                cadence_period_grown,
-            ));
+            step = Some(if let Some(reopen) = draining_reopen {
+                match output.write_reopen_tail_period(&mut sink) {
+                    Ok(true) => complete_reopen_step(reopen),
+                    Ok(false) => OutputStep::Continue,
+                    Err(error) => OutputStep::Lost(error),
+                }
+            } else {
+                output_rt_step(
+                    &mut output,
+                    &mut sink,
+                    &shared,
+                    qpc_frequency,
+                    &mut sink_restart_baseline,
+                    cadence_period_grown,
+                )
+            });
         };
         if let Some(scope) = &config.rt_scope {
             scope(RtSection::Output, &mut work);
@@ -1794,7 +1949,23 @@ fn output_thread_main<O: OutputOpener>(
         if let Some(hook) = &config.rt_event {
             hook(RtLoopEvent::OutputEnd);
         }
-        match step.expect("the real-time scope must run its closure exactly once") {
+        let mut step = step.expect("the real-time scope must run its closure exactly once");
+        if draining_reopen.is_none() {
+            let reopen = match step {
+                OutputStep::ChangeLayout(layout) => Some(ReopenStep::ChangeLayout(layout)),
+                OutputStep::GrowCadence(period) => Some(ReopenStep::GrowCadence(period)),
+                _ => None,
+            };
+            if let Some(reopen) = reopen
+                && output.begin_reopen_tail()
+            {
+                draining_reopen = Some(reopen);
+                step = OutputStep::Continue;
+            }
+        } else if !matches!(step, OutputStep::Continue) {
+            draining_reopen = None;
+        }
+        match step {
             OutputStep::Continue => {}
             OutputStep::ChangeLayout(mut layout) => {
                 drop(sink);
@@ -1808,18 +1979,25 @@ fn output_thread_main<O: OutputOpener>(
                     }
                     let opened = opener.open(layout);
                     match opened {
-                        Ok(reopened) if valid_output_format(reopened.format(), layout) => {
+                        Ok(reopened) => {
                             let format = reopened.format();
-                            output.reconfigure(layout, format.rate, format.period_frames);
-                            if let Some(hook) = &config.rt_event {
-                                hook(RtLoopEvent::OutputOpenEnd);
+                            match configure_reopened_output(
+                                &mut output,
+                                &shared,
+                                config.clock,
+                                layout,
+                                format,
+                            ) {
+                                Ok(()) => {
+                                    if let Some(hook) = &config.rt_event {
+                                        hook(RtLoopEvent::OutputOpenEnd);
+                                    }
+                                    sink = reopened;
+                                    break;
+                                }
+                                Err(error) => shared.publish_output_error(error),
                             }
-                            sink = reopened;
-                            break;
                         }
-                        Ok(_) => shared.publish_output_error(
-                            "reopened output format does not match the requested layout",
-                        ),
                         Err(OutputError::FormatRejected(message)) => {
                             shared.publish_output_error(
                                 &OutputError::FormatRejected(message).to_string(),
@@ -1845,9 +2023,7 @@ fn output_thread_main<O: OutputOpener>(
                         (delay * 2).min(RECONNECT_MAX_MS)
                     };
                 }
-                let format = sink.format();
                 sink_restart_baseline = sink.restarts();
-                shared.publish_output_format(format);
                 shared.output_reopens.fetch_add(1, Ordering::Relaxed);
                 output.events.clear_fault(FAULT_OUTPUT);
                 output.events.push(RtEvent::OutputLayoutChanged { layout });
@@ -1873,45 +2049,26 @@ fn output_thread_main<O: OutputOpener>(
                     match opened {
                         Ok(reopened) => {
                             let reopened_format = reopened.format();
-                            if !valid_output_format(reopened_format, output.layout) {
-                                shared.publish_output_error(
-                                    "reconnected output format does not match the requested layout",
-                                );
+                            let layout = output.layout;
+                            if let Err(error) = configure_reopened_output(
+                                &mut output,
+                                &shared,
+                                config.clock,
+                                layout,
+                                reopened_format,
+                            ) {
+                                shared.publish_output_error(error);
                                 if let Some(hook) = &config.rt_event {
                                     hook(RtLoopEvent::OutputOpenEnd);
                                 }
                                 delay = (delay * 2).min(RECONNECT_MAX_MS);
                                 continue;
                             }
-                            let trim_available =
-                                ClockMode::from_u32(shared.clock_mode.load(Ordering::Acquire))
-                                    == ClockMode::Trim;
-                            let Some(mode) = reopened_clock_mode(
-                                config.clock,
-                                trim_available,
-                                reopened_format.rate,
-                            ) else {
-                                shared.publish_output_error(
-                                    "Trim requires a 48 kHz output device for the common mix rate",
-                                );
-                                if let Some(hook) = &config.rt_event {
-                                    hook(RtLoopEvent::OutputOpenEnd);
-                                }
-                                delay = (delay * 2).min(RECONNECT_MAX_MS);
-                                continue;
-                            };
-                            shared.clock_mode.store(mode.as_u32(), Ordering::Release);
-                            output.reconfigure(
-                                output.layout,
-                                reopened_format.rate,
-                                reopened_format.period_frames,
-                            );
                             if let Some(hook) = &config.rt_event {
                                 hook(RtLoopEvent::OutputOpenEnd);
                             }
                             sink = reopened;
                             sink_restart_baseline = sink.restarts();
-                            shared.publish_output_format(reopened_format);
                             shared.output_reconnects.fetch_add(1, Ordering::Relaxed);
                             output.events.clear_fault(FAULT_OUTPUT);
                             output.events.push(RtEvent::OutputReconnected);
@@ -1943,25 +2100,32 @@ fn output_thread_main<O: OutputOpener>(
                     }
                     let reopened = opener.open(output.layout);
                     match reopened {
-                        Ok(reopened) if valid_output_format(reopened.format(), output.layout) => {
+                        Ok(reopened) => {
                             let format = reopened.format();
-                            output.reconfigure(output.layout, format.rate, format.period_frames);
-                            if let Some(hook) = &config.rt_event {
-                                hook(RtLoopEvent::OutputOpenEnd);
+                            let layout = output.layout;
+                            match configure_reopened_output(
+                                &mut output,
+                                &shared,
+                                config.clock,
+                                layout,
+                                format,
+                            ) {
+                                Ok(()) => {
+                                    if let Some(hook) = &config.rt_event {
+                                        hook(RtLoopEvent::OutputOpenEnd);
+                                    }
+                                    sink = reopened;
+                                    sink_restart_baseline = sink.restarts();
+                                    output.events.clear_fault(FAULT_OUTPUT);
+                                    output.events.push(RtEvent::OutputCadenceReopen {
+                                        period_ms: format.period_frames as f32 * 1_000.0
+                                            / format.rate as f32,
+                                    });
+                                    break;
+                                }
+                                Err(error) => shared.publish_output_error(error),
                             }
-                            sink = reopened;
-                            sink_restart_baseline = sink.restarts();
-                            shared.publish_output_format(format);
-                            output.events.clear_fault(FAULT_OUTPUT);
-                            output.events.push(RtEvent::OutputCadenceReopen {
-                                period_ms: format.period_frames as f32 * 1_000.0
-                                    / format.rate as f32,
-                            });
-                            break;
                         }
-                        Ok(_) => shared.publish_output_error(
-                            "cadence reopen output format does not match the requested layout",
-                        ),
                         Err(error) => shared.publish_output_error(&error.to_string()),
                     }
                     if let Some(hook) = &config.rt_event {
@@ -1981,7 +2145,12 @@ fn output_thread_main<O: OutputOpener>(
             && shared.capture_done.load(Ordering::Acquire)
             && output.drained()
         {
-            output.write_drain_tail(&mut sink);
+            let mut drain = || output.write_drain_tail(&mut sink);
+            if let Some(scope) = &config.rt_scope {
+                scope(RtSection::Output, &mut drain);
+            } else {
+                drain();
+            }
             break;
         }
     }
@@ -2024,6 +2193,14 @@ struct OutputState {
     have_last_output: bool,
     latency: LatencyWriter,
     cadence: CadenceGuard,
+    reopen_tail_periods: usize,
+    drain_real_frames: usize,
+    drain_fade_frames: usize,
+    drain_fade_lead_frames: usize,
+    period_signal_end: usize,
+    drain_frames_written: usize,
+    drain_fade_prepared: bool,
+    drain_tail_pending: bool,
 }
 
 impl OutputState {
@@ -2076,6 +2253,14 @@ impl OutputState {
             have_last_output: false,
             latency,
             cadence: CadenceGuard::new(),
+            reopen_tail_periods: 0,
+            drain_real_frames: 0,
+            drain_fade_frames: 0,
+            drain_fade_lead_frames: 0,
+            period_signal_end: 0,
+            drain_frames_written: 0,
+            drain_fade_prepared: false,
+            drain_tail_pending: false,
         }
     }
 
@@ -2167,12 +2352,26 @@ impl OutputState {
         self.period_source_frames = produced.source_frames;
         self.period_had_audio = produced.output_frames != 0;
         let layout_ended = at_layout_boundary && produced.source_frames >= layout_frames;
+        let drains_asrc = mode == ClockMode::Asrc
+            && self.asrc.drain_periods() != 0
+            && (layout_ended
+                || (self.shared.capture_done.load(Ordering::Acquire) && self.audio.slots() == 0));
+        if drains_asrc {
+            self.prepare_asrc_drain_fade(Some((
+                produced.output_frames,
+                self.asrc.real_output_frames,
+            )));
+            self.drain_tail_pending = true;
+            self.apply_asrc_drain_lead_fade(buffer);
+        }
         if produced.output_frames < frames {
             self.apply_fade_in(buffer, produced.output_frames);
-            if produced.output_frames == 0 {
-                self.apply_zero_frame_fade(buffer);
-            } else {
-                self.apply_fade_out(buffer, produced.output_frames);
+            if !drains_asrc {
+                if produced.output_frames == 0 {
+                    self.apply_zero_frame_fade(buffer);
+                } else {
+                    self.apply_fade_out(buffer, produced.output_frames);
+                }
             }
             if !layout_ended {
                 self.shared.underruns.fetch_add(1, Ordering::Relaxed);
@@ -2184,11 +2383,10 @@ impl OutputState {
                 self.fade_in_remaining = boundary_fade_frames(self.device_rate);
             }
         } else if layout_ended {
-            // This is the old sink's final complete period. A short remainder
-            // already takes the branch above; either way every old-layout frame
-            // is retained and its last audible frame reaches zero before reopen.
             self.apply_fade_in(buffer, produced.output_frames);
-            self.apply_fade_out(buffer, produced.output_frames);
+            if !drains_asrc {
+                self.apply_fade_out(buffer, produced.output_frames);
+            }
         } else {
             self.apply_fade_in(buffer, produced.output_frames);
         }
@@ -2199,6 +2397,63 @@ impl OutputState {
             self.last_output[..self.channels].copy_from_slice(frame);
             self.have_last_output = frame.iter().any(|sample| *sample != 0.0);
         }
+    }
+
+    fn prepare_asrc_drain_fade(&mut self, rendered: Option<(usize, usize)>) {
+        if self.drain_fade_prepared {
+            return;
+        }
+        let plan = plan_asrc_tail_fade(
+            self.asrc.output_delay(),
+            boundary_fade_frames(self.device_rate),
+            rendered,
+        );
+        self.drain_real_frames = plan.drain_real_frames;
+        self.drain_fade_frames = plan.drain_fade_frames;
+        self.drain_fade_lead_frames = plan.lead_frames;
+        self.period_signal_end = plan.period_signal_end;
+        self.drain_frames_written = 0;
+        self.drain_fade_prepared = true;
+    }
+
+    fn apply_asrc_drain_lead_fade(&self, buffer: &mut [f32]) {
+        let total_fade_frames = self
+            .drain_fade_lead_frames
+            .saturating_add(self.drain_fade_frames);
+        let fade_start = self
+            .period_signal_end
+            .saturating_sub(self.drain_fade_lead_frames);
+        for (frame_index, frame) in buffer.chunks_exact_mut(self.channels).enumerate() {
+            let gain = if frame_index >= self.period_signal_end {
+                0.0
+            } else if frame_index < fade_start {
+                1.0
+            } else if total_fade_frames <= 1 {
+                0.0
+            } else {
+                let offset = frame_index - fade_start;
+                (total_fade_frames - 1 - offset) as f32 / (total_fade_frames - 1) as f32
+            };
+            for sample in frame {
+                *sample *= gain;
+            }
+        }
+    }
+
+    fn apply_asrc_drain_fade(&mut self, buffer: &mut [f32]) {
+        let period_frames = buffer.len() / self.channels;
+        for (offset, frame) in buffer.chunks_exact_mut(self.channels).enumerate() {
+            let gain = asrc_drain_gain(
+                self.drain_frames_written.saturating_add(offset),
+                self.drain_real_frames,
+                self.drain_fade_frames,
+                self.drain_fade_lead_frames,
+            );
+            for sample in frame {
+                *sample *= gain;
+            }
+        }
+        self.drain_frames_written = self.drain_frames_written.saturating_add(period_frames);
     }
 
     /// `None` until the ring holds target + the next delivery + this period's
@@ -2386,7 +2641,12 @@ impl OutputState {
                     .store(ppm.to_bits(), Ordering::Release),
                 // The ASRC ratio is output/input. A positive controller value
                 // means the ring is high, so consume faster by reducing it.
-                ClockMode::Asrc => self.asrc.set_ppm(ppm, scene_rate, self.device_rate),
+                ClockMode::Asrc => {
+                    self.shared
+                        .trim_ppm_bits
+                        .store(0.0_f64.to_bits(), Ordering::Release);
+                    self.asrc.set_ppm(ppm, scene_rate, self.device_rate);
+                }
             }
         }
         self.consume_markers(playback_qpc, scene_rate);
@@ -2589,7 +2849,14 @@ impl OutputState {
         }
     }
 
-    fn reconfigure(&mut self, layout: OutputLayout, device_rate: u32, period_frames: usize) {
+    fn reconfigure(
+        &mut self,
+        mode: ClockMode,
+        layout: OutputLayout,
+        device_rate: u32,
+        period_frames: usize,
+    ) {
+        self.strategy_mode = mode;
         self.layout = layout;
         self.channels = usize::from(layout.channels);
         self.device_rate = device_rate;
@@ -2608,21 +2875,63 @@ impl OutputState {
         self.have_last_output = false;
         self.latency.reset(&self.shared);
         self.cadence.reset();
+        self.drain_fade_prepared = false;
+        self.drain_tail_pending = false;
     }
 
     fn drained(&self) -> bool {
         self.audio.slots() == 0 && self.asrc.buffered_frames() == 0
     }
 
+    fn begin_reopen_tail(&mut self) -> bool {
+        self.reopen_tail_periods = if self.strategy_mode == ClockMode::Asrc {
+            self.asrc.drain_periods()
+        } else {
+            0
+        };
+        if self.reopen_tail_periods != 0 {
+            if !self.drain_fade_prepared {
+                self.prepare_asrc_drain_fade(None);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn write_reopen_tail_period<S: OutputSink>(
+        &mut self,
+        sink: &mut S,
+    ) -> Result<bool, OutputError> {
+        debug_assert!(self.reopen_tail_periods != 0);
+        let mut fill = |buffer: &mut [f32]| {
+            buffer.fill(0.0);
+            self.asrc.flush(buffer);
+            self.apply_asrc_drain_fade(buffer);
+            self.apply_mute(buffer);
+        };
+        sink.next_period(&mut fill)?;
+        self.reopen_tail_periods -= 1;
+        Ok(self.reopen_tail_periods == 0)
+    }
+
     fn write_drain_tail<S: OutputSink>(&mut self, sink: &mut S) {
-        if self.strategy_mode != ClockMode::Asrc {
+        if self.strategy_mode != ClockMode::Asrc || !self.drain_tail_pending {
             return;
         }
+        self.drain_tail_pending = false;
         let periods = self.asrc.drain_periods();
+        if periods == 0 {
+            return;
+        }
+        if !self.drain_fade_prepared {
+            self.prepare_asrc_drain_fade(None);
+        }
         for _ in 0..periods {
             let mut fill = |buffer: &mut [f32]| {
                 buffer.fill(0.0);
                 self.asrc.flush(buffer);
+                self.apply_asrc_drain_fade(buffer);
                 self.apply_mute(buffer);
             };
             if let Err(error) = sink.next_period(&mut fill) {
@@ -2710,6 +3019,7 @@ struct AsrcClock {
     period_output_frames: usize,
     channels: usize,
     input_limit: usize,
+    real_output_frames: usize,
     /// The source has ended: a last take shorter than the resampler asks for
     /// is completed with silence instead of waiting for frames that will not
     /// come.
@@ -2746,6 +3056,7 @@ impl AsrcClock {
             period_output_frames: period_frames,
             channels,
             input_limit: usize::MAX,
+            real_output_frames: 0,
             ending: false,
         }
     }
@@ -2814,10 +3125,14 @@ impl AsrcClock {
             })
     }
 
+    fn output_delay(&self) -> usize {
+        self.resampler
+            .as_ref()
+            .map_or(0, rubato::Resampler::output_delay)
+    }
+
     fn drain_periods(&self) -> usize {
-        self.resampler.as_ref().map_or(0, |resampler| {
-            resampler.output_delay().div_ceil(self.period_output_frames)
-        })
+        self.output_delay().div_ceil(self.period_output_frames)
     }
 
     fn flush(&mut self, output: &mut [f32]) {
@@ -2852,6 +3167,7 @@ impl ClockStrategy for AsrcClock {
         device_rate: u32,
         stream_frame: &mut u64,
     ) -> Rendered {
+        self.real_output_frames = 0;
         if self.scene_rate != scene_rate || self.resampler.is_none() {
             self.reset(scene_rate, device_rate);
         }
@@ -2900,6 +3216,14 @@ impl ClockStrategy for AsrcClock {
             };
         };
         let output_frames = output_frames_capacity.min(produced);
+        self.real_output_frames = if real == input_frames {
+            output_frames
+        } else {
+            output_frames
+                .saturating_mul(real)
+                .saturating_add(input_frames / 2)
+                / input_frames
+        };
         let consumed = consumed.min(real);
         *stream_frame = stream_frame.saturating_add(consumed as u64);
         Rendered {
@@ -3256,6 +3580,156 @@ mod tests {
     use rtrb::RingBuffer;
 
     use super::*;
+
+    fn output_format(rate: u32) -> OutputFormat {
+        OutputFormat {
+            rate,
+            channels: 2,
+            channel_mask: 0x3,
+            period_frames: 480,
+            mode: OutputMode::Exclusive,
+            fell_back: false,
+            mix_channels: 2,
+        }
+    }
+
+    #[test]
+    fn the_asrc_drain_fade_ends_on_the_last_real_frame() {
+        // 44.1 kHz output: 117 real frames in the drain, an 88-frame fade.
+        let (real, fade) = (117, 88);
+        let gains: Vec<f32> = (0..160)
+            .map(|frame| asrc_drain_gain(frame, real, fade, 0))
+            .collect();
+        assert!(
+            gains[..real - fade].iter().all(|gain| *gain == 1.0),
+            "{gains:?}"
+        );
+        assert!(
+            gains[real - fade..real]
+                .windows(2)
+                .all(|pair| pair[1] < pair[0])
+        );
+        assert_eq!(gains[real - 1], 0.0);
+        assert!(gains[real..].iter().all(|gain| *gain == 0.0));
+        // A delay shorter than the fade: the drain continues the ramp the last
+        // rendered period began (lead 40 of 88 frames).
+        let (real, fade, lead) = (48, 48, 40);
+        assert_eq!(asrc_drain_gain(0, real, fade, lead), 47.0 / 87.0);
+        assert_eq!(asrc_drain_gain(real - 1, real, fade, lead), 0.0);
+    }
+
+    #[test]
+    fn the_asrc_tail_fade_plan_places_the_ramp_at_the_real_signal_end() {
+        assert_eq!(
+            plan_asrc_tail_fade(117, 88, None),
+            TailFade {
+                lead_frames: 0,
+                period_signal_end: 0,
+                drain_real_frames: 117,
+                drain_fade_frames: 88,
+            }
+        );
+        assert_eq!(
+            plan_asrc_tail_fade(59, 88, None),
+            TailFade {
+                lead_frames: 0,
+                period_signal_end: 0,
+                drain_real_frames: 59,
+                drain_fade_frames: 59,
+            }
+        );
+        assert_eq!(
+            plan_asrc_tail_fade(117, 88, Some((441, 400))),
+            TailFade {
+                lead_frames: 12,
+                period_signal_end: 441,
+                drain_real_frames: 76,
+                drain_fade_frames: 76,
+            }
+        );
+        assert_eq!(
+            plan_asrc_tail_fade(117, 88, Some((441, 200))),
+            TailFade {
+                lead_frames: 88,
+                period_signal_end: 317,
+                drain_real_frames: 0,
+                drain_fade_frames: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn output_clock_selection_rechecks_every_opened_format() {
+        assert_eq!(
+            select_output_clock(
+                ClockPreference::Auto,
+                true,
+                output_format(crate::MIX_RATE),
+                OutputLayout::STEREO,
+            ),
+            Ok(ClockMode::Trim)
+        );
+        assert_eq!(
+            select_output_clock(
+                ClockPreference::Auto,
+                true,
+                output_format(44_100),
+                OutputLayout::STEREO,
+            ),
+            Ok(ClockMode::Asrc)
+        );
+        assert_eq!(
+            select_output_clock(
+                ClockPreference::Auto,
+                true,
+                output_format(crate::MIX_RATE),
+                OutputLayout::STEREO,
+            ),
+            Ok(ClockMode::Trim)
+        );
+        assert!(
+            select_output_clock(
+                ClockPreference::Trim,
+                true,
+                output_format(44_100),
+                OutputLayout::STEREO,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn only_errors_without_an_endpoint_use_unattributed_counters() {
+        let shared = Shared::new();
+        shared.note_chain_error(None, ChainErrorKind::TruncatedRecord);
+        shared.note_chain_error(Some(1), ChainErrorKind::CorruptPayload);
+        shared.note_chain_error(
+            Some(ENGINE_ENDPOINTS as u16),
+            ChainErrorKind::BadRecordLength,
+        );
+
+        assert_eq!(
+            shared
+                .read_unattributed_chain_errors()
+                .get(ChainErrorKind::TruncatedRecord),
+            1
+        );
+        assert_eq!(shared.read_unattributed_chain_errors().total(), 1);
+        assert_eq!(
+            shared.endpoints[1]
+                .read_chain_errors()
+                .get(ChainErrorKind::CorruptPayload),
+            1
+        );
+        assert_eq!(
+            shared
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.read_chain_errors().total())
+                .sum::<u64>(),
+            1
+        );
+    }
 
     #[test]
     fn cadence_guard_accepts_normal_rejects_sustained_slow_and_ignores_a_blip() {
@@ -4126,6 +4600,193 @@ mod tests {
             }
         }
         writer.join().unwrap();
+    }
+
+    #[test]
+    fn an_unwritable_96_khz_cadence_tail_starts_its_short_drain_at_full_gain() {
+        let shared = Arc::new(Shared::new());
+        shared.scene_rate.store(96_000, Ordering::Release);
+        shared
+            .clock_mode
+            .store(ClockMode::Asrc.as_u32(), Ordering::Release);
+        let period_frames = 441;
+        let source_frames = 8_000;
+        let frequency = 997.0;
+        let (mut audio_in, audio) = RingBuffer::<f32>::new(source_frames * 2);
+        for frame in 0..source_frames {
+            let sample = (2.0 * std::f32::consts::PI * frequency * frame as f32 / 96_000.0).sin();
+            audio_in.push(sample).unwrap();
+            audio_in.push(sample).unwrap();
+        }
+        let (_timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
+        let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
+        let mut output = OutputState::new(
+            audio,
+            timing,
+            44_100,
+            period_frames,
+            0.0,
+            DEFAULT_QPC_FREQUENCY,
+            events,
+            shared,
+            OutputLayout::STEREO,
+            source_frames,
+        );
+        output.asrc.reset(96_000, 44_100);
+        let delay = output.asrc.output_delay();
+        assert_eq!(delay, 58);
+        assert_eq!(boundary_fade_frames(44_100), 88);
+
+        let mut stream_frame = 0;
+        let mut period = vec![0.0; period_frames * 2];
+        for _ in 0..6 {
+            period.fill(0.0);
+            let rendered = output.asrc.render(
+                &mut output.audio,
+                &mut period,
+                96_000,
+                44_100,
+                &mut stream_frame,
+            );
+            assert_eq!(rendered.output_frames, period_frames);
+        }
+
+        assert!(output.begin_reopen_tail());
+        assert_eq!(output.drain_fade_lead_frames, 0);
+        assert_eq!(output.drain_real_frames, delay);
+        assert_eq!(output.drain_fade_frames, delay);
+        let mut drain = vec![0.0; period_frames * 2];
+        output.asrc.flush(&mut drain);
+        let raw_first = drain[0];
+        output.apply_asrc_drain_fade(&mut drain);
+        assert_eq!(
+            drain[0], raw_first,
+            "the unwritable tail must begin at full gain"
+        );
+        assert!(drain[delay * 2..].iter().all(|sample| *sample == 0.0));
+
+        let mut boundary: Vec<_> = period
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|frame| frame[0])
+            .collect();
+        boundary.extend(
+            drain[..delay * 2]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|frame| frame[0]),
+        );
+        let tone_step = 2.0 * (std::f32::consts::PI * frequency / 44_100.0).sin();
+        let max_step = boundary
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_step <= tone_step + 0.05,
+            "cadence boundary step {max_step} exceeded tone bound {}",
+            tone_step + 0.05
+        );
+        assert_eq!(asrc_drain_gain(delay - 1, delay, delay, 0), 0.0);
+    }
+
+    #[test]
+    fn a_short_terminal_asrc_take_fades_inside_the_rendered_period_and_drains_silently() {
+        let shared = Arc::new(Shared::new());
+        shared.scene_rate.store(48_000, Ordering::Release);
+        shared
+            .clock_mode
+            .store(ClockMode::Asrc.as_u32(), Ordering::Release);
+        shared.capture_started.store(true, Ordering::Release);
+        let period_frames = 441;
+        let real_frames = 8;
+        let new_layout = OutputLayout {
+            channels: 12,
+            channel_mask: 0,
+        };
+        let (mut audio_in, audio) = RingBuffer::<f32>::new(real_frames * 2 + 12);
+        for frame in 0..real_frames {
+            let sample = (2.0 * std::f32::consts::PI * 997.0 * frame as f32 / 48_000.0).sin();
+            audio_in.push(sample).unwrap();
+            audio_in.push(sample).unwrap();
+        }
+        for _ in 0..12 {
+            audio_in.push(0.0).unwrap();
+        }
+        let (mut timing_in, timing) = RingBuffer::<TimingMarker>::new(TIMING_QUEUE_CAPACITY);
+        timing_in
+            .push(TimingMarker {
+                stream_frame: 0,
+                frames: real_frames as u32,
+                source_qpc: 0,
+                rate: 48_000,
+                layout: OutputLayout::STEREO,
+            })
+            .unwrap();
+        timing_in
+            .push(TimingMarker {
+                stream_frame: real_frames as u64,
+                frames: 1,
+                source_qpc: real_frames as u64,
+                rate: 48_000,
+                layout: new_layout,
+            })
+            .unwrap();
+        let (events, _events_out) = RingBuffer::<RtEvent>::new(EVENT_QUEUE_CAPACITY);
+        let mut output = OutputState::new(
+            audio,
+            timing,
+            44_100,
+            period_frames,
+            0.0,
+            DEFAULT_QPC_FREQUENCY,
+            events,
+            shared,
+            OutputLayout::STEREO,
+            period_frames,
+        );
+        output.asrc.reset(48_000, 44_100);
+        output.priming = false;
+        output.fade_in_remaining = 0;
+        let mut period = vec![0.0; period_frames * 2];
+        output.fill(&mut period);
+
+        let predicted_signal_end = 7 + output.asrc.output_delay();
+        assert!(predicted_signal_end < period_frames);
+        assert_eq!(output.period_signal_end, predicted_signal_end);
+        let left: Vec<_> = period
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|frame| frame[0])
+            .collect();
+        let first_zero = left[..predicted_signal_end]
+            .iter()
+            .rposition(|sample| *sample == 0.0)
+            .expect("the in-period fade did not reach exact zero");
+        assert!(first_zero >= predicted_signal_end.saturating_sub(2));
+        assert!(
+            left[predicted_signal_end..]
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        let tone_step = 2.0 * (std::f32::consts::PI * 997.0 / 44_100.0).sin();
+        let max_step = left[..predicted_signal_end]
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_step <= tone_step + 0.05,
+            "short terminal fade step {max_step} exceeded tone bound {}",
+            tone_step + 0.05
+        );
+        assert_eq!(output.pending_layout_change(), Some(new_layout));
+
+        let mut drain = vec![1.0; period_frames * 2];
+        output.asrc.flush(&mut drain);
+        output.apply_asrc_drain_fade(&mut drain);
+        assert!(drain.iter().all(|sample| *sample == 0.0));
     }
 
     #[test]

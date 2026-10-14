@@ -335,4 +335,5 @@ fn twelve_channel_output_steady_state_does_not_allocate() {
 #[test]
 fn capture_reconnect_and_layout_change_stay_outside_the_allocation_free_scope() {
     run_no_alloc(ClockPreference::Trim, RATE, BLOCK, 12, true);
+    run_no_alloc(ClockPreference::Asrc, 44_100, 441, 12, false);
 }

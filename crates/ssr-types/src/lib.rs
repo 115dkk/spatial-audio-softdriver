@@ -31,8 +31,8 @@ pub use ports::{
 pub use position::{Speaker, direction_to_room, room_to_direction};
 pub use scene::{MAX_OBJECTS, Object, Position, SceneBlock};
 pub use status::{
-    ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault, EngineStatus, LatencyStats,
-    UnderrunSnapshot,
+    ChainErrorCounts, ChainErrorKind, ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault,
+    EngineStatus, LatencyStats, UnderrunSnapshot,
 };
 
 /// The scene sample rate every decoder produces unless the source says otherwise.

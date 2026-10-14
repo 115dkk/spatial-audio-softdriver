@@ -435,7 +435,11 @@ tests = [
   "engine::an_overflow_burst_reports_its_frames_without_flooding_the_event_queue",
   "engine::priming_never_discards_sound",
   "engine::priming_covers_a_decoder_sized_delivery",
-  "engine::unsupported_format_on_one_endpoint_is_not_a_global_fault",
+  "engine::unsupported_format_is_counted_without_changing_endpoint_fault_semantics",
+  "engine::malformed_records_are_counted_by_endpoint_and_without_attribution",
+  "engine::corrupt_payload_is_counted_without_marking_the_endpoint_unsupported",
+  "engine::only_errors_without_an_endpoint_use_unattributed_counters",
+  "ssr-live::chain_error_report_uses_all_stable_snake_case_names",
   "engine::a_supported_format_clears_only_its_endpoints_unsupported_state",
   "engine::first_sound_after_start_is_not_dropped",
   "engine::default_start_options_use_the_default_qpc_frequency",
@@ -481,8 +485,18 @@ tests = [
   "engine::pi_controller_clamps_and_integrates",
   "engine::auto_selects_trim_only_when_capture_and_output_support_it",
   "engine::format_change_does_not_change_the_startup_clock_or_mix_rate",
+  "engine::output_clock_selection_rechecks_every_opened_format",
+  "engine::reconnect_at_44_1_khz_switches_to_asrc_and_fades_audio_back_in",
+  "engine::a_layout_reopen_switches_trim_to_asrc_clears_trim_and_keeps_playing",
+  "engine::forced_trim_incompatible_layout_reopen_retries_and_stops_without_success",
+  "engine::the_asrc_tail_fade_plan_places_the_ramp_at_the_real_signal_end",
+  "engine::an_unwritable_96_khz_cadence_tail_starts_its_short_drain_at_full_gain",
+  "engine::a_short_terminal_asrc_take_fades_inside_the_rendered_period_and_drains_silently",
+  "engine::asrc_layout_reopen_fades_through_the_real_tail_and_stays_silent",
+  "engine::asrc_eof_fades_through_the_real_tail_and_stays_silent",
+  "engine::sustained_slow_cadence_grows_the_period_and_reopens_once",
 ]
-note = "rubato Async sinc on the binaural pair. Auto chooses Trim only when the capture supports trim and the output is 48 kHz; otherwise it chooses ASRC at startup, and a device-loss reconnect that changes the output rate reselects ASRC. Source format changes never alter that choice or the fixed 48 kHz scene rate. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms plus the smaller of the period's take and the delivery, which is what one delivery landing just after a take costs it; priming fills to target + delivery + take, so the trough starts there. 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation that keeps audible priming excess and can land blocks a period late. The level is the frames the output has not taken yet, so markers a period already read do not count whole (they put the trough up to a period high and the CI soaks underran). The integral learns only within 12 ms of the setpoint and never further into a saturated output: priming keeps audible frames (ADR 0028), so a backlog or a refill after an underrun starts the trough tens of ms high, and integrating that latency as skew drained the ring dry every ~20 s in the CI soaks; 12 ms holds the one-block step a phase slip makes when the period is at least a block long, so the integral learns the skew from those slips. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
+note = "rubato Async sinc on the binaural pair. Auto chooses Trim only when the capture supports trim and the output is 48 kHz; otherwise it chooses ASRC at startup, and every output reopen (layout, loss or cadence) validates the opened format and reselects the mode, including 48 kHz Trim to 44.1 kHz ASRC; leaving Trim explicitly clears the capture source's requested correction. Forced Trim retries an incompatible reopened rate without counting a successful reopen, and stop interrupts that retry backoff. Non-loss layout and cadence reopens drain the old ASRC delay through the still-live sink before replacing the resampler, while actual device loss retains its discard policy. Source format changes never alter that choice or the fixed 48 kHz scene rate. The PI controller holds the ring's trough (lowest level after a period, over 0.2 s windows) at target_ms plus the smaller of the period's take and the delivery, which is what one delivery landing just after a take costs it; priming fills to target + delivery + take, so the trough starts there. 60 ppm/ms and 3 ppm/(ms s), checked by a block-quantized simulation that keeps audible priming excess and can land blocks a period late. The level is the frames the output has not taken yet, so markers a period already read do not count whole (they put the trough up to a period high and the CI soaks underran). The integral learns only within 12 ms of the setpoint and never further into a saturated output: priming keeps audible frames (ADR 0028), so a backlog or a refill after an underrun starts the trough tens of ms high, and integrating that latency as skew drained the ring dry every ~20 s in the CI soaks; 12 ms holds the one-block step a phase slip makes when the period is at least a block long, so the integral learns the skew from those slips. On the dev PC a paced 48 kHz dump played 25 s through a TOPPING USB DAC (exclusive, 3 ms) with no underrun"
 
 [[feature]]
 id = "engine.clock_trim"
@@ -528,8 +542,11 @@ tests = [
   "convolver::repeated_runs_are_bit_identical",
   "convolver::partitions_reports_total_across_segments",
   "convolver::three_segment_process_and_reset_do_not_allocate",
+  "convolver::mono_matches_binaural_left_across_blocks_partitions_and_quiet_transitions",
+  "convolver::mono_process_and_quiet_protocol_do_not_allocate",
+  "convolver::reports_representative_block_times",
 ]
-note = "segments [0,16P) at P, [16P,128P) at 8P and [128P,end) at 64P, the large FFTs spread over fixed slots; the quiet bound includes two complete windows at the largest scheduled ratio and is tested to follow the last nonzero output; 21 inputs x 310,144 taps measured 0.47-0.49 ms mean and 1.0-1.2 ms max per 480-frame block in release"
+note = "segments [0,16P) at P, [16P,128P) at 8P and [128P,end) at 64P, the large FFTs spread over fixed slots; one-output banks omit the second multiply-accumulate and inverse FFT while remaining bit-identical to the binaural left output; the quiet bound includes two complete windows at the largest scheduled ratio and is tested to follow the last nonzero output; release timing covers the binaural workload and eight 0.5-second speaker FIRs (discarded stereo 138.566 us mean/550.570 us max; mono 75.903 us mean/199.655 us max on the 2026-10-14 Linux run)"
 
 [[feature]]
 id = "sys.sal_ring"
@@ -968,15 +985,17 @@ tests = [
   "engine::multichannel_blocks_enter_the_crossing_ring_with_their_layout",
   "engine::asrc_keeps_channels_apart_with_twelve_channels",
   "engine::a_speaker_profile_opens_its_layout_at_start",
-  "engine::a_layout_change_reopens_the_output_after_the_old_blocks_play",
+  "engine::a_layout_reopen_switches_trim_to_asrc_clears_trim_and_keeps_playing",
   "engine::a_failed_reopen_recovers_and_clears_the_output_fault",
   "engine::output_failure_discards_mixed_layout_crossing_audio_and_recovers",
   "engine::ddp_and_speaker_paths_apply_the_same_volume_gain",
   "engine::start_rejects_a_sink_with_another_channel_count",
   "engine::twelve_channel_output_steady_state_does_not_allocate",
   "engine::steady_state_speaker_output_does_not_allocate",
+  "convolver::mono_matches_binaural_left_across_blocks_partitions_and_quiet_transitions",
+  "convolver::mono_process_and_quiet_protocol_do_not_allocate",
   "ssr-replay::speaker_render_writes_extensible_channels_mask_and_report",
   "ssr-replay::direct_speaker_render_writes_zero_channel_mask",
 ]
-note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional mono room FIR (subwoofers included), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). ssr-live and ssr-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
+note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional one-output mono room FIR (subwoofers included, without a discarded second-ear FFT), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). ssr-live and ssr-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
 
