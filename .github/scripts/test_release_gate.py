@@ -37,6 +37,9 @@ class ShipsTest(unittest.TestCase):
             for name in re.findall(r"'([^']+)'", names):
                 path = folder.replace("\\", "/") + "/" + name
                 self.assertTrue(g.ships(path), path)
+        # Copied under another name: the kit's requirements.txt.
+        self.assertIn("tools\\ci\\requirements-kit.txt", kit)
+        self.assertTrue(g.ships("tools/ci/requirements-kit.txt"))
         self.assertTrue(g.ships("docs/profiles/speakers-5.1.toml"))
 
     def test_tests_docs_policy_and_ci_do_not_ship(self):
