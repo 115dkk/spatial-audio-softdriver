@@ -1881,6 +1881,16 @@ fn output_rt_step<S: OutputSink>(
     OutputStep::Continue
 }
 
+/// Once capture has ended and every frame is rendered, nothing is left to play
+/// on a reopened sink, so a layout or cadence reopen gives way to finishing
+/// (the tail still owed goes to the current sink).
+fn end_before_reopen(step: OutputStep, ended: bool) -> OutputStep {
+    match step {
+        OutputStep::ChangeLayout(_) | OutputStep::GrowCadence(_) if ended => OutputStep::Continue,
+        step => step,
+    }
+}
+
 fn complete_reopen_step(reopen: ReopenStep) -> OutputStep {
     match reopen {
         ReopenStep::ChangeLayout(layout) => OutputStep::ChangeLayout(layout),
@@ -1982,10 +1992,14 @@ fn output_thread_main<O: OutputOpener>(
         if let Some(hook) = &config.rt_event {
             hook(RtLoopEvent::OutputEnd);
         }
-        let mut step = output.end_before_reopen(
+        // One decision after the period: whether capture has ended decides both
+        // what happens to a reopen and to a reopen drain.
+        let ended = output.ended();
+        let mut step = end_before_reopen(
             step.expect("the real-time scope must run its closure exactly once"),
+            ended,
         );
-        if output.ended() {
+        if ended {
             draining_reopen = None;
             if let OutputStep::Lost(error) = &step {
                 // Nothing is left to play, so there is nothing to reconnect for.
@@ -2302,6 +2316,11 @@ impl OutputState {
     }
 
     fn fill(&mut self, buffer: &mut [f32]) {
+        // Read once, before anything about the ring: every block capture
+        // published before it finished is then visible to this period, and
+        // every decision about how the period ends uses this reading. Capture
+        // finishing after it is a source that was late for this period.
+        let capture_done = self.shared.capture_done.load(Ordering::Acquire);
         buffer.fill(0.0);
         self.refresh_markers();
         self.target_ms = f64::from(f32::from_bits(
@@ -2364,10 +2383,6 @@ impl OutputState {
             produced_frames: 0,
             since_block_ms: 0.0,
         };
-        // Read once, just before the take: every decision about how this
-        // period ends uses the same reading. Capture finishing after it is a
-        // source that was late for this period.
-        let capture_done = self.shared.capture_done.load(Ordering::Acquire);
         let produced = match mode {
             ClockMode::Trim => {
                 let output_frames = frames.min(layout_frames);
@@ -2955,18 +2970,6 @@ impl OutputState {
 
     fn drained(&self) -> bool {
         self.audio.slots() == 0 && self.asrc.buffered_frames() == 0
-    }
-
-    /// Once capture has ended and every frame is rendered, nothing is left to
-    /// play on a reopened sink, so a layout or cadence reopen gives way to
-    /// finishing (the tail still owed goes to the current sink).
-    fn end_before_reopen(&self, step: OutputStep) -> OutputStep {
-        match step {
-            OutputStep::ChangeLayout(_) | OutputStep::GrowCadence(_) if self.ended() => {
-                OutputStep::Continue
-            }
-            step => step,
-        }
     }
 
     /// Capture has ended and every frame it produced has been rendered.
@@ -5288,33 +5291,48 @@ mod tests {
         output.fill(&mut period);
         assert_eq!(shared.underruns.load(Ordering::Acquire), 0);
         assert!(output.drained());
-        assert!(period[..12 * 2].iter().any(|sample| *sample != 0.0));
+        // Every one of the 100 frames plays, the last 88 under the end fade.
+        let fade = boundary_fade_frames(48_000);
+        for (frame, played) in left(&period[..100 * 2]).into_iter().enumerate() {
+            let source = (2.0 * std::f32::consts::PI * 997.0 * frame as f32 / 48_000.0).sin();
+            let gain = match frame.checked_sub(100 - fade) {
+                None => 1.0,
+                Some(offset) => (fade - 1 - offset) as f32 / (fade - 1) as f32,
+            };
+            assert!(
+                (played - source * gain).abs() <= 1.0e-6,
+                "frame {frame} played {played}, expected {}",
+                source * gain
+            );
+        }
         assert!(period[100 * 2..].iter().all(|sample| *sample == 0.0));
     }
 
     #[test]
     fn a_reopen_gives_way_to_finishing_once_everything_is_rendered() {
-        let (output, shared) = ended_output(ClockMode::Asrc, 0);
         let layout = OutputLayout {
             channels: 12,
             channel_mask: 0,
         };
         assert!(matches!(
-            output.end_before_reopen(OutputStep::ChangeLayout(layout)),
+            end_before_reopen(OutputStep::ChangeLayout(layout), true),
             OutputStep::Continue
         ));
         assert!(matches!(
-            output.end_before_reopen(OutputStep::GrowCadence(Duration::from_millis(20))),
+            end_before_reopen(OutputStep::GrowCadence(Duration::from_millis(20)), true),
             OutputStep::Continue
         ));
         assert!(matches!(
-            output.end_before_reopen(OutputStep::Lost(OutputError::Removed)),
+            end_before_reopen(OutputStep::Lost(OutputError::Removed), true),
             OutputStep::Lost(_)
         ));
-        shared.capture_done.store(false, Ordering::Release);
         assert!(matches!(
-            output.end_before_reopen(OutputStep::ChangeLayout(layout)),
+            end_before_reopen(OutputStep::ChangeLayout(layout), false),
             OutputStep::ChangeLayout(_)
+        ));
+        assert!(matches!(
+            end_before_reopen(OutputStep::GrowCadence(Duration::from_millis(20)), false),
+            OutputStep::GrowCadence(_)
         ));
     }
 
