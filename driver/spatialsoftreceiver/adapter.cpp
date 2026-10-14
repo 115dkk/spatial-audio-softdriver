@@ -132,6 +132,7 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryP
     // it itself instead of calling the default from inside this driver.
     for (ULONG major = 0; major <= IRP_MJ_MAXIMUM_FUNCTION; ++major)
         PortDispatch[major] = driver->MajorFunction[major] == unset ? nullptr : driver->MajorFunction[major];
+#if !defined(SSR_DIAG_PNP_ONLY)
     driver->MajorFunction[IRP_MJ_CREATE] = SsrDispatch;
     driver->MajorFunction[IRP_MJ_CLOSE] = SsrDispatch;
     driver->MajorFunction[IRP_MJ_CLEANUP] = SsrDispatch;
@@ -143,6 +144,12 @@ extern "C" NTSTATUS DriverEntry(PDRIVER_OBJECT driver, PUNICODE_STRING registryP
     driver->MajorFunction[IRP_MJ_SET_SECURITY] = SsrDispatch;
     driver->MajorFunction[IRP_MJ_POWER] = SsrDispatch;
     driver->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = SsrDispatch;
+#else
+    // Diagnosis only (ADR 0027, Server 2022 under I/O verification): PortCls
+    // keeps every major function but PnP, as in SysVAD. Nothing may open the
+    // control device in this build.
+    (void)&SsrDispatch;
+#endif
     driver->MajorFunction[IRP_MJ_PNP] = PnpHandler;
     return STATUS_SUCCESS;
 }
@@ -255,8 +262,10 @@ static NTSTATUS StartDevice(PDEVICE_OBJECT device, PIRP irp, PRESOURCELIST resou
         new (SsrNonPaged{}) CAdapterCommon(extension->ControlDevice));
     if (!adapter) return STATUS_INSUFFICIENT_RESOURCES;
     NTSTATUS status = adapter->Start();
+#if !defined(SSR_DIAG_NO_POWER)  // Diagnosis only (ADR 0027): PortCls without adapter power callbacks.
     if (NT_SUCCESS(status)) status = ssr::km::fault::Hit() ? STATUS_INSUFFICIENT_RESOURCES :
         PcRegisterAdapterPowerManagement(adapter.Get(), device);
+#endif
     for (ULONG i = 0; NT_SUCCESS(status) && i < SSR_MAX_ENDPOINTS; ++i) {
         if ((adapter->Settings().EndpointMask & (1UL << i)) && i < ARRAYSIZE(SsrMiniPairs))
             status = Install(device, irp, resources, adapter.Get(), SsrMiniPairs[i]);

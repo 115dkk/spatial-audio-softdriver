@@ -131,7 +131,7 @@ class VerifierScriptTests(unittest.TestCase):
             "Enable-SsrVerifier -When BeforeLoad | Out-Null\n"
             "$global:SsrCalls | ForEach-Object { Write-Output \"CALL $_\" }", dif=False)
         self.assertEqual(self.calls(result),
-                         ["verifier /volatile /flags 0x9BB /adddriver spatialsoftreceiver.sys", "verifier /query"])
+                         ["verifier /volatile /flags 0x9AB /adddriver spatialsoftreceiver.sys", "verifier /query"])
 
     def test_server_2022_refuses_flags_without_pool_tracking(self):
         query = QUERY.replace("0x000009bf", "0x00000004")
