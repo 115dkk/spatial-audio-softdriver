@@ -15,7 +15,7 @@ public:
     static NTSTATUS AudioProperty(PPCPROPERTY_REQUEST request);
 private:
     LONG references_ = 1;
-    CAdapterCommon* adapter_;
+    ssr::km::ComRef<CAdapterCommon> adapter_;
     USHORT endpoint_;
     ULONG channels_;
     PCFILTER_DESCRIPTOR descriptor_{};

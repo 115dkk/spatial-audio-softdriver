@@ -54,7 +54,7 @@ SHIP = (
     "tools/ci/RootDevice.cs",
     "tools/ci/driver_flow_check.py",
     "tools/ci/ring_record.py",
-    "tools/ci/requirements.txt",
+    "tools/ci/requirements-kit.txt",
     "tools/ci/endpoints.ps1",
     "tools/ci/endpoints.py",
     "tools/ci/package-identities.ps1",
@@ -63,8 +63,12 @@ SHIP = (
     "tools/ci/endpoint-volume.ps1",
     "tools/ci/exclusive-policy.ps1",
     "tools/ci/exclusive_policy_check.ps1",
-    "tools/ci/loopback_check.py",
     "tools/ci/ioctl_fuzz.py",
+    "tools/ci/ssr_abi.py",
+    "tools/ci/ssr_control.py",
+    "tools/ci/ring_stats.py",
+    "tools/ci/numpy_compat.py",
+    "tools/ci/report_check.py",
     # The example profiles in the tools zip (release.yml build-windows).
     "docs/profiles/*",
 )

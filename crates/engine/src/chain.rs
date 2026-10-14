@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use brir::PreparedBrir;
-use convolver::Binauralizer;
+use convolver::{Binauralizer, MonoConvolver};
 use decode::{DecodeConfig, DecodeError, Decoders, MAX_SCENE_FRAMES, Route};
 use render::PanGeometry;
 use speakers::{BiquadCoefficients, CrossoverCoefficients, PreparedSpeakers};
@@ -382,13 +382,12 @@ struct SpeakerOutput {
     /// Per speaker (direction); `Some` for small speakers.
     crossovers: Vec<Option<CrossoverState>>,
     /// Per device channel: the room FIR and its one-input feed.
-    firs: Vec<Option<(Binauralizer, Feeds)>>,
+    firs: Vec<Option<(MonoConvolver, Feeds)>>,
     /// Per device channel.
     delays: Vec<DelayLine>,
     /// Per device channel; 1 where nothing is assigned.
     trims: Vec<f32>,
     work: Vec<f32>,
-    fir_scratch: Vec<f32>,
     bass: Vec<f32>,
 }
 
@@ -400,7 +399,7 @@ impl SpeakerOutput {
             .map(|speaker| speaker.crossover.map(CrossoverState::new))
             .collect();
         let channels = prepared.device_channels;
-        let mut firs: Vec<Option<(Binauralizer, Feeds)>> = (0..channels).map(|_| None).collect();
+        let mut firs: Vec<Option<(MonoConvolver, Feeds)>> = (0..channels).map(|_| None).collect();
         let mut delay_frames = vec![0; channels];
         let mut trims = vec![1.0; channels];
         let loudspeakers = prepared
@@ -427,7 +426,7 @@ impl SpeakerOutput {
             trims[channel] = trim;
             firs[channel] = fir.as_ref().map(|bank| {
                 (
-                    Binauralizer::new(Arc::clone(bank), max_block),
+                    MonoConvolver::new(Arc::clone(bank), max_block),
                     Feeds::new(1, max_block),
                 )
             });
@@ -438,7 +437,6 @@ impl SpeakerOutput {
             delays: delay_frames.into_iter().map(DelayLine::new).collect(),
             trims,
             work: vec![0.0; channels * max_block],
-            fir_scratch: vec![0.0; max_block],
             bass: vec![0.0; max_block],
         }
     }
@@ -455,7 +453,6 @@ impl SpeakerOutput {
             delay.reset();
         }
         self.work.fill(0.0);
-        self.fir_scratch.fill(0.0);
         self.bass.fill(0.0);
     }
 
@@ -539,7 +536,7 @@ impl SpeakerOutput {
             if !silent {
                 convolver.note_active_input();
             }
-            convolver.process(feed, signal, &mut self.fir_scratch[..frames]);
+            convolver.process(feed, signal);
             if silent {
                 convolver.note_silent_input(frames);
             }
@@ -726,25 +723,27 @@ struct Front {
     volume: Option<VolumePayload>,
     byte_rate: u64,
     error_epoch: u32,
-    error_kind: u8,
+    error_kind: Option<ssr_types::ChainErrorKind>,
     transport_remainder: u128,
     block_align: usize,
     deframer_bytes: u64,
 }
 
-fn chain_error_kind(error: &ChainError) -> u8 {
+pub(crate) fn chain_error_kind(error: &ChainError) -> ssr_types::ChainErrorKind {
+    use ssr_types::ChainErrorKind;
+
     match error {
-        ChainError::Decode(DecodeError::UnsupportedCodec(_)) => 1,
-        ChainError::Decode(DecodeError::Unsupported { .. }) => 2,
-        ChainError::Decode(DecodeError::Corrupt { .. }) => 3,
-        ChainError::Decode(DecodeError::NoFormat) => 4,
-        ChainError::Decode(DecodeError::WrongRoute(_)) => 5,
-        ChainError::UnsupportedSceneRate(_) => 6,
-        ChainError::Record(AbiError::Truncated { .. }) => 7,
-        ChainError::Record(AbiError::BadLength { .. }) => 8,
-        ChainError::Record(AbiError::BadFormat { .. }) => 9,
-        ChainError::Record(AbiError::BadVolume { .. }) => 10,
-        ChainError::Decode(DecodeError::NoDirectLayout(_)) => 11,
+        ChainError::Decode(DecodeError::UnsupportedCodec(_)) => ChainErrorKind::UnsupportedCodec,
+        ChainError::Decode(DecodeError::Unsupported { .. }) => ChainErrorKind::UnsupportedFormat,
+        ChainError::Decode(DecodeError::Corrupt { .. }) => ChainErrorKind::CorruptPayload,
+        ChainError::Decode(DecodeError::NoFormat) => ChainErrorKind::MissingFormat,
+        ChainError::Decode(DecodeError::WrongRoute(_)) => ChainErrorKind::WrongRoute,
+        ChainError::UnsupportedSceneRate(_) => ChainErrorKind::UnsupportedSceneRate,
+        ChainError::Record(AbiError::Truncated { .. }) => ChainErrorKind::TruncatedRecord,
+        ChainError::Record(AbiError::BadLength { .. }) => ChainErrorKind::BadRecordLength,
+        ChainError::Record(AbiError::BadFormat { .. }) => ChainErrorKind::BadFormatRecord,
+        ChainError::Record(AbiError::BadVolume { .. }) => ChainErrorKind::BadVolumeRecord,
+        ChainError::Decode(DecodeError::NoDirectLayout(_)) => ChainErrorKind::MissingDirectLayout,
     }
 }
 
@@ -757,11 +756,11 @@ fn emit_front_error(
 ) {
     let kind = chain_error_kind(&error);
     let epoch = front.format.map_or(0, |value| value.0);
-    if front.error_epoch == epoch && front.error_kind == kind {
+    if front.error_epoch == epoch && front.error_kind == Some(kind) {
         *suppressed_errors = suppressed_errors.saturating_add(1);
     } else {
         front.error_epoch = epoch;
-        front.error_kind = kind;
+        front.error_kind = Some(kind);
         out(ChainEvent::Error {
             endpoint: Some(endpoint),
             error,
@@ -930,7 +929,7 @@ impl Front {
             volume: None,
             byte_rate: 0,
             error_epoch: 0,
-            error_kind: 0,
+            error_kind: None,
             transport_remainder: 0,
             block_align: 1,
             deframer_bytes: 0,
@@ -1389,7 +1388,7 @@ impl Chain {
                 self.fronts[index].format = Some((epoch, format));
                 if epoch_changed {
                     self.fronts[index].error_epoch = epoch;
-                    self.fronts[index].error_kind = 0;
+                    self.fronts[index].error_kind = None;
                 }
                 self.fronts[index].deframer.reset();
                 self.fronts[index].configure_transport(format);
@@ -2530,8 +2529,8 @@ mod tests {
     #[test]
     fn speaker_output_routes_delays_trims_and_keeps_fir_mono() {
         let fir_ir = [0.0_f32, 1.0];
-        let fir_filters = [[fir_ir.as_slice(), fir_ir.as_slice()]];
-        let fir = Arc::new(convolver::FilterBank::new(&fir_filters, MIX_FRAMES).unwrap());
+        let fir_filters = [fir_ir.as_slice()];
+        let fir = Arc::new(convolver::FilterBank::new_mono(&fir_filters, MIX_FRAMES).unwrap());
         let prepared = speaker_prepared(
             vec![
                 prepared_speaker("L", 2, 0.5, 2, Some(fir)),
@@ -2669,8 +2668,8 @@ mod tests {
     #[test]
     fn subwoofers_take_their_own_fir_delay_and_trim() {
         let fir_ir = [0.0_f32, 0.5];
-        let fir_filters = [[fir_ir.as_slice(), fir_ir.as_slice()]];
-        let fir = Arc::new(convolver::FilterBank::new(&fir_filters, MIX_FRAMES).unwrap());
+        let fir_filters = [fir_ir.as_slice()];
+        let fir = Arc::new(convolver::FilterBank::new_mono(&fir_filters, MIX_FRAMES).unwrap());
         let prepared = speaker_prepared(
             vec![prepared_speaker("L", 0, 1.0, 0, None)],
             vec![
@@ -2708,8 +2707,8 @@ mod tests {
     #[test]
     fn crossover_tails_reach_the_room_fir_after_the_bed_falls_silent() {
         let fir_ir = [1.0_f32];
-        let fir_filters = [[fir_ir.as_slice(), fir_ir.as_slice()]];
-        let fir = Arc::new(convolver::FilterBank::new(&fir_filters, MIX_FRAMES).unwrap());
+        let fir_filters = [fir_ir.as_slice()];
+        let fir = Arc::new(convolver::FilterBank::new_mono(&fir_filters, MIX_FRAMES).unwrap());
         let speaker = speakers::PreparedSpeaker {
             small: true,
             crossover: Some(speakers::crossover_coefficients(MIX_RATE, 80.0)),

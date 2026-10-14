@@ -17,5 +17,6 @@ thiserror.workspace = true
 eac3.workspace = true
 
 [dev-dependencies]
+ssr-abi.workspace = true
 proptest.workspace = true
 assert_no_alloc.workspace = true

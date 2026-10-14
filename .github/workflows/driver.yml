@@ -24,9 +24,16 @@ name: Driver
 #              the ring back, ssr-live then renders the ring to VB-CABLE while
 #              a tone plays into each endpoint and both tones must come back
 #              out (tools/ci/driver_e2e_check.py), an IOCTL fuzzer attacks
-#              the control device (tools/ci/ioctl_fuzz.py), all under Driver
-#              Verifier where the image allows it, and the kit's collect.ps1
-#              and uninstall.ps1 run as a tester would run them
+#              the control device (tools/ci/ioctl_fuzz.py), the device
+#              restarts five times (each restart unloads and reloads the
+#              image), all under Driver Verifier (tools/ci/verifier.ps1), and
+#              the kit's collect.ps1 and uninstall.ps1 run as a tester would
+#              run them
+#   faults     the same kit with the driver's own fault switch on both
+#              images: each resource acquisition of a load (DriverEntry,
+#              AddDevice, StartDevice) and then of playing (streams, the
+#              control device) fails once, and every instance must unload
+#              holding nothing; then the driver must play correctly
 #   codeql     the Windows driver CodeQL suites the hardware program requires
 #              (must-fix and recommended)
 #   sysvad-build, sysvad-control  diagnosis only: SysVAD itself built on
@@ -224,31 +231,42 @@ jobs:
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start
 
-      # Driver Verifier watches the driver from the moment it loads, without
-      # a reboot (volatile settings apply to drivers loaded afterwards): pool,
-      # IRQL, I/O and deadlock checks. A violation bugchecks the runner, which
-      # fails the job. Whether a hosted image accepts volatile verification is
-      # printed below; until a run shows it does, a refusal is a warning, not
-      # a failure.
-      - name: Driver Verifier for spatialsoftreceiver.sys, volatile (standard checks)
-        id: verifier
+      # Driver Verifier without a reboot. How differs by Windows version
+      # (tools/ci/verifier.ps1): Server 2022 takes volatile flags before the
+      # driver first loads, so it is checked from DriverEntry on; Server 2025
+      # takes `/dif ... /now` rule classes only once the driver runs, so it is
+      # checked from just after the install, and the restarts at the end run
+      # DriverEntry, AddDevice and StartDevice under it. Each step does its
+      # part on its image and fails when verifier refuses a setting, asks for
+      # a reboot, or does not list the driver afterwards. A violation
+      # bugchecks the runner, which fails the job.
+      - name: Driver Verifier before the driver loads (Server 2022, tools/ci/verifier.ps1)
         shell: pwsh
         run: |
-          & verifier.exe /volatile /flags 0x209BB /adddriver spatialsoftreceiver.sys
-          $code = $LASTEXITCODE
-          Write-Host "verifier /volatile exited $code"
-          & verifier.exe /querysettings
-          "requested=$code" | Out-File -Append $env:GITHUB_OUTPUT
-          # Actions ends a pwsh step with the last native exit code; a refusal
-          # here is reported by the next check, not by failing this step.
-          exit 0
+          . ./tools/ci/verifier.ps1
+          Enable-SsrVerifier -When BeforeLoad
 
       # The same kit a release ships (tools/ci/driver-test-kit.ps1), installed
-      # by the tester's own install.ps1.
+      # by the tester's own install.ps1. It takes under a minute; one that
+      # does not return is a driver that never finished starting.
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
         id: install
+        timeout-minutes: 5
         shell: pwsh
         run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      - name: Where the install waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.install.outcome == 'failure' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tools/ci/hang-dump.ps1 -Processes drvinst, rundll32
+
+      - name: Driver Verifier on the running driver (Server 2025, tools/ci/verifier.ps1)
+        if: steps.install.outputs.loaded == 'true'
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          Enable-SsrVerifier -When Loaded
 
       # Stopped before the diagnostics below open the filters themselves.
       - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
@@ -365,13 +383,10 @@ jobs:
         with:
           shared-key: audio
 
-      - name: VB-CABLE, a 1 ms system timer and MMCSS for the end-to-end check (tools/ci/install-virtual-cable.ps1, timer-resolution.ps1)
+      - name: Real-time audio on the runner for the end-to-end check (tools/ci/realtime-audio.ps1)
         if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
         shell: pwsh
-        run: |
-          ./tools/ci/install-virtual-cable.ps1
-          ./tools/ci/timer-resolution.ps1
-          Start-Service -Name MMCSS
+        run: ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps')
 
       - name: Build ssr-live; write the fixture profile
         id: e2e-build
@@ -394,22 +409,25 @@ jobs:
             --report "$RUNNER_TEMP/driver-e2e-report.json" --summary "$RUNNER_TEMP/driver-e2e.json" \
             --record "$RUNNER_TEMP/driver-e2e.ssrdump"
 
+      # The Rust ring reader against the installed driver: QUERY_INFO's
+      # default mask, trim at 0 and +-100 ppm, and a READ that times out.
+      - name: DriverRing against the installed driver (ssr-sys driver_ring, ignored elsewhere)
+        if: ${{ !cancelled() && steps.e2e-build.outcome == 'success' }}
+        run: cargo test --locked --release -p ssr-sys --test driver_ring -- --ignored --nocapture
+
+      - name: Crash stacks of ssr-live (cdb on any dump)
+        if: ${{ failure() && steps.e2e-build.outcome == 'success' }}
+        shell: pwsh
+        run: ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps') -Report -Symbols (Resolve-Path target/release).Path
+
       - name: Is Driver Verifier checking spatialsoftreceiver.sys
-        id: verified
         if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
         shell: pwsh
         run: |
-          $query = (& verifier.exe /query) -join "`n"
-          Write-Host $query
-          $active = $query -match '(?im)^\s*Name:\s*spatialsoftreceiver\.sys'
-          "active=$($active.ToString().ToLower())" | Out-File -Append $env:GITHUB_OUTPUT
-          if ($active) {
-            Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: checking spatialsoftreceiver.sys (${{ matrix.os }})`n"
-          } else {
-            Write-Host '::warning::Driver Verifier is not checking spatialsoftreceiver.sys on this image; the IOCTL fuzzer runs without it'
-            Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: NOT active on ${{ matrix.os }}`n"
-          }
-          exit 0
+          . ./tools/ci/verifier.ps1
+          $state = Get-SsrVerifierState
+          if (-not $state.Listed) { throw 'Driver Verifier is not checking spatialsoftreceiver.sys' }
+          Add-Content $env:GITHUB_STEP_SUMMARY "`nDriver Verifier: checking spatialsoftreceiver.sys (${{ matrix.os }}, level $($state.Level))`n"
 
       # The control device under hostile callers: wrong sizes, extreme fields,
       # unknown codes, cancel and close racing a pending READ, a second open.
@@ -427,9 +445,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "ioctl_fuzz.py exited $LASTEXITCODE" }
 
       - name: Driver Verifier counters after the fuzzer
-        if: ${{ !cancelled() && steps.verified.outputs.active == 'true' }}
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
         shell: pwsh
         run: '& verifier.exe /query'
+
+      # Each restart removes the device stack, so the image unloads (Pool
+      # Tracking bugchecks on a leaked allocation then) and loads again through
+      # DriverEntry, AddDevice and StartDevice. All three endpoints must come
+      # back each time.
+      - name: Restart the device 5 times under Driver Verifier (tools/ci/verifier.ps1)
+        if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' }}
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          . ./tools/ci/verifier.ps1
+          . ./tools/ci/package-identities.ps1
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
+          if (-not $device) { throw 'the Spatial SoftReceiver device is gone' }
+          $before = Get-SsrVerifierState
+          $cycles = @(Invoke-SsrRestartCycles -InstanceId $device.InstanceId -Count 5)
+          $broken = @($cycles | Where-Object { $_.Problem -ne 0 -or $_.PnputilExit -ne 0 })
+          if ($broken.Count) { throw "$($broken.Count) of 5 restarts left the device with a problem code" }
+          $after = Get-SsrVerifierState
+          Write-Host "verifier loads $($before.Loads) -> $($after.Loads), unloads $($before.Unloads) -> $($after.Unloads)"
+          $deadline = (Get-Date).AddSeconds(60)
+          while ($true) {
+            try { ./tools/ci/endpoint-states.ps1 -InstanceId $device.InstanceId; break }
+            catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Seconds 3 }
+          }
 
       - name: The audio stack after the flow check
         if: failure() && steps.install.outputs.loaded == 'true'
@@ -477,6 +520,185 @@ jobs:
         run: |
           & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
           if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
+
+  # Error branches only run when something fails. Driver Verifier cannot make
+  # anything fail on these runners: Server 2022's volatile settings list the
+  # driver but intercept none of its calls, and on Server 2025 the systematic
+  # simulation failed none of 480 allocations of the running image (ADR 0027,
+  # 2026-10-14). So the driver has its own switch: Parameters\FaultInjectAt
+  # fails the N-th resource acquisition after the image loads, and the unload
+  # writes what the instance still held. The first sweep enables and disables
+  # the device once per fault point of a clean load (DriverEntry, AddDevice,
+  # StartDevice and whatever the endpoint builder opens); the second once per
+  # fault point that playing a tone into every endpoint and reading the ring
+  # adds (streams, DMA buffers, timers, the control device). Every instance
+  # must leave nothing behind, and afterwards the driver must play correctly.
+  # A bugcheck loses the runner and fails the job.
+  faults:
+    name: driver error branches under injected failures (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: spatialsoftreceiver-Release-x64
+          path: ${{ runner.temp }}/package
+
+      - name: Start the audio services
+        shell: pwsh
+        run: |
+          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
+            Set-Service -Name $name -StartupType Automatic
+            Start-Service -Name $name
+          }
+
+      # The KS trace runs here without Verifier: on Server 2022 the package
+      # job's install, with both on, has not returned since the RAII/C++23
+      # change, while this job's install without either did. This separates
+      # the two (ADR 0027, 2026-10-14).
+      - name: Start the driver's KS request trace (tools/ci/ks-trace.ps1)
+        shell: pwsh
+        run: ./tools/ci/ks-trace.ps1 -Start
+
+      - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
+        id: install
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./tools/ci/install-driver-test.ps1 -Package (Join-Path $env:RUNNER_TEMP 'package')
+
+      - name: Where the install waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.install.outcome == 'failure' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tools/ci/hang-dump.ps1 -Processes drvinst, rundll32
+
+      - name: What the endpoint builder asked our filters (tools/ci/ks-trace.ps1)
+        if: always() && steps.install.outcome != 'skipped'
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          ./tools/ci/ks-trace.ps1 -Stop
+
+      - name: Fail each fault point of a load once (tools/ci/fault-sweep.ps1)
+        id: sweep
+        if: steps.install.outputs.loaded == 'true'
+        timeout-minutes: 40
+        shell: pwsh
+        run: |
+          . ./tools/ci/fault-sweep.ps1
+          . ./tools/ci/package-identities.ps1
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
+          if (-not $device) { throw 'install created no Spatial SoftReceiver device' }
+          $steps = @(Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Max 400)
+          $failedStarts = @($steps | Where-Object { $_.FailedCall -gt 0 -and $_.StartProblem -ne 0 }).Count
+          $summary = "fault sweep (${{ matrix.os }}): $($steps.Count) fault points failed one at a time ($failedStarts of them failed the start); every instance unloaded holding nothing"
+          Write-Host $summary
+          Add-Content $env:GITHUB_STEP_SUMMARY "`n$summary`n"
+          $deadline = (Get-Date).AddSeconds(60)
+          while ($true) {
+            try { ./tools/ci/endpoint-states.ps1 -InstanceId $device.InstanceId; break }
+            catch { if ((Get-Date) -gt $deadline) { throw }; Start-Sleep -Seconds 3 }
+          }
+
+      - name: Where the sweep waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.sweep.outcome == 'failure' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tools/ci/hang-dump.ps1 -Processes pnputil
+
+      - uses: actions/setup-python@v7
+        if: steps.sweep.outcome == 'success'
+        with:
+          python-version: "3.13"
+
+      - name: Fail each fault point that playing adds once (tools/ci/fault-sweep.ps1)
+        id: runtime-sweep
+        if: steps.sweep.outcome == 'success'
+        timeout-minutes: 60
+        shell: pwsh
+        run: |
+          python -m pip install --quiet -r tools/ci/requirements.txt soundcard==0.4.5
+          . ./tools/ci/fault-sweep.ps1
+          . ./tools/ci/package-identities.ps1
+          $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $SpatialPackage.HardwareId } | Select-Object -First 1
+          # The flow check writes a table to the step summary; one per fault
+          # point would bury it, so only this step's own line goes there.
+          $stepSummary = $env:GITHUB_STEP_SUMMARY
+          Remove-Item Env:GITHUB_STEP_SUMMARY
+          $logs = Join-Path $env:RUNNER_TEMP 'runtime-sweep'
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          # Two seconds of a tone into each endpoint while the ring is read: the
+          # streams, their DMA buffers and timers, and the control device. It
+          # fails while a fault is switched on (that is the point) and must
+          # pass on a clean instance; a run that does not finish is a hang in
+          # an error branch and names its call.
+          $play = {
+            param([int] $At)
+            $out = Join-Path $logs "flow-$At.out"
+            $err = Join-Path $logs "flow-$At.err"
+            $arguments = @('tools/ci/driver_flow_check.py', '--expect-mask', '0x7', '--seconds', '2',
+                           '--summary', (Join-Path $logs "flow-$At.json"))
+            $process = Start-Process -FilePath python -ArgumentList $arguments -NoNewWindow -PassThru `
+              -RedirectStandardOutput $out -RedirectStandardError $err
+            $null = $process.Handle  # keeps ExitCode readable after the exit
+            if (-not $process.WaitForExit(120000)) {
+              # Stacks while it still waits: after the kill the audio engine
+              # has closed its streams and the dump shows nothing.
+              & ./tools/ci/hang-dump.ps1 -Processes python, audiodg
+              $process.Kill($true)
+              throw "call ${At}: the flow check did not finish in 120 s"
+            }
+            Write-Host "call ${At}: flow check exit $($process.ExitCode)"
+            if ($At -eq 0 -and $process.ExitCode -ne 0) {
+              Get-Content $out, $err | Write-Host
+              throw "the flow check failed on a clean instance (exit $($process.ExitCode))"
+            }
+          }
+          $steps = @(Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Exercise $play -Max 300)
+          $first = ($steps | Select-Object -First 1).FailedCall
+          $last = ($steps | Select-Object -Last 1).FailedCall
+          $summary = "runtime fault sweep (${{ matrix.os }}): $($steps.Count) fault points of playing (calls $first to $last) failed one at a time; every instance unloaded holding nothing"
+          Write-Host $summary
+          Add-Content $stepSummary "`n$summary`n"
+
+      - name: Where the runtime sweep waits (kernel stacks from a live dump, tools/ci/hang-dump.ps1)
+        if: ${{ failure() && steps.runtime-sweep.outcome == 'failure' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: ./tools/ci/hang-dump.ps1 -Processes pnputil, python, audiodg
+
+      - name: Play correctly after the sweeps (tools/ci/driver_flow_check.py)
+        if: steps.runtime-sweep.outcome == 'success'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python tools/ci/driver_flow_check.py --expect-mask 0x7 --summary (Join-Path $env:RUNNER_TEMP 'flow-after-sweep.json')
+          if ($LASTEXITCODE -ne 0) { throw "the driver did not play correctly after the sweeps (exit $LASTEXITCODE)" }
+
+      # The uninstall unloads the last image, which writes its report too.
+      - name: Uninstall as a tester would (tools/testkit/uninstall.ps1)
+        if: always() && steps.install.outputs.kit != ''
+        shell: pwsh
+        run: |
+          & (Join-Path '${{ steps.install.outputs.kit }}' 'uninstall.ps1')
+          if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 left something behind (exit $LASTEXITCODE)" }
+
+      - name: Keep the flow summaries
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: faults-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/flow-*.json
+            ${{ runner.temp }}/runtime-sweep
+          if-no-files-found: ignore
 
   codeql:
     name: CodeQL Windows driver suites

@@ -42,6 +42,39 @@ enum CaptureKind {
 }
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn chain_errors_json(counts: ssr_types::ChainErrorCounts) -> serde_json::Value {
+    counts
+        .iter()
+        .map(|(kind, count)| (kind.name().to_owned(), count.into()))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn report_request_fields(
+    source: CaptureKind,
+    from_dump: bool,
+    clock: Clock,
+    shared: bool,
+    status: &ssr_types::EngineStatus,
+) -> serde_json::Value {
+    serde_json::json!({
+        "source": if from_dump { "dump" } else { match source {
+            CaptureKind::Driver => "driver",
+            CaptureKind::Sal => "sal",
+        }},
+        "clock_requested": match clock {
+            Clock::Auto => "auto",
+            Clock::Asrc => "asrc",
+            Clock::Trim => "trim",
+        },
+        "output_mode_requested": if shared { "shared" } else { "exclusive" },
+        "output_sample_rate": status.output_rate,
+        "trim_available": status.trim_available,
+    })
+}
+
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn parse_endpoints(value: Option<&str>) -> Result<engine::EndpointFilter, String> {
     let Some(value) = value else {
         return Ok(engine::EndpointFilter::All);
@@ -86,6 +119,53 @@ mod endpoint_tests {
         assert!(parse_endpoints(Some("4")).is_err());
         assert!(parse_endpoints(Some("2,2")).is_err());
         assert!(parse_endpoints(Some("")).is_err());
+    }
+
+    #[test]
+    fn report_request_fields_cover_sources_clocks_and_output_modes() {
+        let status = ssr_types::EngineStatus {
+            output_rate: 44_100,
+            trim_available: true,
+            ..Default::default()
+        };
+        for (source, from_dump, expected) in [
+            (CaptureKind::Driver, false, "driver"),
+            (CaptureKind::Sal, false, "sal"),
+            (CaptureKind::Driver, true, "dump"),
+        ] {
+            for (clock, clock_name) in [
+                (Clock::Auto, "auto"),
+                (Clock::Asrc, "asrc"),
+                (Clock::Trim, "trim"),
+            ] {
+                for (shared, mode) in [(false, "exclusive"), (true, "shared")] {
+                    let fields = report_request_fields(source, from_dump, clock, shared, &status);
+                    assert_eq!(fields["source"], expected);
+                    assert_eq!(fields["clock_requested"], clock_name);
+                    assert_eq!(fields["output_mode_requested"], mode);
+                    assert_eq!(fields["output_sample_rate"], 44_100);
+                    assert_eq!(fields["trim_available"], true);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chain_error_report_uses_all_stable_snake_case_names() {
+        let counts = ssr_types::ChainErrorCounts::from_fn(|kind| kind.index() as u64 + 1);
+        let json = chain_errors_json(counts);
+        let errors = json.as_object().unwrap();
+
+        assert_eq!(errors.len(), ssr_types::ChainErrorKind::COUNT);
+        for kind in ssr_types::ChainErrorKind::ALL {
+            let name = kind.name();
+            assert!(
+                name.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                "{name} is not snake_case"
+            );
+            assert_eq!(errors[name], serde_json::json!(kind.index() as u64 + 1));
+        }
     }
 
     #[test]
@@ -888,7 +968,7 @@ mod platform {
 
     use super::capture_tap::{READ_END_BYTES, TeeCapture, read_end_marker};
     use super::paced_bounds::{LoopSpan, ReadEnd, loop_span, record_at, wrap_loop};
-    use super::{CaptureKind, Clock, parse_endpoints};
+    use super::{CaptureKind, Clock, chain_errors_json, parse_endpoints, report_request_fields};
 
     pub struct PlayOptions {
         pub source: CaptureKind,
@@ -1532,8 +1612,18 @@ mod platform {
             if started.elapsed() >= next_report {
                 let s = engine.status();
                 figures.observe(&s, next_report);
+                let chain_errors = s.unattributed_chain_errors.total()
+                    + s.endpoints
+                        .iter()
+                        .map(|endpoint| endpoint.chain_errors.total())
+                        .sum::<u64>();
+                let chain_error_suffix = if chain_errors == 0 {
+                    String::new()
+                } else {
+                    format!("  chain errors {chain_errors}")
+                };
                 eprintln!(
-                    "{:>4} s  latency p50 {:.1} ms p99 {:.1} ms  ring trough {:.1} ms  underruns {}  device restarts {}  clock {:+.0} ppm  lost {} B  tee-dropped {} B{}",
+                    "{:>4} s  latency p50 {:.1} ms p99 {:.1} ms  ring trough {:.1} ms  underruns {}  device restarts {}  clock {:+.0} ppm  lost {} B  tee-dropped {} B{}{}",
                     next_report.as_secs(),
                     s.latency.p50_ms,
                     s.latency.p99_ms,
@@ -1543,6 +1633,7 @@ mod platform {
                     s.clock_ppm,
                     s.lost_bytes,
                     dropped.load(Ordering::Relaxed),
+                    chain_error_suffix,
                     s.fault
                         .as_ref()
                         .map(|f| format!("  FAULT {f:?}"))
@@ -1630,11 +1721,18 @@ mod platform {
                         "format": status.format.map(|format| format!("{format:?}")),
                         "epoch": status.epoch,
                         "unsupported": status.unsupported,
+                        "chain_errors": chain_errors_json(status.chain_errors),
                     })
                 })
                 .collect::<Vec<_>>();
-            let json = serde_json::json!({
-                "mode": output_mode,
+            let request_fields = report_request_fields(
+                options.source,
+                options.from_dump.is_some(),
+                options.clock,
+                options.shared,
+                &report.final_status,
+            );
+            let mut json = serde_json::json!({
                 "output_mode": output_mode,
                 "output_fell_back": report.final_status.output_fell_back,
                 "output_kind": output_kind,
@@ -1672,6 +1770,9 @@ mod platform {
                 "idle_blocks": report.idle_blocks,
                 "dropped_events": report.dropped_events,
                 "endpoints": endpoints,
+                "chain_errors": {
+                    "unattributed": chain_errors_json(report.final_status.unattributed_chain_errors),
+                },
                 "overruns": figures.overruns,
                 "faults": faults,
                 "latency_p50_ms": report.final_status.latency.p50_ms,
@@ -1684,6 +1785,12 @@ mod platform {
                 "driver": driver,
                 "driver_stats_error": driver_stats_error,
             });
+            json.as_object_mut().expect("report is an object").extend(
+                request_fields
+                    .as_object()
+                    .expect("request fields are an object")
+                    .clone(),
+            );
             let text = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
             std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         }

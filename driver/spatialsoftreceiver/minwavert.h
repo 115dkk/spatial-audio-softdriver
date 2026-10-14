@@ -15,12 +15,12 @@ public:
     IMP_IMiniportWaveRT;
     STDMETHODIMP_(NTSTATUS) GetModes(ULONG pin, GUID* modes, ULONG* count) override;
     static NTSTATUS Property(PPCPROPERTY_REQUEST request);
-    CAdapterCommon* Adapter() const { return adapter_; }
+    CAdapterCommon* Adapter() const { return adapter_.Get(); }
     USHORT Endpoint() const { return endpoint_; }
     const SSR_ENDPOINT_FORMATS& Formats() const { return adapter_->Settings().Formats[endpoint_]; }
 private:
     LONG references_ = 1;
-    CAdapterCommon* adapter_;
+    ssr::km::ComRef<CAdapterCommon> adapter_;
     USHORT endpoint_;
     PCFILTER_DESCRIPTOR descriptor_{};
     PCPIN_DESCRIPTOR pins_[2]{};

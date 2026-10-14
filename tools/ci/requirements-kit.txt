@@ -1,0 +1,4 @@
+# The driver test kit's runtime, shipped in the kit as requirements.txt
+# (tools/ci/driver-test-kit.ps1). soundcard is installed with it where a step
+# plays or records (docs/testing/test-signed-pc.md).
+numpy==2.3.4

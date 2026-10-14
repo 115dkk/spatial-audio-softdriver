@@ -30,29 +30,22 @@ import time
 
 import numpy as np
 
-from endpoints import CONTROL_DEVICE_PATH, ENDPOINT_NUMBERS, enumerate_endpoints, find_speaker
+from endpoints import ENDPOINT_NUMBERS, enumerate_endpoints, find_speaker
+from ring_stats import (ENDPOINT_TONES, FLOW_TONE_AMPLITUDE, endpoint_stats,
+                        threshold_problems)
+from ssr_abi import (
+    ABI_INFO, DEFAULT_ENDPOINT_MASK, MAX_DATA_PAYLOAD, MAX_VOLUME_CHANNELS,
+    READ_MAX_BYTES, RECORD_ALIGN, RECORD_FLAG_DISCONTINUITY as FLAG_DISCONTINUITY,
+    RECORD_FLAG_REPEAT as FLAG_REPEAT, RECORD_HEADER as HEADER,
+    RECORD_KIND_DATA as KIND_DATA, RECORD_KIND_FORMAT_CHANGE as KIND_FORMAT_CHANGE,
+    RECORD_KIND_OVERRUN as KIND_OVERRUN, RECORD_KIND_STREAM_START as KIND_STREAM_START,
+    RECORD_KIND_STREAM_STOP as KIND_STREAM_STOP, RECORD_KIND_VOLUME as KIND_VOLUME,
+    VOLUME_PAYLOAD as VOLUME,
+)
+from ssr_control import ControlDevice, parse_abi_info
 
-IOCTL_SSR_QUERY_INFO = (0x22 << 16) | (1 << 14) | (0x900 << 2)
-IOCTL_SSR_READ = (0x22 << 16) | (1 << 14) | (0x901 << 2) | 2
-IOCTL_SSR_GET_STATS = (0x22 << 16) | (1 << 14) | (0x903 << 2)
-READ_MAX_BYTES = 256 * 1024
-MAX_DATA_PAYLOAD = 64 * 1024
-
-KIND_DATA, KIND_FORMAT_CHANGE, KIND_STREAM_START, KIND_STREAM_STOP, KIND_OVERRUN, KIND_VOLUME = 1, 2, 3, 4, 5, 6
-VOLUME = struct.Struct("<II32i")
+# Dump format versions before v3 carried sixteen volume levels.
 LEGACY_VOLUME = struct.Struct("<II16i")
-MAX_VOLUME_CHANNELS = 32
-FLAG_DISCONTINUITY = 0x0001
-FLAG_REPEAT = 0x0002
-RECORD_ALIGN = 8
-
-# crates/ssr-abi/src/wire.rs: RecordHeader, AbiInfo, DriverStats.
-MAX_ENDPOINTS = 4
-HEADER = struct.Struct("<HHIQQQIHH")
-ABI_INFO = struct.Struct("<IIIIQIIIIQQII" + "QIIII" * MAX_ENDPOINTS)
-ENDPOINT_FORMATS = struct.Struct("<QIIII")
-ENDPOINT_STATS = struct.Struct("<QQQII")
-STATS_HEAD = struct.Struct("<IIII")
 
 WAVE_FORMAT_PCM = 0x0001
 WAVE_FORMAT_IEEE_FLOAT = 0x0003
@@ -60,27 +53,10 @@ WAVE_FORMAT_EXTENSIBLE = 0xFFFE
 # Data1 of the KSDATAFORMAT_SUBTYPE_* GUIDs {0000xxxx-0000-0010-8000-00aa00389b71}.
 SUBTYPE_TAIL = bytes.fromhex("000010008000 00aa00389b71".replace(" ", ""))
 
-TONES = {0: 1000.0, 1: 1500.0, 2: 2000.0}
-DEFAULT_ENDPOINT_MASK = 0x7
+TONES = ENDPOINT_TONES
 # Exclusive permission/priority do not prohibit shared mode on an idle device.
 # ADR 0028 reserves endpoint 2 by routing policy, not a KS shared-mode ban.
 # https://learn.microsoft.com/en-us/windows/win32/coreaudio/exclusive-mode-streams
-
-
-def parse_abi_info(raw):
-    """ABI v1 pre-freeze rule-based capabilities, exactly 160 bytes."""
-    if len(raw) != ABI_INFO.size:
-        raise ValueError("QUERY_INFO must be 160 bytes")
-    abi, size, driver, ring = struct.unpack_from("<IIII", raw)
-    features, frequency, mask, reserved = struct.unpack_from("<QQII", raw, 40)
-    def formats(offset):
-        codecs, rates, shapes, maximum, direct = ENDPOINT_FORMATS.unpack_from(raw, offset)
-        return {"codecs": codecs, "pcm": {"rates": rates, "shapes": shapes,
-                "max_masked_channels": maximum, "direct_channels": direct}}
-    return {"abi_version": abi, "struct_size": size, "driver_version": driver,
-            "ring_bytes": ring, "compiled": formats(16), "features": features,
-            "qpc_frequency": frequency, "endpoint_mask": mask, "reserved": reserved,
-            "endpoints": [formats(64 + i * ENDPOINT_FORMATS.size) for i in range(MAX_ENDPOINTS)]}
 
 
 def parse_records(stream):
@@ -193,15 +169,6 @@ def decode(data, fmt):
     return samples.reshape(frames, channels)
 
 
-def tone_db(signal, rate, hz):
-    """Level of `hz` in a mono signal, dBFS of a full-scale sine."""
-    if len(signal) == 0:
-        return -200.0
-    t = np.arange(len(signal)) / rate
-    amplitude = 2 * abs(np.dot(signal, np.exp(-2j * np.pi * hz * t))) / len(signal)
-    return 20 * np.log10(max(amplitude, 1e-10))
-
-
 def check_endpoint(records, endpoint, qpc_frequency, tone_hz, other_hz, min_seconds):
     """Checks one endpoint's records; returns (summary, problems)."""
     mine = [r for r in records if r["endpoint"] == endpoint]
@@ -221,7 +188,8 @@ def check_endpoint(records, endpoint, qpc_frequency, tone_hz, other_hz, min_seco
             summary["volume"] = parse_volume(volume["payload"])
         except ValueError as error:
             problems.append(f"endpoint {endpoint}: {error}")
-    summary["overruns"] = kinds.count(KIND_OVERRUN)
+    shared = endpoint_stats(records, endpoint, qpc_frequency)
+    summary["overruns"] = shared["overruns"]
     summary["starts"] = sum(r["kind"] == KIND_STREAM_START for r in events)
     summary["stops"] = sum(r["kind"] == KIND_STREAM_STOP for r in events)
     summary["repeats"] = sum(bool(r["flags"] & FLAG_REPEAT) for r in mine)
@@ -232,9 +200,6 @@ def check_endpoint(records, endpoint, qpc_frequency, tone_hz, other_hz, min_seco
         problems.append(f"endpoint {endpoint}: data before any format change")
     if KIND_STREAM_START not in kinds[:first_data]:
         problems.append(f"endpoint {endpoint}: data before any stream start")
-    if summary["overruns"]:
-        problems.append(f"endpoint {endpoint}: {summary['overruns']} overrun records")
-
     # The format in force for the data: the last format change before the
     # first data record. A later change would be a test failure of its own.
     fmt = parse_wave_format(formats[-1]["payload"]) if formats else None
@@ -242,100 +207,20 @@ def check_endpoint(records, endpoint, qpc_frequency, tone_hz, other_hz, min_seco
         problems.append(f"endpoint {endpoint}: {len(new_formats)} format changes while one stream played")
     summary["format"] = fmt
 
-    gaps = 0
-    for previous, record in zip(data, data[1:]):
-        if record["flags"] & FLAG_DISCONTINUITY or record["byte_pos"] != previous["byte_pos"] + previous["len"]:
-            gaps += 1
-    summary["gaps"] = gaps
-    if gaps:
-        problems.append(f"endpoint {endpoint}: {gaps} gaps in byte_pos")
-
-    total = sum(r["len"] for r in data)
-    summary["bytes"] = total
-    if fmt:
-        seconds = total / fmt["avg_bytes"] if fmt["avg_bytes"] else 0.0
+    decoded = decode(b"".join(r["payload"] for r in data), fmt) if fmt else None
+    shared = endpoint_stats(records, endpoint, qpc_frequency, fmt,
+                            (lambda _data, _fmt: decoded), tone_hz, other_hz)
+    summary.update({key: round(value, 1) if key in ("rate_error_ppm", "tone_db", "other_tone_db") else value
+                    for key, value in shared.items()})
+    if "seconds" in summary:
+        seconds = summary["seconds"]
         summary["seconds"] = round(seconds, 3)
         if seconds < min_seconds:
             problems.append(f"endpoint {endpoint}: only {seconds:.2f} s of data")
-        # Bytes after the first record over the QPC between its last byte and
-        # the last record's last byte: the virtual DMA's byte rate.
-        span = (data[-1]["qpc"] - data[0]["qpc"]) / qpc_frequency
-        if span > 0.5 and fmt["avg_bytes"]:
-            measured = (total - data[0]["len"]) / span
-            ppm = (measured / fmt["avg_bytes"] - 1) * 1e6
-            summary["rate_error_ppm"] = round(ppm, 1)
-            if abs(ppm) > 2000:
-                problems.append(f"endpoint {endpoint}: DMA moved {ppm:+.0f} ppm off the format's byte rate")
-        samples = decode(b"".join(r["payload"] for r in data), fmt)
-        if samples is None:
-            problems.append(f"endpoint {endpoint}: cannot decode {fmt}")
-        else:
-            front = samples[:, 0]
-            # Skip the stream's leading silence (the shared engine primes it).
-            loud = np.flatnonzero(np.abs(front) > 1e-3)
-            front = front[loud[0]:loud[-1] + 1] if len(loud) else front[:0]
-            own = tone_db(front, fmt["rate"], tone_hz)
-            others = [tone_db(front, fmt["rate"], hz) for hz in other_hz]
-            other = max(others, default=-200.0)
-            summary["tone_db"], summary["other_tone_db"] = round(own, 1), round(other, 1)
-            if own < -30:
-                problems.append(f"endpoint {endpoint}: its {tone_hz:.0f} Hz tone is at {own:.1f} dBFS")
-            if other > own - 40:
-                problems.append(f"endpoint {endpoint}: another endpoint's tone leaked in ({other:.1f} dBFS)")
+    if fmt and decoded is None:
+        problems.append(f"endpoint {endpoint}: cannot decode {fmt}")
+    problems.extend(threshold_problems(endpoint, shared))
     return summary, problems
-
-
-class ControlDevice:
-    """\\\\.\\SpatialSoftReceiver through kernel32 (Windows only)."""
-
-    def __init__(self):
-        import ctypes
-        from ctypes import wintypes
-
-        self.ctypes = ctypes
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateFileW.restype = wintypes.HANDLE
-        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-                                         wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
-        kernel32.DeviceIoControl.restype = wintypes.BOOL
-        kernel32.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
-                                             wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
-                                             wintypes.LPVOID]
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        self.kernel32 = kernel32
-        generic_read, generic_write, open_existing = 0x80000000, 0x40000000, 3
-        handle = kernel32.CreateFileW(CONTROL_DEVICE_PATH, generic_read | generic_write, 0, None, open_existing, 0, None)
-        if handle in (None, wintypes.HANDLE(-1).value):
-            raise OSError(ctypes.get_last_error(), "CreateFileW(\\\\.\\SpatialSoftReceiver)")
-        self.handle = handle
-
-    def ioctl(self, code, request, capacity):
-        ctypes = self.ctypes
-        out = ctypes.create_string_buffer(capacity)
-        returned = ctypes.c_ulong(0)
-        inp = ctypes.create_string_buffer(request, len(request)) if request else None
-        ok = self.kernel32.DeviceIoControl(self.handle, code, inp, len(request), out, capacity,
-                                           ctypes.byref(returned), None)
-        if not ok:
-            raise OSError(ctypes.get_last_error(), f"DeviceIoControl(0x{code:08X})")
-        return out.raw[:returned.value]
-
-    def query_info(self):
-        return parse_abi_info(self.ioctl(IOCTL_SSR_QUERY_INFO, b"", ABI_INFO.size))
-
-    def stats(self):
-        raw = self.ioctl(IOCTL_SSR_GET_STATS, b"", STATS_HEAD.size + MAX_ENDPOINTS * ENDPOINT_STATS.size)
-        size, opens, lateness, _ = STATS_HEAD.unpack_from(raw)
-        endpoints = [dict(zip(["total_bytes", "overruns", "lost_bytes", "epoch", "state"],
-                              ENDPOINT_STATS.unpack_from(raw, STATS_HEAD.size + i * ENDPOINT_STATS.size)))
-                     for i in range(MAX_ENDPOINTS)]
-        return {"struct_size": size, "open_count": opens, "max_timer_lateness_us": lateness, "endpoints": endpoints}
-
-    def read(self, min_bytes, timeout_ms):
-        return self.ioctl(IOCTL_SSR_READ, struct.pack("<II", min_bytes, timeout_ms), READ_MAX_BYTES)
-
-    def close(self):
-        self.kernel32.CloseHandle(self.handle)
 
 
 def main():
@@ -349,7 +234,7 @@ def main():
         parser.error("--expect-mask must select endpoints 0..2")
     active_tones = {e: hz for e, hz in TONES.items() if args.expect_mask & (1 << e)}
 
-    from loopback_check import binary_fromstring
+    from numpy_compat import binary_fromstring
     np.fromstring = binary_fromstring
     import soundcard as sc
 
@@ -385,7 +270,7 @@ def main():
         try:
             rate = 48_000
             t = np.arange(int(args.seconds * rate)) / rate
-            tone = (0.5 * np.sin(2 * np.pi * active_tones[endpoint] * t)).astype(np.float32)
+            tone = (FLOW_TONE_AMPLITUDE * np.sin(2 * np.pi * active_tones[endpoint] * t)).astype(np.float32)
             with speakers[endpoint].player(samplerate=rate, channels=2, blocksize=rate // 100) as out:
                 out.play(np.stack([tone, tone], axis=1))
         except Exception as error:

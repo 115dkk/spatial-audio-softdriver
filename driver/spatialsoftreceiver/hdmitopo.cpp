@@ -4,12 +4,12 @@
 // Volume/mute properties adapted from audio/sysvad/kshelper.cpp at the same commit.
 #include "hdmitopo.h"
 #include "hdmitoptable.h"
-CMiniportTopologyHdmi::CMiniportTopologyHdmi(CAdapterCommon* adapter, USHORT endpoint) : adapter_(adapter), endpoint_(endpoint) {
-    adapter_->AddRef();
+CMiniportTopologyHdmi::CMiniportTopologyHdmi(CAdapterCommon* adapter, USHORT endpoint)
+    : adapter_(ssr::km::ComRef<CAdapterCommon>::Retain(adapter)), endpoint_(endpoint) {
     channels_ = SsrVolumeChannels(endpoint_);
     ULONG count = 0;
     const auto& pcm = adapter_->Settings().Formats[endpoint_].pcm;
-    if (SsrPcmEnabled(pcm, false) || SsrPcmEnabled(pcm, true)) {
+    if (ssr::PcmTypeEnabled(pcm, false) || ssr::PcmTypeEnabled(pcm, true)) {
         auto& range = ranges_[count];
         range.FormatSize = sizeof(range);
         range.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
@@ -41,7 +41,7 @@ CMiniportTopologyHdmi::CMiniportTopologyHdmi(CAdapterCommon* adapter, USHORT end
     descriptor_.NodeCount = ARRAYSIZE(SsrVolumeNodes); descriptor_.Nodes = SsrVolumeNodes;
     descriptor_.ConnectionCount = ARRAYSIZE(connections_); descriptor_.Connections = connections_;
 }
-CMiniportTopologyHdmi::~CMiniportTopologyHdmi() { adapter_->Release(); }
+CMiniportTopologyHdmi::~CMiniportTopologyHdmi() = default;
 STDMETHODIMP CMiniportTopologyHdmi::QueryInterface(REFIID iid, PVOID* object) {
     if (!object) return STATUS_INVALID_PARAMETER;
     *object = nullptr;

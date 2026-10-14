@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use convolver::{Binauralizer, ConvolverError, FilterBank};
+use convolver::{Binauralizer, ConvolverError, FilterBank, MonoConvolver};
 use proptest::prelude::*;
 use ssr_types::Feeds;
 
@@ -160,6 +160,93 @@ fn impulse_ir_passes_input_through() {
             assert!((actual - expected).abs() < 2.0e-6);
         }
     }
+}
+
+#[test]
+fn mono_matches_binaural_left_across_blocks_partitions_and_quiet_transitions() {
+    for partition in [64, 480, 512] {
+        for hops in [1, 3] {
+            let frames = partition * hops;
+            let irs: Vec<Vec<f32>> = (0..3)
+                .map(|input| {
+                    (0..partition * 129 + 17)
+                        .map(|tap| {
+                            (((tap * 37 + input * 11) % 101) as f32 / 50.0 - 1.0)
+                                * (-(tap as f32) / 700.0).exp()
+                        })
+                        .collect()
+                })
+                .collect();
+            let mono_irs = irs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let stereo_irs = irs
+                .iter()
+                .map(|ir| [ir.as_slice(), ir.as_slice()])
+                .collect::<Vec<_>>();
+            let mut mono = MonoConvolver::new(
+                Arc::new(FilterBank::new_mono(&mono_irs, partition).unwrap()),
+                frames,
+            );
+            let mut stereo = Binauralizer::new(
+                Arc::new(FilterBank::new(&stereo_irs, partition).unwrap()),
+                frames,
+            );
+            let mut feeds = Feeds::new(irs.len(), frames);
+            let mut mono_output = vec![0.0; frames];
+            let mut left = vec![0.0; frames];
+            let mut right = vec![0.0; frames];
+
+            for block in 0..48 {
+                feeds.clear();
+                let active = block < 5 || block == 23;
+                if active {
+                    for input in 0..irs.len() {
+                        for (frame, sample) in feeds.channel_mut(input).iter_mut().enumerate() {
+                            *sample = ((block * 43 + input * 29 + frame * 31) as f32).sin();
+                        }
+                    }
+                    mono.note_active_input();
+                    stereo.note_active_input();
+                }
+                mono.process(&feeds, &mut mono_output);
+                stereo.process(&feeds, &mut left, &mut right);
+                assert_eq!(
+                    mono_output
+                        .iter()
+                        .map(|sample| sample.to_bits())
+                        .collect::<Vec<_>>(),
+                    left.iter()
+                        .map(|sample| sample.to_bits())
+                        .collect::<Vec<_>>(),
+                    "partition {partition}, hops {hops}, block {block}"
+                );
+                if block == 23 {
+                    mono.reset();
+                    stereo.reset();
+                }
+                if !active {
+                    mono.note_silent_input(frames);
+                    stereo.note_silent_input(frames);
+                }
+                assert_eq!(mono.is_quiet(), stereo.is_quiet());
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "filter bank output count mismatch")]
+fn binauralizer_rejects_a_mono_bank() {
+    let ir = [1.0_f32];
+    let bank = Arc::new(FilterBank::new_mono(&[&ir], 64).unwrap());
+    let _ = Binauralizer::new(bank, 64);
+}
+
+#[test]
+#[should_panic(expected = "filter bank output count mismatch")]
+fn mono_convolver_rejects_a_stereo_bank() {
+    let ir = [1.0_f32];
+    let bank = Arc::new(FilterBank::new(&[[&ir, &ir]], 64).unwrap());
+    let _ = MonoConvolver::new(bank, 64);
 }
 
 #[test]

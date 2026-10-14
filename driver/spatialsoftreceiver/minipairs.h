@@ -3,7 +3,7 @@
 // Reduced from audio/sysvad/TabletAudioSample/minipairs.h at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
 #pragma once
 struct SsrMiniPair { PCWSTR Wave; PCWSTR Topology; USHORT Endpoint; };
-static const SsrMiniPair SsrMiniPairs[] = {
+static constinit const SsrMiniPair SsrMiniPairs[] = {
     {L"WaveHdmi0", L"TopologyHdmi0", SSR_ENDPOINT_PRIMARY},
     {L"WaveHdmi1", L"TopologyHdmi1", SSR_ENDPOINT_SECOND},
     {L"WaveHdmi2", L"TopologyHdmi2", SSR_ENDPOINT_PASSTHROUGH},

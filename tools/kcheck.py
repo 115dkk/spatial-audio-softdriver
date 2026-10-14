@@ -124,14 +124,14 @@ def clang_resource_dir(clang):
     return subprocess.run([clang, "-print-resource-dir"], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def check(clang, source, arch, roots, extra_includes, analyze):
+def check(clang, source, arch, roots, extra_includes, analyze, defines=()):
     args = [
         clang,
         f"--target={TARGETS[arch]}",
         "-fms-extensions",
         "-fms-compatibility",
         "-fms-compatibility-version=19.40",
-        "-std=c++17",
+        "-std=c++23",
         "-fno-exceptions",
         "-fno-rtti",
         "-nostdinc",
@@ -149,7 +149,7 @@ def check(clang, source, arch, roots, extra_includes, analyze):
         args += ["-isystem", str(root)]
     for path in extra_includes:
         args += ["-I", str(path)]
-    for define in DEFINES[arch] + COMMON_DEFINES:
+    for define in DEFINES[arch] + COMMON_DEFINES + list(defines):
         args.append(f"-D{define}")
     if analyze:
         args += ["--analyze", "-Xanalyzer", "-analyzer-output=text", "-o", os.devnull]
@@ -169,6 +169,8 @@ def main():
     parser.add_argument("--arch", choices=sorted(TARGETS), action="append")
     parser.add_argument("--analyze", action="store_true", help="also run clang --analyze on x64")
     parser.add_argument("--clang", default=os.environ.get("CLANG", "clang++"))
+    parser.add_argument("--define", action="append", default=[], metavar="NAME[=VALUE]",
+                        help="extra preprocessor definition, as a diagnostic build passes through SsrDiagDefines")
     args = parser.parse_args()
 
     driver = REPO / "driver" / "spatialsoftreceiver"
@@ -183,14 +185,14 @@ def main():
     failed = 0
     for arch in args.arch or ["x64", "arm64"]:
         for source in sources:
-            ok, output = check(args.clang, source, arch, roots, extra, False)
+            ok, output = check(args.clang, source, arch, roots, extra, False, args.define)
             print(f"kcheck {arch} {source.relative_to(REPO) if source.is_absolute() else source}: {'ok' if ok else 'FAILED'}")
             if output:
                 print(output)
             failed += not ok
     if args.analyze:
         for source in sources:
-            ok, output = check(args.clang, source, "x64", roots, extra, True)
+            ok, output = check(args.clang, source, "x64", roots, extra, True, args.define)
             print(f"kcheck analyze {source}: {'ok' if ok else 'FAILED'}")
             if output:
                 print(output)

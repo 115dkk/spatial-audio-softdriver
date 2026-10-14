@@ -154,6 +154,17 @@ class IoctlFuzzTests(unittest.TestCase):
         self.assertEqual(len(loaded["unexpected_successes"]), 1)
         self.assertEqual(loaded["unexpected_successes"][0]["code"], "0x00226400")
 
+    def test_a_device_that_stays_taken_fails_the_checks_and_keeps_the_summary(self):
+        summary = new_summary(7, 1.0)
+        taken = OSError(ioctl_fuzz.ERROR_SHARING_VIOLATION, "CreateFileW")
+        with mock.patch.object(ioctl_fuzz, "WindowsDevice", side_effect=taken):
+            self.assertFalse(ioctl_fuzz.open_once(summary, "reopen_error"))
+            ioctl_fuzz.final_health(summary)
+        self.assertEqual(summary["reopen_error"], ioctl_fuzz.ERROR_SHARING_VIOLATION)
+        self.assertEqual(summary["checks"], {"final_open": False})
+        self.assertEqual(summary["final_open_error"], ioctl_fuzz.ERROR_SHARING_VIOLATION)
+        json.dumps(summary)
+
 
 if __name__ == "__main__":
     unittest.main()

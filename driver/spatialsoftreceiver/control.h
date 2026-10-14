@@ -2,6 +2,7 @@
 // Copyright (c) 2026 115dkk
 #pragma once
 #include "spatialsoftreceiver.h"
+#include "ssr_kernel.h"
 
 struct SsrFileContext { BOOLEAN Cleaned; };
 struct SsrReadContext {
@@ -19,8 +20,10 @@ struct SsrControlState {
     IO_CSQ Csq;
     PIRP Pending;
     ULONG DetachedReads;
+    SsrReadContext ReadSlot;
+    BOOLEAN ReadSlotBusy;
     ULONGLONG Generation;
-    PEX_TIMER DeadlineTimer;
+    ssr::km::ExTimer DeadlineTimer;
     BOOLEAN Removed;
     BOOLEAN Started;
     ULONG OpenCount;
@@ -29,7 +32,7 @@ struct SsrControlState {
     ULONGLONG Frequency;
     SsrSettings Settings;
     ssr::RecordRing Ring;
-    PUCHAR Storage;
+    ssr::km::PoolPtr<UCHAR> Storage;
 };
 NTSTATUS SsrCreateControl(PDRIVER_OBJECT driver, const SsrSettings& settings, PDEVICE_OBJECT* device);
 NTSTATUS SsrStartControl(SsrControlState* state);

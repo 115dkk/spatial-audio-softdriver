@@ -85,6 +85,8 @@ pub const ENDPOINT_SECOND: u16 = 1;
 pub const ENDPOINT_PASSTHROUGH: u16 = 2;
 /// Contract slots for render endpoints, including reserved endpoint 3.
 pub const MAX_ENDPOINTS: usize = 4;
+/// Default exposure mask for the primary, music, and passthrough endpoints.
+pub const DEFAULT_ENDPOINT_MASK: u32 = 0x7;
 
 /// Returns the exposure-mask bit for `endpoint`, or zero outside the contract.
 pub const fn endpoint_bit(endpoint: u16) -> u32 {
@@ -177,6 +179,8 @@ pub struct RateTrim {
     pub reserved: u32,
 }
 
+/// Number of entries in [`PCM_RATES`].
+pub const PCM_RATE_COUNT: u32 = 6;
 /// PCM sample rates; bit i of `PcmFormats::rates` is `PCM_RATES[i]`.
 pub const PCM_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
 
@@ -191,6 +195,19 @@ pub enum PcmShape {
     Int32 = 3,
     Float32 = 4,
 }
+
+/// Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Int16`].
+pub const PCM_SHAPE_INT16: u32 = 1 << 0;
+/// Bit of [`PcmFormats::shapes`] corresponding to packed [`PcmShape::Int24`].
+pub const PCM_SHAPE_INT24: u32 = 1 << 1;
+/// Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Int24In32`].
+pub const PCM_SHAPE_INT24_IN_32: u32 = 1 << 2;
+/// Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Int32`].
+pub const PCM_SHAPE_INT32: u32 = 1 << 3;
+/// Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Float32`].
+pub const PCM_SHAPE_FLOAT32: u32 = 1 << 4;
+/// Integer shape bits. These use the PCM subtype; float32 uses IEEE_FLOAT.
+pub const PCM_SHAPES_INTEGER: u32 = 0x0f;
 
 /// The 18 ksmedia.h speaker positions, FRONT_LEFT through TOP_BACK_RIGHT.
 pub const PCM_SPEAKER_BITS: u32 = 0x0003_ffff;
@@ -228,6 +245,9 @@ pub const DEFAULT_PCM: PcmFormats = PcmFormats {
     direct_channels: 0xffff_ffff,
 };
 pub const COMPILED_PCM: PcmFormats = DEFAULT_PCM;
+/// Bits c-1 for decoder-default direct layouts: 1-6, 8, 10, 12, 14, and 16
+/// channels. The driver prefers these when intersecting direct PCM formats.
+pub const DIRECT_DEFAULT_CHANNELS: u32 = 0xaabf;
 
 /// Codec mask: bits 1..8 retain their values; bit 0 and bits 9..63 are reserved.
 pub const FORMAT_AC3: u64 = 1 << 1;
@@ -370,7 +390,18 @@ const _: () = {
     assert!(offset_of!(DumpHeader, format_version) == 24);
     assert!(offset_of!(DumpHeader, reserved) == 28);
     assert!(MAX_ENDPOINTS == 4);
+    assert!(DEFAULT_ENDPOINT_MASK < 1 << MAX_ENDPOINTS);
     assert!(FORMAT_DTS_HD < 1 << 31 && FEATURE_WRITE_PACKET < 1 << 31);
+    assert!(PCM_SHAPE_INT16 == 1 << PcmShape::Int16 as u32);
+    assert!(PCM_SHAPE_INT24 == 1 << PcmShape::Int24 as u32);
+    assert!(PCM_SHAPE_INT24_IN_32 == 1 << PcmShape::Int24In32 as u32);
+    assert!(PCM_SHAPE_INT32 == 1 << PcmShape::Int32 as u32);
+    assert!(PCM_SHAPE_FLOAT32 == 1 << PcmShape::Float32 as u32);
+    assert!(
+        PCM_SHAPE_INT16 | PCM_SHAPE_INT24 | PCM_SHAPE_INT24_IN_32 | PCM_SHAPE_INT32
+            == PCM_SHAPES_INTEGER
+    );
+    assert!(PCM_RATE_COUNT as usize == PCM_RATES.len());
     assert!(size_of::<PcmFormats>() == 16);
     assert!(size_of::<EndpointFormats>() == 24);
     assert!(offset_of!(EndpointFormats, pcm) == 8);

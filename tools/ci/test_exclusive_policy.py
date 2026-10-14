@@ -29,7 +29,7 @@ class ExclusivePolicyContractTests(unittest.TestCase):
             self.assertIn(f'{{L"WaveHdmi{ep}", L"TopologyHdmi{ep}", SSR_ENDPOINT_{constant}}}', pairs)
         adapter = read("driver/spatialsoftreceiver/adapter.cpp")
         self.assertIn("2 * ARRAYSIZE(SsrMiniPairs)", adapter)
-        self.assertIn("Settings = {0x7,", adapter)
+        self.assertIn("Settings = {SSR_DEFAULT_ENDPOINT_MASK,", adapter)
         self.assertIn("Settings.EndpointMask &= available", adapter)
         load = adapter.split("static void LoadSettings()", 1)[1].split('extern "C"', 1)[0]
         self.assertNotIn("return;", load)
@@ -89,8 +89,11 @@ class ExclusivePolicyContractTests(unittest.TestCase):
         self.assertLess(uninstall.index("Clear-SsrExclusivePolicy -"), uninstall.index("pnputil.exe /remove-device"))
         self.assertIn("Get-SsrPolicySnapshot", read("tools/testkit/collect.ps1"))
         kit = read("tools/ci/driver-test-kit.ps1")
-        for name in ("exclusive-policy.ps1", "exclusive_policy_check.ps1", "loopback_check.py"):
+        for name in ("exclusive-policy.ps1", "exclusive_policy_check.ps1",
+                     "ssr_abi.py", "ssr_control.py", "ring_stats.py",
+                     "numpy_compat.py", "report_check.py"):
             self.assertIn(f"'{name}'", kit)
+        self.assertNotIn("'loopback_check.py'", kit)
         states = read("tools/ci/endpoint-states.ps1")
         self.assertIn("$Expect = 3", states)
         self.assertIn("Get-SpatialEndpoints -InstanceId $InstanceId", states)

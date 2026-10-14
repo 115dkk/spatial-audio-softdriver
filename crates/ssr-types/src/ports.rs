@@ -1,13 +1,14 @@
 //! Port traits: the seams the engine and the supervisor are wired through.
 //!
 //! The traits live here, not in `engine`, so `ssr-sys` can implement them
-//! without depending on the engine. Each has more than one adapter:
+//! without depending on the engine. The first two have more than one adapter;
+//! [`Host`] is a draft with none yet:
 //!
 //! | seam | adapters |
 //! | --- | --- |
-//! | [`CaptureSource`] | driver ring, SAL ring (development only), dump file |
-//! | [`OutputOpener`] / [`OutputSink`] | WASAPI, WAV file, null |
-//! | [`Host`] | Windows (`ssr-sys`), fake (tests) |
+//! | [`CaptureSource`] | driver ring and SAL ring (`ssr-sys`), dump file (`engine::adapters`), test fakes |
+//! | [`OutputOpener`] / [`OutputSink`] | WASAPI (`ssr-sys`), WAV file and null (`engine::adapters`), test fakes |
+//! | [`Host`] | none until the supervisor (M4) needs one |
 
 use std::time::Duration;
 
@@ -178,9 +179,8 @@ pub enum OutputError {
 
 /// What the supervisor asks the operating system for (draft; M4 settles it).
 ///
-/// The Windows adapter lives in `ssr-sys::host`; tests use a fake. Kept minimal
-/// until the supervisor exists, so the shape follows its needs rather than a
-/// guess.
+/// Nothing implements it yet: the Windows adapter and a test fake come with
+/// the supervisor, so the shape follows its needs rather than a guess.
 pub trait Host {
     type Device: Clone + std::fmt::Debug;
 

@@ -3,13 +3,13 @@
 // Reduced from audio/sysvad/common.cpp at 2dc3fd3a0cc84a2933f2194e7ec0871584979071.
 #include "common.h"
 #include "minwavertstream.h"
-const GUID SsrAdapterInterface = {0x534664d2,0x3ca6,0x4fbd,{0x84,0x75,0x3a,0x0b,0x41,0xb9,0x4c,0x11}};
-CAdapterCommon::CAdapterCommon(PDEVICE_OBJECT control) : control_(control), state_(SsrControl(control)) {
+constinit const GUID SsrAdapterInterface = {0x534664d2,0x3ca6,0x4fbd,{0x84,0x75,0x3a,0x0b,0x41,0xb9,0x4c,0x11}};
+CAdapterCommon::CAdapterCommon(PDEVICE_OBJECT control)
+    : control_(ssr::km::ObjectRef<DEVICE_OBJECT>::Retain(control)), state_(SsrControl(control)) {
     settings_ = state_->Settings;
-    ObReferenceObject(control_);
     KeInitializeSpinLock(&streamLock_);
 }
-CAdapterCommon::~CAdapterCommon() { Stop(); ObDereferenceObject(control_); }
+CAdapterCommon::~CAdapterCommon() { Stop(); }
 STDMETHODIMP CAdapterCommon::QueryInterface(REFIID iid, PVOID* object) {
     if (!object) return STATUS_INVALID_PARAMETER;
     *object = nullptr;
@@ -22,7 +22,7 @@ NTSTATUS CAdapterCommon::Start() {
     PAGED_CODE();
     NTSTATUS status = SsrStartControl(state_);
     if (!NT_SUCCESS(status)) return status;
-    timer_ = ExAllocateTimer(TimerTick, this, EX_TIMER_HIGH_RESOLUTION);
+    timer_ = ssr::km::ExTimer::Allocate(TimerTick, this, EX_TIMER_HIGH_RESOLUTION);
     if (!timer_) { SsrStopControl(state_); return STATUS_INSUFFICIENT_RESOURCES; }
     // The DMA timer starts with the first stream in RUN (StreamState).
     active_ = true;
@@ -30,6 +30,7 @@ NTSTATUS CAdapterCommon::Start() {
 }
 void CAdapterCommon::Stop() {
     PAGED_CODE();
+    ssr::km::ExTimer timer;
     KIRQL irql; Lock(&irql);
     bool wasActive = active_;
     if (wasActive) {
@@ -39,10 +40,9 @@ void CAdapterCommon::Stop() {
     }
     active_ = false;
     SyncTimer(SsrQpc());
-    PEX_TIMER timer = timer_;
-    timer_ = nullptr;
+    timer = ssr::km::Move(timer_);
     Unlock(irql);
-    if (timer) ExDeleteTimer(timer, TRUE, TRUE, nullptr);
+    timer.Reset();
     if (wasActive) SsrStopControl(state_);
 }
 NTSTATUS CAdapterCommon::RegisterStream(USHORT endpoint, CMiniportWaveRTStream* stream) {
@@ -80,10 +80,10 @@ void CAdapterCommon::SyncTimer(ULONGLONG qpc) {
     const bool shouldRun = timer_ && active_ && power_ == PowerDeviceD0 && running_ > 0;
     if (shouldRun && !timerArmed_) {
         lastTick_ = qpc;
-        ExSetTimer(timer_, -10000, 10000, nullptr);
+        ExSetTimer(timer_.Get(), -10000, 10000, nullptr);
         timerArmed_ = true;
     } else if (!shouldRun && timerArmed_) {
-        ExCancelTimer(timer_, nullptr);
+        ExCancelTimer(timer_.Get(), nullptr);
         timerArmed_ = false;
     }
 }
@@ -134,10 +134,9 @@ STDMETHODIMP_(void) CAdapterCommon::PowerChangeState(POWER_STATE state) {
 STDMETHODIMP_(NTSTATUS) CAdapterCommon::QueryPowerChangeState(POWER_STATE state) {
     return state.DeviceState >= PowerDeviceD0 && state.DeviceState <= PowerDeviceD3 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }
+// PortCls fills the capabilities from the bus; DeviceState[PowerSystemUnspecified]
+// and DeviceD1/DeviceD2 belong to the system and the bus. The root bus already
+// maps working to D0 and every sleep state to D3, so nothing changes (SysVAD).
 STDMETHODIMP_(NTSTATUS) CAdapterCommon::QueryDeviceCapabilities(PDEVICE_CAPABILITIES caps) {
-    if (!caps || caps->Size < sizeof(*caps)) return STATUS_INVALID_PARAMETER;
-    caps->DeviceD1 = FALSE; caps->DeviceD2 = FALSE;
-    for (ULONG i = 0; i < PowerSystemMaximum; ++i)
-        caps->DeviceState[i] = i == PowerSystemWorking ? PowerDeviceD0 : PowerDeviceD3;
-    return STATUS_SUCCESS;
+    return caps ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
 }

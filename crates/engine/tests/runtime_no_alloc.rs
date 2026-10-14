@@ -133,6 +133,8 @@ struct Capture {
     fail_once_at: Option<usize>,
     failed: bool,
     reconnects: Arc<AtomicU64>,
+    end_after_records: bool,
+    end_gate: Option<Arc<AtomicBool>>,
 }
 
 impl CaptureSource for Capture {
@@ -150,7 +152,16 @@ impl CaptureSource for Capture {
             return Ok(0);
         }
         let Some(record) = self.records.get(self.next) else {
-            return Ok(0);
+            return if self.end_after_records
+                && self
+                    .end_gate
+                    .as_ref()
+                    .is_none_or(|gate| gate.load(Ordering::Acquire))
+            {
+                Err(CaptureError::Ended)
+            } else {
+                Ok(0)
+            };
         };
         buffer[..record.len()].copy_from_slice(record);
         self.next += 1;
@@ -178,6 +189,7 @@ struct Opener {
     rate: u32,
     period_frames: usize,
     emitted: Arc<AtomicU64>,
+    fail_drain: Arc<AtomicBool>,
 }
 
 impl OutputOpener for Opener {
@@ -191,6 +203,7 @@ impl OutputOpener for Opener {
             layout,
             samples: vec![0.0; self.period_frames * usize::from(layout.channels)],
             emitted: Arc::clone(&self.emitted),
+            fail_drain: Arc::clone(&self.fail_drain),
         })
     }
 }
@@ -202,6 +215,7 @@ struct Sink {
     layout: OutputLayout,
     samples: Vec<f32>,
     emitted: Arc<AtomicU64>,
+    fail_drain: Arc<AtomicBool>,
 }
 
 impl OutputSink for Sink {
@@ -219,6 +233,9 @@ impl OutputSink for Sink {
 
     fn next_period(&mut self, fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError> {
         fill(&mut self.samples);
+        if self.fail_drain.swap(false, Ordering::AcqRel) {
+            return Err(OutputError::Removed);
+        }
         if self.samples.iter().any(|sample| *sample != 0.0) {
             self.emitted.fetch_add(1, Ordering::Release);
         }
@@ -240,6 +257,7 @@ fn run_no_alloc(
     let emitted = Arc::new(AtomicU64::new(0));
     let gate = Arc::new(AtomicBool::new(false));
     let reconnects = Arc::new(AtomicU64::new(0));
+    let fail_drain = Arc::new(AtomicBool::new(false));
     let hook_periods = Arc::clone(&periods);
     let hook_processed = Arc::clone(&processed);
     let config = EngineConfig {
@@ -270,6 +288,8 @@ fn run_no_alloc(
         fail_once_at: reconnect.then_some(WARMUP as usize + 2),
         failed: false,
         reconnects: Arc::clone(&reconnects),
+        end_after_records: false,
+        end_gate: None,
     };
     let engine = start_with_clock(
         config,
@@ -279,6 +299,7 @@ fn run_no_alloc(
             rate: output_rate,
             period_frames,
             emitted: Arc::clone(&emitted),
+            fail_drain,
         },
         RATE as u64,
     )
@@ -316,6 +337,87 @@ fn run_no_alloc(
 }
 
 #[test]
+fn eof_drain_sink_failure_returns_from_the_allocation_free_scope() {
+    let periods = Arc::new(AtomicU64::new(0));
+    let processed = Arc::new(AtomicU64::new(0));
+    let emitted = Arc::new(AtomicU64::new(0));
+    let gate = Arc::new(AtomicBool::new(false));
+    let reconnects = Arc::new(AtomicU64::new(0));
+    let fail_drain = Arc::new(AtomicBool::new(false));
+    let end_gate = Arc::new(AtomicBool::new(false));
+    let event_processed = Arc::clone(&processed);
+    let event_end_gate = Arc::clone(&end_gate);
+    let event_fail_drain = Arc::clone(&fail_drain);
+    let config = EngineConfig {
+        clock: ClockPreference::Asrc,
+        target_ms: 0.0,
+        capacity_ms: 80.0,
+        read_wait: Duration::ZERO,
+        rt_scope: Some(Arc::new(move |_section, work| {
+            assert_no_alloc::assert_no_alloc(work);
+        })),
+        rt_event: Some(Arc::new(move |event| {
+            if event == engine::RtLoopEvent::OutputEnd
+                && event_processed.load(Ordering::Acquire) >= 2
+            {
+                event_end_gate.store(true, Ordering::Release);
+            }
+            // Only the tail written after the last rendered period fails.
+            if event == engine::RtLoopEvent::OutputTailBegin {
+                event_fail_drain.store(true, Ordering::Release);
+            }
+        })),
+        ..EngineConfig::default()
+    };
+    let capture = Capture {
+        records: records(1),
+        next: 0,
+        gate: Arc::clone(&gate),
+        periods: Arc::clone(&periods),
+        now_qpc: (2 * BLOCK) as u64,
+        processed: Arc::clone(&processed),
+        fail_once_at: None,
+        failed: false,
+        reconnects,
+        end_after_records: true,
+        end_gate: Some(end_gate),
+    };
+    let engine = start_with_clock(
+        config,
+        capture,
+        Opener {
+            periods: Arc::clone(&periods),
+            rate: 44_100,
+            period_frames: 441,
+            emitted,
+            fail_drain: Arc::clone(&fail_drain),
+        },
+        RATE as u64,
+    )
+    .unwrap();
+    engine.apply(LiveChange::Prepared(prepared(2))).unwrap();
+    gate.store(true, Ordering::Release);
+
+    let start = std::time::Instant::now();
+    while engine.status().fault.is_none() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::yield_now();
+    }
+    let status = engine.status();
+    let report = engine.stop();
+    assert!(
+        !fail_drain.load(Ordering::Acquire),
+        "the end of capture wrote no tail for the sink to fail"
+    );
+    assert_eq!(
+        status.fault,
+        Some(ssr_types::EngineFault::OutputLost(
+            "the output device was removed".into()
+        )),
+        "terminal drain failure was not published outside the realtime scope: {status:?}, {report:?}"
+    );
+}
+
+#[test]
 fn volume_record_and_ramp_do_not_allocate() {
     run_no_alloc(ClockPreference::Trim, RATE, BLOCK, 2, false);
 }
@@ -335,4 +437,5 @@ fn twelve_channel_output_steady_state_does_not_allocate() {
 #[test]
 fn capture_reconnect_and_layout_change_stay_outside_the_allocation_free_scope() {
     run_no_alloc(ClockPreference::Trim, RATE, BLOCK, 12, true);
+    run_no_alloc(ClockPreference::Asrc, 44_100, 441, 12, false);
 }

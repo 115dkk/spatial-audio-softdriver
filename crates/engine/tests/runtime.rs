@@ -51,6 +51,28 @@ fn data_record(qpc: u64, value: f32) -> Vec<u8> {
     data_record_for(ENDPOINT_PRIMARY, qpc, value, -value, BLOCK)
 }
 
+fn tone_record(qpc: u64, start_frame: u64, frequency: f32) -> Vec<u8> {
+    tone_record_frames_at_rate(qpc, start_frame, frequency, RATE, BLOCK)
+}
+
+fn tone_record_frames_at_rate(
+    qpc: u64,
+    start_frame: u64,
+    frequency: f32,
+    rate: u32,
+    frames: usize,
+) -> Vec<u8> {
+    let mut pcm = vec![0_u8; frames * 2 * 4];
+    for (offset, frame) in pcm.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        let phase = 2.0 * std::f32::consts::PI * frequency * (start_frame + offset as u64) as f32
+            / rate as f32;
+        let sample = phase.sin();
+        frame[..4].copy_from_slice(&sample.to_le_bytes());
+        frame[4..].copy_from_slice(&sample.to_le_bytes());
+    }
+    bytes_record_for(ENDPOINT_PRIMARY, qpc, &pcm)
+}
+
 fn data_record_for(endpoint: u16, qpc: u64, left: f32, right: f32, frames: usize) -> Vec<u8> {
     let mut pcm = vec![0_u8; frames * 2 * 4];
     for frame in pcm.as_chunks_mut::<8>().0 {
@@ -58,6 +80,65 @@ fn data_record_for(endpoint: u16, qpc: u64, left: f32, right: f32, frames: usize
         frame[4..].copy_from_slice(&right.to_le_bytes());
     }
     bytes_record_for(endpoint, qpc, &pcm)
+}
+
+fn period_energy(samples: &[f32]) -> f64 {
+    samples
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum()
+}
+
+fn boundary_left_frames(periods: &[&[f32]]) -> Vec<f32> {
+    periods
+        .iter()
+        .flat_map(|period| period.as_chunks::<2>().0.iter().map(|frame| frame[0]))
+        .collect()
+}
+
+fn assert_boundary_tail_is_continuous_and_silent_after_zero(periods: &[&[f32]], frequency: f32) {
+    assert_boundary_frames_are_continuous_and_silent_after_zero(
+        &boundary_left_frames(periods),
+        frequency,
+    );
+}
+
+fn assert_boundary_frames_are_continuous_and_silent_after_zero(frames: &[f32], frequency: f32) {
+    let first_audible = frames
+        .iter()
+        .position(|sample| *sample != 0.0)
+        .expect("old sink tail had no audible samples");
+    let first_zero = frames[first_audible + 1..]
+        .iter()
+        .position(|sample| *sample == 0.0)
+        .map(|offset| first_audible + 1 + offset)
+        .expect("fade did not end at exact zero");
+    assert!(
+        frames[first_zero..].iter().all(|sample| *sample == 0.0),
+        "old sink drain became audible again after reaching zero at {first_zero}; next nonzero {:?}",
+        frames[first_zero..]
+            .iter()
+            .position(|sample| *sample != 0.0)
+            .map(|offset| first_zero + offset)
+    );
+    assert_tone_step_bound(frames, frequency);
+}
+
+fn assert_tone_step_bound(frames: &[f32], frequency: f32) {
+    let tone_step = 2.0 * (std::f32::consts::PI * frequency / 44_100.0).sin();
+    // The 256-tap ASRC can overshoot a full-scale sine slightly at the finite
+    // input boundary; leave a small filter-ringing allowance while still being
+    // far below the pre-fix zero-to-full-scale restart.
+    let margin = 0.05;
+    let max_step = frames
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_step <= tone_step + margin,
+        "old sink discontinuity {max_step} exceeded tone bound {}",
+        tone_step + margin
+    );
 }
 
 fn bytes_record_for(endpoint: u16, qpc: u64, bytes: &[u8]) -> Vec<u8> {
@@ -167,6 +248,7 @@ struct RecordsCapture {
     records: Vec<Vec<u8>>,
     next: usize,
     trim_supported: bool,
+    trims: Option<Arc<Mutex<Vec<f64>>>>,
     gate: Option<Arc<AtomicBool>>,
     /// Without it every record arrives at once, the output's priming drops
     /// what lies beyond target + one delivery, and QPCs written in advance no
@@ -183,6 +265,7 @@ struct RecordsCapture {
 struct Pacing {
     state: Arc<SinkState>,
     lead: u64,
+    scene_rate: u32,
 }
 
 #[derive(Debug, Default)]
@@ -195,6 +278,7 @@ struct Steps {
     period_completed: u64,
     capture_phases_completed: u64,
     capture_finished: bool,
+    output_finished: bool,
     qpc: u64,
     released: bool,
 }
@@ -338,6 +422,31 @@ impl Lockstep {
         self.changed.notify_all();
     }
 
+    fn finish_output(&self) {
+        let mut steps = self.steps.lock().unwrap();
+        steps.output_finished = true;
+        self.changed.notify_all();
+    }
+
+    /// Waits until the output thread has left because the stream ended.
+    fn wait_output_finished(&self) {
+        let mut steps = self.steps.lock().unwrap();
+        while !steps.output_finished {
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(steps, Duration::from_secs(5))
+                .unwrap();
+            steps = next;
+            if timeout.timed_out() {
+                let message = format!("output did not finish: {steps:?}");
+                steps.released = true;
+                self.changed.notify_all();
+                drop(steps);
+                panic!("{message}");
+            }
+        }
+    }
+
     /// Waits until the capture thread has stopped, so everything it will put
     /// into the crossing ring is already there.
     fn wait_capture_finished(&self) {
@@ -469,11 +578,12 @@ impl CaptureSource for RecordsCapture {
             let now = pacing.state.frames.load(Ordering::Acquire);
             let kind = u16::from_le_bytes(buffer[RECORD_KIND..RECORD_KIND + 2].try_into().unwrap());
             let bytes = u32::from_le_bytes(buffer[RECORD_LEN..RECORD_LEN + 4].try_into().unwrap());
-            // Data records in this harness use either 48 kHz stereo f32 PCM or
-            // a 192 kHz stereo i16 IEC carrier, both mapped to their ABI end QPC.
+            // Data records in this harness use stereo f32 PCM at the pacing
+            // scene rate or a 192 kHz stereo i16 IEC carrier. Convert both to
+            // this synthetic clock's 48 kHz QPC units.
             let record_frames = match kind {
-                ssr_abi::RECORD_KIND_DATA if bytes % 8 == 0 && bytes <= (BLOCK * 8) as u32 => {
-                    u64::from(bytes / 8)
+                ssr_abi::RECORD_KIND_DATA if bytes % 8 == 0 && bytes <= (BLOCK * 16) as u32 => {
+                    u64::from(bytes / 8) * u64::from(RATE) / u64::from(pacing.scene_rate)
                 }
                 ssr_abi::RECORD_KIND_DATA => u64::from(bytes) * RATE as u64 / 768_000,
                 _ => 0,
@@ -485,7 +595,10 @@ impl CaptureSource for RecordsCapture {
             let kind = u16::from_le_bytes(record[RECORD_KIND..RECORD_KIND + 2].try_into().unwrap());
             let bytes = u32::from_le_bytes(record[RECORD_LEN..RECORD_LEN + 4].try_into().unwrap());
             if kind == ssr_abi::RECORD_KIND_DATA {
-                u64::from(bytes / 8)
+                self.paced_by.as_ref().map_or_else(
+                    || u64::from(bytes / 8),
+                    |pacing| u64::from(bytes / 8) * u64::from(RATE) / u64::from(pacing.scene_rate),
+                )
             } else {
                 0
             }
@@ -503,8 +616,11 @@ impl CaptureSource for RecordsCapture {
         self.lockstep.as_ref().map(|lockstep| lockstep.now_qpc())
     }
 
-    fn set_rate_trim(&mut self, _ppm: f64) -> Result<(), TrimUnsupported> {
+    fn set_rate_trim(&mut self, ppm: f64) -> Result<(), TrimUnsupported> {
         if self.trim_supported {
+            if let Some(trims) = &self.trims {
+                trims.lock().unwrap().push(ppm);
+            }
             Ok(())
         } else {
             Err(TrimUnsupported)
@@ -533,6 +649,9 @@ struct SinkState {
     opened_layouts: Mutex<Vec<OutputLayout>>,
     opened_formats: Mutex<Vec<OutputFormat>>,
     requested_periods: Mutex<Vec<Duration>>,
+    accept_period_change: AtomicBool,
+    inject_cadence_tail: AtomicBool,
+    inject_cadence_tail_enabled: AtomicBool,
     stopped: AtomicBool,
     delay_frames: u64,
     max_periods: AtomicU64,
@@ -561,6 +680,9 @@ impl SinkState {
             opened_layouts: Mutex::new(Vec::new()),
             opened_formats: Mutex::new(Vec::new()),
             requested_periods: Mutex::new(Vec::new()),
+            accept_period_change: AtomicBool::new(true),
+            inject_cadence_tail: AtomicBool::new(false),
+            inject_cadence_tail_enabled: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             delay_frames,
             max_periods: AtomicU64::new(u64::MAX),
@@ -608,6 +730,18 @@ impl OutputOpener for TestOpener {
 
     fn set_period(&mut self, period: Duration) -> bool {
         self.state.requested_periods.lock().unwrap().push(period);
+        if !self.state.accept_period_change.load(Ordering::Acquire) {
+            return false;
+        }
+        if self
+            .state
+            .inject_cadence_tail_enabled
+            .load(Ordering::Acquire)
+        {
+            self.state
+                .inject_cadence_tail
+                .store(true, Ordering::Release);
+        }
         self.format.period_frames =
             (period.as_secs_f64() * f64::from(self.format.rate)).round() as usize;
         true
@@ -644,6 +778,22 @@ impl OutputSink for TestSink {
             |lockstep| lockstep.enter_period(self.format.period_frames as u64),
         );
         fill(&mut self.buffer);
+        if self.state.inject_cadence_tail.swap(false, Ordering::AcqRel) {
+            let frames = self.buffer.len() / usize::from(self.format.channels);
+            for (index, frame) in self
+                .buffer
+                .chunks_exact_mut(usize::from(self.format.channels))
+                .enumerate()
+            {
+                let sample = (2.0 * std::f32::consts::PI * 997.0 * index as f32
+                    / self.format.rate as f32)
+                    .sin();
+                for channel in frame {
+                    *channel = sample;
+                }
+            }
+            debug_assert_eq!(frames, self.format.period_frames);
+        }
         self.state
             .samples
             .lock()
@@ -699,6 +849,7 @@ fn lockstep_config(clock: ClockPreference, lockstep: Arc<Lockstep>) -> EngineCon
             engine::RtLoopEvent::CaptureEnd => lockstep.complete_capture_phase(),
             engine::RtLoopEvent::OutputEnd => lockstep.complete_period(),
             engine::RtLoopEvent::CaptureFinished => lockstep.finish_capture(),
+            engine::RtLoopEvent::OutputFinished => lockstep.finish_output(),
             _ => {}
         })),
         ..config(clock)
@@ -737,6 +888,7 @@ fn output_open_failure_is_returned_from_start() {
         records: Vec::new(),
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: None,
@@ -762,6 +914,7 @@ fn default_start_options_use_the_default_qpc_frequency() {
         records: Vec::new(),
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: None,
@@ -789,6 +942,7 @@ fn auto_selects_trim_only_when_capture_and_output_support_it() {
             records: Vec::new(),
             next: 0,
             trim_supported,
+            trims: None,
             gate: None,
             paced_by: None,
             lockstep: None,
@@ -814,6 +968,7 @@ fn format_change_does_not_change_the_startup_clock_or_mix_rate() {
         records: vec![format_record(96_000)],
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -841,6 +996,7 @@ fn required_trim_rejects_an_unsupported_capture() {
         records: Vec::new(),
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: None,
@@ -864,6 +1020,7 @@ fn required_trim_rejects_a_non_mix_rate_output_before_any_endpoint_data() {
         records: Vec::new(),
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: None,
@@ -893,6 +1050,7 @@ fn format_and_needs_brir_events_reach_poll() {
         ],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -944,6 +1102,7 @@ fn mixer_statistics_are_visible_before_capture_stops() {
         ],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -975,13 +1134,14 @@ fn mixer_statistics_are_visible_before_capture_stops() {
 }
 
 #[test]
-fn unsupported_format_on_one_endpoint_is_not_a_global_fault() {
+fn unsupported_format_is_counted_without_changing_endpoint_fault_semantics() {
     let lockstep = Arc::new(Lockstep::default());
     let state = SinkState::lockstep(0, Arc::clone(&lockstep));
     let capture = RecordsCapture {
         records: vec![format_record(RATE), format_record_for(1, 32_000)],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -998,6 +1158,12 @@ fn unsupported_format_on_one_endpoint_is_not_a_global_fault() {
     let status = engine.status();
     assert!(status.fault.is_none());
     assert!(status.endpoints[1].unsupported.is_some());
+    assert_eq!(
+        status.endpoints[1]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::UnsupportedSceneRate),
+        1
+    );
     let events = engine.poll();
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1013,7 +1179,130 @@ fn unsupported_format_on_one_endpoint_is_not_a_global_fault() {
             .any(|event| matches!(event, EngineEvent::Fault(_)))
     );
     lockstep.release();
-    let _ = engine.stop();
+    let report = engine.stop();
+    assert_eq!(
+        report.final_status.endpoints[1]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::UnsupportedSceneRate),
+        1
+    );
+    assert_eq!(
+        report.final_status.endpoints[1]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::UnsupportedSceneRate),
+        1
+    );
+    assert!(report.final_status.endpoints[1].unsupported.is_some());
+}
+
+#[test]
+fn malformed_records_are_counted_by_endpoint_and_without_attribution() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let mut bad_length = vec![0; ssr_abi::record_size(1)];
+    let mut writer = RecordWriter::new(&mut bad_length);
+    writer.set_endpoint(1);
+    assert!(writer.stream_stop(1, 0));
+    let length = writer.len();
+    bad_length.resize(length + 1, 0);
+    bad_length[32..36].copy_from_slice(&1_u32.to_le_bytes());
+    let truncated_header = vec![0; std::mem::size_of::<ssr_abi::RecordHeader>() - 1];
+    let capture = RecordsCapture {
+        records: vec![bad_length, truncated_header],
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        opener(state, RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    lockstep.step_read(3);
+    let status = engine.status();
+    assert_eq!(
+        status.endpoints[1]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::BadRecordLength),
+        1
+    );
+    assert_eq!(
+        status
+            .unattributed_chain_errors
+            .get(ssr_types::ChainErrorKind::TruncatedRecord),
+        1
+    );
+    assert_eq!(status.endpoints[1].unsupported, None);
+    assert!(status.fault.is_none());
+    lockstep.release();
+    let report = engine.stop();
+    assert_eq!(
+        report.final_status.endpoints[1]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::BadRecordLength),
+        1
+    );
+    assert_eq!(
+        report
+            .final_status
+            .unattributed_chain_errors
+            .get(ssr_types::ChainErrorKind::TruncatedRecord),
+        1
+    );
+}
+
+#[test]
+fn corrupt_payload_is_counted_without_marking_the_endpoint_unsupported() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let mut corrupt = Vec::new();
+    bitstream::frame_burst(bitstream::DataType::Eac3, &[0; 7], 24_576, &mut corrupt);
+    let capture = RecordsCapture {
+        records: vec![
+            ddp_format_record(),
+            bytes_record_for(ENDPOINT_PRIMARY, 0, &corrupt),
+        ],
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        opener(state, RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    lockstep.step_read(3);
+    let status = engine.status();
+    assert_eq!(
+        status.endpoints[0]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::CorruptPayload),
+        1
+    );
+    assert_eq!(status.endpoints[0].unsupported, None);
+    assert!(status.fault.is_none());
+    lockstep.release();
+    let report = engine.stop();
+    assert_eq!(
+        report.final_status.endpoints[0]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::CorruptPayload),
+        1
+    );
 }
 
 #[test]
@@ -1037,6 +1326,7 @@ fn zero_mask_pcm_without_a_direct_layout_reports_that_reason() {
         records: vec![record],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1077,6 +1367,7 @@ fn a_supported_format_clears_only_its_endpoints_unsupported_state() {
         ],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1105,6 +1396,7 @@ fn a_speaker_profile_opens_its_layout_at_start() {
         records: vec![format_record(RATE)],
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: None,
@@ -1139,6 +1431,7 @@ fn start_rejects_a_sink_with_another_channel_count() {
         records: Vec::new(),
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: None,
@@ -1172,6 +1465,7 @@ fn first_sound_after_start_is_not_dropped() {
         ],
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1246,6 +1540,7 @@ fn priming_covers_a_decoder_sized_delivery() {
             records,
             next: 0,
             trim_supported: false,
+            trims: None,
             gate: None,
             paced_by: None,
             lockstep: Some(Arc::clone(&lockstep)),
@@ -1274,6 +1569,10 @@ fn priming_covers_a_decoder_sized_delivery() {
             }
             lockstep.step_period(1);
         }
+        // Count the stepped periods only: after release the output runs free
+        // on a capture that delivers nothing more until stop lands, and how
+        // many of those periods underrun depends on the scheduler.
+        let stepped_underruns = engine.status().underruns;
         lockstep.release();
         let report = engine.stop();
         assert_eq!(report.dropped_frames, 0, "phase {phase}: {report:?}");
@@ -1286,7 +1585,7 @@ fn priming_covers_a_decoder_sized_delivery() {
                 .any(|sample| *sample != 0.0),
             "phase {phase}: no sound reached the output: {report:?}"
         );
-        underruns.push((phase, report.underruns));
+        underruns.push((phase, stepped_underruns));
     }
     assert!(
         underruns.iter().all(|(_, count)| *count == 0),
@@ -1306,6 +1605,7 @@ fn prepared_swap_is_retired_through_poll() {
         records,
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1340,6 +1640,7 @@ fn capture_loss_reconnects_and_clears_the_fault() {
             records,
             next: 0,
             trim_supported: true,
+            trims: None,
             gate: None,
             paced_by: None,
             lockstep: Some(Arc::clone(&lockstep)),
@@ -1398,6 +1699,7 @@ fn latency_uses_playback_qpc_and_source_qpc() {
         records,
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1458,6 +1760,7 @@ fn ddp_latency_uses_playback_qpc_and_source_qpc() {
         records,
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1503,6 +1806,7 @@ fn mute_changes_samples_by_at_most_one_ramp_increment() {
         records,
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1560,6 +1864,7 @@ fn asrc_converts_48_khz_to_44_1_khz_over_ten_seconds() {
         records,
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1612,6 +1917,7 @@ fn target_change_moves_the_ring_controller_toward_the_new_target() {
         records,
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -1669,38 +1975,54 @@ fn target_change_moves_the_ring_controller_toward_the_new_target() {
 }
 
 #[test]
-fn a_layout_change_reopens_the_output_after_the_old_blocks_play() {
+fn a_layout_reopen_switches_trim_to_asrc_clears_trim_and_keeps_playing() {
     let lockstep = Arc::new(Lockstep::default());
     let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let trims = Arc::new(Mutex::new(Vec::new()));
     let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    let frequency = 997.0;
     records.extend(
-        (0..32_u64).map(|block| {
-            data_record_for(ENDPOINT_PRIMARY, block * BLOCK as u64, 0.25, 0.25, BLOCK)
-        }),
+        (0..96_u64).map(|block| tone_record(block * BLOCK as u64, block * BLOCK as u64, frequency)),
     );
     let capture = RecordsCapture {
         records,
         next: 0,
         trim_supported: true,
+        trims: Some(Arc::clone(&trims)),
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
         stay_open: true,
     };
+    let mut output = opener(Arc::clone(&state), RATE);
+    output.reopen_format = Some(OutputFormat {
+        rate: 44_100,
+        period_frames: 441,
+        ..output.format
+    });
     let mut engine = start_with(
-        lockstep_config(ClockPreference::Trim, Arc::clone(&lockstep)),
+        lockstep_config(ClockPreference::Auto, Arc::clone(&lockstep)),
         capture,
-        opener(Arc::clone(&state), RATE),
+        output,
         StartOptions {
             qpc_frequency: QPC_FREQUENCY,
             prepared: Some(prepared(RATE)),
         },
     )
     .unwrap();
-    for _ in 0..16 {
+    for _ in 0..6 {
+        lockstep.step_read(2);
+        lockstep.step_period(1);
+    }
+    for _ in 0..24 {
         lockstep.step_read(1);
         lockstep.step_period(1);
     }
+    let before_switch_trims = trims.lock().unwrap().clone();
+    assert!(
+        before_switch_trims.iter().any(|ppm| ppm.abs() > 0.1),
+        "Trim mode never requested a nonzero correction: {before_switch_trims:?}"
+    );
     let old_periods = state.periods_by_layout.lock().unwrap().clone();
     assert!(old_periods.iter().any(|(layout, samples)| {
         *layout == OutputLayout::STEREO && samples.iter().any(|sample| *sample != 0.0)
@@ -1708,17 +2030,44 @@ fn a_layout_change_reopens_the_output_after_the_old_blocks_play() {
     engine
         .apply(LiveChange::Prepared(speaker_prepared(12, 0)))
         .unwrap();
-    for _ in 0..12 {
+    for _ in 0..40 {
         lockstep.step_read(1);
         lockstep.step_period(1);
-        if engine.status().output_reopens == 1 {
+        if engine.status().output_reopens == 1
+            && trims
+                .lock()
+                .unwrap()
+                .windows(2)
+                .any(|pair| pair[0].abs() > 0.1 && pair[1] == 0.0)
+            && state
+                .periods_by_layout
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(layout, samples)| {
+                    layout.channels == 12 && samples.iter().any(|sample| *sample != 0.0)
+                })
+        {
             break;
         }
     }
     let status = engine.status();
+    let events = engine.poll();
+    lockstep.release();
+    let report = engine.stop();
     assert_eq!(status.output_channels, 12);
     assert_eq!(status.output_channel_mask, 0);
     assert_eq!(status.output_reopens, 1);
+    assert_eq!(status.output_rate, 44_100);
+    assert!(status.trim_available);
+    assert_eq!(status.clock, ClockStatus::Asrc);
+    let trims = trims.lock().unwrap().clone();
+    assert!(
+        trims
+            .windows(2)
+            .any(|pair| pair[0].abs() > 0.1 && pair[1] == 0.0),
+        "the capture source did not receive zero after leaving Trim: {trims:?}"
+    );
     assert_eq!(
         state.opened_layouts.lock().unwrap().as_slice(),
         [
@@ -1730,19 +2079,26 @@ fn a_layout_change_reopens_the_output_after_the_old_blocks_play() {
         ]
     );
     let periods = state.periods_by_layout.lock().unwrap();
-    let old_last = periods
+    let old_sink: Vec<_> = periods
         .iter()
-        .rev()
-        .find(|(layout, samples)| {
-            *layout == OutputLayout::STEREO && samples.iter().any(|x| *x != 0.0)
-        })
+        .filter(|(layout, _)| *layout == OutputLayout::STEREO)
         .map(|(_, samples)| samples)
-        .expect("old sink emitted audio");
-    assert_eq!(old_last[old_last.len() - 2..], [0.0, 0.0]);
+        .collect();
+    let old_last = old_sink
+        .last()
+        .copied()
+        .expect("old Trim sink emitted a final boundary period");
+    let old_penultimate = old_sink
+        .get(old_sink.len().saturating_sub(2))
+        .copied()
+        .expect("old Trim sink emitted audio before its boundary period");
     assert!(
-        old_last[..old_last.len().saturating_sub(96 * 2)]
-            .iter()
-            .any(|sample| *sample != 0.0)
+        period_energy(old_penultimate) > 0.0,
+        "old Trim sink lost its final ordinary audio period"
+    );
+    assert!(
+        period_energy(old_last) > 0.0,
+        "old Trim sink swallowed its final ordinary period"
     );
     let new_first = periods
         .iter()
@@ -1752,17 +2108,191 @@ fn a_layout_change_reopens_the_output_after_the_old_blocks_play() {
     assert!(new_first[..12].iter().all(|sample| *sample == 0.0));
     assert!(new_first[12..96 * 12].iter().any(|sample| *sample != 0.0));
     drop(periods);
-    assert!(engine.poll().iter().any(|event| matches!(
+    assert!(events.iter().any(|event| matches!(
         event,
         EngineEvent::OutputLayoutChanged {
             channels: 12,
             channel_mask: 0,
         }
     )));
-    lockstep.release();
-    let report = engine.stop();
     assert_eq!(report.output_reopens, 1);
     assert_eq!(report.output_channels, 12);
+    assert_eq!(report.final_status.output_rate, 44_100);
+    assert_eq!(report.final_status.clock, ClockStatus::Asrc);
+}
+
+#[test]
+fn asrc_layout_reopen_fades_through_the_real_tail_and_stays_silent() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let frequency = 997.0;
+    let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    records.extend(
+        (0..96_u64).map(|block| tone_record(block * BLOCK as u64, block * BLOCK as u64, frequency)),
+    );
+    let capture = RecordsCapture {
+        records,
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let mut output = opener_with_period(Arc::clone(&state), 44_100, 441);
+    output.reopen_format = Some(OutputFormat {
+        rate: 44_100,
+        period_frames: 441,
+        ..output.format
+    });
+    let engine = start_with(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        output,
+        StartOptions {
+            qpc_frequency: QPC_FREQUENCY,
+            prepared: Some(prepared(RATE)),
+        },
+    )
+    .unwrap();
+
+    for _ in 0..24 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+    }
+    engine
+        .apply(LiveChange::Prepared(speaker_prepared(12, 0)))
+        .unwrap();
+    for _ in 0..40 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+        if engine.status().output_reopens == 1 {
+            break;
+        }
+    }
+    let periods = state.periods_by_layout.lock().unwrap().clone();
+    lockstep.release();
+    let report = engine.stop();
+
+    let first_reopened = periods
+        .iter()
+        .position(|(layout, _)| layout.channels == 12)
+        .expect("the new-layout sink emitted a period");
+    let old_tail = &periods[..first_reopened];
+    let old_last = &old_tail.last().expect("old sink emitted a drain period").1;
+    let old_penultimate = &old_tail
+        .get(old_tail.len().saturating_sub(2))
+        .expect("old sink emitted the preceding drain period")
+        .1;
+    let tail_energy = period_energy(old_last);
+    let preceding_energy = period_energy(old_penultimate);
+    assert!(
+        tail_energy > 0.0 && tail_energy < preceding_energy,
+        "old ASRC tail energy {tail_energy} did not follow tone energy {preceding_energy}"
+    );
+    let boundary: Vec<_> = old_tail
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(|(_, samples)| samples.as_slice())
+        .collect();
+    assert_boundary_tail_is_continuous_and_silent_after_zero(&boundary, frequency);
+    let frames = boundary_left_frames(&boundary);
+    let last_nonzero = frames
+        .iter()
+        .rposition(|sample| *sample != 0.0)
+        .expect("old sink emitted no tail signal");
+    // This fixture's final padded take contributes 438 output frames before
+    // rubato's 117-frame delay; the first boundary period precedes that take.
+    let predicted_signal_end = 441 + 438 + 117;
+    assert!(
+        last_nonzero.abs_diff(predicted_signal_end - 1) <= 2,
+        "last nonzero frame {last_nonzero} missed predicted tail end {}",
+        predicted_signal_end - 1
+    );
+    assert!(
+        frames[predicted_signal_end..]
+            .iter()
+            .all(|sample| *sample == 0.0)
+    );
+    let fade_start = predicted_signal_end - 88;
+    let cycle_frames = (44_100.0_f32 / frequency).ceil() as usize;
+    let peak = frames[fade_start - cycle_frames..fade_start]
+        .iter()
+        .map(|sample| sample.abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        peak >= 0.97,
+        "pre-fade tone peak {peak} was below 97% of full scale"
+    );
+    assert_eq!(report.output_reopens, 1);
+}
+
+#[test]
+fn forced_trim_incompatible_layout_reopen_retries_and_stops_without_success() {
+    // Wall time is intentional here: the property is that stop interrupts the
+    // retry backoff after multiple incompatible opens.
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    records.extend(
+        (0..96_u64).map(|block| {
+            data_record_for(ENDPOINT_PRIMARY, block * BLOCK as u64, 0.25, 0.25, BLOCK)
+        }),
+    );
+    let capture = RecordsCapture {
+        records,
+        next: 0,
+        trim_supported: true,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let mut output = opener(Arc::clone(&state), RATE);
+    output.reopen_format = Some(OutputFormat {
+        rate: 44_100,
+        period_frames: 441,
+        ..output.format
+    });
+    let engine = start_with(
+        lockstep_config(ClockPreference::Trim, Arc::clone(&lockstep)),
+        capture,
+        output,
+        StartOptions {
+            qpc_frequency: QPC_FREQUENCY,
+            prepared: Some(prepared(RATE)),
+        },
+    )
+    .unwrap();
+    for _ in 0..30 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+    }
+    engine
+        .apply(LiveChange::Prepared(speaker_prepared(12, 0)))
+        .unwrap();
+    // The retries wait in wall time (250 ms, then twice as long), and an
+    // iteration that retries plays no period, so periods cannot be stepped
+    // through them: let both threads run and wait for the third open.
+    lockstep.release();
+    wait_for_thread_exit(Duration::from_secs(10), || {
+        state.opened_formats.lock().unwrap().len() >= 3
+    });
+    let status = engine.status();
+    let start = Instant::now();
+    let report = engine.stop();
+
+    assert!(start.elapsed() < Duration::from_millis(200));
+    assert!(state.opened_formats.lock().unwrap().len() >= 3);
+    assert_eq!(status.output_reopens, 0);
+    assert_eq!(status.output_reconnects, 0);
+    assert_eq!(report.output_reopens, 0);
+    assert_eq!(report.final_status.output_reconnects, 0);
+    assert_eq!(report.final_status.clock, ClockStatus::Trim);
 }
 
 #[test]
@@ -1779,10 +2309,12 @@ fn output_failure_discards_mixed_layout_crossing_audio_and_recovers() {
         records,
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: Some(Pacing {
             state: Arc::clone(&state),
             lead: 8,
+            scene_rate: RATE,
         }),
         lockstep: Some(Arc::clone(&lockstep)),
         stay_open: true,
@@ -1872,33 +2404,140 @@ fn output_failure_discards_mixed_layout_crossing_audio_and_recovers() {
 }
 
 #[test]
+fn declined_cadence_change_keeps_asrc_live_and_a_later_layout_tail_fresh() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    state.played_numerator.store(4, Ordering::Release);
+    state.played_denominator.store(5, Ordering::Release);
+    state.accept_period_change.store(false, Ordering::Release);
+    let frequency = 997.0;
+    let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    records.extend(
+        (0..1_200_u64)
+            .map(|block| tone_record(block * BLOCK as u64, block * BLOCK as u64, frequency)),
+    );
+    let capture = RecordsCapture {
+        records,
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: Some(Pacing {
+            state: Arc::clone(&state),
+            lead: 8,
+            scene_rate: RATE,
+        }),
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let mut output = opener_with_period(Arc::clone(&state), 44_100, 441);
+    output.reopen_format = Some(OutputFormat::exclusive(44_100, 12, 0, 441));
+    let engine = start_with(
+        lockstep_config(ClockPreference::Auto, Arc::clone(&lockstep)),
+        capture,
+        output,
+        StartOptions {
+            qpc_frequency: QPC_FREQUENCY,
+            prepared: Some(prepared(RATE)),
+        },
+    )
+    .unwrap();
+
+    for _ in 0..401 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+    }
+    let requested = state.requested_periods.lock().unwrap().clone();
+    let before_layout = state.periods_by_layout.lock().unwrap().clone();
+    assert_eq!(requested, [Duration::from_millis(20)]);
+    assert_eq!(state.opened_formats.lock().unwrap().len(), 1);
+    assert!(
+        before_layout
+            .iter()
+            .rev()
+            .take(4)
+            .all(|(_, samples)| period_energy(samples) > 0.0),
+        "declined cadence change drained or silenced the live ASRC"
+    );
+
+    engine
+        .apply(LiveChange::Prepared(speaker_prepared(12, 0)))
+        .unwrap();
+    for _ in 0..40 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+        if engine.status().output_reopens == 1 {
+            break;
+        }
+    }
+    let periods = state.periods_by_layout.lock().unwrap().clone();
+    lockstep.release();
+    let report = engine.stop();
+
+    let first_reopened = periods
+        .iter()
+        .position(|(layout, _)| layout.channels == 12)
+        .expect("later layout change reopened the sink");
+    let old_tail = &periods[..first_reopened];
+    let boundary: Vec<_> = old_tail
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(|(_, samples)| samples.as_slice())
+        .collect();
+    assert_boundary_tail_is_continuous_and_silent_after_zero(&boundary, frequency);
+    assert_eq!(report.output_reopens, 1);
+}
+
+#[test]
 fn sustained_slow_cadence_grows_the_period_and_reopens_once() {
     let lockstep = Arc::new(Lockstep::default());
     let state = SinkState::lockstep(0, Arc::clone(&lockstep));
     state.played_numerator.store(4, Ordering::Release);
     state.played_denominator.store(5, Ordering::Release);
+    let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    let frequency = 997.0;
+    records.extend(
+        (0..1_200_u64)
+            .map(|block| tone_record(block * BLOCK as u64, block * BLOCK as u64, frequency)),
+    );
     let capture = RecordsCapture {
-        records: vec![format_record(RATE)],
+        records,
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
-        paced_by: None,
+        paced_by: Some(Pacing {
+            state: Arc::clone(&state),
+            lead: 8,
+            scene_rate: RATE,
+        }),
         lockstep: Some(Arc::clone(&lockstep)),
         stay_open: true,
     };
-    let engine = start_with_clock(
-        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+    let mut output = opener_with_period(Arc::clone(&state), 44_100, 441);
+    output.reopen_format = Some(OutputFormat::exclusive(44_100, 2, 0x3, 882));
+    let engine = start_with(
+        lockstep_config(ClockPreference::Auto, Arc::clone(&lockstep)),
         capture,
-        opener(Arc::clone(&state), RATE),
-        QPC_FREQUENCY,
+        output,
+        StartOptions {
+            qpc_frequency: QPC_FREQUENCY,
+            prepared: Some(prepared(RATE)),
+        },
     )
     .unwrap();
 
     // 10 ms synthetic periods make each cadence window one second. Four
     // windows cross the sustained three-second threshold and leave room for
     // the cadence-triggered reopen to complete.
-    lockstep.step_period(401);
+    for _ in 0..401 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+    }
     while state.opened_formats.lock().unwrap().len() < 2 {
+        lockstep.step_read(1);
         lockstep.step_period(1);
     }
     let requested = state.requested_periods.lock().unwrap().clone();
@@ -1913,18 +2552,77 @@ fn sustained_slow_cadence_grows_the_period_and_reopens_once() {
 
     // The reopened sink keeps reporting 80%, but this session must not ask for
     // another period increase or another reopen.
-    lockstep.step_period(200);
+    for _ in 0..200 {
+        lockstep.step_read(1);
+        lockstep.step_period(1);
+    }
     let final_requested = state.requested_periods.lock().unwrap().len();
     let final_opened = state.opened_formats.lock().unwrap().len();
+    let periods = state.periods_by_layout.lock().unwrap().clone();
     lockstep.release();
-    let _ = engine.stop();
+    let report = engine.stop();
 
+    let first_reopened = periods
+        .iter()
+        .position(|(_, samples)| samples.len() == 882 * 2)
+        .expect("the larger-period sink emitted a period");
+    let old_tail = &periods[..first_reopened];
+    let old_last = &old_tail
+        .last()
+        .expect("the old cadence sink emitted its ASRC tail")
+        .1;
+    let old_penultimate = &old_tail
+        .get(old_tail.len().saturating_sub(2))
+        .expect("the old cadence sink emitted tone before its ASRC tail")
+        .1;
+    let tail_energy = period_energy(old_last);
+    let preceding_energy = period_energy(old_penultimate);
+    // The cadence request is raised only after an old-sink period completes.
+    // The following old-sink period is consequently fed only zero input and is
+    // the delayed ASRC contribution. Energy avoids coupling the proof to
+    // rubato's exact fractional-delay sample count.
+    assert!(
+        tail_energy > 0.0 && tail_energy < preceding_energy,
+        "old ASRC tail energy {tail_energy} did not follow tone energy {preceding_energy}"
+    );
+    // The 117-frame delay occupies one 441-frame drain period. Include that
+    // period and the final normally rendered period before it.
+    let old_boundary: Vec<_> = old_tail
+        .iter()
+        .rev()
+        .take(2)
+        .rev()
+        .map(|(_, samples)| samples.as_slice())
+        .collect();
+    let boundary_frames = boundary_left_frames(&old_boundary);
+    let drain_start = old_boundary[0].len() / 2;
+    assert_boundary_frames_are_continuous_and_silent_after_zero(
+        &boundary_frames[drain_start..],
+        frequency,
+    );
+    assert!(
+        boundary_frames[..drain_start]
+            .iter()
+            .any(|sample| *sample != 0.0),
+        "cadence fixture did not make the final written period audible"
+    );
+    assert_tone_step_bound(&boundary_frames[..drain_start + 117], frequency);
+    let resumed = periods[first_reopened..]
+        .iter()
+        .any(|(_, samples)| samples.iter().any(|sample| *sample != 0.0));
     assert_eq!(requested, [Duration::from_millis(20)]);
-    assert_eq!(opened, [BLOCK, BLOCK * 2]);
-    assert_eq!(status.output_cadence_faults, 1);
-    assert!((status.output_cadence_ratio - 0.8).abs() < 0.01);
+    assert_eq!(opened, [441, 882]);
+    assert!(status.output_cadence_faults >= 1);
+    assert_eq!(status.clock, ClockStatus::Asrc);
+    assert_eq!(report.final_status.clock, ClockStatus::Asrc);
+    assert!(
+        status.output_cadence_ratio < 0.9,
+        "unexpected cadence ratio: {}",
+        status.output_cadence_ratio
+    );
     assert_eq!(final_requested, 1);
     assert_eq!(final_opened, 2);
+    assert!(resumed, "audio did not resume after the cadence reopen");
 }
 
 #[test]
@@ -1937,6 +2635,7 @@ fn a_failed_reopen_recovers_and_clears_the_output_fault() {
         records,
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -2003,10 +2702,12 @@ fn reconnect_at_44_1_khz_switches_to_asrc_and_fades_audio_back_in() {
         records,
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: Some(Pacing {
             state: Arc::clone(&state),
             lead: 8,
+            scene_rate: RATE,
         }),
         lockstep: Some(Arc::clone(&lockstep)),
         stay_open: true,
@@ -2050,11 +2751,12 @@ fn reconnect_at_44_1_khz_switches_to_asrc_and_fades_audio_back_in() {
     let status = engine.status();
     let periods = state.periods_by_layout.lock().unwrap().clone();
     lockstep.release();
-    let _ = engine.stop();
+    let report = engine.stop();
 
     assert_eq!(status.output_reconnects, 1);
     assert_eq!(state.opened_formats.lock().unwrap()[1].rate, 44_100);
     assert_eq!(status.clock, ClockStatus::Asrc);
+    assert_eq!(report.final_status.clock, ClockStatus::Asrc);
     let resumed = periods
         .iter()
         .find(|(_, samples)| samples.len() == 441 * 2 && samples.iter().any(|x| *x != 0.0))
@@ -2088,6 +2790,7 @@ fn an_output_failure_reports_why_the_sink_failed() {
         records: vec![format_record(RATE)],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -2137,6 +2840,7 @@ fn a_stopped_source_lets_the_brir_tail_play_and_counts_no_underrun() {
         ],
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -2192,6 +2896,7 @@ fn ended_input_drains_a_thirty_two_channel_ring_below_the_priming_threshold() {
         records: vec![format_record(RATE), data_record(0, 0.25)],
         next: 0,
         trim_supported: true,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -2248,6 +2953,93 @@ fn ended_input_drains_a_thirty_two_channel_ring_below_the_priming_threshold() {
 }
 
 #[test]
+fn asrc_eof_fades_through_the_real_tail_and_stays_silent() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let frequency = 997.0;
+    let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    records.extend(
+        (0..32_u64).map(|block| tone_record(block * BLOCK as u64, block * BLOCK as u64, frequency)),
+    );
+    let record_count = records.len();
+    let capture = RecordsCapture {
+        records,
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: false,
+    };
+    let mut runtime = lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep));
+    runtime.target_ms = 0.0;
+    let engine = start_with(
+        runtime,
+        capture,
+        opener_with_period(Arc::clone(&state), 44_100, 441),
+        StartOptions {
+            qpc_frequency: QPC_FREQUENCY,
+            prepared: Some(prepared(RATE)),
+        },
+    )
+    .unwrap();
+
+    lockstep.step_read(record_count as u64);
+    lockstep.start_read(1);
+    lockstep.wait_capture_finished();
+    {
+        let mut steps = lockstep.steps.lock().unwrap();
+        steps.period_allowed += 64;
+        lockstep.changed.notify_all();
+    }
+    wait_for_thread_exit(Duration::from_secs(5), || {
+        state.stopped.load(Ordering::Acquire)
+    });
+    let periods = state.periods_by_layout.lock().unwrap();
+    let last_audible = periods
+        .iter()
+        .rposition(|(_, samples)| samples.iter().any(|sample| *sample != 0.0))
+        .expect("EOF emitted no audible period");
+    // Two periods before the last audible one and the drain after it, without
+    // the ASRC startup transient.
+    let boundary_start = last_audible.saturating_sub(2);
+    let boundary_end = (last_audible + 2).min(periods.len());
+    let boundary: Vec<_> = periods[boundary_start..boundary_end]
+        .iter()
+        .map(|(_, samples)| samples.as_slice())
+        .collect();
+    assert_boundary_tail_is_continuous_and_silent_after_zero(&boundary, frequency);
+    let frames = boundary_left_frames(&boundary);
+    let last_nonzero = frames
+        .iter()
+        .rposition(|sample| *sample != 0.0)
+        .expect("EOF emitted no tail signal");
+    // Pinned for this fixture: the third period here is the final rendered
+    // one, its padded take held 105 output frames of real input, and the
+    // signal ends the 117-frame delay after them. The arithmetic behind the
+    // pin is checked against known input by the engine's unit tests; here a
+    // tail that is skipped, repeated or cut short moves the end.
+    let predicted_signal_end = 2 * 441 + 105 + 117;
+    assert!(
+        last_nonzero.abs_diff(predicted_signal_end - 1) <= 2,
+        "EOF last nonzero frame {last_nonzero} missed the pinned end {}",
+        predicted_signal_end - 1
+    );
+    assert!(
+        frames[predicted_signal_end..]
+            .iter()
+            .all(|sample| *sample == 0.0),
+        "EOF output rose after its exact-zero predicted end"
+    );
+    let signal_end = predicted_signal_end;
+    assert_tone_step_bound(&frames[..signal_end], frequency);
+    drop(periods);
+    lockstep.release();
+    let _ = engine.stop();
+}
+
+#[test]
 fn second_endpoint_first_block_from_finish_reaches_runtime_output() {
     let lockstep = Arc::new(Lockstep::default());
     let state = SinkState::lockstep(0, Arc::clone(&lockstep));
@@ -2258,6 +3050,7 @@ fn second_endpoint_first_block_from_finish_reaches_runtime_output() {
         ],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -2317,6 +3110,7 @@ fn stop_interrupts_output_reconnect_backoff_promptly() {
         records: vec![format_record(RATE)],
         next: 0,
         trim_supported: false,
+        trims: None,
         gate: None,
         paced_by: None,
         lockstep: Some(Arc::clone(&lockstep)),
@@ -2347,6 +3141,57 @@ fn stop_interrupts_output_reconnect_backoff_promptly() {
 }
 
 #[test]
+fn a_lost_output_stops_reconnecting_once_the_stream_has_ended() {
+    // Wall time: the output notices the end only after its real reconnect
+    // backoff, since no sink is open to ask for a period.
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    state.fail_from_period.store(0, Ordering::Release);
+    let capture = RecordsCapture {
+        records: vec![format_record(RATE)],
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: false,
+    };
+    let mut output = opener(Arc::clone(&state), RATE);
+    output.fail_after_first = true;
+    let engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        output,
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    // The first period fails, so the output waits to reconnect with no sink;
+    // every reopen fails. Once a reopen has been tried, the output is inside
+    // its retry loop (capture had not ended when it decided), and only then
+    // does the source end without queuing audio.
+    lockstep.step_period(1);
+    let start = Instant::now();
+    while engine.status().output_reconnect_attempts == 0 {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the output never tried to reopen"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    lockstep.step_read(1);
+    lockstep.start_read(1);
+    lockstep.wait_capture_finished();
+    lockstep.wait_output_finished();
+    let report = engine.stop();
+    assert!(
+        report.final_status.fault.is_some(),
+        "the lost output was not reported"
+    );
+}
+
+#[test]
 fn stop_and_drop_join_threads_promptly() {
     // This intentionally uses wall time: prompt thread joining is the property
     // under test, unlike audio progression, which the other runtime tests drive
@@ -2357,6 +3202,7 @@ fn stop_and_drop_join_threads_promptly() {
             records: vec![format_record(RATE)],
             next: 0,
             trim_supported: false,
+            trims: None,
             gate: None,
             paced_by: None,
             lockstep: None,

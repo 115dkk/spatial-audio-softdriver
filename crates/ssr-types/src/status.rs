@@ -10,6 +10,87 @@ use crate::{format::SourceFormat, ports::OutputMode};
 /// foundational crate depend on `ssr-abi`.
 pub const ENGINE_ENDPOINTS: usize = 4;
 
+/// Stable chain-error classifications published by the live engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ChainErrorKind {
+    UnsupportedCodec,
+    UnsupportedFormat,
+    CorruptPayload,
+    MissingFormat,
+    WrongRoute,
+    UnsupportedSceneRate,
+    TruncatedRecord,
+    BadRecordLength,
+    BadFormatRecord,
+    BadVolumeRecord,
+    MissingDirectLayout,
+}
+
+impl ChainErrorKind {
+    pub const ALL: [Self; 11] = [
+        Self::UnsupportedCodec,
+        Self::UnsupportedFormat,
+        Self::CorruptPayload,
+        Self::MissingFormat,
+        Self::WrongRoute,
+        Self::UnsupportedSceneRate,
+        Self::TruncatedRecord,
+        Self::BadRecordLength,
+        Self::BadFormatRecord,
+        Self::BadVolumeRecord,
+        Self::MissingDirectLayout,
+    ];
+    pub const COUNT: usize = Self::ALL.len();
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::UnsupportedCodec => "unsupported_codec",
+            Self::UnsupportedFormat => "unsupported_format",
+            Self::CorruptPayload => "corrupt_payload",
+            Self::MissingFormat => "missing_format",
+            Self::WrongRoute => "wrong_route",
+            Self::UnsupportedSceneRate => "unsupported_scene_rate",
+            Self::TruncatedRecord => "truncated_record",
+            Self::BadRecordLength => "bad_record_length",
+            Self::BadFormatRecord => "bad_format_record",
+            Self::BadVolumeRecord => "bad_volume_record",
+            Self::MissingDirectLayout => "missing_direct_layout",
+        }
+    }
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChainErrorCounts {
+    counts: [u64; ChainErrorKind::COUNT],
+}
+
+impl ChainErrorCounts {
+    pub fn from_fn(mut f: impl FnMut(ChainErrorKind) -> u64) -> Self {
+        Self {
+            counts: ChainErrorKind::ALL.map(&mut f),
+        }
+    }
+
+    pub const fn get(&self, kind: ChainErrorKind) -> u64 {
+        self.counts[kind.index()]
+    }
+
+    pub fn total(&self) -> u64 {
+        self.counts.iter().copied().sum()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ChainErrorKind, u64)> + '_ {
+        ChainErrorKind::ALL
+            .into_iter()
+            .map(|kind| (kind, self.get(kind)))
+    }
+}
+
 /// Latency of the whole chain, from the driver's record QPC to the output
 /// device's playback QPC (the time inside the source application is not part
 /// of it).
@@ -47,6 +128,8 @@ pub struct EndpointStatus {
     /// Why this entrance's current format cannot be decoded. This is local to
     /// the entrance and never faults the other entrances.
     pub unsupported: Option<String>,
+    /// Every chain error attributed to this entrance, by stable kind.
+    pub chain_errors: ChainErrorCounts,
 }
 
 /// What the output saw in the period that last found the crossing ring short,
@@ -72,6 +155,8 @@ pub struct UnderrunSnapshot {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EngineStatus {
     pub endpoints: [EndpointStatus; ENGINE_ENDPOINTS],
+    /// Chain errors whose malformed record did not identify an entrance.
+    pub unattributed_chain_errors: ChainErrorCounts,
     pub latency: LatencyStats,
     /// Lowest crossing-ring level over the last control window, in
     /// milliseconds of rendered signal: the margin the clock controller holds
@@ -83,6 +168,10 @@ pub struct EngineStatus {
     pub last_underrun: Option<UnderrunSnapshot>,
     /// Times the output device's stream was restarted after it stalled.
     pub output_restarts: u64,
+    /// Sample rate of the currently open output sink, or zero before open.
+    pub output_rate: u32,
+    /// Whether the capture source accepted rate trim when the engine started.
+    pub trim_available: bool,
     /// Layout of the currently open output sink.
     pub output_channels: u16,
     pub output_channel_mask: u32,

@@ -101,6 +101,11 @@
 #define SSR_MAX_ENDPOINTS 4
 
 /**
+ * Default exposure mask for the primary, music, and passthrough endpoints.
+ */
+#define SSR_DEFAULT_ENDPOINT_MASK 7
+
+/**
  * Data record flag: the bytes do not follow the previous data record. The
  * kernel sets it after an overrun, a source gap, and on the first data returned
  * to a newly opened handle.
@@ -137,11 +142,52 @@
 #define SSR_TRIM_LIMIT_PPM 2000
 
 /**
+ * Number of entries in [`PCM_RATES`].
+ */
+#define SSR_PCM_RATE_COUNT 6
+
+/**
+ * Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Int16`].
+ */
+#define SSR_PCM_SHAPE_INT16 (1 << 0)
+
+/**
+ * Bit of [`PcmFormats::shapes`] corresponding to packed [`PcmShape::Int24`].
+ */
+#define SSR_PCM_SHAPE_INT24 (1 << 1)
+
+/**
+ * Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Int24In32`].
+ */
+#define SSR_PCM_SHAPE_INT24_IN_32 (1 << 2)
+
+/**
+ * Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Int32`].
+ */
+#define SSR_PCM_SHAPE_INT32 (1 << 3)
+
+/**
+ * Bit of [`PcmFormats::shapes`] corresponding to [`PcmShape::Float32`].
+ */
+#define SSR_PCM_SHAPE_FLOAT32 (1 << 4)
+
+/**
+ * Integer shape bits. These use the PCM subtype; float32 uses IEEE_FLOAT.
+ */
+#define SSR_PCM_SHAPES_INTEGER 15
+
+/**
  * The 18 ksmedia.h speaker positions, FRONT_LEFT through TOP_BACK_RIGHT.
  */
 #define SSR_PCM_SPEAKER_BITS 262143
 
 #define SSR_MAX_PCM_CHANNELS 32
+
+/**
+ * Bits c-1 for decoder-default direct layouts: 1-6, 8, 10, 12, 14, and 16
+ * channels. The driver prefers these when intersecting direct PCM formats.
+ */
+#define SSR_DIRECT_DEFAULT_CHANNELS 43711
 
 /**
  * Codec mask: bits 1..8 retain their values; bit 0 and bits 9..63 are reserved.
@@ -363,7 +409,7 @@ typedef struct SSR_DUMP_HEADER {
 /**
  * PCM sample rates; bit i of `PcmFormats::rates` is `PCM_RATES[i]`.
  */
-static const uint32_t SSR_PCM_RATES[6] = { 44100, 48000, 88200, 96000, 176400, 192000, };
+static const uint32_t SSR_PCM_RATES[SSR_PCM_RATE_COUNT] = { 44100, 48000, 88200, 96000, 176400, 192000, };
 
 #define SSR_DEFAULT_PCM_INIT { 63, 31, 18, 4294967295U }
 

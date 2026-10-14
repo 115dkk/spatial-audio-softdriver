@@ -319,6 +319,7 @@ dependencies = [
  "bitstream",
  "eac3",
  "proptest",
+ "ssr-abi",
  "ssr-types",
  "thiserror",
 ]

@@ -16,28 +16,20 @@ import sys
 import time
 from pathlib import Path
 
-from driver_flow_check import (
-    FLAG_DISCONTINUITY,
-    FLAG_REPEAT,
-    KIND_DATA,
-    KIND_FORMAT_CHANGE,
-    KIND_OVERRUN,
-    KIND_VOLUME,
-    parse_volume,
-    KIND_STREAM_START,
-    KIND_STREAM_STOP,
-    HEADER,
-    ControlDevice,
-    parse_records,
-    parse_wave_format,
+from driver_flow_check import parse_records, parse_volume, parse_wave_format
+from ring_stats import endpoint_stats
+from ssr_abi import (
+    ABI_VERSION, DUMP_FORMAT_VERSION, DUMP_HEADER, DUMP_MAGIC,
+    RECORD_ENDPOINT_RECORDER as RECORDER_ENDPOINT,
+    RECORD_FLAG_DISCONTINUITY as FLAG_DISCONTINUITY,
+    RECORD_FLAG_REPEAT as FLAG_REPEAT, RECORD_HEADER as HEADER,
+    RECORD_KIND_DATA as KIND_DATA, RECORD_KIND_FORMAT_CHANGE as KIND_FORMAT_CHANGE,
+    RECORD_KIND_OVERRUN as KIND_OVERRUN, RECORD_KIND_READ_END as KIND_READ_END,
+    RECORD_KIND_STREAM_START as KIND_STREAM_START,
+    RECORD_KIND_STREAM_STOP as KIND_STREAM_STOP, RECORD_KIND_VOLUME as KIND_VOLUME,
 )
+from ssr_control import ControlDevice
 
-DUMP_HEADER = struct.Struct("<8sIIQII")
-DUMP_MAGIC = b"SSRDUMP\0"
-ABI_VERSION = 1
-DUMP_FORMAT_VERSION = 3
-KIND_READ_END = 0x8001
-RECORDER_ENDPOINT = 0xFFFF
 ERROR_SHARING_VIOLATION = 32
 DEFAULT_TIMEOUT_MS = 50
 
@@ -149,25 +141,12 @@ def summarize_records(records, qpc_frequency, elapsed_seconds, endpoint_mask, st
                 item = format_description(record["payload"])
                 item.update({"qpc": record["qpc"], "epoch": record["epoch"]})
                 formats.append(item)
-        discontinuities = 0
-        discontinuity_flags = 0
-        lost_from_gaps = 0
-        previous = None
-        for record in data:
-            if record["flags"] & FLAG_DISCONTINUITY:
-                discontinuity_flags += 1
-            if previous is not None:
-                expected = previous["byte_pos"] + previous["len"]
-                if record["byte_pos"] != expected:
-                    discontinuities += 1
-                    if record["byte_pos"] > expected:
-                        lost_from_gaps += record["byte_pos"] - expected
-            previous = record
-        overrun_lost = 0
+        shared = endpoint_stats(records, endpoint, qpc_frequency)
+        discontinuities = sum(
+            record["byte_pos"] != previous["byte_pos"] + previous["len"]
+            for previous, record in zip(data, data[1:]))
+        discontinuity_flags = sum(bool(record["flags"] & FLAG_DISCONTINUITY) for record in data)
         overruns = [r for r in mine if r["kind"] == KIND_OVERRUN]
-        for record in overruns:
-            if len(record["payload"]) >= 8:
-                overrun_lost += struct.unpack_from("<Q", record["payload"])[0]
         written = [r["qpc_written"] for r in data if r.get("qpc_written")]
         intervals = []
         if qpc_frequency:
@@ -196,7 +175,8 @@ def summarize_records(records, qpc_frequency, elapsed_seconds, endpoint_mask, st
             "byte_pos_discontinuities": discontinuities,
             "discontinuity_flags": discontinuity_flags,
             "overrun_records": len(overruns),
-            "lost_bytes": max(lost_from_gaps, overrun_lost),
+            "lost_bytes": shared["lost_bytes"],
+            "rate_error_ppm": shared.get("rate_error_ppm"),
             "starts": sum(r["kind"] == KIND_STREAM_START and not r["flags"] & FLAG_REPEAT for r in mine),
             "stops": sum(r["kind"] == KIND_STREAM_STOP and not r["flags"] & FLAG_REPEAT for r in mine),
             "state_repeats": sum(bool(r["flags"] & FLAG_REPEAT) for r in mine),

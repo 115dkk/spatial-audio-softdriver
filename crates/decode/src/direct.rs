@@ -270,3 +270,16 @@ pub const fn speaker_name(speaker: Speaker) -> &'static str {
         Lfe2 => "LFE2",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_direct_layout_channels_match_driver_contract() {
+        let channels = DirectLayouts::default()
+            .iter()
+            .fold(0, |mask, (channels, _)| mask | 1 << (channels - 1));
+        assert_eq!(channels, ssr_abi::DIRECT_DEFAULT_CHANNELS);
+    }
+}

@@ -777,9 +777,7 @@ bool IntersectionAccept(const ssr::PcmCandidate& value, void* opaque) {
            (!rule.direct_only || value.channel_mask == 0);
 }
 
-bool PcmIntersectionAllowed(const ssr::PcmCandidate& value, void* opaque) {
-    const auto& enabled = *static_cast<SSR_PCM_FORMATS*>(opaque);
-    uint8_t wave[40]{};
+void CandidateWave(uint8_t* wave, const ssr::PcmCandidate& value) {
     Put16(wave, 0, 0xfffe);
     Put16(wave, 2, value.channels);
     Put32(wave, 4, value.rate);
@@ -794,6 +792,13 @@ bool PcmIntersectionAllowed(const ssr::PcmCandidate& value, void* opaque) {
     Put16(wave, 28, 0);
     const uint8_t tail[10] = {0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71};
     memcpy(wave + 30, tail, sizeof(tail));
+}
+
+bool PcmIntersectionAllowed(const ssr::PcmCandidate& value, void* opaque) {
+    const auto& enabled = *static_cast<SSR_PCM_FORMATS*>(opaque);
+    uint8_t wave[40]{};
+    CandidateWave(wave, value);
+    CHECK(ssr::PcmCandidateAllowed(enabled, value));
     return ssr::PcmAllowed(enabled, wave, sizeof(wave));
 }
 
@@ -821,7 +826,7 @@ void PcmIntersectionOrder() {
     CHECK(ssr::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
     CHECK(result.rate == 44100);
     enabled = SSR_DEFAULT_PCM;
-    enabled.shapes = 1U;
+    enabled.shapes = SSR_PCM_SHAPE_INT16;
     CHECK(ssr::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
     CHECK(result.bits == 16 && result.valid_bits == 16 && !result.floating);
     enabled = {};
@@ -831,6 +836,298 @@ void PcmIntersectionOrder() {
     enabled.direct_channels = 1U << 1U;
     CHECK(ssr::ChoosePcmIntersection(enabled, oem, PcmIntersectionAllowed, &enabled, &result));
     CHECK(result.channels == 2);
+}
+
+struct TestShape { uint16_t bits, valid; bool floating; uint32_t bit; };
+constexpr TestShape kTestShapes[] = {
+    {16, 16, false, SSR_PCM_SHAPE_INT16}, {24, 24, false, SSR_PCM_SHAPE_INT24},
+    {32, 24, false, SSR_PCM_SHAPE_INT24_IN_32}, {32, 32, false, SSR_PCM_SHAPE_INT32},
+    {32, 32, true, SSR_PCM_SHAPE_FLOAT32},
+    {8, 8, false, 0}, {16, 15, false, 0}, {24, 20, false, 0},
+    {32, 0, false, 0}, {32, 16, false, 0}, {64, 64, false, 0},
+    {16, 16, true, 0}, {24, 24, true, 0}, {32, 24, true, 0}, {64, 64, true, 0},
+};
+
+void CheckCandidate(const SSR_PCM_FORMATS& enabled, const ssr::PcmCandidate& candidate, bool expected) {
+    uint8_t unaligned[41]{};
+    auto* wave = unaligned + 1; // Exercise unaligned WAVE and GUID parsing.
+    CandidateWave(wave, candidate);
+    CHECK(ssr::PcmCandidateAllowed(enabled, candidate) == expected);
+    CHECK(ssr::PcmAllowed(enabled, wave, 40) == expected);
+    CHECK(ssr::FormatAccepted({0, enabled}, wave + 24, wave, 40) == expected);
+}
+
+void PcmCandidateAgreementGrid() {
+    const uint32_t masks[] = {0, 4, 3, 0x33, 0x3f, 0x60f, 0xff, 0x63f,
+        0x2d63f, SSR_PCM_SPEAKER_BITS, 0x40000, UINT32_MAX};
+    const uint32_t outside[] = {0, 1, 32000, 47999, 48001, 192001, UINT32_MAX};
+    const uint32_t limits[] = {0, 2, 8, 18};
+    for (uint16_t channels = 1; channels <= 33; ++channels) for (uint32_t mask : masks) {
+        uint32_t count = 0;
+        for (uint32_t m = mask; m; m &= m - 1U) ++count;
+        for (uint32_t limit : limits) {
+            auto enabled = SSR_DEFAULT_PCM; enabled.max_masked_channels = limit;
+            const bool channelOk = channels <= SSR_MAX_PCM_CHANNELS && (!mask ||
+                (!(mask & ~static_cast<uint32_t>(SSR_PCM_SPEAKER_BITS)) && count == channels && channels <= limit));
+            for (const auto& shape : kTestShapes) {
+                for (uint32_t rate : SSR_PCM_RATES)
+                    CheckCandidate(enabled, {channels, rate, mask, shape.bits, shape.valid, shape.floating}, channelOk && shape.bit != 0);
+                for (uint32_t rate : outside)
+                    CheckCandidate(enabled, {channels, rate, mask, shape.bits, shape.valid, shape.floating}, false);
+            }
+        }
+    }
+}
+
+void PcmMaskBits() {
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        auto enabled = SSR_DEFAULT_PCM;
+        enabled.rates = UINT32_C(1) << bit;
+        for (uint32_t r = 0; r < SSR_PCM_RATE_COUNT; ++r)
+            CheckCandidate(enabled, {2, SSR_PCM_RATES[r], 3, 16, 16, false}, r == bit);
+        CHECK(ssr::PcmTypeEnabled(enabled, false) == (bit < SSR_PCM_RATE_COUNT));
+        enabled = SSR_DEFAULT_PCM; enabled.shapes = UINT32_C(1) << bit;
+        for (const auto& shape : kTestShapes)
+            CheckCandidate(enabled, {2, SSR_PCM_RATES[0], 3, shape.bits, shape.valid, shape.floating},
+                (shape.bit & enabled.shapes) != 0);
+        enabled = SSR_DEFAULT_PCM; enabled.direct_channels = UINT32_C(1) << bit;
+        for (uint16_t c = 1; c <= 33; ++c)
+            CheckCandidate(enabled, {c, SSR_PCM_RATES[0], 0, 16, 16, false}, c == bit + 1U);
+    }
+}
+
+void CarrierWave(uint8_t* wave, const ssr::CodecCarrier& carrier) {
+    CandidateWave(wave, {carrier.channels, carrier.rate, carrier.channel_mask,
+        carrier.bits, carrier.valid_bits, false});
+    Put32(wave, 24, carrier.subtype_id);
+    Put16(wave, 28, carrier.subtype_family);
+}
+
+void CodecCarrierAcceptance() {
+    for (const auto& carrier : ssr::kCodecCarriers) {
+        uint8_t wave[40]{}; CarrierWave(wave, carrier);
+        const SSR_ENDPOINT_FORMATS enabled{carrier.bit, {}};
+        CHECK(ssr::FormatAccepted(enabled, wave + 24, wave, sizeof(wave)));
+        CHECK(!ssr::FormatAccepted({SSR_COMPILED_CODECS & ~carrier.bit, {}}, wave + 24, wave, sizeof(wave)));
+        CHECK(ssr::CodecBit(wave, sizeof(wave)) == carrier.bit);
+        Put32(wave, 20, 0);
+        CHECK(ssr::FormatAccepted(enabled, wave + 24, wave, sizeof(wave)));
+        // Rebuild between mutations. These values cannot describe another carrier.
+        for (uint32_t mutation = 0; mutation < 8; ++mutation) {
+            CarrierWave(wave, carrier);
+            switch (mutation) {
+                case 0: Put32(wave, 24, 0xffffffff); break;
+                case 1: Put16(wave, 2, 3); Put16(wave, 12, 6); Put32(wave, 8, carrier.rate * 6U); break;
+                case 2: Put32(wave, 4, carrier.rate + 1U); Put32(wave, 8, (carrier.rate + 1U) * carrier.channels * 2U); break;
+                case 3: Put16(wave, 14, 24); Put16(wave, 18, 24); Put16(wave, 12, static_cast<uint16_t>(carrier.channels * 3U)); Put32(wave, 8, carrier.rate * carrier.channels * 3U); break;
+                case 4: Put16(wave, 18, 15); break;
+                case 5: Put32(wave, 20, 1); break;
+                case 6: Put16(wave, 12, 1); break;
+                default: Put32(wave, 8, 1); break;
+            }
+            CHECK(!ssr::FormatAccepted(enabled, wave + 24, wave, sizeof(wave)));
+        }
+    }
+}
+
+// Pinned independently of kCodecCarriers: codec bits as numbers, the
+// ksmedia.h subtypes and KSAUDIO_SPEAKER masks the driver advertised before
+// the table moved into the core.
+void CodecCarrierGolden() {
+    const ssr::CodecCarrier golden[] = {
+        {0x002, 0x0092, 0x0000, 2,  44100, 0x60f, 16, 16},  // AC-3, 5.1 surround
+        {0x002, 0x0092, 0x0000, 2,  48000, 0x60f, 16, 16},
+        {0x010, 0x000c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // TrueHD (MLP), 7.1
+        {0x010, 0x000c, 0x0cea, 8, 192000, 0x63f, 16, 16},  // TrueHD, 7.1 surround
+        {0x080, 0x0008, 0x0000, 2,  48000, 0x60f, 16, 16},  // DTS
+        {0x100, 0x000b, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // DTS-HD
+        {0x100, 0x010b, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // DTS:X E1
+        {0x100, 0x030b, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // DTS:X E2
+        {0x020, 0x010c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // MAT 2.0
+        {0x040, 0x030c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // MAT 2.1
+        {0x040, 0x070c, 0x0cea, 8, 192000, 0x0ff, 16, 16},  // MAT 2.1 (PROFILE4 alias)
+        {0x004, 0x000a, 0x0cea, 2, 192000, 0x60f, 16, 16},  // E-AC-3
+        {0x008, 0x010a, 0x0cea, 2, 192000, 0x0ff, 16, 16},  // E-AC-3 JOC
+    };
+    static_assert(sizeof(golden) == sizeof(ssr::kCodecCarriers), "carrier count");
+    for (size_t i = 0; i < sizeof(golden) / sizeof(golden[0]); ++i) {
+        const auto& a = golden[i];
+        const auto& b = ssr::kCodecCarriers[i];
+        CHECK(a.bit == b.bit && a.subtype_id == b.subtype_id && a.subtype_family == b.subtype_family &&
+              a.channels == b.channels && a.rate == b.rate && a.channel_mask == b.channel_mask &&
+              a.bits == b.bits && a.valid_bits == b.valid_bits);
+        uint8_t wave[40]{}; CarrierWave(wave, a);
+        CHECK(ssr::CodecBit(wave, sizeof(wave)) == a.bit);
+        CHECK(ssr::FormatAccepted({a.bit, {}}, wave + 24, wave, sizeof(wave)));
+    }
+}
+
+// Each check of FormatAccepted on its own, with every other field valid.
+void FormatAcceptedSingleChecks() {
+    const SSR_ENDPOINT_FORMATS all{SSR_COMPILED_CODECS, SSR_COMPILED_PCM};
+    // Extensible with a cbSize too small for WAVEFORMATEXTENSIBLE, although
+    // the buffer holds a valid one.
+    const uint16_t shortSizes[] = {0, 21};
+    for (uint16_t cb : shortSizes) {
+        uint8_t wave[40]{}; CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 16, 16, false});
+        CHECK(ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+        Put16(wave, 16, cb);
+        CHECK(!ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+    }
+    // A plain WAVEFORMATEX must agree with the KS subtype too.
+    {
+        uint8_t wave[40]{}; CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 16, 16, false});
+        Put16(wave, 0, 1); Put16(wave, 16, 0);
+        uint8_t pcm[16]; memcpy(pcm, wave + 24, sizeof(pcm));
+        uint8_t floating[16]; memcpy(floating, pcm, sizeof(floating)); Put32(floating, 0, 3);
+        CHECK(ssr::FormatAccepted(all, pcm, wave, 18));
+        CHECK(!ssr::FormatAccepted(all, floating, wave, 18));
+    }
+    // A carrier's container width on its own (valid bits unchanged).
+    for (const auto& carrier : ssr::kCodecCarriers) {
+        uint8_t wave[40]{}; CarrierWave(wave, carrier);
+        Put16(wave, 14, 24);
+        Put16(wave, 12, static_cast<uint16_t>(carrier.channels * 3U));
+        Put32(wave, 8, carrier.rate * carrier.channels * 3U);
+        CHECK(!ssr::FormatAccepted({carrier.bit, {}}, wave + 24, wave, sizeof(wave)));
+    }
+    // The ring keeps formats up to kMaxFormatBytes; a longer declared format
+    // is refused even when the buffer holds it.
+    {
+        uint8_t wave[ssr::kMaxFormatBytes + 1]{};
+        CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 16, 16, false});
+        Put16(wave, 16, static_cast<uint16_t>(ssr::kMaxFormatBytes - 18U));
+        CHECK(ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+        Put16(wave, 16, static_cast<uint16_t>(ssr::kMaxFormatBytes - 17U));
+        CHECK(!ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+    }
+}
+
+void FormatSubtypeValidation() {
+    const SSR_ENDPOINT_FORMATS all{SSR_COMPILED_CODECS, SSR_COMPILED_PCM};
+    uint8_t wave[40]{}; CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 32, 32, true});
+    uint8_t guid[16]; memcpy(guid, wave + 24, sizeof(guid));
+    Put32(guid, 0, 1); // Both subtypes are supported, but KS and WAVE must agree.
+    CHECK(!ssr::FormatAccepted(all, guid, wave, sizeof(wave)));
+    Put32(guid, 0, 3);
+    for (uint32_t i = 0; i < sizeof(guid); ++i) {
+        guid[i] ^= 0x80;
+        CHECK(!ssr::FormatAccepted(all, guid, wave, sizeof(wave)));
+        wave[24 + i] ^= 0x80;
+        CHECK(!ssr::FormatAccepted(all, guid, wave, sizeof(wave)));
+        guid[i] ^= 0x80; wave[24 + i] ^= 0x80;
+    }
+    for (uint32_t n = 0; n < sizeof(wave); ++n) CHECK(!ssr::FormatAccepted(all, guid, wave, n));
+    CHECK(!ssr::FormatAccepted(all, nullptr, wave, sizeof(wave)));
+    CHECK(!ssr::FormatAccepted(all, guid, nullptr, sizeof(wave)));
+    Put16(wave, 16, UINT16_MAX); CHECK(!ssr::FormatAccepted(all, guid, wave, sizeof(wave)));
+    const uint16_t tags[] = {1, 3, 0x92, 8};
+    for (uint16_t tag : tags) {
+        if (tag == 0x92 || tag == 8) CarrierWave(wave, ssr::kCodecCarriers[tag == 8 ? 4 : 1]);
+        else CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 32, 32, tag == 3});
+        Put16(wave, 0, tag); Put16(wave, 16, 0);
+        CHECK(ssr::FormatAccepted(all, wave + 24, wave, 18) == (tag != 8));
+        if (tag == 8) CHECK(ssr::CodecBit(wave, 18) == SSR_FORMAT_DTS);
+    }
+    CandidateWave(wave, {32, UINT32_MAX, 0, 32, 32, true});
+    CHECK(!ssr::FormatAccepted(all, wave + 24, wave, sizeof(wave)));
+}
+
+void FormatTypeRules() {
+    const SSR_ENDPOINT_FORMATS all{SSR_COMPILED_CODECS, SSR_COMPILED_PCM};
+    uint8_t wave[40]{};
+    const bool types[] = {false, true};
+    for (bool floating : types) {
+        CandidateWave(wave, {2, SSR_PCM_RATES[1], 3, 32, 32, floating});
+        CHECK(ssr::FormatTypeAccepted(all, wave + 24));
+        CHECK(!ssr::FormatTypeAccepted({}, wave + 24));
+        auto enabled = all; enabled.pcm.rates = UINT32_C(1) << 31U;
+        CHECK(!ssr::FormatTypeAccepted(enabled, wave + 24));
+        enabled = all; enabled.pcm.shapes = UINT32_C(1) << 31U;
+        CHECK(!ssr::FormatTypeAccepted(enabled, wave + 24));
+        enabled = all; enabled.pcm.max_masked_channels = 0; enabled.pcm.direct_channels = 0;
+        CHECK(!ssr::FormatTypeAccepted(enabled, wave + 24));
+    }
+    for (const auto& carrier : ssr::kCodecCarriers) {
+        CarrierWave(wave, carrier);
+        CHECK(ssr::FormatTypeAccepted({carrier.bit, {}}, wave + 24));
+        CHECK(!ssr::FormatTypeAccepted({all.codecs & ~carrier.bit, all.pcm}, wave + 24));
+        for (uint32_t i = 24; i < 40; ++i) {
+            wave[i] ^= 0x80;
+            CHECK(!ssr::FormatTypeAccepted(all, wave + 24));
+            wave[i] ^= 0x80;
+        }
+    }
+    Put32(wave, 24, UINT32_MAX); CHECK(!ssr::FormatTypeAccepted(all, wave + 24));
+    CHECK(!ssr::FormatTypeAccepted(all, nullptr));
+}
+
+void PcmRangeRules() {
+    ssr::PcmRangeBounds bounds{};
+    CHECK(ssr::PcmRange(SSR_DEFAULT_PCM, false, &bounds));
+    CHECK(bounds.max_channels == 32 && bounds.min_bits == 16 && bounds.max_bits == 32 &&
+        bounds.min_rate == SSR_PCM_RATES[0] && bounds.max_rate == SSR_PCM_RATES[SSR_PCM_RATE_COUNT - 1] );
+    CHECK(ssr::PcmRange(SSR_DEFAULT_PCM, true, &bounds));
+    CHECK(bounds.min_bits == 32 && bounds.max_bits == 32);
+    auto enabled = SSR_DEFAULT_PCM; enabled.shapes = SSR_PCM_SHAPES_INTEGER;
+    CHECK(ssr::PcmRange(enabled, false, &bounds)); CHECK(!ssr::PcmRange(enabled, true, &bounds));
+    enabled.shapes = SSR_PCM_SHAPE_FLOAT32;
+    CHECK(ssr::PcmRange(enabled, true, &bounds)); CHECK(!ssr::PcmRange(enabled, false, &bounds));
+    enabled.shapes = SSR_PCM_SHAPE_INT16;
+    CHECK(ssr::PcmRange(enabled, false, &bounds)); CHECK(bounds.min_bits == 16 && bounds.max_bits == 16);
+    enabled = SSR_DEFAULT_PCM; enabled.max_masked_channels = 0; enabled.direct_channels = 1U << 11U;
+    CHECK(ssr::PcmRange(enabled, false, &bounds)); CHECK(bounds.max_channels == 12);
+    enabled = SSR_DEFAULT_PCM; enabled.direct_channels = 0; enabled.max_masked_channels = UINT32_MAX;
+    CHECK(ssr::PcmRange(enabled, false, &bounds)); CHECK(bounds.max_channels == 18);
+    enabled = SSR_DEFAULT_PCM; enabled.rates = UINT32_C(1) << 31U;
+    CHECK(!ssr::PcmRange(enabled, false, &bounds));
+    enabled = SSR_DEFAULT_PCM; enabled.shapes = UINT32_C(1) << 31U;
+    CHECK(!ssr::PcmRange(enabled, false, &bounds));
+    enabled = SSR_DEFAULT_PCM; enabled.rates = 0;
+    CHECK(!ssr::PcmRange(enabled, false, &bounds)); CHECK(!ssr::PcmRange(enabled, true, &bounds));
+    enabled = SSR_DEFAULT_PCM; enabled.shapes = 0;
+    CHECK(!ssr::PcmRange(enabled, false, &bounds)); CHECK(!ssr::PcmRange(enabled, true, &bounds));
+    enabled = SSR_DEFAULT_PCM; enabled.max_masked_channels = 0; enabled.direct_channels = 0;
+    CHECK(!ssr::PcmRange(enabled, false, &bounds)); CHECK(!ssr::PcmRange(enabled, true, &bounds));
+    const auto saved = bounds;
+    CHECK(!ssr::PcmRange({}, false, &bounds));
+    CHECK(bounds.max_channels == saved.max_channels && bounds.min_bits == saved.min_bits &&
+        bounds.max_bits == saved.max_bits && bounds.min_rate == saved.min_rate && bounds.max_rate == saved.max_rate);
+    CHECK(!ssr::PcmRange(SSR_DEFAULT_PCM, false, nullptr));
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        enabled = SSR_DEFAULT_PCM; enabled.rates = UINT32_C(1) << bit;
+        const bool found = ssr::PcmRange(enabled, false, &bounds);
+        CHECK(found == (bit < SSR_PCM_RATE_COUNT));
+        if (found) CHECK(bounds.min_rate == SSR_PCM_RATES[bit] && bounds.max_rate == SSR_PCM_RATES[bit]);
+        enabled = SSR_DEFAULT_PCM; enabled.shapes = UINT32_C(1) << bit;
+        for (const auto& shape : kTestShapes) if (shape.bit == enabled.shapes) {
+            CHECK(ssr::PcmRange(enabled, shape.floating, &bounds));
+            CHECK(bounds.min_bits == shape.bits && bounds.max_bits == shape.bits);
+        }
+        enabled = SSR_DEFAULT_PCM; enabled.max_masked_channels = 0; enabled.direct_channels = UINT32_C(1) << bit;
+        CHECK(ssr::PcmRange(enabled, false, &bounds)); CHECK(bounds.max_channels == bit + 1U);
+    }
+}
+
+void PcmIntersectionCandidates() {
+    const ssr::PcmCandidate oem{8, SSR_PCM_RATES[1], 0x63f, 32, 32, true};
+    auto accepts = [](const ssr::PcmCandidate& candidate, void* opaque) {
+        CHECK(ssr::PcmCandidateAllowed(*static_cast<SSR_PCM_FORMATS*>(opaque), candidate));
+        return true;
+    };
+    for (uint32_t bit = 0; bit < 32; ++bit) for (uint32_t field = 0; field < 3; ++field) {
+        auto enabled = SSR_DEFAULT_PCM;
+        if (field == 0) enabled.rates = UINT32_C(1) << bit;
+        else if (field == 1) enabled.shapes = UINT32_C(1) << bit;
+        else { enabled.direct_channels = UINT32_C(1) << bit; enabled.max_masked_channels = 0; }
+        ssr::PcmCandidate result{};
+        const bool found = ssr::ChoosePcmIntersection(enabled, oem, accepts, &enabled, &result);
+        const bool expected = field == 0 ? bit < SSR_PCM_RATE_COUNT : field == 1 ?
+            ((UINT32_C(1) << bit) & (SSR_PCM_SHAPES_INTEGER | SSR_PCM_SHAPE_FLOAT32)) != 0 :
+            ((UINT32_C(1) << bit) & SSR_DIRECT_DEFAULT_CHANNELS) != 0;
+        CHECK(found == expected);
+        if (found) CHECK(ssr::PcmCandidateAllowed(enabled, result));
+    }
 }
 
 void PcmRules() {
@@ -864,12 +1161,10 @@ void PcmRules() {
         make(2, 3, rate); CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
     }
     make(2, 3, 32000); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
-    const uint16_t widths[] = {16, 24, 32, 32, 32};
-    const uint16_t valid[] = {16, 24, 24, 32, 32};
-    for (uint32_t i = 0; i < 5; ++i) {
-        make(2, 3, 48000, widths[i], valid[i], i == 4 ? 3 : 1);
+    for (const auto& shape : kTestShapes) if (shape.bit) {
+        make(2, 3, SSR_PCM_RATES[1], shape.bits, shape.valid, shape.floating ? 3U : 1U);
         CHECK(ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
-        auto enabled = SSR_DEFAULT_PCM; enabled.shapes &= ~(1U << i);
+        auto enabled = SSR_DEFAULT_PCM; enabled.shapes &= ~shape.bit;
         CHECK(!ssr::PcmAllowed(enabled, wave, 40));
         Put16(wave, 18, 20); CHECK(!ssr::PcmAllowed(SSR_DEFAULT_PCM, wave, 40));
     }
@@ -924,6 +1219,15 @@ int main() {
     Formats();
     PcmIntersectionOrder();
     PcmRules();
+    PcmCandidateAgreementGrid();
+    PcmMaskBits();
+    CodecCarrierAcceptance();
+    CodecCarrierGolden();
+    FormatAcceptedSingleChecks();
+    FormatSubtypeValidation();
+    FormatTypeRules();
+    PcmRangeRules();
+    PcmIntersectionCandidates();
     Volume32();
     FormatlessOverwriteKeepsReading();
     if (failures != 0) {

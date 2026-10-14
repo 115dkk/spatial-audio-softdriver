@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use convolver::{Binauralizer, FilterBank};
+use convolver::{Binauralizer, FilterBank, MonoConvolver};
 use ssr_types::Feeds;
 
 #[global_allocator]
@@ -69,6 +69,30 @@ fn steady_state_process_does_not_allocate() {
             start.elapsed() / iterations
         );
     }
+}
+
+#[test]
+fn mono_process_and_quiet_protocol_do_not_allocate() {
+    const PARTITION: usize = 480;
+    let ir = (0..24_000)
+        .map(|frame| ((frame * 17) as f32).sin() / 10_000.0)
+        .collect::<Vec<_>>();
+    let bank = Arc::new(FilterBank::new_mono(&[ir.as_slice()], PARTITION).unwrap());
+    let mut convolver = MonoConvolver::new(bank, PARTITION);
+    let mut feeds = Feeds::new(1, PARTITION);
+    feeds.channel_mut(0)[0] = 1.0;
+    let mut output = vec![0.0; PARTITION];
+
+    assert_no_alloc(|| {});
+    convolver.process(&feeds, &mut output);
+    assert_no_alloc(|| {
+        for _ in 0..80 {
+            convolver.note_active_input();
+            convolver.process(&feeds, &mut output);
+            convolver.note_silent_input(PARTITION);
+        }
+        convolver.reset();
+    });
 }
 
 #[test]

@@ -227,7 +227,7 @@ fn generate() -> String {
         .lines()
         .map(|line| {
             if let Some(values) = line.strip_prefix("#define SSR_PCM_RATES ") {
-                format!("static const uint32_t SSR_PCM_RATES[6] = {values};")
+                format!("static const uint32_t SSR_PCM_RATES[SSR_PCM_RATE_COUNT] = {values};")
             } else if line.starts_with("#define SSR_DEFAULT_PCM ")
                 || line.starts_with("#define SSR_COMPILED_PCM ")
             {
@@ -273,6 +273,19 @@ fn parse_inf_qword(inf: &str, name: &str) -> u64 {
     u64::from_le_bytes(bytes.try_into().unwrap())
 }
 
+fn parse_inf_dword(inf: &str, name: &str) -> u32 {
+    let prefix = format!("HKR,Parameters,{name},0x00010001,");
+    let raw = inf
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("INF lacks {name}"));
+    if let Some(hex) = raw.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16).unwrap()
+    } else {
+        raw.parse().unwrap()
+    }
+}
+
 #[test]
 fn default_capabilities_match_header_and_inf() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -280,6 +293,10 @@ fn default_capabilities_match_header_and_inf() {
     assert_eq!(
         parse_c_decimal_define(&header, "SSR_DEFAULT_ENABLED_CODECS"),
         DEFAULT_ENABLED_CODECS
+    );
+    assert_eq!(
+        parse_c_decimal_define(&header, "SSR_DEFAULT_ENDPOINT_MASK"),
+        u64::from(ssr_abi::DEFAULT_ENDPOINT_MASK)
     );
     let bytes =
         std::fs::read(root.join("driver/spatialsoftreceiver/spatialsoftreceiver.inx")).unwrap();
@@ -295,6 +312,14 @@ fn default_capabilities_match_header_and_inf() {
         .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     let inf = String::from_utf16(&units).unwrap();
+    assert_eq!(
+        parse_inf_dword(&inf, "EndpointMask"),
+        ssr_abi::DEFAULT_ENDPOINT_MASK
+    );
+    assert_eq!(
+        parse_c_decimal_define(&header, "SSR_PCM_RATE_COUNT"),
+        ssr_abi::PCM_RATES.len() as u64
+    );
     for index in 0..4 {
         let name = format!("CodecMask{index}");
         assert_eq!(parse_inf_qword(&inf, &name), DEFAULT_ENABLED_CODECS);
@@ -307,17 +332,8 @@ fn default_capabilities_match_header_and_inf() {
             ),
             ("PcmDirectChannels", ssr_abi::DEFAULT_PCM.direct_channels),
         ] {
-            let prefix = format!("HKR,Parameters,{field}{index},0x00010001,");
-            let raw = inf
-                .lines()
-                .find_map(|line| line.strip_prefix(&prefix))
-                .unwrap_or_else(|| panic!("INF lacks {field}{index}"));
-            let actual = if let Some(hex) = raw.strip_prefix("0x") {
-                u32::from_str_radix(hex, 16).unwrap()
-            } else {
-                raw.parse().unwrap()
-            };
-            assert_eq!(actual, expected, "{field}{index}");
+            let name = format!("{field}{index}");
+            assert_eq!(parse_inf_dword(&inf, &name), expected, "{name}");
         }
     }
 }

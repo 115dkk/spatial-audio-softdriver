@@ -253,27 +253,11 @@ jobs:
         with:
           shared-key: audio
 
-      - name: Install a virtual audio cable (tools/ci/install-virtual-cable.ps1)
+      # VB-CABLE, local crash dumps, the system timer held at 1 ms and MMCSS
+      # running; the driver end-to-end job uses the same script (ADR 0026).
+      - name: Real-time audio on the runner (tools/ci/realtime-audio.ps1)
         shell: pwsh
-        run: ./tools/ci/install-virtual-cable.ps1
-
-      # VB-CABLE's exclusive-mode events advance on the system timer, one per
-      # 15.6 ms tick whatever the period; a 1 ms tick lets it keep the periods
-      # the engine asks for, as hardware does (ADR 0026).
-      - name: Crash dumps on; system timer held at 1 ms; MMCSS running (tools/ci/crash-dumps.ps1, timer-resolution.ps1)
-        shell: pwsh
-        run: |
-          ./tools/ci/crash-dumps.ps1 -Folder (Join-Path $env:RUNNER_TEMP 'dumps')
-          ./tools/ci/timer-resolution.ps1
-          # MMCSS boosts the real-time threads. The Server images leave it
-          # stopped (manual start) until the first registration starts it,
-          # which lands in the first second of a run; desktops run it already.
-          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' |
-            Select-Object SystemResponsiveness, NetworkThrottlingIndex | Format-List
-          Start-Service -Name MMCSS
-          $mmcss = Get-Service -Name MMCSS
-          Write-Host "MMCSS $($mmcss.Status) ($($mmcss.StartType))"
-          if ($mmcss.Status -ne 'Running') { throw "MMCSS is $($mmcss.Status)" }
+        run: ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps')
 
       - name: Build ssr-live and ssr-replay; write the fixtures
         id: build
@@ -286,11 +270,13 @@ jobs:
 
       # The exclusive cadence tests run at a 20 ms period, longer than a PCM
       # block; exclusive_cadence_at_each_period prints the rate the sink
-      # keeps at 3 to 40 ms (ADR 0026).
-      - name: Device tests ssr-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent)
+      # keeps at 3 to 40 ms (ADR 0026). no_alloc runs WASAPI periods (shared,
+      # exclusive with a forced restart, and an exclusive multichannel layout
+      # of the default endpoint) under the allocation guard.
+      - name: Device tests ssr-sys keeps ignored (WASAPI exclusive and shared, MMCSS, SAL absent, no allocation)
         env:
           SSR_TEST_EXCLUSIVE_PERIOD_MS: "20"
-        run: cargo test --locked --release -p ssr-sys --test windows -- --ignored --test-threads=1 --nocapture
+        run: cargo test --locked --release -p ssr-sys --test windows --test no_alloc -- --ignored --test-threads=1 --nocapture
 
       # The stages below run even when an earlier one failed, so one CI round
       # reports on all of them; the job still fails.

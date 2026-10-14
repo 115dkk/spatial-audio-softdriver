@@ -90,7 +90,7 @@ pub struct PreparedSpeaker {
     pub crossover: Option<CrossoverCoefficients>,
     pub delay_frames: usize,
     pub gain: f32,
-    /// A one-input bank whose two outputs contain the same mono FIR.
+    /// A one-input, one-output room-correction FIR bank.
     pub fir: Option<Arc<FilterBank>>,
 }
 
@@ -99,7 +99,7 @@ pub struct PreparedSubwoofer {
     pub device_channel: usize,
     pub delay_frames: usize,
     pub gain: f32,
-    /// A one-input bank whose two outputs contain the same mono FIR.
+    /// A one-input, one-output room-correction FIR bank.
     pub fir: Option<Arc<FilterBank>>,
 }
 
@@ -443,9 +443,7 @@ pub fn prepare(
     })
 }
 
-/// Loads a mono room FIR at `rate`. The convolver has two outputs, so the
-/// bank carries the FIR in both and the speaker stage reads one; a mono
-/// convolver would halve this cost.
+/// Loads a mono room FIR at `rate` into a one-output convolver bank.
 fn prepare_fir(
     path: Option<&Path>,
     rate: u32,
@@ -466,8 +464,8 @@ fn prepare_fir(
             rate,
         });
     }
-    let filters = [[samples.as_slice(), samples.as_slice()]];
-    Ok(Some(Arc::new(FilterBank::new(&filters, partition)?)))
+    let filters = [samples.as_slice()];
+    Ok(Some(Arc::new(FilterBank::new_mono(&filters, partition)?)))
 }
 
 fn validate(profile: &SpeakerProfile) -> Result<Layout, SpeakerError> {

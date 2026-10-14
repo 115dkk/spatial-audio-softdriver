@@ -6,7 +6,9 @@ import os
 import time
 from pathlib import Path
 
-from driver_flow_check import ControlDevice, FLAG_REPEAT, KIND_VOLUME, parse_records, parse_volume
+from driver_flow_check import FLAG_REPEAT, KIND_VOLUME, parse_records, parse_volume
+from ssr_abi import MAX_ENDPOINTS
+from ssr_control import ControlDevice
 
 
 def write_json(path, value):
@@ -62,7 +64,7 @@ def matches(record, expected):
 def verify(captured, actions):
     errors = list(captured.get("errors", [])) + list(actions.get("errors", []))
     mask = captured.get("query_info", {}).get("endpoint_mask", 0)
-    expected_endpoints = [ep for ep in range(4) if mask & (1 << ep)]
+    expected_endpoints = [ep for ep in range(MAX_ENDPOINTS) if mask & (1 << ep)]
     endpoints = actions.get("endpoints", [])
     if not expected_endpoints or sorted(item["endpoint"] for item in endpoints) != expected_endpoints:
         errors.append("tested endpoints do not match QUERY_INFO endpoint_mask")

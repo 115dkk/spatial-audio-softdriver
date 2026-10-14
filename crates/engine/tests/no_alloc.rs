@@ -60,8 +60,8 @@ fn prepared() -> Box<Prepared> {
 fn speaker_prepared() -> Box<Prepared> {
     let layout = Layout::new(vec![Direction::new("front", 0.0, 0.0)]).unwrap();
     let fir_ir = [0.0_f32, 1.0];
-    let fir_filters = [[fir_ir.as_slice(), fir_ir.as_slice()]];
-    let fir = Arc::new(FilterBank::new(&fir_filters, MIX_FRAMES).unwrap());
+    let fir_filters = [fir_ir.as_slice()];
+    let fir = Arc::new(FilterBank::new_mono(&fir_filters, MIX_FRAMES).unwrap());
     let speakers = speakers::PreparedSpeakers {
         layout,
         rate: MIX_RATE,

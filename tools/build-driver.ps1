@@ -8,7 +8,11 @@ param(
     [string]$Configuration = 'Release',
 
     [ValidateSet('x64', 'ARM64')]
-    [string]$Platform = 'x64'
+    [string]$Platform = 'x64',
+
+    # Extra MSBuild properties for diagnostic builds, e.g.
+    # 'SsrConformanceMode=false'. Releases pass none.
+    [string[]]$Property = @()
 )
 
 Set-StrictMode -Version Latest
@@ -91,7 +95,8 @@ if (-not $msbuild) {
 }
 
 $stampDate = Get-Date -Format 'MM/dd/yyyy'
-Invoke-Native -FilePath $msbuild -ArgumentList @(
+# Built first: in a command's arguments `@(...) + @(...)` is three arguments.
+$msbuildArguments = @(
     $solutionPath,
     '/m',
     '/restore:false',
@@ -106,7 +111,8 @@ Invoke-Native -FilePath $msbuild -ArgumentList @(
     '/p:SkipPackageVerification=true',
     '/p:ApiValidator_Enable=false',
     '/verbosity:minimal'
-)
+) + @($Property | ForEach-Object { "/p:$_" })
+Invoke-Native -FilePath $msbuild -ArgumentList $msbuildArguments
 
 $buildDirectory = Join-Path $repositoryRoot "target/driver-build/$Configuration/$Platform"
 $artifacts = @(

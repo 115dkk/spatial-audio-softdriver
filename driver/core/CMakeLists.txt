@@ -4,9 +4,14 @@ cmake_minimum_required(VERSION 3.20)
 project(ssr_driver_core LANGUAGES C CXX)
 
 option(SSR_SANITIZE "Enable address and undefined-behavior sanitizers" OFF)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+# C++23. CMake maps CXX_STANDARD 23 to /std:c++latest on MSVC, while the
+# kernel build (spatialsoftreceiver.vcxproj, stdcpp23) uses /std:c++23preview;
+# MSVC gets that flag in SSR_WARNINGS below instead.
+if(NOT MSVC)
+    set(CMAKE_CXX_STANDARD 23)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    set(CMAKE_CXX_EXTENSIONS OFF)
+endif()
 
 add_library(ssr_core STATIC ssr_ring.cpp ssr_read.cpp ssr_clock.cpp ssr_u128.cpp ssr_format.cpp)
 target_include_directories(ssr_core PUBLIC
@@ -19,7 +24,7 @@ add_executable(write_dump tests/write_dump.cpp)
 target_link_libraries(write_dump PRIVATE ssr_core)
 
 if(MSVC)
-    set(SSR_WARNINGS /W4 /WX /permissive- /EHs-c- /GR-)
+    set(SSR_WARNINGS /std:c++23preview /W4 /WX /permissive- /EHs-c- /GR-)
     target_compile_options(ssr_core PRIVATE ${SSR_WARNINGS})
     target_compile_options(core_tests PRIVATE ${SSR_WARNINGS})
     target_compile_options(write_dump PRIVATE ${SSR_WARNINGS})

@@ -43,13 +43,14 @@ struct FilterSegment {
     offset: usize,
     partitions: usize,
     bins: usize,
-    // [input][ear][partition][bin]
+    outputs: usize,
+    // [input][output][partition][bin]
     spectra: Vec<Complex<f32>>,
 }
 
 impl FilterSegment {
-    fn spectrum(&self, input: usize, ear: usize, partition: usize) -> &[Complex<f32>] {
-        let start = ((input * 2 + ear) * self.partitions + partition) * self.bins;
+    fn spectrum(&self, input: usize, output: usize, partition: usize) -> &[Complex<f32>] {
+        let start = ((input * self.outputs + output) * self.partitions + partition) * self.bins;
         &self.spectra[start..start + self.bins]
     }
 }
@@ -70,16 +71,37 @@ impl FilterBank {
     /// `irs[i] = [left, right]` impulse responses of input `i` (the two ears
     /// may differ in length; a missing tail is represented by zero partitions).
     pub fn new(irs: &[[&[f32]; 2]], partition: usize) -> Result<Self, ConvolverError> {
+        Self::build(irs, partition)
+    }
+
+    /// Builds a one-output filter bank for mono convolution.
+    pub fn new_mono(irs: &[&[f32]], partition: usize) -> Result<Self, ConvolverError> {
+        let wrapped = irs.iter().map(|&ir| [ir]).collect::<Vec<_>>();
+        Self::build(&wrapped, partition)
+    }
+
+    fn build<I, O>(irs: &[I], partition: usize) -> Result<Self, ConvolverError>
+    where
+        I: AsRef<[O]>,
+        O: AsRef<[f32]>,
+    {
         if irs.is_empty() {
             return Err(ConvolverError::NoInputs);
         }
         if partition < 16 || !partition.is_multiple_of(2) {
             return Err(ConvolverError::BadPartition(partition));
         }
+        let outputs = irs[0].as_ref().len();
+        debug_assert!(outputs == 1 || outputs == 2);
 
         let mut longest = 0;
         for (input, ir) in irs.iter().enumerate() {
-            let input_len = ir[0].len().max(ir[1].len());
+            let input_len = ir
+                .as_ref()
+                .iter()
+                .map(|samples| samples.as_ref().len())
+                .max()
+                .unwrap_or(0);
             if input_len == 0 {
                 return Err(ConvolverError::EmptyIr(input));
             }
@@ -112,6 +134,7 @@ impl FilterBank {
         for (offset, segment_partition, segment_partitions) in descriptions {
             segments.push(build_filter_segment(
                 irs,
+                outputs,
                 offset,
                 segment_partition,
                 segment_partitions,
@@ -145,6 +168,11 @@ impl FilterBank {
         self.inputs
     }
 
+    /// Number of output channels represented by every input's impulse response.
+    pub fn outputs(&self) -> usize {
+        self.segments[0].outputs
+    }
+
     /// The smallest partition, which is also the required process hop.
     pub fn partition(&self) -> usize {
         self.partition
@@ -159,23 +187,29 @@ impl FilterBank {
     }
 }
 
-fn build_filter_segment(
-    irs: &[[&[f32]; 2]],
+fn build_filter_segment<I, O>(
+    irs: &[I],
+    outputs: usize,
     offset: usize,
     partition: usize,
     partitions: usize,
     planner: &mut RealFftPlanner<f32>,
-) -> FilterSegment {
+) -> FilterSegment
+where
+    I: AsRef<[O]>,
+    O: AsRef<[f32]>,
+{
     let fft_len = partition * 2;
     let bins = partition + 1;
     let forward = planner.plan_fft_forward(fft_len);
     let mut time = forward.make_input_vec();
     let mut transformed = forward.make_output_vec();
     let mut scratch = forward.make_scratch_vec();
-    let mut spectra = vec![Complex::new(0.0, 0.0); irs.len() * 2 * partitions * bins];
+    let mut spectra = vec![Complex::new(0.0, 0.0); irs.len() * outputs * partitions * bins];
 
     for (input, ir) in irs.iter().enumerate() {
-        for (ear, samples) in ir.iter().enumerate() {
+        for (output, samples) in ir.as_ref().iter().enumerate() {
+            let samples = samples.as_ref();
             for part in 0..partitions {
                 time.fill(0.0);
                 let source_start = offset + part * partition;
@@ -186,7 +220,7 @@ fn build_filter_segment(
                 forward
                     .process_with_scratch(&mut time, &mut transformed, &mut scratch)
                     .expect("buffers were sized by the real FFT plan");
-                let destination = ((input * 2 + ear) * partitions + part) * bins;
+                let destination = ((input * outputs + output) * partitions + part) * bins;
                 spectra[destination..destination + bins].copy_from_slice(&transformed);
             }
         }
@@ -197,6 +231,7 @@ fn build_filter_segment(
         offset,
         partitions,
         bins,
+        outputs,
         spectra,
     }
 }
@@ -249,12 +284,12 @@ impl ImmediateState {
         inputs: usize,
         feeds: &Feeds,
         hop_start: usize,
-        left: &mut [f32],
-        right: &mut [f32],
+        outputs: &mut [&mut [f32]],
     ) {
         self.transform_inputs(segment, inputs, feeds, hop_start);
-        self.synthesize_ear(segment, inputs, 0, left);
-        self.synthesize_ear(segment, inputs, 1, right);
+        for (output_index, output) in outputs.iter_mut().enumerate() {
+            self.synthesize_output(segment, inputs, output_index, output);
+        }
         self.current_slot = (self.current_slot + 1) % segment.partitions;
     }
 
@@ -285,11 +320,11 @@ impl ImmediateState {
         }
     }
 
-    fn synthesize_ear(
+    fn synthesize_output(
         &mut self,
         segment: &FilterSegment,
         inputs: usize,
-        ear: usize,
+        output_index: usize,
         output: &mut [f32],
     ) {
         self.accumulator.fill(Complex::new(0.0, 0.0));
@@ -300,7 +335,7 @@ impl ImmediateState {
                     % segment.partitions;
                 let delay_start = (input * segment.partitions + slot) * segment.bins;
                 let input_spectrum = &self.delay_line[delay_start..delay_start + segment.bins];
-                let filter_spectrum = segment.spectrum(input, ear, filter_partition);
+                let filter_spectrum = segment.spectrum(input, output_index, filter_partition);
                 for ((sum, signal), filter) in self
                     .accumulator
                     .iter_mut()
@@ -383,7 +418,7 @@ struct ScheduledState {
 }
 
 impl ScheduledState {
-    fn new(segment: &FilterSegment, inputs: usize, base_partition: usize) -> Self {
+    fn new(segment: &FilterSegment, inputs: usize, outputs: usize, base_partition: usize) -> Self {
         let fft_len = segment.partition * 2;
         let mut planner = RealFftPlanner::<f32>::new();
         let forward = planner.plan_fft_forward(fft_len);
@@ -397,11 +432,12 @@ impl ScheduledState {
         let delay_windows = segment.offset / segment.partition;
         debug_assert!(delay_windows >= 2);
         let spectrum_slots = delay_windows + segment.partitions;
-        let output_spectra = vec![Complex::new(0.0, 0.0); 2 * spectrum_slots * segment.bins];
+        let output_spectra = vec![Complex::new(0.0, 0.0); outputs * spectrum_slots * segment.bins];
         let output_slots = delay_windows + 1;
-        let output_windows = vec![0.0; 2 * output_slots * segment.partition];
+        let output_windows = vec![0.0; outputs * output_slots * segment.partition];
         let ratio = segment.partition / base_partition;
-        let (work_items, work_ends) = build_work_plan(segment, inputs, base_partition, ratio);
+        let (work_items, work_ends) =
+            build_work_plan(segment, inputs, outputs, base_partition, ratio);
 
         Self {
             forward,
@@ -433,10 +469,9 @@ impl ScheduledState {
         base_partition: usize,
         feeds: &Feeds,
         hop_start: usize,
-        left: &mut [f32],
-        right: &mut [f32],
+        outputs: &mut [&mut [f32]],
     ) {
-        self.emit_output(segment.partition, base_partition, left, right);
+        self.emit_output(segment.partition, base_partition, outputs);
         self.collect_input(segment.partition, inputs, base_partition, feeds, hop_start);
 
         if self.window_index != 0 {
@@ -451,25 +486,16 @@ impl ScheduledState {
         }
     }
 
-    fn emit_output(
-        &mut self,
-        partition: usize,
-        base_partition: usize,
-        left: &mut [f32],
-        right: &mut [f32],
-    ) {
+    fn emit_output(&mut self, partition: usize, base_partition: usize, outputs: &mut [&mut [f32]]) {
         let slot = self.window_index % self.output_slots;
         let window_offset = self.hop_in_window * base_partition;
-        let left_start = slot * partition + window_offset;
-        add_and_clear(
-            left,
-            &mut self.output_windows[left_start..left_start + base_partition],
-        );
-        let right_start = (self.output_slots + slot) * partition + window_offset;
-        add_and_clear(
-            right,
-            &mut self.output_windows[right_start..right_start + base_partition],
-        );
+        for (output_index, output) in outputs.iter_mut().enumerate() {
+            let start = (output_index * self.output_slots + slot) * partition + window_offset;
+            add_and_clear(
+                output,
+                &mut self.output_windows[start..start + base_partition],
+            );
+        }
     }
 
     fn collect_input(
@@ -636,11 +662,12 @@ fn add_and_clear(destination: &mut [f32], source: &mut [f32]) {
 fn build_work_plan(
     segment: &FilterSegment,
     inputs: usize,
+    outputs: usize,
     base_partition: usize,
     ratio: usize,
 ) -> (Vec<WorkItem>, Vec<usize>) {
     let chunks = segment.bins.div_ceil(base_partition);
-    let item_capacity = inputs * (1 + 2 * segment.partitions * chunks) + 2;
+    let item_capacity = inputs * (1 + outputs * segment.partitions * chunks) + outputs;
     let mut items = Vec::with_capacity(item_capacity);
     let mut weights = Vec::with_capacity(item_capacity);
     let fft_weight = estimated_fft_weight(segment.partition);
@@ -650,7 +677,7 @@ fn build_work_plan(
         weights.push(fft_weight);
     }
     for filter_partition in 0..segment.partitions {
-        for ear in 0..2 {
+        for ear in 0..outputs {
             for input in 0..inputs {
                 for bin_start in (0..segment.bins).step_by(base_partition) {
                     let bin_end = (bin_start + base_partition).min(segment.bins);
@@ -698,9 +725,7 @@ fn estimated_fft_weight(partition: usize) -> u64 {
     (fft_len as u64 * u64::from(stages)).div_ceil(4)
 }
 
-/// Streaming state for one bank: immediate input history plus scheduled work
-/// and output windows for every larger segment.
-pub struct Binauralizer {
+struct ConvolverCore<const OUTPUTS: usize> {
     bank: Arc<FilterBank>,
     max_block: usize,
     immediate: ImmediateState,
@@ -708,33 +733,20 @@ pub struct Binauralizer {
     silent_hops: usize,
 }
 
-impl fmt::Debug for Binauralizer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Binauralizer")
-            .field("bank", &self.bank)
-            .field("max_block", &self.max_block)
-            .field("scheduled_segments", &self.scheduled.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl Binauralizer {
-    /// Allocates everything `process` needs for blocks up to `max_block`
-    /// frames (a multiple of the bank's smallest partition).
-    pub fn new(bank: Arc<FilterBank>, max_block: usize) -> Self {
+impl<const OUTPUTS: usize> ConvolverCore<OUTPUTS> {
+    fn new(bank: Arc<FilterBank>, max_block: usize) -> Self {
+        assert_eq!(bank.outputs(), OUTPUTS, "filter bank output count mismatch");
         let partition = bank.partition;
         assert!(
             max_block > 0 && max_block.is_multiple_of(partition),
             "maximum block length {max_block} must be a positive multiple of partition {partition}"
         );
-
         let immediate = ImmediateState::new(&bank.segments[0], bank.inputs);
         let silent_hops = bank.quiet_hops;
         let scheduled = bank.segments[1..]
             .iter()
-            .map(|segment| ScheduledState::new(segment, bank.inputs, bank.partition))
+            .map(|segment| ScheduledState::new(segment, bank.inputs, OUTPUTS, bank.partition))
             .collect();
-
         Self {
             bank,
             max_block,
@@ -744,17 +756,11 @@ impl Binauralizer {
         }
     }
 
-    pub fn bank(&self) -> &Arc<FilterBank> {
-        &self.bank
-    }
-
-    /// Whether enough zero input has passed to empty every convolution state.
-    pub fn is_quiet(&self) -> bool {
+    fn is_quiet(&self) -> bool {
         self.silent_hops >= self.bank.quiet_hops
     }
 
-    /// Accounts for a known zero-input block after it has been processed.
-    pub fn note_silent_input(&mut self, frames: usize) {
+    fn note_silent_input(&mut self, frames: usize) {
         debug_assert!(frames.is_multiple_of(self.bank.partition));
         self.silent_hops = self
             .silent_hops
@@ -762,18 +768,14 @@ impl Binauralizer {
             .min(self.bank.quiet_hops);
     }
 
-    /// Marks the next processed block as containing signal.
-    pub fn note_active_input(&mut self) {
+    fn note_active_input(&mut self) {
         self.silent_hops = 0;
     }
 
-    /// Convolves `feeds` (one channel per bank input, `feeds.frames()` a
-    /// multiple of the smallest partition and at most `max_block`) and writes
-    /// the ear sums into `left` and `right` (each `feeds.frames()` long,
-    /// overwritten). Never allocates.
-    pub fn process(&mut self, feeds: &Feeds, left: &mut [f32], right: &mut [f32]) {
+    fn validate(&self, feeds: &Feeds, outputs: &[&mut [f32]]) {
         let frames = feeds.frames();
         let partition = self.bank.partition;
+        assert_eq!(outputs.len(), OUTPUTS);
         assert_eq!(
             feeds.directions(),
             self.bank.inputs,
@@ -788,44 +790,161 @@ impl Binauralizer {
             "block length {frames} exceeds maximum {}",
             self.max_block
         );
-        assert_eq!(left.len(), frames, "left output length must match feeds");
-        assert_eq!(right.len(), frames, "right output length must match feeds");
+        assert!(
+            outputs.iter().all(|output| output.len() == frames),
+            "output length must match feeds"
+        );
+    }
 
-        for hop_start in (0..frames).step_by(partition) {
-            let left_hop = &mut left[hop_start..hop_start + partition];
-            let right_hop = &mut right[hop_start..hop_start + partition];
-            left_hop.fill(0.0);
-            right_hop.fill(0.0);
-
-            self.immediate.process_hop(
-                &self.bank.segments[0],
+    fn process_hop(&mut self, feeds: &Feeds, hop_start: usize, outputs: &mut [&mut [f32]]) {
+        let partition = self.bank.partition;
+        self.immediate.process_hop(
+            &self.bank.segments[0],
+            self.bank.inputs,
+            feeds,
+            hop_start,
+            outputs,
+        );
+        for (state, segment) in self.scheduled.iter_mut().zip(&self.bank.segments[1..]) {
+            state.process_hop(
+                segment,
                 self.bank.inputs,
+                partition,
                 feeds,
                 hop_start,
-                left_hop,
-                right_hop,
+                outputs,
             );
-            for (state, segment) in self.scheduled.iter_mut().zip(&self.bank.segments[1..]) {
-                state.process_hop(
-                    segment,
-                    self.bank.inputs,
-                    partition,
-                    feeds,
-                    hop_start,
-                    left_hop,
-                    right_hop,
-                );
-            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.immediate.reset();
+        for state in &mut self.scheduled {
+            state.reset();
+        }
+        self.silent_hops = self.bank.quiet_hops;
+    }
+}
+
+/// Streaming state for one stereo bank.
+pub struct Binauralizer {
+    core: ConvolverCore<2>,
+}
+
+impl fmt::Debug for Binauralizer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Binauralizer")
+            .field("bank", &self.core.bank)
+            .field("max_block", &self.core.max_block)
+            .field("scheduled_segments", &self.core.scheduled.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Binauralizer {
+    /// Allocates everything `process` needs for blocks up to `max_block`
+    /// frames. `bank` must have two outputs and the block limit must be a
+    /// multiple of its smallest partition.
+    pub fn new(bank: Arc<FilterBank>, max_block: usize) -> Self {
+        Self {
+            core: ConvolverCore::new(bank, max_block),
+        }
+    }
+
+    pub fn bank(&self) -> &Arc<FilterBank> {
+        &self.core.bank
+    }
+
+    /// Whether enough zero input has passed to empty every convolution state.
+    pub fn is_quiet(&self) -> bool {
+        self.core.is_quiet()
+    }
+
+    /// Accounts for a known zero-input block after it has been processed.
+    pub fn note_silent_input(&mut self, frames: usize) {
+        self.core.note_silent_input(frames);
+    }
+
+    /// Marks the next processed block as containing signal.
+    pub fn note_active_input(&mut self) {
+        self.core.note_active_input();
+    }
+
+    /// Convolves `feeds` and overwrites the two ear outputs. Never allocates.
+    pub fn process(&mut self, feeds: &Feeds, left: &mut [f32], right: &mut [f32]) {
+        self.core.validate(feeds, &[left, right]);
+        let partition = self.core.bank.partition;
+        for hop_start in (0..feeds.frames()).step_by(partition) {
+            let hop_end = hop_start + partition;
+            let left_hop = &mut left[hop_start..hop_end];
+            let right_hop = &mut right[hop_start..hop_end];
+            left_hop.fill(0.0);
+            right_hop.fill(0.0);
+            self.core
+                .process_hop(feeds, hop_start, &mut [left_hop, right_hop]);
         }
     }
 
     /// Zeroes every segment's history and any partially completed scheduled
     /// work, as after a format change.
     pub fn reset(&mut self) {
-        self.immediate.reset();
-        for state in &mut self.scheduled {
-            state.reset();
+        self.core.reset();
+    }
+}
+
+/// Streaming state for a one-output filter bank.
+pub struct MonoConvolver {
+    core: ConvolverCore<1>,
+}
+
+impl fmt::Debug for MonoConvolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MonoConvolver")
+            .field("bank", &self.core.bank)
+            .field("max_block", &self.core.max_block)
+            .field("scheduled_segments", &self.core.scheduled.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MonoConvolver {
+    /// Allocates everything `process` needs for blocks up to `max_block`.
+    /// `bank` must have exactly one output.
+    pub fn new(bank: Arc<FilterBank>, max_block: usize) -> Self {
+        Self {
+            core: ConvolverCore::new(bank, max_block),
         }
-        self.silent_hops = self.bank.quiet_hops;
+    }
+
+    pub fn bank(&self) -> &Arc<FilterBank> {
+        &self.core.bank
+    }
+
+    pub fn is_quiet(&self) -> bool {
+        self.core.is_quiet()
+    }
+
+    pub fn note_silent_input(&mut self, frames: usize) {
+        self.core.note_silent_input(frames);
+    }
+
+    pub fn note_active_input(&mut self) {
+        self.core.note_active_input();
+    }
+
+    /// Convolves `feeds` and overwrites the one output. Never allocates.
+    pub fn process(&mut self, feeds: &Feeds, output: &mut [f32]) {
+        self.core.validate(feeds, &[output]);
+        let partition = self.core.bank.partition;
+        for hop_start in (0..feeds.frames()).step_by(partition) {
+            let hop_end = hop_start + partition;
+            let output_hop = &mut output[hop_start..hop_end];
+            output_hop.fill(0.0);
+            self.core.process_hop(feeds, hop_start, &mut [output_hop]);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.core.reset();
     }
 }
