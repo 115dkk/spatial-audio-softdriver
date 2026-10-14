@@ -96,7 +96,9 @@ class VerifierScriptTests(unittest.TestCase):
             f". '{ROOT / 'tools/ci/verifier.ps1'}'\n"
             f"{MOCKS}\n"
             f"function Test-SsrDifVerifier {{ ${'true' if dif else 'false'} }}\n"
-            f"{body}\n"
+            # pwsh wraps an uncaught error to the console width; one line
+            # keeps the message whole wherever the tests run.
+            f"try {{\n{body}\n}} catch {{ Write-Output \"ERROR $($_.Exception.Message)\"; exit 1 }}\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "case.ps1"
