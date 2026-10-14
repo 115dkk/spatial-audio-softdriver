@@ -124,7 +124,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "bitstream"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_no_alloc",
  "proptest",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "brir"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "convolver",
  "hound",
@@ -278,7 +278,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "convolver"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_no_alloc",
  "proptest",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "decode"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_no_alloc",
  "bitstream",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_no_alloc",
  "bitstream",
@@ -628,7 +628,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "render"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_no_alloc",
  "proptest",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "speakers"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "brir",
  "convolver",
@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "ssr-abi"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "cbindgen",
  "proptest",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "ssr-live"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_no_alloc",
  "brir",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "ssr-policy"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "serde",
  "toml 1.1.8+spec-1.1.0",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "ssr-replay"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "bitstream",
  "brir",
@@ -828,14 +828,14 @@ dependencies = [
 
 [[package]]
 name = "ssr-setup"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "ssr-sys",
 ]
 
 [[package]]
 name = "ssr-sys"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "assert_no_alloc",
  "hound",
@@ -849,7 +849,7 @@ dependencies = [
 
 [[package]]
 name = "ssr-types"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "thiserror",
 ]
@@ -868,7 +868,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "supervisor"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "brir",
  "engine",
