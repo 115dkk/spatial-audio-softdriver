@@ -10,6 +10,7 @@
 #[cfg(windows)]
 use crate::{
     devices::{ComGuard, output_error},
+    playback_clock::{ClockReading, PlaybackClock, scale},
     qpc,
 };
 #[cfg(windows)]
@@ -42,61 +43,6 @@ fn exclusive_failure_policy(exclusive: bool, shared_fallback: bool) -> Exclusive
         ExclusiveFailurePolicy::FallBackToShared
     } else {
         ExclusiveFailurePolicy::Fail
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ClockReading {
-    position: u64,
-    qpc_100ns: u64,
-}
-
-#[derive(Debug, Default)]
-struct PlaybackClock {
-    last_qpc: Option<u64>,
-}
-
-impl PlaybackClock {
-    #[allow(clippy::too_many_arguments)]
-    fn next(
-        &mut self,
-        first_frame: u64,
-        reading: Option<ClockReading>,
-        started_qpc: u64,
-        stream_rate: u32,
-        clock_frequency: u64,
-        qpc_frequency: u64,
-        period_frames: usize,
-    ) -> u64 {
-        let candidate = reading.map_or_else(
-            || {
-                started_qpc.saturating_add(scale(
-                    first_frame,
-                    qpc_frequency,
-                    u64::from(stream_rate),
-                ))
-            },
-            |reading| {
-                playback_qpc(
-                    reading.qpc_100ns,
-                    reading.position,
-                    clock_frequency,
-                    first_frame,
-                    stream_rate,
-                    qpc_frequency,
-                )
-            },
-        );
-        let next = self.last_qpc.map_or(candidate, |last| match reading {
-            Some(_) => candidate.max(last),
-            None => {
-                let period_ticks =
-                    scale(period_frames as u64, qpc_frequency, u64::from(stream_rate));
-                candidate.max(last.saturating_add(period_ticks))
-            }
-        });
-        self.last_qpc = Some(next);
-        next
     }
 }
 
@@ -601,25 +547,6 @@ fn stall_ticks(period_frames: usize, rate: u32, qpc_frequency: u64) -> u64 {
     two_periods.max(qpc_frequency / 100)
 }
 
-fn scale(value: u64, numerator: u64, denominator: u64) -> u64 {
-    (u128::from(value) * u128::from(numerator) / u128::from(denominator)).min(u128::from(u64::MAX))
-        as u64
-}
-
-fn playback_qpc(
-    clock_qpc: u64,
-    position: u64,
-    clock_frequency: u64,
-    frame: u64,
-    rate: u32,
-    qpc_frequency: u64,
-) -> u64 {
-    let base = i128::from(scale(clock_qpc, qpc_frequency, 10_000_000));
-    let queued = i128::from(scale(frame, qpc_frequency, u64::from(rate)))
-        - i128::from(scale(position, qpc_frequency, clock_frequency));
-    (base + queued).clamp(0, i128::from(u64::MAX)) as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,129 +565,6 @@ mod tests {
             exclusive_failure_policy(false, true),
             ExclusiveFailurePolicy::Fail
         );
-    }
-
-    #[test]
-    fn playback_timestamp_uses_clock_units_and_queue_distance() {
-        // A 24 MHz QPC, 192 kHz device clock, 48 kHz stream: 10 ms queued.
-        assert_eq!(
-            playback_qpc(20_000_000, 192_000, 192_000, 48_480, 48_000, 24_000_000),
-            48_240_000
-        );
-    }
-
-    #[test]
-    fn playback_clock_is_monotonic_across_estimates_measurements_and_restarts() {
-        #[derive(Clone, Copy, Debug)]
-        struct Row {
-            first_frame: u64,
-            reading: Option<ClockReading>,
-            started_qpc: u64,
-        }
-
-        for qpc_frequency in [10_000_000, 24_000_000] {
-            let period = qpc_frequency / 100;
-            let base = 7 * qpc_frequency;
-            let rows = [
-                // Startup estimate.
-                Row {
-                    first_frame: 480,
-                    reading: None,
-                    started_qpc: base,
-                },
-                // First correlation reports the hardware delay and moves ahead.
-                Row {
-                    first_frame: 960,
-                    reading: Some(ClockReading {
-                        position: 480,
-                        qpc_100ns: 70_200_000,
-                    }),
-                    started_qpc: base,
-                },
-                // A regressing correlation is clamped by one whole period.
-                Row {
-                    first_frame: 1_440,
-                    reading: Some(ClockReading {
-                        position: 960,
-                        qpc_100ns: 70_150_000,
-                    }),
-                    started_qpc: base,
-                },
-                // Correlation can disappear temporarily after it existed.
-                Row {
-                    first_frame: 1_920,
-                    reading: None,
-                    started_qpc: base,
-                },
-                // Reset rewinds submitted frames and changes the estimate base.
-                Row {
-                    first_frame: 480,
-                    reading: None,
-                    started_qpc: base - qpc_frequency,
-                },
-                // Large device positions must not overflow intermediate math.
-                Row {
-                    first_frame: u64::MAX - 480,
-                    reading: Some(ClockReading {
-                        position: u64::MAX - 960,
-                        qpc_100ns: 80_000_000,
-                    }),
-                    started_qpc: base,
-                },
-            ];
-            let mut clock = PlaybackClock::default();
-            let mut actual = Vec::new();
-            for row in rows {
-                actual.push(clock.next(
-                    row.first_frame,
-                    row.reading,
-                    row.started_qpc,
-                    48_000,
-                    48_000,
-                    qpc_frequency,
-                    480,
-                ));
-            }
-            assert!(
-                actual.windows(2).all(|pair| pair[1] >= pair[0]),
-                "qpc_frequency={qpc_frequency}, rows={rows:#?}, actual={actual:?}"
-            );
-            assert!(
-                actual[1] > base + 2 * period,
-                "forward measurement was not accepted: qpc_frequency={qpc_frequency}, rows={rows:#?}, actual={actual:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn fast_dac_measurements_do_not_accumulate_nominal_period_error() {
-        let qpc_frequency = 10_000_000;
-        let rate = 48_000;
-        let period_frames = 480;
-        let periods = 360_000_u64;
-        let period_100ns = 100_000_u64;
-        let mut clock = PlaybackClock::default();
-        let mut last = 0;
-        for period in 0..periods {
-            let first_frame = (period + 1) * period_frames as u64;
-            let position = period * period_frames as u64;
-            let qpc_100ns = 50_000_000 + period * period_100ns * 9_999 / 10_000;
-            last = clock.next(
-                first_frame,
-                Some(ClockReading {
-                    position,
-                    qpc_100ns,
-                }),
-                5 * qpc_frequency,
-                rate,
-                u64::from(rate),
-                qpc_frequency,
-                period_frames,
-            );
-        }
-        let expected =
-            5 * qpc_frequency + (periods - 1) * period_100ns * 9_999 / 10_000 + qpc_frequency / 100;
-        assert_eq!(last, expected);
     }
 
     #[cfg(windows)]

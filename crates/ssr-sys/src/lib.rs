@@ -22,6 +22,7 @@
 //! Windows modules are `cfg(windows)`; `host` and `install` join in M4.
 
 pub mod driver_ring;
+mod playback_clock;
 pub mod sal_format;
 
 #[cfg(windows)]
