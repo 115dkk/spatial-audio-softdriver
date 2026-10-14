@@ -6,9 +6,8 @@ $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent $PSScriptRoot
 $include = Join-Path $repo 'crates\ssr-abi\include'
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-$vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $vs) { throw 'MSVC (VC.Tools.x86.x64) not found' }
+. (Join-Path $PSScriptRoot 'vs-tools.ps1')
+$vs = Get-VsInstallPath @('Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
 $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
 
 $work = Join-Path ([IO.Path]::GetTempPath()) "ssr-abi-header-$PID"

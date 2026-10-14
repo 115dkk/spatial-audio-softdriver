@@ -79,8 +79,7 @@ jobs:
         with:
           ref: ${{ needs.gate.outputs.release_sha }}
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
+      - uses: ./.github/actions/rust-toolchain
 
       - name: Test (release mode)
         run: cargo test --workspace --release --locked
@@ -127,8 +126,7 @@ jobs:
         with:
           ref: ${{ needs.gate.outputs.release_sha }}
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
+      - uses: ./.github/actions/rust-toolchain
 
       - name: Test (release mode)
         run: cargo test --workspace --release --locked

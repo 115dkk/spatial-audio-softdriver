@@ -29,11 +29,8 @@ function Restore-NuGetWdk {
     if (-not $version) { throw "driver/packages.config pins no $packageId" }
     $out = Join-Path $env:RUNNER_TEMP 'nuget-wdk'
     if (Test-Path (Join-Path $out "$packageId.$version")) { return $out }
-    $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
-    if (-not $nuget) {
-        $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
-        Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/v6.12.1/nuget.exe' -OutFile $nuget -UseBasicParsing
-    }
+    . (Join-Path $PSScriptRoot '..\vs-tools.ps1')
+    $nuget = Get-NuGetExe $env:RUNNER_TEMP
     Write-Host "> nuget install $packageId $version (the image has no WDK)"
     & $nuget install $packageId -Version $version -OutputDirectory $out -DependencyVersion Ignore -NonInteractive | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "nuget install $packageId $version failed ($LASTEXITCODE)" }
