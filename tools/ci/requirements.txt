@@ -1,5 +1,6 @@
-# tools/ci: the loopback comparison and its tests. soundcard is installed
-# separately on the Windows audio job, which is the only place it records.
-numpy==2.3.4
+# tools/ci in CI: the kit's runtime (requirements-kit.txt) plus the loopback
+# comparison and its tests. soundcard is installed separately on the Windows
+# audio jobs, the only places that record.
+-r requirements-kit.txt
 scipy==1.16.3
 soundfile==0.13.1

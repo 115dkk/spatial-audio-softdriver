@@ -6,7 +6,8 @@ import unittest
 import numpy as np
 from scipy.signal import resample_poly
 
-from loopback_check import binary_fromstring, compare, report_problems
+from loopback_check import compare, report_problems
+from numpy_compat import binary_fromstring
 
 RATE = 48_000
 
@@ -139,12 +140,9 @@ class ReportProblems(unittest.TestCase):
         report = self.clean_report()
         del report["dropped_events"]
         report["output_overflow_frames"] = 480
-        self.assertEqual(
+        self.assertCountEqual(
             report_problems(report),
-            [
-                "report is missing dropped_events",
-                "output_overflow_frames is 480",
-            ],
+            ["report is missing dropped_events", "output_overflow_frames is 480"],
         )
 
     def test_rejects_reconnects_cadence_faults_fallback_and_wrong_mode(self):
@@ -153,14 +151,11 @@ class ReportProblems(unittest.TestCase):
         report["output_cadence_faults"] = 2
         report["output_fell_back"] = True
         report["output_mode"] = "shared"
-        self.assertEqual(
+        self.assertCountEqual(
             report_problems(report, expected_mode="exclusive"),
-            [
-                "output_reconnects is 1",
-                "output_cadence_faults is 2",
-                "exclusive output fell back to shared mode",
-                "output opened shared, expected exclusive",
-            ],
+            ["output_reconnects is 1", "output_cadence_faults is 2",
+             "exclusive output fell back to shared mode",
+             "output opened shared, expected exclusive"],
         )
         self.assertEqual(report_problems(self.clean_report(), expected_mode="exclusive"), [])
 

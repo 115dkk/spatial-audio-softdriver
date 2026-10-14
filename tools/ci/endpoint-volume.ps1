@@ -82,7 +82,7 @@ public sealed class SsrEndpointVolume : IDisposable {
         var result = new SsrVolumeSnapshot();
         uint count;
         Check(volume.GetChannelCount(out count));
-        if (count == 0 || count > 16) throw new InvalidOperationException("endpoint channel count outside Spatial SoftReceiver contract");
+        if (count == 0 || count > 32) throw new InvalidOperationException("endpoint channel count outside Spatial SoftReceiver contract");
         result.channels_db = new float[count];
         for (uint i = 0; i < count; ++i) Check(volume.GetChannelVolumeLevel(i, out result.channels_db[i]));
         Check(volume.GetMasterVolumeLevel(out result.master_db));

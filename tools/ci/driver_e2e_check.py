@@ -18,10 +18,10 @@ import time
 import numpy as np
 
 from endpoints import enumerate_endpoints, find_speaker
+from report_check import PRESETS, problems as report_problems
+from ring_stats import ENDPOINT_TONES
 
-# One tone per endpoint. 2250 Hz is no harmonic of the others, and their
-# difference products (500, 750, 1250 Hz) fall on none of the three.
-TONES = {0: 1000.0, 1: 1500.0, 2: 2250.0}
+TONES = ENDPOINT_TONES
 
 
 def tone_margin_db(signal, rate, frequency, guard_hz=40.0):
@@ -41,70 +41,8 @@ def tone_margin_db(signal, rate, frequency, guard_hz=40.0):
     return tone_db, noise_db, tone_db - noise_db
 
 
-LOSS_COUNTERS = (
-    "underruns_while_streaming",
-    "output_reconnects",
-    "output_cadence_faults",
-    "dropped_frames",
-    "lane_underrun_frames",
-    "output_overflow_frames",
-    "dropped_events",
-)
-
-
-LATENCY_CEILING_MS = 1_000
-
-
 def check_report(report):
-    """Returns failures for missing state and discontinuities in a ssr-live report."""
-    problems = []
-    for key in LOSS_COUNTERS:
-        if key not in report:
-            problems.append(f"report is missing {key}")
-        elif report[key] != 0:
-            problems.append(f"{key} is {report[key]}")
-    if report.get("output_fell_back"):
-        problems.append("exclusive output fell back to shared mode")
-    # As loopback_check.LATENCY_CEILING_MS: no chain is this slow, so such a
-    # sample is a block stamped with a source time from another clock.
-    for key in ("latency_p50_ms", "latency_p99_ms"):
-        value = report.get(key)
-        if isinstance(value, (int, float)) and value > LATENCY_CEILING_MS:
-            problems.append(f"{key} is {value} ms, above {LATENCY_CEILING_MS} ms")
-
-    endpoints = report.get("endpoints")
-    if not isinstance(endpoints, list) or len(endpoints) != 4:
-        problems.append("report endpoints must contain exactly four entries")
-    else:
-        for expected, endpoint in enumerate(endpoints):
-            for key in ("endpoint", "format", "epoch", "unsupported"):
-                if key not in endpoint:
-                    problems.append(f"report endpoint {expected} is missing {key}")
-            if endpoint.get("endpoint") != expected:
-                problems.append(
-                    f"report endpoint slot {expected} names {endpoint.get('endpoint')}"
-                )
-            if endpoint.get("unsupported") is not None:
-                problems.append(
-                    f"endpoint {expected} has unsupported format: {endpoint['unsupported']}"
-                )
-
-    driver = report.get("driver")
-    if driver is None:
-        problems.append("report is missing driver statistics")
-    elif not isinstance(driver.get("endpoints"), list):
-        problems.append("driver statistics are missing endpoints")
-    else:
-        for endpoint in driver["endpoints"]:
-            if "lost_bytes" not in endpoint:
-                problems.append(
-                    f"driver endpoint {endpoint.get('endpoint')} is missing lost_bytes"
-                )
-            elif endpoint["lost_bytes"] != 0:
-                problems.append(
-                    f"driver endpoint {endpoint.get('endpoint')} lost {endpoint['lost_bytes']} bytes"
-                )
-    return problems
+    return report_problems(report, PRESETS["driver_e2e"])
 
 
 def main():
@@ -124,7 +62,7 @@ def main():
     )
     args = parser.parse_args()
 
-    from loopback_check import binary_fromstring
+    from numpy_compat import binary_fromstring
     np.fromstring = binary_fromstring
     import soundcard as sc
 

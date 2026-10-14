@@ -1,5 +1,6 @@
 import itertools
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,9 @@ from driver_flow_check import (FLAG_REPEAT, HEADER, KIND_VOLUME, LEGACY_VOLUME, 
                                check_endpoint, parse_records, parse_volume)
 from ring_record import metadata, summarize_records
 from volume_check import capture, matches, verify
+from ssr_abi import MAX_VOLUME_CHANNELS
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def snapshot(db=-20, mute=False):
@@ -32,6 +36,11 @@ def evidence():
 
 
 class VolumeCheckTests(unittest.TestCase):
+    def test_powershell_channel_limit_matches_abi(self):
+        source = (ROOT / "tools/ci/endpoint-volume.ps1").read_text(encoding="utf-8-sig")
+        limit = int(re.search(r"count > (\d+)", source)[1])
+        self.assertEqual(limit, MAX_VOLUME_CHANNELS)
+
     def test_capture_stops_even_while_other_audio_keeps_arriving(self):
         device = Mock()
         device.query_info.return_value = {"endpoint_mask": 1}

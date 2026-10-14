@@ -176,7 +176,15 @@ MAT 디코더와 블랙박스 골든 시험의 재료입니다. 구축기에서 
 
 같은 것을 공유 모드로 한 번 더: `--shared --report play-music-shared.json`.
 
-Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 바닥, 클럭 보정이 남습니다. 화면에도 1초마다 나옵니다.
+Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 바닥, 클럭 보정이 남습니다. 화면에도 1초마다 나옵니다. 각 보고를 검사합니다.
+
+```powershell
+py .\report_check.py --preset sal play-game.json
+py .\report_check.py --preset sal play-music.json
+py .\report_check.py --preset sal play-music-shared.json
+```
+
+검사기가 적은 문제와 종료 코드가 합격 판정입니다. 문제를 한 줄도 적지 않고 `pass`를 출력하며 종료 코드가 0이어야 합니다.
 
 들으며 적을 것:
 - 끊김이나 잡음이 들렸는지
@@ -253,7 +261,7 @@ py .\driver_flow_check.py --expect-mask 0x7 --summary driver-flow-basic.json
 - `driver-flow-basic.json`에서 엔드포인트마다:
   - `gaps`가 0
   - `overruns`가 0
-  - `tone_db`가 −6 dB 안팎
+  - `tone_db`가 −6.02 dB에서 ±1 dB 이내
   - `other_tone_db`가 −60 dB 이하
   - `rate_error_ppm`의 절댓값이 100 이하
 - `snapshot_skew_us`가 100 이하이고 `snapshot_reads_compared`가 1 이상. 한 번의 READ 안에서 엔드포인트들의 마지막 데이터가 같은 시각에서 끝나는지 봅니다. 드라이버가 모든 스트림을 함께 진행시키므로 차이는 한 프레임(수십 µs) 이하여야 합니다.
@@ -477,7 +485,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 2. Apple Music 같은 음악 앱의 출력은 **Spatial SoftReceiver Music**으로 고릅니다.
 3. 지원되는 DD+ 비트스트림 플레이어는 **Spatial SoftReceiver PASS**로 보내고 세 소리를 함께 1분 이상 듣습니다.
 4. 한쪽 재생만 멈췄다가 다시 시작하고, 그동안 다른 쪽이 끊기지 않는지 듣습니다.
-5. Enter로 끝낸 뒤 `driver-listen.json`을 결과 묶음 폴더에 둡니다.
+5. Enter로 끝낸 뒤 보고를 검사하고 `driver-listen.json`을 결과 묶음 폴더에 둡니다. 명령에 `--clock trim`이나 `--clock asrc`를 붙였다면 검사 명령에도 같은 값을 쓰고, 생략했다면 `auto`를 씁니다.
+
+   ```powershell
+   py .\report_check.py --preset listen driver-listen.json --clock auto --output-mode exclusive
+   ```
+
+   공유 모드로 들었으면 `--output-mode shared`로 바꿉니다. 검사기가 적은 문제와 종료 코드가 합격 판정입니다. 문제를 한 줄도 적지 않고 `pass`를 출력하며 종료 코드가 0이어야 합니다.
 
 `--endpoints`를 생략하면 드라이버가 노출한 엔드포인트를 모두 처리합니다. 한 엔드포인트만 진단하려면 `--endpoints 0`, `--endpoints 1` 또는 `--endpoints 2`를 쓰고, 임의 부분집합은 쉼표로 묶습니다(예: `--endpoints 0,2`).
 
@@ -496,7 +510,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 - 세 소리가 함께 들림
 - 한쪽을 멈추고 다시 틀어도 다른 쪽이 끊기지 않음
 
-**(가능하면) 출력 장치를 뽑았다 꽂기.** USB DAC라면 위 명령으로 재생하는 동안 DAC를 뽑고, 10초 뒤 다시 꽂습니다. 끝낸 뒤 보고를 `driver-replug.json`으로 남깁니다(`--report driver-replug.json`).
+**(가능하면) 출력 장치를 뽑았다 꽂기.** USB DAC라면 위 명령으로 재생하는 동안 DAC를 뽑고, 10초 뒤 다시 꽂습니다. 끝낸 뒤 보고를 `driver-replug.json`으로 남기고 검사합니다. 명시한 클럭과 출력 모드가 다르면 인자를 맞춰 바꿉니다.
+
+```powershell
+py .\report_check.py --preset replug driver-replug.json --clock auto --output-mode exclusive
+```
 
 **합격 기준**
 - 뽑은 동안 `ssr-live`가 끝나지 않고 `fault: Output...`을 한 번 알림
@@ -550,7 +568,13 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
    ```
 
 4. Windows 기본 장치인 **Spatial SoftReceiver**로 채널 확인 영상이나 5.1/7.1 시험 음원을 재생해, 소리가 각 스피커에서 나오는지 확인합니다. Atmos 음원이 있으면 위층 스피커(7.1.4)에서 높이가 들리는지도 적습니다.
-5. Enter로 끝내고 `speakers-listen.json`을 결과 묶음 폴더에 둡니다.
+5. Enter로 끝내고 보고를 검사한 뒤 `speakers-listen.json`을 결과 묶음 폴더에 둡니다. 명시한 클럭과 출력 모드가 다르면 인자를 맞춰 바꿉니다.
+
+   ```powershell
+   py .\report_check.py --preset speakers speakers-listen.json --clock auto --output-mode exclusive
+   ```
+
+   종료 코드 0과 `pass`가 합격입니다. 출력된 문제는 모두 해결하거나 결과에 그대로 적습니다.
 
 **합격 기준**
 - 보고의 `output_kind`가 `speakers`, `output_channels`와 `output_channel_mask`가 프로필과 같음

@@ -21,6 +21,7 @@ Exit status 0 when the recording matches, 1 otherwise. CI only.
 """
 
 import argparse
+from dataclasses import replace
 import json
 import subprocess
 import sys
@@ -30,25 +31,13 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import correlate, resample_poly
 
+from numpy_compat import binary_fromstring
+from report_check import PRESETS, problems as check_report
+
 WINDOW_S = 0.05
 SEARCH = 64  # samples either side of the running offset
 RESYNC_S = 0.05  # either side, for a window that misses at the running offset
 ANCHOR_S = 0.25  # of the reference's start, correlated to refine the alignment
-
-
-_numpy_fromstring = np.fromstring
-
-
-def binary_fromstring(string, dtype=float, count=-1, *, sep=""):
-    """numpy.fromstring with the binary mode NumPy 2 removed.
-
-    soundcard 0.4.5 reads each WASAPI capture buffer with
-    numpy.fromstring(buffer, dtype='float32') (mediafoundation.py); frombuffer
-    does the same, and the copy outlives the released buffer.
-    """
-    if sep:
-        return _numpy_fromstring(string, dtype=dtype, count=count, sep=sep)
-    return np.frombuffer(string, dtype=dtype, count=count).copy()
 
 
 def ncc(a, b):
@@ -73,100 +62,10 @@ def first_sound(mono, rate):
     return None
 
 
-LATENCY_CEILING_MS = 1_000
-
-
 def report_problems(figures, require_driver=False, expected_mode=None):
-    """Returns failures for missing report state and live-path losses.
-
-    `expected_mode` ("exclusive" or "shared") is the mode the run asked for;
-    the report's `output_mode` is the mode the device was actually opened in.
-    """
-    problems = []
-    for key in (
-        "underruns_while_streaming",
-        "output_restarts",
-        "output_reconnects",
-        "output_cadence_faults",
-        "output_mode",
-        "output_fell_back",
-        "dropped_frames",
-        "lane_underrun_frames",
-        "output_overflow_frames",
-        "dropped_events",
-        "faults",
-        "endpoints",
-    ):
-        if key not in figures:
-            problems.append(f"report is missing {key}")
-
-    for key in (
-        "underruns_while_streaming",
-        "output_restarts",
-        "output_reconnects",
-        "output_cadence_faults",
-        "dropped_frames",
-        "lane_underrun_frames",
-        "output_overflow_frames",
-        "dropped_events",
-    ):
-        if key in figures and figures[key] != 0:
-            problems.append(f"{key} is {figures[key]}")
-    if figures.get("output_fell_back"):
-        problems.append("exclusive output fell back to shared mode")
-    if expected_mode is not None and "output_mode" in figures \
-            and figures["output_mode"] != expected_mode:
-        problems.append(f"output opened {figures['output_mode']}, expected {expected_mode}")
-    if figures.get("faults"):
-        problems.append(f"faults: {figures['faults']}")
-    # Far above any real chain: a sample this large means a block carried a
-    # source time from another clock (silence counted up from 0 read as the
-    # machine's uptime, p99 429 s).
-    for key in ("latency_p50_ms", "latency_p99_ms"):
-        value = figures.get(key)
-        if isinstance(value, (int, float)) and value > LATENCY_CEILING_MS:
-            problems.append(f"{key} is {value} ms, above {LATENCY_CEILING_MS} ms")
-
-    endpoints = figures.get("endpoints")
-    if not isinstance(endpoints, list):
-        problems.append("report endpoints must be an array")
-    else:
-        if len(endpoints) != 4:
-            problems.append("report endpoints must contain exactly four entries")
-        for expected, endpoint in enumerate(endpoints):
-            if not isinstance(endpoint, dict):
-                problems.append(f"report endpoint {expected} must be an object")
-                continue
-            for key in ("endpoint", "format", "epoch", "unsupported"):
-                if key not in endpoint:
-                    problems.append(f"report endpoint {expected} is missing {key}")
-            if endpoint.get("endpoint") != expected:
-                problems.append(
-                    f"report endpoint slot {expected} names {endpoint.get('endpoint')}"
-                )
-            if endpoint.get("unsupported") is not None:
-                problems.append(
-                    f"endpoint {expected} has unsupported format: {endpoint['unsupported']}"
-                )
-
-    if require_driver:
-        driver = figures.get("driver")
-        if driver is None:
-            problems.append("report is missing driver statistics")
-        elif not isinstance(driver.get("endpoints"), list):
-            problems.append("driver statistics are missing endpoints")
-        else:
-            for endpoint in driver["endpoints"]:
-                if "lost_bytes" not in endpoint:
-                    problems.append(
-                        f"driver endpoint {endpoint.get('endpoint')} is missing lost_bytes"
-                    )
-                elif endpoint["lost_bytes"] != 0:
-                    problems.append(
-                        f"driver endpoint {endpoint.get('endpoint')} lost "
-                        f"{endpoint['lost_bytes']} bytes"
-                    )
-    return problems
+    expect = replace(PRESETS["loopback"], require_driver=require_driver,
+                     output_mode=expected_mode)
+    return check_report(figures, expect)
 
 
 def compare(reference, ref_rate, captured, rate, min_correlation):

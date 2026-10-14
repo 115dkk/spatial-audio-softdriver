@@ -67,47 +67,13 @@ try {
         } elseif (-not (Test-Path $report)) {
             $failures += "${label}: no report written"
         } else {
-            $r = Get-Content $report -Raw | ConvertFrom-Json
-            $required = @('faults', 'output_restarts', 'underruns_while_streaming',
-                'dropped_frames', 'lane_underrun_frames', 'output_overflow_frames',
-                'dropped_events', 'idle_blocks', 'endpoints', 'output_reconnects',
-                'output_cadence_faults', 'output_mode', 'output_fell_back')
-            $missing = @($required | Where-Object { -not $r.PSObject.Properties[$_] })
-            $runProblems = @()
-            if ($missing) { $runProblems += "missing report keys: $($missing -join ', ')" }
-            if ($r.PSObject.Properties['faults'] -and $r.faults.Count -gt 0) {
-                $runProblems += "faults: $($r.faults -join '; ')"
-            }
-            foreach ($counter in @('output_restarts', 'underruns_while_streaming',
-                    'dropped_frames', 'lane_underrun_frames', 'output_overflow_frames',
-                    'dropped_events', 'output_reconnects', 'output_cadence_faults')) {
-                if ($r.PSObject.Properties[$counter] -and $r.$counter -ne 0) {
-                    $runProblems += "$counter is $($r.$counter)"
-                }
-            }
             $expectedMode = if ($shared) { 'shared' } else { 'exclusive' }
-            if ($r.PSObject.Properties['output_fell_back'] -and $r.output_fell_back) {
-                $runProblems += 'exclusive output fell back to shared mode'
+            $reportCheck = Join-Path $PSScriptRoot 'report_check.py'
+            $runProblems = @(& py $reportCheck --preset restart $report --output-mode $expectedMode 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $runProblems | ForEach-Object { Write-Host $_ }
+                $failures += "${label}: $($runProblems -join ', ')"
             }
-            if ($r.PSObject.Properties['output_mode'] -and $r.output_mode -ne $expectedMode) {
-                $runProblems += "output opened $($r.output_mode), expected $expectedMode"
-            }
-            if ($r.PSObject.Properties['endpoints']) {
-                if (@($r.endpoints).Count -ne 4) {
-                    $runProblems += 'report must contain four endpoint states'
-                }
-                foreach ($endpoint in @($r.endpoints)) {
-                    $endpointMissing = @('endpoint', 'format', 'epoch', 'unsupported') |
-                        Where-Object { -not $endpoint.PSObject.Properties[$_] }
-                    if ($endpointMissing) {
-                        $runProblems += "endpoint state missing keys: $($endpointMissing -join ', ')"
-                    }
-                    if ($endpoint.PSObject.Properties['unsupported'] -and $null -ne $endpoint.unsupported) {
-                        $runProblems += "endpoint $($endpoint.endpoint) unsupported: $($endpoint.unsupported)"
-                    }
-                }
-            }
-            if ($runProblems) { $failures += "${label}: $($runProblems -join ', ')" }
         }
     }
 }

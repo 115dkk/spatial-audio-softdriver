@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 import subprocess
 
-CONTROL_DEVICE_PATH = r"\\.\SpatialSoftReceiver"
+from ssr_abi import CONTROL_DEVICE_PATH
+
 ENDPOINT_NUMBERS = (0, 1, 2)
 
 

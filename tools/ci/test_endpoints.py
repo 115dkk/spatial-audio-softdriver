@@ -114,7 +114,7 @@ class EndpointTests(unittest.TestCase):
         self.assertIn("Device::open(CONTROL_DEVICE_PATH)", ring)
         for filename in ("driver_flow_check.py", "ioctl_fuzz.py"):
             source = read("tools/ci/" + filename)
-            self.assertIn("import CONTROL_DEVICE_PATH", source)
+            self.assertIn("from ssr_abi import", source)
             self.assertNotIn('r"\\\\.\\SpatialSoftReceiver"', source)
         kernel = read("driver/spatialsoftreceiver/control.cpp")
         for prefix in ("Device", "DosDevices"):

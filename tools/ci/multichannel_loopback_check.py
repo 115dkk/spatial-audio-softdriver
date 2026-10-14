@@ -13,6 +13,10 @@ import numpy as np
 import soundfile as sf
 
 from loopback_check import compare, report_problems
+from ssr_abi import (ABI_VERSION, DUMP_FORMAT_VERSION, DUMP_HEADER, DUMP_MAGIC,
+                     RECORD_HEADER, RECORD_KIND_DATA, RECORD_KIND_FORMAT_CHANGE,
+                     RECORD_KIND_STREAM_START, RECORD_KIND_STREAM_STOP)
+
 
 RATE = 48_000
 LAYOUTS = {8: (0x63F, ["L", "R", "C", "LFE", "Lrs", "Rrs", "Lss", "Rss"]),
@@ -49,28 +53,30 @@ def tone_frames(channels, seconds=4.0):
 
 
 def _record(kind, epoch, byte_pos, qpc, payload=b""):
-    header = struct.pack("<HHIQQQIHH", kind, 0, epoch, byte_pos, qpc, 0, len(payload), 0, 0)
+    header = RECORD_HEADER.pack(kind, 0, epoch, byte_pos, qpc, 0, len(payload), 0, 0)
     return header + payload + b"\0" * ((-len(payload)) % 8)
 
 
 def make_dump(path, frames, channel_mask):
-    """Write a ssr-abi format-1 dump containing float32 interleaved PCM."""
+    """Write a current ssr-abi dump containing float32 interleaved PCM."""
     channels = frames.shape[1]
     block = channels * 4
     wave = struct.pack("<HHIIHHHHI16s", 0xFFFE, channels, RATE, RATE * block, block,
                        32, 22, 32, channel_mask,
                        bytes.fromhex("0300000000001000800000aa00389b71"))
     stream = bytearray()
-    stream += _record(3, 1, 0, 0)
-    stream += _record(2, 1, 0, 0, wave)
+    stream += _record(RECORD_KIND_STREAM_START, 1, 0, 0)
+    stream += _record(RECORD_KIND_FORMAT_CHANGE, 1, 0, 0, wave)
     payload = frames.astype("<f4", copy=False).tobytes()
     period_bytes = RATE // 100 * block
     for at in range(0, len(payload), period_bytes):
         chunk = payload[at:at + period_bytes]
         qpc = ((at + len(chunk)) // block) * 10_000_000 // RATE
-        stream += _record(1, 1, at, qpc, chunk)
-    stream += _record(4, 1, len(payload), frames.shape[0] * 10_000_000 // RATE)
-    header = struct.pack("<8sIIQII", b"SSRDUMP\0", 1, 32, 10_000_000, 1, 0)
+        stream += _record(RECORD_KIND_DATA, 1, at, qpc, chunk)
+    stream += _record(RECORD_KIND_STREAM_STOP, 1, len(payload),
+                      frames.shape[0] * 10_000_000 // RATE)
+    header = DUMP_HEADER.pack(DUMP_MAGIC, ABI_VERSION, DUMP_HEADER.size, 10_000_000,
+                              DUMP_FORMAT_VERSION, 0)
     Path(path).write_bytes(header + stream)
 
 

@@ -18,7 +18,12 @@ import sys
 import threading
 import time
 
-from endpoints import CONTROL_DEVICE_PATH
+from ssr_abi import (
+    ABI_INFO, ABI_VERSION, CONTROL_DEVICE_PATH, DRIVER_STATS,
+    IOCTL_SSR_GET_STATS, IOCTL_SSR_QUERY_INFO, IOCTL_SSR_READ,
+    IOCTL_SSR_SET_RATE_TRIM, RATE_TRIM, READ_MAX_BYTES, READ_REQUEST,
+    RECORD_HEADER, TRIM_LIMIT_PPM,
+)
 
 FILE_DEVICE_UNKNOWN = 0x22
 METHOD_BUFFERED, METHOD_IN_DIRECT, METHOD_OUT_DIRECT, METHOD_NEITHER = range(4)
@@ -29,19 +34,12 @@ def ctl_code(device_type, function, method, access):
     return (device_type << 16) | (access << 14) | (function << 2) | method
 
 
-IOCTL_SSR_QUERY_INFO = ctl_code(FILE_DEVICE_UNKNOWN, 0x900, METHOD_BUFFERED, FILE_READ_ACCESS)
-IOCTL_SSR_READ = ctl_code(FILE_DEVICE_UNKNOWN, 0x901, METHOD_OUT_DIRECT, FILE_READ_ACCESS)
-IOCTL_SSR_SET_RATE_TRIM = ctl_code(FILE_DEVICE_UNKNOWN, 0x902, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-IOCTL_SSR_GET_STATS = ctl_code(FILE_DEVICE_UNKNOWN, 0x903, METHOD_BUFFERED, FILE_READ_ACCESS)
-
-ABI_VERSION = 1
-ABI_INFO_SIZE = 160
-READ_REQUEST_SIZE = 8
-RATE_TRIM_SIZE = 8
-SSR_STATS_SIZE = 144
-RECORD_HEADER_SIZE = 40
-READ_MAX_BYTES = 256 * 1024
-TRIM_LIMIT_Q16 = 2000 * 65536
+ABI_INFO_SIZE = ABI_INFO.size
+READ_REQUEST_SIZE = READ_REQUEST.size
+RATE_TRIM_SIZE = RATE_TRIM.size
+SSR_STATS_SIZE = DRIVER_STATS.size
+RECORD_HEADER_SIZE = RECORD_HEADER.size
+TRIM_LIMIT_Q16 = TRIM_LIMIT_PPM * 65536
 ERROR_IO_PENDING = 997
 ERROR_OPERATION_ABORTED = 995
 ERROR_SHARING_VIOLATION = 32
@@ -104,11 +102,11 @@ def deterministic_cases(seed):
             for output in outputs:
                 reserved = 0
                 if name == "READ" and size >= READ_REQUEST_SIZE:
-                    payload = struct.pack("<II", rng.choice(READ_EXTREMES), rng.choice(READ_EXTREMES))
+                    payload = READ_REQUEST.pack(rng.choice(READ_EXTREMES), rng.choice(READ_EXTREMES))
                     payload += bytes(rng.getrandbits(8) for _ in range(size - READ_REQUEST_SIZE))
                 elif name == "SET_RATE_TRIM" and size >= RATE_TRIM_SIZE:
                     reserved = rng.choice((0, 0, 1, 0xFFFFFFFF))
-                    payload = struct.pack("<iI", rng.choice(TRIM_EXTREMES), reserved)
+                    payload = RATE_TRIM.pack(rng.choice(TRIM_EXTREMES), reserved)
                     payload += bytes(rng.getrandbits(8) for _ in range(size - RATE_TRIM_SIZE))
                 cases.append({
                     "kind": "known", "name": name, "code": code,
@@ -314,7 +312,7 @@ def exercise_races(summary, rng):
     device = WindowsDevice(overlapped=True)
     try:
         for action in ("cancel", "stats_trim", "close"):
-            request = struct.pack("<II", READ_MAX_BYTES, 0xFFFFFFFF)
+            request = READ_REQUEST.pack(READ_MAX_BYTES, 0xFFFFFFFF)
             operation = device.begin(IOCTL_SSR_READ, request, READ_MAX_BYTES)
             if action == "cancel":
                 thread = threading.Thread(target=device.cancel, args=(operation,))
@@ -324,7 +322,7 @@ def exercise_races(summary, rng):
             elif action == "stats_trim":
                 stats = device.begin(IOCTL_SSR_GET_STATS, b"", SSR_STATS_SIZE)
                 trim = device.begin(IOCTL_SSR_SET_RATE_TRIM,
-                                    struct.pack("<iI", rng.choice(TRIM_EXTREMES), 0), 0)
+                                    RATE_TRIM.pack(rng.choice(TRIM_EXTREMES), 0), 0)
                 device.cancel(operation)
                 device.finish(stats)
                 device.finish(trim)
@@ -354,7 +352,7 @@ def final_health(summary):
         stats_good = ok and returned == SSR_STATS_SIZE and struct.unpack_from("<I", stats)[0] == SSR_STATS_SIZE
         summary["checks"]["get_stats"] = stats_good
         started = time.monotonic()
-        ok, _, _, _ = device.ioctl(IOCTL_SSR_READ, struct.pack("<II", 1, 50), READ_MAX_BYTES)
+        ok, _, _, _ = device.ioctl(IOCTL_SSR_READ, READ_REQUEST.pack(1, 50), READ_MAX_BYTES)
         summary["checks"]["read_bounded"] = ok and time.monotonic() - started < 2.0
     finally:
         device.close()

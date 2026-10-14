@@ -1,6 +1,9 @@
 """Device-free tests for multichannel_loopback_check."""
 
 import struct
+
+from driver_flow_check import parse_records
+from ring_record import DUMP_FORMAT_VERSION, DUMP_HEADER
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,29 +78,21 @@ class DumpTest(unittest.TestCase):
             path = Path(directory) / "tones.ssrdump"
             make_dump(path, frames, LAYOUTS[4][0])
             data = path.read_bytes()
-        magic, abi, header_size, qpc_hz, version, reserved = struct.unpack_from(
-            "<8sIIQII", data
-        )
+        magic, abi, header_size, qpc_hz, version, reserved = DUMP_HEADER.unpack_from(data)
         self.assertEqual((magic, abi, header_size, qpc_hz, version, reserved),
-                         (b"SSRDUMP\0", 1, 32, 10_000_000, 1, 0))
-        records = []
-        at = header_size
-        while at < len(data):
-            header = struct.unpack_from("<HHIQQQIHH", data, at)
-            kind, _, epoch, byte_pos, qpc, _, length, endpoint, _ = header
-            payload = data[at + 40:at + 40 + length]
-            records.append((kind, epoch, byte_pos, qpc, endpoint, payload))
-            at += 40 + (length + 7) // 8 * 8
-        self.assertEqual(records[0][0], 3)
-        self.assertEqual(records[1][0], 2)
-        wave = struct.unpack("<HHIIHHHHI16s", records[1][-1])
+                         (b"SSRDUMP\0", 1, DUMP_HEADER.size, 10_000_000,
+                          DUMP_FORMAT_VERSION, 0))
+        records = parse_records(data[header_size:])
+        self.assertEqual(records[0]["kind"], 3)
+        self.assertEqual(records[1]["kind"], 2)
+        wave = struct.unpack("<HHIIHHHHI16s", records[1]["payload"])
         self.assertEqual((wave[0], wave[1], wave[2], wave[4], wave[5], wave[6], wave[7], wave[8]),
                          (0xFFFE, 4, RATE, 16, 32, 22, 32, 0x33))
-        pcm = b"".join(record[-1] for record in records if record[0] == 1)
+        pcm = b"".join(record["payload"] for record in records if record["kind"] == 1)
         decoded = np.frombuffer(pcm, dtype="<f4").reshape(-1, 4)
         np.testing.assert_array_equal(decoded, frames)
-        self.assertEqual(records[-1][0], 4)
-        self.assertEqual(records[-1][2], frames.nbytes)
+        self.assertEqual(records[-1]["kind"], 4)
+        self.assertEqual(records[-1]["byte_pos"], frames.nbytes)
 
 
 class AssignmentTest(unittest.TestCase):
