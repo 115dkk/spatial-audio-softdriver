@@ -9,13 +9,7 @@ TRACELOGGING_DEFINE_PROVIDER(SsrKsProvider, "SpatialSoftReceiver.Driver.Ks",
 
 static constinit bool Registered{};
 
-void SsrTraceRegister() {
-#ifdef SSR_TRACE_NO_PROVIDER
-    // Diagnostic build (driver.yml): no provider, so no session reaches the image.
-#else
-    Registered = NT_SUCCESS(TraceLoggingRegister(SsrKsProvider));
-#endif
-}
+void SsrTraceRegister() { Registered = NT_SUCCESS(TraceLoggingRegister(SsrKsProvider)); }
 void SsrTraceUnregister() {
     if (Registered) TraceLoggingUnregister(SsrKsProvider);
     Registered = false;
@@ -24,14 +18,9 @@ void SsrTraceFault(ULONG call) {
     if (Registered) TraceLoggingWrite(SsrKsProvider, "FaultInjected", TraceLoggingUInt32(call, "Call"));
 }
 
-// External linkage so the diagnostic builds below, which leave one or both
-// unused, do not trip C4505.
-USHORT SsrTraceCapture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* target, ULONG capacity);
-void SsrTraceCaptureBuffers(PIRP irp, PIO_STACK_LOCATION stack, SsrIrpNote* note);
-
 // Copies up to `capacity` bytes of a request buffer. A user-mode caller's
 // METHOD_NEITHER buffer is probed first; a fault leaves nothing copied.
-USHORT SsrTraceCapture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* target, ULONG capacity) {
+static USHORT SsrTraceCapture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* target, ULONG capacity) {
     ULONG bytes = length < capacity ? length : capacity;
     if (!source || !bytes) return 0;
     __try {
@@ -43,7 +32,7 @@ USHORT SsrTraceCapture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* t
     return static_cast<USHORT>(bytes);
 }
 
-void SsrTraceCaptureBuffers(PIRP irp, PIO_STACK_LOCATION stack, SsrIrpNote* note) {
+static void SsrTraceCaptureBuffers(PIRP irp, PIO_STACK_LOCATION stack, SsrIrpNote* note) {
     if (stack->MajorFunction == IRP_MJ_CREATE) {
         // A filter's reference string, or KSSTRING_Pin with the KSPIN_CONNECT
         // and data format after it: the I/O manager's copy, kernel memory.
@@ -70,10 +59,6 @@ void SsrTraceCaptureBuffers(PIRP irp, PIO_STACK_LOCATION stack, SsrIrpNote* note
 
 void SsrTraceBefore(PIRP irp, SsrIrpNote* note) {
     note->Active = false;
-#ifdef SSR_TRACE_OFF
-    // Diagnostic build (driver.yml): a session may be on, the driver writes nothing.
-    UNREFERENCED_PARAMETER(irp);
-#else
     if (!Registered || !TraceLoggingProviderEnabled(SsrKsProvider, 0, 0)) return;
     auto stack = IoGetCurrentIrpStackLocation(irp);
     if (stack->MajorFunction != IRP_MJ_CREATE && stack->MajorFunction != IRP_MJ_DEVICE_CONTROL) return;
@@ -103,12 +88,8 @@ void SsrTraceBefore(PIRP irp, SsrIrpNote* note) {
         note->OutputLength = stack->Parameters.DeviceIoControl.OutputBufferLength;
     }
     // ProbeForRead and a copy that may fault need APC_LEVEL or below; above it
-    // the event carries the request's identity without its bytes. The
-    // metadata-only diagnostic build (driver.yml) never copies.
-#ifndef SSR_TRACE_METADATA_ONLY
+    // the event carries the request's identity without its bytes.
     if (irql <= APC_LEVEL) SsrTraceCaptureBuffers(irp, stack, note);
-#endif
-#endif
 }
 
 void SsrTraceAfter(const SsrIrpNote& note, NTSTATUS status) {

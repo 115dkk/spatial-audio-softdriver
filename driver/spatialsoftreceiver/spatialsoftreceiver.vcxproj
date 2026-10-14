@@ -79,7 +79,7 @@
       <ExceptionHandling>false</ExceptionHandling>
       <LanguageStandard>stdcpp23</LanguageStandard>
       <!-- SsrConformanceMode and SsrDiagDefines exist for diagnostic builds
-           (driver.yml); releases leave them empty. -->
+           (tools/build-driver.ps1 -Property); releases leave them empty. -->
       <ConformanceMode Condition="'$(SsrConformanceMode)' != ''">$(SsrConformanceMode)</ConformanceMode>
       <!-- C++20+ warns on enum arithmetic in WDK headers (C5054) and implies
            /permissive-. Angle includes are WDK; quoted project headers remain /W4 /WX. -->

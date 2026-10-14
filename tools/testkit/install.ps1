@@ -2,6 +2,9 @@
 # Checks a test-signing PC, trusts this kit certificate, and installs Spatial SoftReceiver.
 param(
     [switch] $AllowWithoutTestSigning,
+    # Diagnosis only (driver.yml): install and check the endpoints, but do not
+    # apply or probe the exclusive-mode policy, which opens audio streams.
+    [switch] $SkipExclusivePolicy,
     [string] $ResultPath = (Join-Path $PSScriptRoot 'install-result.json')
 )
 $ErrorActionPreference = 'Stop'
@@ -137,6 +140,11 @@ try {
     if ($problem -eq 52) { $exitCode = 3 }
     elseif (-not $loaded) { $exitCode = 1 }
     elseif ($active -ne $expectedCount -or -not $identitiesMatch) { $exitCode = 4 }
+    elseif ($SkipExclusivePolicy) {
+        $result.exclusive_policy = 'skipped (-SkipExclusivePolicy)'
+        $result | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $ResultPath
+        $exitCode = 0
+    }
     else {
         $policyHelper = Join-Path $PSScriptRoot 'exclusive-policy.ps1'
         if (-not (Test-Path -LiteralPath $policyHelper)) { $policyHelper = Join-Path $PSScriptRoot '..\ci\exclusive-policy.ps1' }

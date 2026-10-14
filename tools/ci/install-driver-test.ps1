@@ -5,7 +5,9 @@
 # later CI steps decide whether loaded endpoints work.
 param(
     # Folder with spatialsoftreceiver.sys and spatialsoftreceiver.inf (the build job's artifact).
-    [Parameter(Mandatory)] [string] $Package
+    [Parameter(Mandatory)] [string] $Package,
+    # Passed to the kit's install.ps1 (diagnosis only).
+    [switch] $SkipExclusivePolicy
 )
 $ErrorActionPreference = 'Stop'
 $HardwareId = 'Root\SpatialSoftReceiver'
@@ -26,7 +28,7 @@ $kit = Join-Path $expanded "spatial-softreceiver-driver-test-$version-x64"
 # install fails.
 if ($env:GITHUB_OUTPUT) { Add-Content -Path $env:GITHUB_OUTPUT -Value "kit=$kit" }
 
-& (Join-Path $kit 'install.ps1') -AllowWithoutTestSigning
+& (Join-Path $kit 'install.ps1') -AllowWithoutTestSigning -SkipExclusivePolicy:$SkipExclusivePolicy
 $installExit = $LASTEXITCODE
 if ($installExit -notin @(0, 3, 4)) { throw "test-kit install.ps1 failed ($installExit)" }
 $result = Get-Content -Raw (Join-Path $kit 'install-result.json') | ConvertFrom-Json
