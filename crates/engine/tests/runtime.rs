@@ -2250,18 +2250,14 @@ fn forced_trim_incompatible_layout_reopen_retries_and_stops_without_success() {
     engine
         .apply(LiveChange::Prepared(speaker_prepared(12, 0)))
         .unwrap();
-    for _ in 0..40 {
-        lockstep.step_read(1);
-        lockstep.step_period(1);
-        if state.opened_formats.lock().unwrap().len() >= 2 {
-            break;
-        }
-    }
-    wait_for_thread_exit(Duration::from_secs(2), || {
+    // The retries wait in wall time (250 ms, then twice as long), and an
+    // iteration that retries plays no period, so periods cannot be stepped
+    // through them: let both threads run and wait for the third open.
+    lockstep.release();
+    wait_for_thread_exit(Duration::from_secs(10), || {
         state.opened_formats.lock().unwrap().len() >= 3
     });
     let status = engine.status();
-    lockstep.release();
     let start = Instant::now();
     let report = engine.stop();
 
