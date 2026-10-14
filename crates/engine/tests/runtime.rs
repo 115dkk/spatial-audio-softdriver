@@ -1533,6 +1533,10 @@ fn priming_covers_a_decoder_sized_delivery() {
             }
             lockstep.step_period(1);
         }
+        // Count the stepped periods only: after release the output runs free
+        // on a capture that delivers nothing more until stop lands, and how
+        // many of those periods underrun depends on the scheduler.
+        let stepped_underruns = engine.status().underruns;
         lockstep.release();
         let report = engine.stop();
         assert_eq!(report.dropped_frames, 0, "phase {phase}: {report:?}");
@@ -1545,7 +1549,7 @@ fn priming_covers_a_decoder_sized_delivery() {
                 .any(|sample| *sample != 0.0),
             "phase {phase}: no sound reached the output: {report:?}"
         );
-        underruns.push((phase, report.underruns));
+        underruns.push((phase, stepped_underruns));
     }
     assert!(
         underruns.iter().all(|(_, count)| *count == 0),
