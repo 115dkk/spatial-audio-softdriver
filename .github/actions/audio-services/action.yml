@@ -1,0 +1,14 @@
+name: Audio services
+description: >-
+  Starts the Windows audio services, which are manual on Server images;
+  endpoints appear only when they run.
+runs:
+  using: composite
+  steps:
+    - name: Start the audio services
+      shell: pwsh
+      run: |
+        foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
+          Set-Service -Name $name -StartupType Automatic
+          Start-Service -Name $name
+        }

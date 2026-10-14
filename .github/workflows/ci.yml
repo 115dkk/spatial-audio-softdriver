@@ -54,15 +54,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: |
-          rustup toolchain install
-          rustup target add x86_64-pc-windows-msvc aarch64-pc-windows-msvc
-          rustup show active-toolchain
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: lint
+          cache-key: lint
+          targets: x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -115,14 +110,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: test-${{ matrix.profile }}
+          cache-key: test-${{ matrix.profile }}
 
       # --no-fail-fast: one failing test binary must not hide the others,
       # many of which (ssr-sys, ssr-live platform) run only on Windows.
@@ -152,12 +142,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: replay
+          cache-key: replay
 
       - name: Generate the fixtures (apps/ssr-replay/examples/replay_fixtures.rs)
         shell: bash
@@ -246,12 +233,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: audio
+          cache-key: audio
 
       # VB-CABLE, local crash dumps, the system timer held at 1 ms and MMCSS
       # running; the driver end-to-end job uses the same script (ADR 0026).
@@ -418,12 +402,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: docs
+          cache-key: docs
 
       - name: cargo doc
         env:
@@ -514,18 +495,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain with llvm-tools
-        run: |
-          rustup toolchain install
-          rustup component add llvm-tools-preview
+      - uses: ./.github/actions/rust-toolchain
+        with:
+          cache-key: coverage
+          components: llvm-tools-preview
 
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: coverage
 
       - name: Measure
         run: |

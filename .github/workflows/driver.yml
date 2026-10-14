@@ -65,12 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: driver-core
+          cache-key: driver-core
 
       - name: Build and test with clang and gcc (ASan, UBSan)
         run: |
@@ -126,19 +123,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install the pinned toolchain (rust-toolchain.toml)
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: driver-core-msvc
+          cache-key: driver-core-msvc
 
       # RelWithDebInfo: CMake's Debug flags carry /RTC1, which MSVC refuses
       # together with /fsanitize=address.
       - name: Build and test with MSVC (/W4 /WX, /fsanitize=address)
         shell: pwsh
         run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          . ./tools/vs-tools.ps1
+          $vs = Get-VsInstallPath @('Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
           $build = Join-Path $env:RUNNER_TEMP 'core-msvc'
           cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && cmake -S driver/core -B `"$build`" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSSR_SANITIZE=ON && cmake --build `"$build`""
           if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
@@ -213,13 +208,7 @@ jobs:
 
       # The audio services are manual on Server images; endpoints appear only
       # when they run.
-      - name: Start the audio services
-        shell: pwsh
-        run: |
-          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
-            Set-Service -Name $name -StartupType Automatic
-            Start-Service -Name $name
-          }
+      - uses: ./.github/actions/audio-services
 
       # Diagnosis: the driver's own trace of every KS request that reaches its
       # filters, from before the device exists until the endpoint builder is
@@ -376,12 +365,9 @@ jobs:
       - name: Install the pinned toolchain for the end-to-end check (rust-toolchain.toml)
         id: e2e-toolchain
         if: ${{ !cancelled() && steps.install.outputs.loaded == 'true' && steps.endpoints.outcome == 'success' }}
-        run: rustup toolchain install
-
-      - uses: Swatinem/rust-cache@v2
-        if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
+        uses: ./.github/actions/rust-toolchain
         with:
-          shared-key: audio
+          cache-key: audio
 
       - name: Real-time audio on the runner for the end-to-end check (tools/ci/realtime-audio.ps1)
         if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
@@ -551,13 +537,7 @@ jobs:
           name: spatialsoftreceiver-Release-x64
           path: ${{ runner.temp }}/package
 
-      - name: Start the audio services
-        shell: pwsh
-        run: |
-          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
-            Set-Service -Name $name -StartupType Automatic
-            Start-Service -Name $name
-          }
+      - uses: ./.github/actions/audio-services
 
       # The KS trace runs here without Verifier: on Server 2022 the package
       # job's install, with both on, has not returned since the RAII/C++23
@@ -769,15 +749,11 @@ jobs:
         working-directory: samples
         run: |
           Copy-Item ../driver/packages.config, ../driver/Directory.Build.props . -Force
-          $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
-          if (-not $nuget) {
-            $nuget = Join-Path $env:RUNNER_TEMP 'nuget.exe'
-            Invoke-WebRequest -Uri 'https://dist.nuget.org/win-x86-commandline/v6.12.1/nuget.exe' -OutFile $nuget -UseBasicParsing
-          }
+          . ../tools/vs-tools.ps1
+          $nuget = Get-NuGetExe $env:RUNNER_TEMP
           & $nuget restore packages.config -PackagesDirectory packages -NonInteractive
           if ($LASTEXITCODE -ne 0) { throw "nuget restore failed ($LASTEXITCODE)" }
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $vs = (& $vswhere -latest -products * -requires Microsoft.Component.MSBuild Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          $vs = Get-VsInstallPath @('Microsoft.Component.MSBuild', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
           Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=amd64 -host_arch=amd64'
           $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
@@ -811,13 +787,7 @@ jobs:
           name: sysvad-Release-x64
           path: ${{ runner.temp }}/sysvad-build
 
-      - name: Start the audio services
-        shell: pwsh
-        run: |
-          foreach ($name in 'AudioEndpointBuilder', 'Audiosrv') {
-            Set-Service -Name $name -StartupType Automatic
-            Start-Service -Name $name
-          }
+      - uses: ./.github/actions/audio-services
 
       - name: Test-sign and install SysVAD (tools/ci/install-sysvad-control.ps1)
         id: sysvad

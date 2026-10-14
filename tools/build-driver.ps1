@@ -42,18 +42,8 @@ $packagesDirectory = Join-Path $driverRoot 'packages'
 $targetTools = Join-Path $repositoryRoot 'target/tools'
 $outputDirectory = Join-Path $repositoryRoot "target/driver/$Configuration/$Platform"
 
-$nugetCommand = Get-Command nuget.exe -ErrorAction SilentlyContinue
-if ($nugetCommand) {
-    $nuget = $nugetCommand.Source
-} else {
-    New-Item -ItemType Directory -Force -Path $targetTools | Out-Null
-    $nuget = Join-Path $targetTools 'nuget.exe'
-    if (-not (Test-Path -LiteralPath $nuget -PathType Leaf)) {
-        $nugetUri = 'https://dist.nuget.org/win-x86-commandline/v6.12.1/nuget.exe'
-        Write-Host "Downloading NuGet command line client to $nuget"
-        Invoke-WebRequest -Uri $nugetUri -OutFile $nuget -UseBasicParsing
-    }
-}
+. (Join-Path $PSScriptRoot 'vs-tools.ps1')
+$nuget = Get-NuGetExe $targetTools
 
 Invoke-Native -FilePath $nuget -ArgumentList @(
     'restore', $packagesConfig,
@@ -61,21 +51,11 @@ Invoke-Native -FilePath $nuget -ArgumentList @(
     '-NonInteractive'
 )
 
-$vswhereCommand = Get-Command vswhere.exe -ErrorAction SilentlyContinue
-if ($vswhereCommand) {
-    $vswhere = $vswhereCommand.Source
-} else {
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-}
-
 $msbuildCommand = Get-Command msbuild.exe -ErrorAction SilentlyContinue
 $msbuild = if ($msbuildCommand) { $msbuildCommand.Source } else { $null }
 
-if (-not $msbuild -and (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
-    $installationPath = (& $vswhere -latest -products * -requires Microsoft.Component.MSBuild Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $installationPath) {
-        throw 'vswhere could not locate a Visual Studio installation containing MSBuild.'
-    }
+if (-not $msbuild -and (Test-Path -LiteralPath (Get-VsWhere) -PathType Leaf)) {
+    $installationPath = Get-VsInstallPath @('Microsoft.Component.MSBuild', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64')
 
     $devShellModule = Join-Path $installationPath 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll'
     if (Test-Path -LiteralPath $devShellModule -PathType Leaf) {
