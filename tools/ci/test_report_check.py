@@ -6,8 +6,9 @@ from report_check import PRESETS, problems
 
 def report():
     return {
-        "mode": "driver", "output_mode": "shared", "output_fell_back": False,
-        "output_kind": "speakers", "clock_strategy": "trim",
+        "source": "driver", "output_mode": "shared", "output_mode_requested": "shared",
+        "output_fell_back": False,
+        "output_kind": "speakers", "clock_strategy": "trim", "clock_requested": "auto",
         "output_sample_rate": 48000, "trim_available": True,
         "output_reconnects": 0, "output_cadence_ratio": 1.0, "faults": [],
         "latency_p50_ms": 20.0, "latency_p99_ms": 30.0,
@@ -26,9 +27,9 @@ class ReportCheckTests(unittest.TestCase):
         value = report()
         expect = PRESETS[preset]
         if expect.source:
-            value["mode"] = expect.source
-        if expect.output_mode:
-            value["output_mode"] = expect.output_mode
+            value["source"] = expect.source
+        if expect.output_mode and expect.output_mode != "requested":
+            value["output_mode"] = value["output_mode_requested"] = expect.output_mode
         if expect.output_kind:
             value["output_kind"] = expect.output_kind
         if expect.reconnects == "required":
@@ -70,6 +71,30 @@ class ReportCheckTests(unittest.TestCase):
         value = self.good("listen")
         value["clock_strategy"] = "trim"
         self.assertIn("clock_strategy is trim, expected asrc", problems(value, explicit))
+
+    def test_requested_clock_and_mode_come_from_the_report(self):
+        expect = PRESETS["listen"]
+        value = self.good("listen")
+        value["clock_requested"] = "asrc"
+        self.assertIn("clock_strategy is trim, expected asrc", problems(value, expect))
+        value["clock_strategy"] = "asrc"
+        self.assertEqual(problems(value, expect), [])
+        value["output_mode_requested"] = "exclusive"
+        self.assertIn("output opened shared, expected exclusive", problems(value, expect))
+        for key in ("clock_requested", "output_mode_requested"):
+            value = self.good("listen")
+            del value[key]
+            with self.subTest(key=key):
+                self.assertIn(f"report is missing {key}", problems(value, expect))
+        # An explicit expectation does not need the requested field.
+        value = self.good("listen")
+        del value["output_mode_requested"]
+        self.assertEqual(problems(value, replace(expect, output_mode="shared")), [])
+
+    def test_a_report_from_another_source_is_named(self):
+        value = self.good("listen")
+        value["source"] = "dump"
+        self.assertIn("source is dump, expected driver", problems(value, PRESETS["listen"]))
 
     def test_replug_allows_only_output_faults(self):
         value = self.good("replug")

@@ -20,11 +20,17 @@ COMMON_LOSS_COUNTERS = (
 )
 
 
+# An expectation of "requested" compares with what the run asked for, which
+# ssr-live writes into the report (clock_requested, output_mode_requested), so
+# a tester never repeats the command line's options here.
+REQUESTED = "requested"
+
+
 @dataclass(frozen=True)
 class Expect:
-    source: str | None
-    output_mode: str | None
-    clock: str | None
+    source: str | None  # driver, sal or dump
+    output_mode: str | None  # exclusive, shared, requested
+    clock: str | None  # auto, trim, asrc, requested
     reconnects: str  # required, forbidden, or ignored
     latency_ceiling_ms: float | None
     cadence_band: tuple[float, float] | None
@@ -38,26 +44,26 @@ class Expect:
 
 
 PRESETS = {
-    "sal": Expect(None, None, None, "forbidden", LATENCY_CEILING_MS, None,
+    "sal": Expect("sal", REQUESTED, REQUESTED, "forbidden", LATENCY_CEILING_MS, None,
                   ("underruns", "output_restarts"), False),
-    "listen": Expect(None, None, "auto", "forbidden", LATENCY_CEILING_MS,
+    "listen": Expect("driver", REQUESTED, REQUESTED, "forbidden", LATENCY_CEILING_MS,
                      (CADENCE_RATIO_MIN, CADENCE_RATIO_MAX), COMMON_LOSS_COUNTERS,
                      False, True),
-    "speakers": Expect(None, None, "auto", "forbidden", LATENCY_CEILING_MS,
+    "speakers": Expect("driver", REQUESTED, REQUESTED, "forbidden", LATENCY_CEILING_MS,
                        (CADENCE_RATIO_MIN, CADENCE_RATIO_MAX), COMMON_LOSS_COUNTERS,
                        False, True, "speakers"),
-    "replug": Expect(None, None, "auto", "required", LATENCY_CEILING_MS,
+    "replug": Expect("driver", REQUESTED, REQUESTED, "required", LATENCY_CEILING_MS,
                      (CADENCE_RATIO_MIN, CADENCE_RATIO_MAX), COMMON_LOSS_COUNTERS,
                      False, True, faults="output_only"),
-    "loopback": Expect(None, None, None, "forbidden", LATENCY_CEILING_MS, None,
+    "loopback": Expect("dump", None, None, "forbidden", LATENCY_CEILING_MS, None,
                        COMMON_LOSS_COUNTERS + ("output_restarts",), False),
-    "driver_e2e": Expect(None, "shared", None, "forbidden", LATENCY_CEILING_MS,
+    "driver_e2e": Expect("driver", "shared", None, "forbidden", LATENCY_CEILING_MS,
                          (CADENCE_RATIO_MIN, CADENCE_RATIO_MAX), COMMON_LOSS_COUNTERS,
                          False, True),
-    "soak": Expect(None, None, None, "forbidden", LATENCY_CEILING_MS,
+    "soak": Expect("dump", None, None, "forbidden", LATENCY_CEILING_MS,
                    (CADENCE_RATIO_MIN, CADENCE_RATIO_MAX),
                    COMMON_LOSS_COUNTERS + ("output_restarts",), False),
-    "restart": Expect(None, None, None, "forbidden", LATENCY_CEILING_MS,
+    "restart": Expect("dump", None, None, "forbidden", LATENCY_CEILING_MS,
                       (CADENCE_RATIO_MIN, CADENCE_RATIO_MAX),
                       COMMON_LOSS_COUNTERS + ("output_restarts",), False),
 }
@@ -70,9 +76,19 @@ def _missing(report, key, problems):
     return False
 
 
+def _requested(report, key, expected, problems):
+    """The expectation itself, or what the report says the run asked for."""
+    if expected != REQUESTED:
+        return expected
+    if _missing(report, key, problems):
+        return None
+    return report[key]
+
+
 def _clock_problems(report, requested):
     problems = []
-    if _missing(report, "clock_strategy", problems):
+    requested = _requested(report, "clock_requested", requested, problems)
+    if requested is None or _missing(report, "clock_strategy", problems):
         return problems
     actual = report["clock_strategy"]
     if requested in ("asrc", "trim"):
@@ -96,11 +112,12 @@ def problems(report, expect):
         return ["report must be an object"]
     result = []
     if expect.source is not None:
-        if not _missing(report, "mode", result) and report["mode"] != expect.source:
-            result.append(f"mode is {report['mode']}, expected {expect.source}")
+        if not _missing(report, "source", result) and report["source"] != expect.source:
+            result.append(f"source is {report['source']}, expected {expect.source}")
     if expect.output_mode is not None:
-        if not _missing(report, "output_mode", result) and report["output_mode"] != expect.output_mode:
-            result.append(f"output opened {report['output_mode']}, expected {expect.output_mode}")
+        mode = _requested(report, "output_mode_requested", expect.output_mode, result)
+        if mode is not None and not _missing(report, "output_mode", result) and report["output_mode"] != mode:
+            result.append(f"output opened {report['output_mode']}, expected {mode}")
     if expect.require_no_fallback:
         if not _missing(report, "output_fell_back", result) and report["output_fell_back"]:
             result.append("exclusive output fell back to shared mode")
@@ -174,6 +191,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--preset", choices=PRESETS, required=True)
     parser.add_argument("report")
+    # Overrides; by default the presets compare with what the run requested.
     parser.add_argument("--clock", choices=("auto", "trim", "asrc"))
     parser.add_argument("--output-mode", choices=("exclusive", "shared"))
     args = parser.parse_args(argv)

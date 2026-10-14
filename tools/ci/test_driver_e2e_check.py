@@ -20,7 +20,7 @@ class DriverE2eCheckTests(unittest.TestCase):
     @staticmethod
     def clean_report():
         return {
-            "mode": "driver",
+            "source": "driver",
             "output_mode": "shared",
             "output_cadence_ratio": 1.0,
             "faults": [],
