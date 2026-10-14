@@ -95,7 +95,8 @@ if (-not $msbuild) {
 }
 
 $stampDate = Get-Date -Format 'MM/dd/yyyy'
-Invoke-Native -FilePath $msbuild -ArgumentList @(
+# Built first: in a command's arguments `@(...) + @(...)` is three arguments.
+$msbuildArguments = @(
     $solutionPath,
     '/m',
     '/restore:false',
@@ -111,6 +112,7 @@ Invoke-Native -FilePath $msbuild -ArgumentList @(
     '/p:ApiValidator_Enable=false',
     '/verbosity:minimal'
 ) + @($Property | ForEach-Object { "/p:$_" })
+Invoke-Native -FilePath $msbuild -ArgumentList $msbuildArguments
 
 $buildDirectory = Join-Path $repositoryRoot "target/driver-build/$Configuration/$Platform"
 $artifacts = @(
