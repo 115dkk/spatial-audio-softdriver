@@ -372,7 +372,9 @@ jobs:
       - name: Real-time audio on the runner for the end-to-end check (tools/ci/realtime-audio.ps1)
         if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
         shell: pwsh
-        run: ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps')
+        # VB-CABLE at 48 kHz with a 6,144-sample pipe on Server 2022 only,
+        # as in ci.yml's audio job (ADR 0026).
+        run: ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps') ${{ matrix.os == 'windows-2022' && '-CableRate 48000 -CableMaxLatency 6144' || '' }}
 
       - name: Build ssr-live; write the fixture profile
         id: e2e-build

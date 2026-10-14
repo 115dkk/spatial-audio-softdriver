@@ -3,7 +3,9 @@
 #
 #     ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps')
 #
-# - VB-CABLE, the output the tests record back (install-virtual-cable.ps1).
+# - VB-CABLE, the output the tests record back (install-virtual-cable.ps1),
+#   with its internal rate and pipe size when -CableRate and -CableMaxLatency
+#   are given (on Server 2022 only, ADR 0026).
 # - Local crash dumps of ssr-live and ssr-replay (crash-dumps.ps1); a later
 #   `crash-dumps.ps1 -Report` step prints their stacks.
 # - The system timer held at 1 ms for the rest of the job
@@ -14,11 +16,13 @@
 #   stopped (manual start) until the first registration starts it, which lands
 #   in the first second of a run, while desktops run it already.
 param(
-    [Parameter(Mandatory)] [string] $CrashDumps
+    [Parameter(Mandatory)] [string] $CrashDumps,
+    [int] $CableRate = 0,
+    [int] $CableMaxLatency = 0
 )
 $ErrorActionPreference = 'Stop'
 
-& (Join-Path $PSScriptRoot 'install-virtual-cable.ps1')
+& (Join-Path $PSScriptRoot 'install-virtual-cable.ps1') -InternalRate $CableRate -MaxLatency $CableMaxLatency
 & (Join-Path $PSScriptRoot 'crash-dumps.ps1') -Folder $CrashDumps
 & (Join-Path $PSScriptRoot 'timer-resolution.ps1')
 
