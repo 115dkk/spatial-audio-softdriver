@@ -224,6 +224,11 @@ void SsrDeleteControl(PDEVICE_OBJECT device) {
 static void CleanFile(SsrControlState* state, SsrFileContext* file) {
     KIRQL irql;
     KeAcquireSpinLock(&state->Lock, &irql);
+    // The device takes one handle, and the handle is gone at CLEANUP. CLOSE
+    // comes when the file object's last reference drops, which a READ still
+    // completing can delay past CloseHandle; a client reopening then (or a
+    // restarted engine) must not find the device taken.
+    if (!file->Cleaned && state->OpenCount) --state->OpenCount;
     file->Cleaned = TRUE;
     state->Trim = 0;
     if (state->Started) state->Ring.DiscardQueued(SsrQpc());
@@ -243,10 +248,6 @@ NTSTATUS SsrControlDispatch(PDEVICE_OBJECT device, PIRP irp) {
         if (file) {
             CleanFile(state, file);
             if (stack->MajorFunction == IRP_MJ_CLOSE) {
-                KIRQL irql;
-                KeAcquireSpinLock(&state->Lock, &irql);
-                --state->OpenCount;
-                KeReleaseSpinLock(&state->Lock, irql);
                 stack->FileObject->FsContext = nullptr;
                 ssr::km::PoolPtr<SsrFileContext> closeFile(file);
             }

@@ -628,7 +628,7 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
 - 블루스크린 없음
 - 2단계 합격
 - 퍼저가 지정한 시간에서 1분 안에 끝남
-- 퍼저 종료 코드 0: `ioctl-fuzz.json`의 `checks`가 모두 `true`(취소한 READ를 드라이버가 끝냈는지 보는 `pending_requests_cancel` 포함)이고 `unexpected_successes`가 빈 목록. 화면 첫 줄의 `IOCTL fuzz seed`를 결과 표에 적습니다(같은 씨앗으로 다시 돌릴 수 있습니다)
+- 퍼저 종료 코드 0: `ioctl-fuzz.json`의 `checks`가 모두 `true`(취소한 READ를 드라이버가 끝냈는지 보는 `pending_requests_cancel`, READ가 걸린 채 핸들을 닫은 바로 뒤에 다시 열 수 있는지 보는 `reopen_after_close_race`, 마지막에 장치를 다시 여는 `final_open` 포함)이고 `unexpected_successes`가 빈 목록. 화면 첫 줄의 `IOCTL fuzz seed`를 결과 표에 적습니다(같은 씨앗으로 다시 돌릴 수 있습니다)
 
 블루스크린이 났다면 재부팅 뒤 바로 8단계를 실행하십시오. 덤프(`C:\Windows\Minidump`)가 함께 모입니다.
 

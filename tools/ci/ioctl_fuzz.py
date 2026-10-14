@@ -337,10 +337,30 @@ def exercise_races(summary, rng):
         summary["checks"]["overlapped_races_completed"] = True
     finally:
         device.close()
+    # The device takes one handle and gives it back at CLEANUP, when the
+    # handle goes; CLOSE can come later, once a READ still completing lets go
+    # of the file object. Opening again right after CloseHandle must work.
+    summary["checks"]["reopen_after_close_race"] = open_once(summary, "reopen_after_close_race_error")
+
+
+def open_once(summary, error_key):
+    try:
+        device = WindowsDevice()
+    except OSError as error:
+        summary[error_key] = error.errno
+        return False
+    device.close()
+    return True
 
 
 def final_health(summary):
-    device = WindowsDevice()
+    try:
+        device = WindowsDevice()
+    except OSError as error:
+        summary["checks"]["final_open"] = False
+        summary["final_open_error"] = error.errno
+        return
+    summary["checks"]["final_open"] = True
     try:
         ok, error, info, returned = device.ioctl(IOCTL_SSR_QUERY_INFO, b"", ABI_INFO_SIZE)
         info_good = ok and returned == ABI_INFO_SIZE
