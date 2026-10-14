@@ -599,7 +599,7 @@ jobs:
           if (-not $device) { throw 'install created no Spatial SoftReceiver device' }
           $steps = @(Invoke-SsrFaultSweep -InstanceId $device.InstanceId -Max 400)
           $failedStarts = @($steps | Where-Object { $_.FailedCall -gt 0 -and $_.StartProblem -ne 0 }).Count
-          $summary = "fault sweep (${{ matrix.os }}): $($steps.Count - 1) fault points failed one at a time ($failedStarts of them failed the start); every instance unloaded holding nothing"
+          $summary = "fault sweep (${{ matrix.os }}): $($steps.Count) fault points failed one at a time ($failedStarts of them failed the start); every instance unloaded holding nothing"
           Write-Host $summary
           Add-Content $env:GITHUB_STEP_SUMMARY "`n$summary`n"
           $deadline = (Get-Date).AddSeconds(60)
@@ -664,26 +664,63 @@ jobs:
             ${{ runner.temp }}/fuzz-*.json
           if-no-files-found: ignore
 
-  # Diagnosis, not a gate: on Server 2022 the install of the RAII/C++23 driver
-  # takes the runner down when the KS trace and Driver Verifier are both on,
-  # and passes with either alone (ADR 0027, 2026-10-14). One Verifier check
-  # at a time, with the trace on, says which check trips. Remove once found.
+  # Diagnosis, not a gate (ADR 0027, 2026-10-14): on Server 2022 the install of
+  # the RAII/C++23 driver takes the runner down when the KS trace and Driver
+  # Verifier's I/O verification (0x10) are both on; with either alone, or with
+  # any other Verifier check and the trace, it passes. These variant builds
+  # say which part of the driver it needs: the trace's buffer copies, the
+  # trace's events at all, or MSVC's conformance mode. Remove once found.
+  diag-build:
+    name: diagnostic driver build (${{ matrix.variant }})
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: trace-metadata-only
+            property: SsrDiagDefines=SSR_TRACE_METADATA_ONLY
+          - variant: trace-off
+            property: SsrDiagDefines=SSR_TRACE_OFF
+          - variant: permissive
+            property: SsrConformanceMode=false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Release x64 with ${{ matrix.property }} (tools/build-driver.ps1)
+        shell: pwsh
+        run: ./tools/build-driver.ps1 -Configuration Release -Platform x64 -Property '${{ matrix.property }}'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spatialsoftreceiver-diag-${{ matrix.variant }}
+          path: target/driver/Release/x64
+          if-no-files-found: error
+          retention-days: 7
+
   verifier-isolation:
-    name: which Verifier check stops the 2022 install (0x${{ matrix.flag }})
-    needs: build
+    name: 2022 install with the KS trace and I/O verification (${{ matrix.variant }})
+    needs: [build, diag-build]
     runs-on: windows-2022
     timeout-minutes: 15
     continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
-        flag: ['1', '2', '8', '10', '20', '80', '100', '800']
+        include:
+          - variant: release
+            artifact: spatialsoftreceiver-Release-x64
+          - variant: trace-metadata-only
+            artifact: spatialsoftreceiver-diag-trace-metadata-only
+          - variant: trace-off
+            artifact: spatialsoftreceiver-diag-trace-off
+          - variant: permissive
+            artifact: spatialsoftreceiver-diag-permissive
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v7
         with:
-          name: spatialsoftreceiver-Release-x64
+          name: ${{ matrix.artifact }}
           path: ${{ runner.temp }}/package
 
       - name: Start the audio services
@@ -698,11 +735,11 @@ jobs:
         shell: pwsh
         run: ./tools/ci/ks-trace.ps1 -Start
 
-      - name: Driver Verifier with only flag 0x${{ matrix.flag }}
+      - name: Driver Verifier with I/O verification only (0x10)
         shell: pwsh
         run: |
           . ./tools/ci/verifier.ps1
-          Invoke-SsrVerifier @('/volatile', '/flags', '0x${{ matrix.flag }}', '/adddriver', $SsrVerifiedImage) | Out-Null
+          Invoke-SsrVerifier @('/volatile', '/flags', '0x10', '/adddriver', $SsrVerifiedImage) | Out-Null
           Get-SsrVerifierState | Select-Object Level, Listed | Format-List
 
       - name: Test-sign, stage and install (tools/ci/install-driver-test.ps1)
@@ -717,7 +754,7 @@ jobs:
         run: |
           Start-Sleep -Seconds 10
           ./tools/ci/ks-trace.ps1 -Stop
-          Add-Content $env:GITHUB_STEP_SUMMARY "`nVerifier flag 0x${{ matrix.flag }} with the KS trace: install ${{ steps.install.outcome }}`n"
+          Add-Content $env:GITHUB_STEP_SUMMARY "`nKS trace and I/O verification, ${{ matrix.variant }} build: install ${{ steps.install.outcome }}`n"
 
   codeql:
     name: CodeQL Windows driver suites

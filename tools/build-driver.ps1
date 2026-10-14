@@ -8,7 +8,11 @@ param(
     [string]$Configuration = 'Release',
 
     [ValidateSet('x64', 'ARM64')]
-    [string]$Platform = 'x64'
+    [string]$Platform = 'x64',
+
+    # Extra MSBuild properties for diagnostic builds, e.g.
+    # 'SsrConformanceMode=false'. Releases pass none.
+    [string[]]$Property = @()
 )
 
 Set-StrictMode -Version Latest
@@ -106,7 +110,7 @@ Invoke-Native -FilePath $msbuild -ArgumentList @(
     '/p:SkipPackageVerification=true',
     '/p:ApiValidator_Enable=false',
     '/verbosity:minimal'
-)
+) + @($Property | ForEach-Object { "/p:$_" })
 
 $buildDirectory = Join-Path $repositoryRoot "target/driver-build/$Configuration/$Platform"
 $artifacts = @(

@@ -18,9 +18,14 @@ void SsrTraceFault(ULONG call) {
     if (Registered) TraceLoggingWrite(SsrKsProvider, "FaultInjected", TraceLoggingUInt32(call, "Call"));
 }
 
+// External linkage so the diagnostic builds below, which leave one or both
+// unused, do not trip C4505.
+USHORT SsrTraceCapture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* target, ULONG capacity);
+void SsrTraceCaptureBuffers(PIRP irp, PIO_STACK_LOCATION stack, SsrIrpNote* note);
+
 // Copies up to `capacity` bytes of a request buffer. A user-mode caller's
 // METHOD_NEITHER buffer is probed first; a fault leaves nothing copied.
-static USHORT Capture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* target, ULONG capacity) {
+USHORT SsrTraceCapture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* target, ULONG capacity) {
     ULONG bytes = length < capacity ? length : capacity;
     if (!source || !bytes) return 0;
     __try {
@@ -32,8 +37,37 @@ static USHORT Capture(PVOID source, ULONG length, KPROCESSOR_MODE mode, BYTE* ta
     return static_cast<USHORT>(bytes);
 }
 
+void SsrTraceCaptureBuffers(PIRP irp, PIO_STACK_LOCATION stack, SsrIrpNote* note) {
+    if (stack->MajorFunction == IRP_MJ_CREATE) {
+        // A filter's reference string, or KSSTRING_Pin with the KSPIN_CONNECT
+        // and data format after it: the I/O manager's copy, kernel memory.
+        if (stack->FileObject && stack->FileObject->FileName.Buffer)
+            note->NameBytes = SsrTraceCapture(stack->FileObject->FileName.Buffer, stack->FileObject->FileName.Length,
+                                              KernelMode, note->Name, sizeof(note->Name));
+        return;
+    }
+    auto& control = stack->Parameters.DeviceIoControl;
+    if (METHOD_FROM_CTL_CODE(control.IoControlCode) != METHOD_NEITHER) return;
+    // KSPROPERTY or KSP_PIN, then for DATAINTERSECTION the client's ranges.
+    note->InputBytes = SsrTraceCapture(control.Type3InputBuffer, control.InputBufferLength, irp->RequestorMode,
+                                       note->Input, sizeof(note->Input));
+    // Input sits at an odd offset in the note: copy Flags out instead of
+    // reading it through a misaligned KSPROPERTY pointer.
+    ULONG flags = 0;
+    if (note->InputBytes >= sizeof(KSPROPERTY))
+        RtlCopyMemory(&flags, note->Input + FIELD_OFFSET(KSPROPERTY, Flags), sizeof(flags));
+    if (control.IoControlCode == IOCTL_KS_PROPERTY && note->InputBytes >= sizeof(KSPROPERTY) &&
+        (flags & KSPROPERTY_TYPE_SET))
+        note->ValueBytes = SsrTraceCapture(irp->UserBuffer, control.OutputBufferLength, irp->RequestorMode,
+                                           note->Value, sizeof(note->Value));
+}
+
 void SsrTraceBefore(PIRP irp, SsrIrpNote* note) {
     note->Active = false;
+#ifdef SSR_TRACE_OFF
+    // Diagnostic build (driver.yml): a session may be on, the driver writes nothing.
+    UNREFERENCED_PARAMETER(irp);
+#else
     if (!Registered || !TraceLoggingProviderEnabled(SsrKsProvider, 0, 0)) return;
     auto stack = IoGetCurrentIrpStackLocation(irp);
     if (stack->MajorFunction != IRP_MJ_CREATE && stack->MajorFunction != IRP_MJ_DEVICE_CONTROL) return;
@@ -57,34 +91,18 @@ void SsrTraceBefore(PIRP irp, SsrIrpNote* note) {
     note->Related = stack->FileObject ? stack->FileObject->RelatedFileObject : nullptr;
     note->Process = HandleToULong(PsGetCurrentProcessId());
     note->InputBytes = note->ValueBytes = note->NameBytes = 0;
-    // ProbeForRead and a copy that may fault need APC_LEVEL or below; above it
-    // the event carries the request's identity without its bytes.
-    if (irql > APC_LEVEL) return;
-    if (stack->MajorFunction == IRP_MJ_CREATE) {
-        // A filter's reference string, or KSSTRING_Pin with the KSPIN_CONNECT
-        // and data format after it: the I/O manager's copy, kernel memory.
-        if (stack->FileObject && stack->FileObject->FileName.Buffer)
-            note->NameBytes = Capture(stack->FileObject->FileName.Buffer, stack->FileObject->FileName.Length,
-                                      KernelMode, note->Name, sizeof(note->Name));
-        return;
+    if (stack->MajorFunction == IRP_MJ_DEVICE_CONTROL) {
+        note->Code = stack->Parameters.DeviceIoControl.IoControlCode;
+        note->InputLength = stack->Parameters.DeviceIoControl.InputBufferLength;
+        note->OutputLength = stack->Parameters.DeviceIoControl.OutputBufferLength;
     }
-    auto& control = stack->Parameters.DeviceIoControl;
-    note->Code = control.IoControlCode;
-    note->InputLength = control.InputBufferLength;
-    note->OutputLength = control.OutputBufferLength;
-    if (METHOD_FROM_CTL_CODE(control.IoControlCode) != METHOD_NEITHER) return;
-    // KSPROPERTY or KSP_PIN, then for DATAINTERSECTION the client's ranges.
-    note->InputBytes = Capture(control.Type3InputBuffer, control.InputBufferLength, irp->RequestorMode,
-                               note->Input, sizeof(note->Input));
-    // Input sits at an odd offset in the note: copy Flags out instead of
-    // reading it through a misaligned KSPROPERTY pointer.
-    ULONG flags = 0;
-    if (note->InputBytes >= sizeof(KSPROPERTY))
-        RtlCopyMemory(&flags, note->Input + FIELD_OFFSET(KSPROPERTY, Flags), sizeof(flags));
-    if (control.IoControlCode == IOCTL_KS_PROPERTY && note->InputBytes >= sizeof(KSPROPERTY) &&
-        (flags & KSPROPERTY_TYPE_SET))
-        note->ValueBytes = Capture(irp->UserBuffer, control.OutputBufferLength, irp->RequestorMode,
-                                   note->Value, sizeof(note->Value));
+    // ProbeForRead and a copy that may fault need APC_LEVEL or below; above it
+    // the event carries the request's identity without its bytes. The
+    // metadata-only diagnostic build (driver.yml) never copies.
+#ifndef SSR_TRACE_METADATA_ONLY
+    if (irql <= APC_LEVEL) SsrTraceCaptureBuffers(irp, stack, note);
+#endif
+#endif
 }
 
 void SsrTraceAfter(const SsrIrpNote& note, NTSTATUS status) {
