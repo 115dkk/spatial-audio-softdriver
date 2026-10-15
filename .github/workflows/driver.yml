@@ -372,6 +372,7 @@ jobs:
       - name: Real-time audio on the runner for the end-to-end check (tools/ci/realtime-audio.ps1)
         if: ${{ !cancelled() && steps.e2e-toolchain.outcome == 'success' }}
         shell: pwsh
+        # VB-CABLE with the driver's defaults, as in ci.yml's audio job (ADR 0026).
         run: ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps')
 
       - name: Build ssr-live; write the fixture profile
@@ -717,6 +718,16 @@ jobs:
       - uses: github/codeql-action/analyze@v4
         with:
           category: windows-driver
+          output: ${{ runner.temp }}/sarif
+
+      # The same results as SARIF beside the run (see codeql.yml).
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: codeql-sarif-windows-driver
+          path: ${{ runner.temp }}/sarif
+          if-no-files-found: ignore
+          retention-days: 30
 
   # Diagnosis only: SysVAD itself (the sample driver/spatialsoftreceiver is reduced from,
   # at the same commit) built with the NuGet WDK, test-signed and installed,

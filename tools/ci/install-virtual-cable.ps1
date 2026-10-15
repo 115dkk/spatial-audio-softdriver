@@ -10,6 +10,21 @@
 # DIF_REGISTERDEVICE, UpdateDriverForPlugAndPlayDevices), through SetupAPI
 # from C# (tools/ci/RootDevice.cs, shared with install-driver-test.ps1), so the
 # runner needs no devcon.exe.
+#
+# The package's driver (vbaudio_cable64_win7.sys, 1.0.3.5) reads two settings
+# from HKLM\SOFTWARE\VB-Audio\Cable when the device starts, the values its
+# control panel writes (ADR 0026):
+#   VBAudioCableWDM_SR  internal sample rate: 44100, 48000 or 88200; anything
+#                       else, or no value, runs the cable at 96000 Hz, so a
+#                       48 kHz stream is converted up and back down inside it.
+#   VBAudioCableWDM     pipe size in samples of the internal rate, clamped to
+#                       512..8192; 7168 without a value. VB-Audio's rule is three
+#                       times the largest buffer a client hands the cable.
+# -InternalRate and -MaxLatency write them before the device is created.
+param(
+    [ValidateSet(0, 44100, 48000, 88200)] [int] $InternalRate = 0,
+    [ValidateScript({ $_ -eq 0 -or ($_ -ge 512 -and $_ -le 8192) })] [int] $MaxLatency = 0
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -50,6 +65,21 @@ $store.Open('ReadWrite')
 $store.Add($signature.SignerCertificate)
 $store.Close()
 Write-Host "Trusted publisher: $($signature.SignerCertificate.Subject)"
+
+$settings = 'HKLM:\SOFTWARE\VB-Audio\Cable'
+if ($InternalRate -or $MaxLatency) {
+    if (-not (Test-Path $settings)) { New-Item -Path $settings -Force | Out-Null }
+    if ($InternalRate) {
+        Set-ItemProperty -Path $settings -Name VBAudioCableWDM_SR -Value $InternalRate -Type DWord
+    }
+    if ($MaxLatency) {
+        Set-ItemProperty -Path $settings -Name VBAudioCableWDM -Value $MaxLatency -Type DWord
+    }
+}
+$stored = Get-ItemProperty -Path $settings -ErrorAction SilentlyContinue
+$rate = if ($stored -and $stored.VBAudioCableWDM_SR -in 44100, 48000, 88200) { $stored.VBAudioCableWDM_SR } else { 96000 }
+$pipe = if ($stored -and $null -ne $stored.VBAudioCableWDM) { [math]::Min([math]::Max([int]$stored.VBAudioCableWDM, 512), 8192) } else { 7168 }
+Write-Host ('VB-CABLE settings: internal rate {0} Hz, pipe {1} samples ({2:N1} ms)' -f $rate, $pipe, (1000.0 * $pipe / $rate))
 
 Add-Type -TypeDefinition (Get-Content -Raw (Join-Path $PSScriptRoot 'RootDevice.cs'))
 

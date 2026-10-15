@@ -239,6 +239,8 @@ jobs:
 
       # VB-CABLE, local crash dumps, the system timer held at 1 ms and MMCSS
       # running; the driver end-to-end job uses the same script (ADR 0026).
+      # The cable keeps the driver's defaults (96 kHz, 7,168 samples): at 48 kHz
+      # with a 6,144-sample pipe every Server 2022 soak lost real-time pace.
       - name: Real-time audio on the runner (tools/ci/realtime-audio.ps1)
         shell: pwsh
         run: ./tools/ci/realtime-audio.ps1 -CrashDumps (Join-Path $env:RUNNER_TEMP 'dumps')
