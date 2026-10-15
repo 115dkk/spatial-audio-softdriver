@@ -120,6 +120,18 @@ impl Session {
         output: O,
         driver_stats: Option<Box<dyn DriverStatsSource>>,
     ) -> Result<Self, SessionError> {
+        // The baseline is taken as soon as the source is open, before the
+        // output is prepared: a driver ring that overflows while a large
+        // profile prepares belongs to this run's losses.
+        let driver_baseline = match driver_stats {
+            Some(source) => {
+                let source = Arc::new(Mutex::new(source));
+                let (generation, stats) = sample(&source).map_err(SessionError::DriverStats)?;
+                let totals = Arc::new(Mutex::new(DriverStatsTotals::new(generation, stats)));
+                Some((source, totals))
+            }
+            None => None,
+        };
         let prepared = config.profile.prepare()?;
         let output_kind = prepared.kind();
         let output_channels = prepared.channels();
@@ -132,10 +144,7 @@ impl Session {
                 .map_or(default_now, |recorder| recorder.now),
         );
 
-        let (driver_source, driver_totals) = if let Some(source) = driver_stats {
-            let source = Arc::new(Mutex::new(source));
-            let initial = sample(&source).map_err(SessionError::DriverStats)?;
-            let totals = Arc::new(Mutex::new(DriverStatsTotals::new(initial.0, initial.1)));
+        let (driver_source, driver_totals) = if let Some((source, totals)) = driver_baseline {
             let before_source = Arc::clone(&source);
             let before_totals = Arc::clone(&totals);
             let after_source = Arc::clone(&source);

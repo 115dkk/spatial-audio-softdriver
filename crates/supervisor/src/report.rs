@@ -162,21 +162,24 @@ mod tests {
 
     #[test]
     fn chain_error_report_uses_all_stable_snake_case_names() {
-        let report = chain_errors_json(ChainErrorCounts::default());
-        let actual = report
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
+        let counts = ChainErrorCounts::from_fn(|kind| kind.index() as u64 + 1);
+        let report = chain_errors_json(counts);
+        let errors = report.as_object().unwrap();
+        assert_eq!(errors.len(), ChainErrorKind::COUNT);
+        let names = errors.keys().map(String::as_str).collect::<BTreeSet<_>>();
         let expected = ChainErrorKind::ALL
             .iter()
             .map(|kind| kind.name())
             .collect::<BTreeSet<_>>();
-        assert_eq!(actual, expected);
-        assert!(actual.iter().all(|name| {
-            name.bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-        }));
+        assert_eq!(names, expected);
+        for kind in ChainErrorKind::ALL {
+            let name = kind.name();
+            assert!(
+                name.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                "{name} is not snake_case"
+            );
+            assert_eq!(errors[name], serde_json::json!(kind.index() as u64 + 1));
+        }
     }
 }

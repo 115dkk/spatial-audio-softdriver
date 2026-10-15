@@ -12,7 +12,7 @@ use ssr_types::{
     OutputError, OutputFormat, OutputLayout, OutputOpener, OutputSink, PcmFormat, SampleType,
     SourceFormat,
 };
-use supervisor::{RequestFields, Session, SessionConfig};
+use supervisor::{DriverStatsSource, RequestFields, Session, SessionConfig, SessionError};
 
 struct FailingOpener;
 
@@ -274,4 +274,52 @@ fn snapshot_is_faulted_after_permanent_output_failure() {
         std::thread::sleep(Duration::from_millis(5));
     }
     session.stop().unwrap();
+}
+
+struct CountingStats(Arc<AtomicU64>);
+
+impl DriverStatsSource for CountingStats {
+    fn sample(&self) -> Result<(u64, ssr_abi::DriverStats), String> {
+        self.0.fetch_add(1, Ordering::AcqRel);
+        Ok((
+            0,
+            ssr_abi::DriverStats {
+                struct_size: std::mem::size_of::<ssr_abi::DriverStats>() as u32,
+                open_count: 1,
+                max_timer_lateness_us: 0,
+                reserved: 0,
+                endpoints: [ssr_abi::EndpointStats {
+                    total_bytes: 0,
+                    overruns: 0,
+                    lost_bytes: 0,
+                    epoch: 1,
+                    state: 1,
+                }; ssr_abi::MAX_ENDPOINTS],
+            },
+        ))
+    }
+}
+
+#[test]
+fn the_driver_baseline_is_taken_before_the_output_is_prepared() {
+    // A driver ring that overflows while a large profile prepares is this
+    // run's loss, so the baseline sample comes first; a profile that cannot
+    // prepare shows the order.
+    let samples = Arc::new(AtomicU64::new(0));
+    let mut config = config();
+    let engine::OutputProfile::Speakers(speakers) = &mut config.profile else {
+        unreachable!()
+    };
+    speakers.speakers[1].channel = 5;
+    let started = Session::start(
+        config,
+        capture(),
+        NullOpener {
+            rate: 48_000,
+            period_frames: 480,
+        },
+        Some(Box::new(CountingStats(Arc::clone(&samples)))),
+    );
+    assert!(matches!(started, Err(SessionError::Prepare(_))));
+    assert_eq!(samples.load(Ordering::Acquire), 1);
 }

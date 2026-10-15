@@ -133,10 +133,13 @@ impl<C: CaptureSource> CaptureSource for TeeCapture<C> {
     }
 }
 
+/// The writer thread that drains the byte ring to the dump file. Stopping or
+/// dropping it writes out everything already handed to the ring and joins
+/// the thread, so a capture that ends in an error still leaves a whole dump.
 pub struct Recorder {
     stopped: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
-    writer: JoinHandle<Result<(), String>>,
+    writer: Option<JoinHandle<Result<(), String>>>,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -200,7 +203,7 @@ impl Recorder {
             Self {
                 stopped,
                 dropped,
-                writer: handle,
+                writer: Some(handle),
             },
         ))
     }
@@ -209,11 +212,25 @@ impl Recorder {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    pub fn stop(self) -> Result<(), String> {
+    pub fn stop(mut self) -> Result<(), String> {
+        self.finish()
+    }
+
+    fn finish(&mut self) -> Result<(), String> {
+        let Some(writer) = self.writer.take() else {
+            return Ok(());
+        };
         self.stopped.store(true, Ordering::Release);
-        self.writer
+        writer
             .join()
             .map_err(|_| "the dump writer panicked".to_owned())?
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        // An early return (a capture error) must not lose what was read.
+        let _ = self.finish();
     }
 }
 
@@ -270,67 +287,97 @@ mod tests {
         bytes
     }
 
-    #[test]
-    fn recorder_marks_reads_and_a_full_ring_gap() {
-        let path = std::env::temp_dir().join(format!(
-            "supervisor-recorder-{}.ssrdump",
+    fn temp_dump(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "supervisor-{name}-{}-{}.ssrdump",
+            std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        ))
+    }
+
+    fn file_reads(path: &std::path::Path) -> Vec<(Vec<u8>, Option<u64>)> {
+        let bytes = std::fs::read(path).unwrap();
+        let (header, stream) = ssr_abi::split_dump(&bytes).unwrap();
+        ssr_abi::reads(&header, stream)
+            .map(|read| (read.bytes.to_vec(), read.end_qpc))
+            .collect()
+    }
+
+    // The byte ring is large enough for every read, so nothing depends on
+    // when the writer thread runs; overflow is covered with a hand-driven
+    // consumer (tee_capture_preserves_reads_and_records_dropped_bytes).
+    #[test]
+    fn recorder_writes_every_read_with_its_end_marker() {
+        let path = temp_dump("recorder");
+        let reads = vec![data(1), data(2), data(3)];
         let tee = TeeCapture::without_recorder(
             Capture {
-                reads: vec![data(1), data(2), data(3)],
+                reads: reads.clone(),
                 next: 0,
             },
             now,
         );
-        let one = ssr_abi::record_size(8) + READ_END_BYTES;
-        let capacity = ssr_abi::RECORDER_GAP_RECORD_BYTES + one;
-        let (mut tee, recorder) = Recorder::start_with_capacity(
+        let (mut tee, recorder) = Recorder::start(
             RecorderConfig {
                 path: path.clone(),
                 now,
             },
             1_000,
             tee,
-            capacity,
+        )
+        .unwrap();
+        let mut buffer = [0; 128];
+        for _ in 0..3 {
+            tee.read(&mut buffer, Duration::ZERO).unwrap();
+        }
+        assert_eq!(recorder.dropped_bytes(), 0);
+        drop(tee);
+        recorder.stop().unwrap();
+
+        let written = file_reads(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            written,
+            reads
+                .into_iter()
+                .zip(1..)
+                .map(|(bytes, qpc)| (bytes, Some(qpc)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_recorder_dropped_on_a_capture_error_keeps_what_was_read() {
+        let path = temp_dump("recorder-error");
+        let tee = TeeCapture::without_recorder(
+            Capture {
+                reads: vec![data(1)],
+                next: 0,
+            },
+            now,
+        );
+        let (mut tee, recorder) = Recorder::start(
+            RecorderConfig {
+                path: path.clone(),
+                now,
+            },
+            1_000,
+            tee,
         )
         .unwrap();
         let mut buffer = [0; 128];
         tee.read(&mut buffer, Duration::ZERO).unwrap();
-        tee.read(&mut buffer, Duration::ZERO).unwrap();
-        assert!(recorder.dropped_bytes() > 0);
-        std::thread::sleep(Duration::from_millis(20));
-        tee.read(&mut buffer, Duration::ZERO).unwrap();
-        drop(tee);
-        recorder.stop().unwrap();
+        let failed = tee.read(&mut buffer, Duration::ZERO);
+        assert!(matches!(failed, Err(CaptureError::Ended)));
+        // As `record` does when a read fails: return without stopping.
+        drop(recorder);
 
-        let bytes = std::fs::read(&path).unwrap();
-        let (header, stream) = ssr_abi::split_dump(&bytes).unwrap();
-        let reads = ssr_abi::reads(&header, stream).collect::<Vec<_>>();
-        assert_eq!(reads.len(), 2);
-        assert_eq!(reads[0].end_qpc, Some(1));
-        assert_eq!(reads[1].end_qpc, Some(3));
-        assert_eq!(reads[1].lost_bytes, ssr_abi::record_size(8) as u64);
-        assert_eq!(
-            ssr_abi::raw_records(reads[0].bytes)
-                .next()
-                .unwrap()
-                .unwrap()
-                .payload,
-            &[1; 8]
-        );
-        assert_eq!(
-            ssr_abi::raw_records(reads[1].bytes)
-                .next()
-                .unwrap()
-                .unwrap()
-                .payload,
-            &[3; 8]
-        );
-        std::fs::remove_file(path).unwrap();
+        let written = file_reads(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(written, vec![(data(1), Some(1))]);
     }
 
     #[test]

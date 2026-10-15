@@ -643,7 +643,9 @@ tests = [
   "ssr-live::a_dump_that_ends_on_data_keeps_looping",
   "ssr-live::looping_needs_two_data_records",
   "ssr-live::format_two_loop_span_uses_whole_recorded_reads",
-  "supervisor::recorder_marks_reads_and_a_full_ring_gap",
+  "supervisor::recorder_writes_every_read_with_its_end_marker",
+  "supervisor::a_recorder_dropped_on_a_capture_error_keeps_what_was_read",
+  "ssr-live::report_request_fields_cover_sources_clocks_and_output_modes",
   "supervisor::tee_capture_records_empty_successful_reads",
   "supervisor::tee_capture_preserves_reads_and_records_dropped_bytes",
   "supervisor::tee_capture_stop_idle_restart_replays_like_the_live_chain",
@@ -706,8 +708,9 @@ tests = [
   "supervisor::snapshot_is_faulted_after_permanent_output_failure",
   "supervisor::totals_span_generations_and_ignore_stale_samples",
   "supervisor::driver_stats_json_keeps_stable_keys",
+  "supervisor::the_driver_baseline_is_taken_before_the_output_is_prepared",
 ]
-note = "supervisor::Session runs one live session for ssr-live today and the M4 shell later: it starts the engine with the prepared output, re-prepares when the engine asks (retrying while the change queue is full; a profile that no longer prepares is an error), keeps the run figures, tees capture reads into the diagnostic recorder, totals driver statistics across reconnects, and stops in the order its report relies on (the last driver-statistics sample while the engine still reads, the engine, then the recorder). SessionReport::to_json is the ssr-live --report contract CI reads; the test pins its key set"
+note = "supervisor::Session runs one live session for ssr-live today and the M4 shell later: it starts the engine with the prepared output, re-prepares when the engine asks (retrying while the change queue is full; a profile that no longer prepares is an error), keeps the run figures, tees capture reads into the diagnostic recorder, totals driver statistics across reconnects from a baseline taken before the output is prepared to a last sample taken while the engine still reads, and stops the engine and then the recorder, which also writes out what it holds when dropped on an error. SessionReport::to_json is the ssr-live --report contract CI reads; the test pins its key set"
 
 [[feature]]
 id = "setup.tasks"

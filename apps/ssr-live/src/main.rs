@@ -41,6 +41,37 @@ enum CaptureKind {
     Sal,
 }
 
+/// What only the command line knows for `--report` (source kind, requested
+/// clock and output mode, direct layouts).
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn request_fields(
+    source: CaptureKind,
+    from_dump: bool,
+    clock: Clock,
+    shared: bool,
+    direct_layouts: Vec<supervisor::DirectLayoutField>,
+) -> supervisor::RequestFields {
+    supervisor::RequestFields {
+        source: if from_dump {
+            "dump"
+        } else {
+            match source {
+                CaptureKind::Driver => "driver",
+                CaptureKind::Sal => "sal",
+            }
+        }
+        .to_owned(),
+        clock_requested: match clock {
+            Clock::Auto => "auto",
+            Clock::Asrc => "asrc",
+            Clock::Trim => "trim",
+        }
+        .to_owned(),
+        output_mode_requested: if shared { "shared" } else { "exclusive" }.to_owned(),
+        direct_layouts,
+    }
+}
+
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn parse_endpoints(value: Option<&str>) -> Result<engine::EndpointFilter, String> {
     let Some(value) = value else {
@@ -75,6 +106,55 @@ fn parse_endpoints(value: Option<&str>) -> Result<engine::EndpointFilter, String
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
+
+    #[test]
+    fn report_request_fields_cover_sources_clocks_and_output_modes() {
+        let report = supervisor::SessionReport {
+            seconds: 1.0,
+            engine: engine::StopReport {
+                final_status: ssr_types::EngineStatus {
+                    output_rate: 44_100,
+                    trim_available: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            figures: supervisor::RunFigures::default(),
+            output_kind: engine::OutputKind::Speakers,
+            output_channels: 2,
+            output_channel_mask: 3,
+            recorder_lost_bytes: 0,
+            driver: None,
+            driver_stats_error: None,
+        };
+        for (source, from_dump, expected) in [
+            (CaptureKind::Driver, false, "driver"),
+            (CaptureKind::Sal, false, "sal"),
+            (CaptureKind::Driver, true, "dump"),
+        ] {
+            for (clock, clock_name) in [
+                (Clock::Auto, "auto"),
+                (Clock::Asrc, "asrc"),
+                (Clock::Trim, "trim"),
+            ] {
+                for (shared, mode) in [(false, "exclusive"), (true, "shared")] {
+                    let fields = report.to_json(&request_fields(
+                        source,
+                        from_dump,
+                        clock,
+                        shared,
+                        Vec::new(),
+                    ));
+                    assert_eq!(fields["source"], expected);
+                    assert_eq!(fields["clock_requested"], clock_name);
+                    assert_eq!(fields["output_mode_requested"], mode);
+                    assert_eq!(fields["output_sample_rate"], 44_100);
+                    assert_eq!(fields["trim_available"], true);
+                    assert_eq!(fields["direct_layouts"], serde_json::json!([]));
+                }
+            }
+        }
+    }
 
     #[test]
     fn endpoint_parser_accepts_arbitrary_subsets_and_rejects_bad_masks() {
@@ -531,29 +611,12 @@ mod platform {
     }
 
     fn report_request(options: &PlayOptions) -> supervisor::RequestFields {
-        supervisor::RequestFields {
-            source: if options.from_dump.is_some() {
-                "dump"
-            } else {
-                match options.source {
-                    CaptureKind::Driver => "driver",
-                    CaptureKind::Sal => "sal",
-                }
-            }
-            .to_owned(),
-            clock_requested: match options.clock {
-                Clock::Auto => "auto",
-                Clock::Asrc => "asrc",
-                Clock::Trim => "trim",
-            }
-            .to_owned(),
-            output_mode_requested: if options.shared {
-                "shared"
-            } else {
-                "exclusive"
-            }
-            .to_owned(),
-            direct_layouts: options
+        super::request_fields(
+            options.source,
+            options.from_dump.is_some(),
+            options.clock,
+            options.shared,
+            options
                 .direct_layouts
                 .iter()
                 .map(|value| supervisor::DirectLayoutField {
@@ -568,7 +631,7 @@ mod platform {
                         .collect(),
                 })
                 .collect(),
-        }
+        )
     }
 
     pub fn play(options: PlayOptions) -> Result<(), String> {
