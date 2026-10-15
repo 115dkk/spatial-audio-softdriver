@@ -509,7 +509,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\volume_check.ps1 -Summary 
 
 **합격 기준**
 - `underruns_while_streaming`이 0
-- `dropped_frames`, `lane_underrun_frames`, `output_overflow_frames`, `dropped_events`가 모두 0
+- `dropped_frames`, `decode_refused`, `lane_underrun_frames`, `output_overflow_frames`, `dropped_events`가 모두 0
 - `endpoints`가 네 슬롯이고 `endpoints[*].unsupported`와 `endpoints[*].unsupported_reason`이 모두 `null`
 - `skipped_records`가 0
 - `driver.endpoints[*].lost_bytes`가 모두 0
@@ -587,7 +587,7 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
 
 **합격 기준**
 - 보고의 `output_kind`가 `speakers`, `output_channels`와 `output_channel_mask`가 프로필과 같음
-- `underruns_while_streaming`, `dropped_frames`, `output_overflow_frames`가 0
+- `underruns_while_streaming`, `dropped_frames`, `decode_refused`, `output_overflow_frames`가 0
 - 채널 확인 음원의 각 채널이 그 스피커에서만 나옴(뒤바뀐 채널이 있으면 그 이름을 적음)
 - 크로스오버를 쓴 경우 저음이 서브우퍼로 가고, 스피커 사이 거리 정렬 뒤 소리가 한 점에 모임
 

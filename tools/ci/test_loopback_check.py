@@ -109,6 +109,7 @@ class ReportProblems(unittest.TestCase):
             "output_mode": "exclusive",
             "output_fell_back": False,
             "dropped_frames": 0,
+            "decode_refused": 0,
             "lane_underrun_frames": 0,
             "output_overflow_frames": 0,
             "dropped_events": 0,

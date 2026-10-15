@@ -20,12 +20,28 @@ const FADE_FRAMES: usize = 64;
 const VOLUME_RAMP_FRAMES: u64 = 64;
 const VOLUME_TRANSITIONS: usize = 16;
 const CHANNELS: usize = MAX_OBJECTS + 1;
-const MAX_DELAY_FRAMES: u64 = MIX_RATE as u64 / 5;
+/// The one lateness constant, 200 ms at 48 kHz: the cap on a lane's initial
+/// delay, and the chain's bound on how late a decode-thread delivery may come
+/// back and still be placed (later ones are discarded and counted). A lane's
+/// delay itself is not capped: it is bookkeeping (timeline position minus
+/// frames produced), and IEC 61937 zero padding or a pause legitimately
+/// raises it without bound.
+pub const MAX_DELAY_FRAMES: u64 = MIX_RATE as u64 / 5;
 const MAX_SCENE_FRAMES: u64 = 1_536;
 const MAX_OUTPUT_FRAMES: usize = (MAX_SCENE_FRAMES * MIX_RATE as u64).div_ceil(44_100) as usize + 1;
 const CONVERSION_RING: usize = 4;
 const MAX_DIRECTIONS: usize = Layout::MAX_DIRECTIONS;
 const MATRIX_VALUES: usize = MAX_DIRECTIONS * MAX_DIRECTIONS;
+
+/// Timeline frames one lane's slot ring must retain ahead of the frontier: the
+/// delivery-lateness bound, the admitted arrival slack, the largest decoded
+/// scene and two intervals.
+fn retained_frames(arrival_slack_frames: u64) -> u64 {
+    MAX_DELAY_FRAMES
+        .saturating_add(arrival_slack_frames)
+        .saturating_add(MAX_SCENE_FRAMES)
+        .saturating_add(2 * MIX_FRAMES as u64)
+}
 
 #[inline]
 fn renderer_pan_ramp_gain(from: f32, to: f32, index: usize, frames: usize) -> f32 {
@@ -878,14 +894,19 @@ impl SceneMixer {
             arrival_slack_frames: config.arrival_slack_frames.min(MAX_ARRIVAL_SLACK_FRAMES),
             ..config
         };
-        let retained = MAX_DELAY_FRAMES
+        // The ring holds a lane whose placed audio leads the frontier by up to
+        // the chain's delivery-lateness bound (`MAX_DELAY_FRAMES`) plus the
+        // admitted arrival slack, a scene and two intervals, with the frontier
+        // trailing `now` by up to an interval plus the slack (an interval is
+        // emitted late once `now` passes its end by the slack). A lane that
+        // leads further is held at the ring end by `ahead_limit`. The extra
+        // slot keeps a just-emitted interval from aliasing the furthest
+        // admissible write.
+        let slot_capacity = retained_frames(config.arrival_slack_frames)
+            .saturating_add(MIX_FRAMES as u64)
             .saturating_add(config.arrival_slack_frames)
-            .saturating_add(MAX_SCENE_FRAMES)
-            .saturating_add(2 * MIX_FRAMES as u64);
-        // The delay, admitted arrival slack, largest decoded scene, and two
-        // output intervals are simultaneously retained. The extra slot keeps a
-        // just-emitted interval from aliasing the furthest admissible write.
-        let slot_capacity = retained.div_ceil(MIX_FRAMES as u64) as usize + 1;
+            .div_ceil(MIX_FRAMES as u64) as usize
+            + 1;
         Self {
             config,
             lanes: (0..MAX_ENDPOINTS)
@@ -1461,6 +1482,12 @@ impl SceneMixer {
     pub fn dropped_frames(&self) -> u64 {
         self.dropped_frames
     }
+
+    /// Counts source frames a caller discarded before they reached a lane
+    /// (deliveries the decode thread returned too late to place).
+    pub fn note_dropped(&mut self, frames: u64) {
+        self.dropped_frames = self.dropped_frames.saturating_add(frames);
+    }
     pub fn volume_transitions_coalesced(&self) -> u64 {
         self.lanes
             .iter()
@@ -1527,14 +1554,21 @@ impl SceneMixer {
 
     /// Exclusive timeline bound for new placements in one lane.
     ///
-    /// The smaller of the physical current-ring end and the admitted lead keeps
-    /// `slot_mut` from aliasing an un-emitted interval while bounding latency.
+    /// The ring end keeps `slot_mut` from aliasing an un-emitted interval. The
+    /// policy end caps a fast lane, one whose scenes carry more frames than
+    /// its bytes, and not a delayed one: a regular lane has produced at most
+    /// its transport plus one scene at every placement, so the bound is the
+    /// lane's own clock plus its delay, plus the arrival slack, one scene and
+    /// two intervals. A lane whose scenes arrive late carries that lateness in
+    /// its delay and keeps its full lead. The delay is unbounded, so when a
+    /// lane's lead over the frontier reaches the ring end, the ring end binds.
     fn ahead_limit(&self, lane_index: usize) -> u64 {
         let frontier = self.next_t.unwrap_or(self.now);
-        let ring_end =
-            frontier.saturating_add(self.lanes[lane_index].slots.len() as u64 * MIX_FRAMES as u64);
-        let policy_end = self
-            .now
+        let lane = &self.lanes[lane_index];
+        let ring_end = frontier.saturating_add(lane.slots.len() as u64 * MIX_FRAMES as u64);
+        let lane_clock = lane.origin.saturating_add(lane.transport);
+        let policy_end = lane_clock
+            .saturating_add(lane.delay.unwrap_or(0))
             .saturating_add(self.config.arrival_slack_frames)
             .saturating_add(MAX_SCENE_FRAMES)
             .saturating_add(2 * MIX_FRAMES as u64);

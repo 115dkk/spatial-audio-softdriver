@@ -4,8 +4,14 @@
 //! `eac3` takes one syncframe, not an IEC access unit. We decode independent
 //! substream 0 and overlay its dependent substreams before reconstructing JOC.
 //! Short syncframes are concatenated to the access unit's 1536 samples.
-//! The upstream decoder allocates per frame; this adapter adds no allocations
-//! in `push`, including error paths (owned error details are empty).
+//!
+//! The upstream decoder allocates per frame, so the adapter is split in two
+//! halves (ADR 0031). [`DdpFront`] runs the upstream decoders on the decode
+//! thread and hands their frames over in a [`DdpDecoded`]; [`DdpBack`] checks
+//! their shape and writes scenes on the capture thread without allocating,
+//! including on error paths (owned error details are empty). [`DdpDecoder`]
+//! runs both halves in one place for offline callers and tests; its output is
+//! the same scenes, cuts and errors as the halves run apart.
 //!
 //! Nominal bed positions come from `ssr_types::Speaker`, shared with PCM;
 //! measured BRIR directions remain separate. OAMD room coordinates are axis
@@ -59,75 +65,62 @@ const EMPTY_META: ObjectMeta = ObjectMeta {
     known: false,
 };
 
+/// Decode-thread half: the upstream decoders. Allocates; never runs on a
+/// real-time thread.
 #[derive(Debug)]
-pub struct DdpDecoder {
-    buffers: SceneBuffers,
+pub struct DdpFront {
     core: eac3::PcmDecoder,
     dependent: [eac3::PcmDecoder; 8],
     objects: eac3::ObjectPcmDecoder,
-    timeline: Timeline,
-    epoch: Option<u32>,
-    joc_sequence: Option<u16>,
 }
 
-impl DdpDecoder {
-    pub fn new(config: DecodeConfig) -> Self {
+impl Default for DdpFront {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DdpFront {
+    pub fn new() -> Self {
         Self {
-            buffers: SceneBuffers::new(config.max_frames),
             core: eac3::PcmDecoder::new(),
             dependent: std::array::from_fn(|_| eac3::PcmDecoder::new()),
             objects: eac3::ObjectPcmDecoder::new(),
-            timeline: Timeline::new(),
-            epoch: None,
-            joc_sequence: None,
         }
     }
 
-    /// Decodes one 1536-frame access unit. Plain beds emit one scene; JOC emits
-    /// scenes at OAMD update/ramp boundaries whose frame counts sum to 1536.
-    /// Bed channels use nominal positions and JOC uses converted room positions.
-    /// The payload must contain exactly 1536 independent samples, each followed
-    /// by its dependents. Alternate independent presentations are refused.
-    /// Errors discard cross-frame state and emit no scene. Epoch changes reset.
-    pub fn push(
-        &mut self,
-        burst: &Burst<'_>,
-        qpc: u64,
-        epoch: u32,
-        out: &mut dyn FnMut(&SceneBlock<'_>),
-    ) -> Result<(), DecodeError> {
-        if self.epoch != Some(epoch) {
-            self.reset();
-            self.epoch = Some(epoch);
+    /// Forgets the cross-frame state of every upstream decoder.
+    pub fn reset(&mut self) {
+        self.core.reset();
+        for decoder in &mut self.dependent {
+            decoder.reset();
         }
-        let result = self.decode(burst, qpc, epoch, out);
-        if result.is_err() {
+        self.objects.reset();
+    }
+
+    /// Decodes one burst payload (one 1536-sample access unit) into `into`,
+    /// one entry per independent syncframe with its dependents merged and
+    /// JOC objects reconstructed. The payload must contain exactly 1536
+    /// independent samples, each followed by its dependents; alternate
+    /// independent presentations are refused. Groups decode in order and the
+    /// first failure stops: the upstream state is reset, and the groups
+    /// decoded before it stay in `into` with the error, which
+    /// [`DdpBack::place`] returns after checking them. So a capture-side error
+    /// in an earlier group still wins over a later group's upstream error, as
+    /// in the one-piece adapter.
+    pub fn decode(&mut self, payload: &[u8], into: &mut DdpDecoded) -> Result<(), DecodeError> {
+        into.clear();
+        let result = self.decode_groups(payload, into);
+        if let Err(error) = result {
             self.reset();
+            into.error = Some(error);
         }
         result
     }
 
-    fn decode(
-        &mut self,
-        burst: &Burst<'_>,
-        qpc: u64,
-        epoch: u32,
-        out: &mut dyn FnMut(&SceneBlock<'_>),
-    ) -> Result<(), DecodeError> {
-        if burst.data_type != DataType::Eac3 {
-            return Err(DecodeError::WrongRoute("a non-E-AC-3 burst in a DD+ epoch"));
-        }
-        if self.buffers.max_frames() < FRAMES {
-            return Err(unsupported(
-                "max_frames is below one 1536-frame access unit",
-            ));
-        }
-        validate_access_unit(burst.payload)?;
-        let mut bytes = burst.payload;
-        let mut offset = 0;
-        let mut shape = None;
-        let mut order = [None; MAX_OBJECTS];
-        let mut rate = 0;
+    fn decode_groups(&mut self, payload: &[u8], into: &mut DdpDecoded) -> Result<(), DecodeError> {
+        validate_access_unit(payload)?;
+        let mut bytes = payload;
         while !bytes.is_empty() {
             let (frame, header, rest) = syncframe(bytes)?;
             bytes = rest;
@@ -156,66 +149,234 @@ impl DdpDecoder {
                     .ok_or_else(corrupt)?;
                 bytes = rest;
             }
-            let samples = usize::from(header.samples);
-            rate = header.sample_rate;
-            let object_frame = if let Some(frame) = joc_frame {
+            let kind = if let Some(frame) = joc_frame {
                 validate_joc_bed(&core, joc_channels.ok_or_else(corrupt)?)?;
-                Some(
-                    self.objects
-                        .push_access_unit_with_core(frame, core)
-                        .map_err(|_| corrupt())?
-                        .ok_or_else(corrupt)?,
-                )
+                let objects = self
+                    .objects
+                    .push_access_unit_with_core(frame, core)
+                    .map_err(|_| corrupt())?
+                    .ok_or_else(corrupt)?;
+                DecodedKind::Objects(objects.pcm)
             } else {
                 self.objects.note_non_joc_presentation();
-                self.joc_sequence = None;
-                self.timeline.reset();
-                let current = (
-                    false,
-                    core.fullband_channels.len(),
-                    core.lfe_channel.is_some(),
-                );
-                check_shape(&mut shape, current)?;
-                if offset == 0 {
-                    if core.fullband_channel_order.len() > MAX_OBJECTS {
+                DecodedKind::Bed(core)
+            };
+            into.groups.push(DecodedGroup {
+                samples: usize::from(header.samples),
+                rate: header.sample_rate,
+                kind,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// What crosses from the decode thread to the capture thread: the
+/// upstream-owned frames of one access unit, one entry per independent
+/// syncframe group. Created, filled and dropped on the decode thread only; the
+/// capture thread borrows it.
+#[derive(Debug, Default)]
+pub struct DdpDecoded {
+    groups: Vec<DecodedGroup>,
+    /// The upstream error that stopped the decode after `groups`.
+    error: Option<DecodeError>,
+}
+
+impl DdpDecoded {
+    pub fn new() -> Self {
+        Self {
+            groups: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// Drops the frames held (this frees them; call it on the decode thread)
+    /// and the error.
+    pub fn clear(&mut self) {
+        self.groups.clear();
+        self.error = None;
+    }
+
+    /// Nothing was handed over: no group and no error.
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty() && self.error.is_none()
+    }
+
+    /// The upstream error that stopped the decode, if any.
+    pub fn error(&self) -> Option<DecodeError> {
+        self.error
+    }
+
+    /// Source frames held: the sum of the samples of the groups present (1536
+    /// for a decoded access unit, 0 when empty).
+    pub fn frames(&self) -> usize {
+        self.groups.iter().map(|group| group.samples).sum()
+    }
+
+    /// [`Self::frames`] at the 48 kHz mix rate, rounded up (the groups of one
+    /// access unit share a rate).
+    pub fn frames_at_mix_rate(&self) -> u64 {
+        let Some(rate) = self
+            .groups
+            .first()
+            .map(|group| u64::from(group.rate))
+            .filter(|rate| *rate != 0)
+        else {
+            return 0;
+        };
+        (self.frames() as u64 * 48_000).div_ceil(rate)
+    }
+}
+
+#[derive(Debug)]
+struct DecodedGroup {
+    samples: usize,
+    rate: u32,
+    kind: DecodedKind,
+}
+
+#[derive(Debug)]
+enum DecodedKind {
+    /// No JOC: the merged core channels, laid out as a bed.
+    Bed(CorePcmFrame),
+    /// JOC: reconstructed objects plus the aligned core LFE.
+    Objects(ObjectPcmFrame),
+}
+
+/// Capture-thread half: shape checks, channel order, scene buffers, the OAMD
+/// timeline, the epoch and the JOC sequence. Never allocates in `place`.
+#[derive(Debug)]
+pub struct DdpBack {
+    buffers: SceneBuffers,
+    timeline: Timeline,
+    epoch: Option<u32>,
+    joc_sequence: Option<u16>,
+}
+
+impl DdpBack {
+    pub fn new(config: DecodeConfig) -> Self {
+        Self {
+            buffers: SceneBuffers::new(config.max_frames),
+            timeline: Timeline::new(),
+            epoch: None,
+            joc_sequence: None,
+        }
+    }
+
+    /// Forgets the timeline, epoch and JOC sequence. Does not allocate.
+    pub fn reset(&mut self) {
+        self.timeline.reset();
+        self.epoch = None;
+        self.joc_sequence = None;
+        self.buffers.set_layout(0, false);
+    }
+
+    /// Writes one decoded access unit as scenes. Plain beds emit one scene;
+    /// JOC emits scenes at OAMD update/ramp boundaries whose frame counts sum
+    /// to 1536. Bed channels use nominal positions and JOC uses converted room
+    /// positions. An epoch other than the last one resets first. Errors reset
+    /// this half and emit no scene; the caller resets the decode-thread half.
+    pub fn place(
+        &mut self,
+        decoded: &DdpDecoded,
+        qpc: u64,
+        epoch: u32,
+        out: &mut dyn FnMut(&SceneBlock<'_>),
+    ) -> Result<(), DecodeError> {
+        if self.epoch != Some(epoch) {
+            self.reset();
+            self.epoch = Some(epoch);
+        }
+        let result = self.write(decoded, qpc, epoch, out);
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+
+    fn check_capacity(&self) -> Result<(), DecodeError> {
+        if self.buffers.max_frames() < FRAMES {
+            return Err(unsupported(
+                "max_frames is below one 1536-frame access unit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn write(
+        &mut self,
+        decoded: &DdpDecoded,
+        qpc: u64,
+        epoch: u32,
+        out: &mut dyn FnMut(&SceneBlock<'_>),
+    ) -> Result<(), DecodeError> {
+        self.check_capacity()?;
+        if decoded.is_empty() {
+            return Err(DecodeError::WrongRoute(
+                "no decoded E-AC-3 access unit to place",
+            ));
+        }
+        // With an upstream error the groups before it are still checked and
+        // written in order, so their error comes first; then the upstream one.
+        let mut offset = 0;
+        let mut shape = None;
+        let mut order = [None; MAX_OBJECTS];
+        let mut rate = 0;
+        for group in &decoded.groups {
+            let samples = group.samples;
+            rate = group.rate;
+            match &group.kind {
+                DecodedKind::Bed(core) => {
+                    self.joc_sequence = None;
+                    self.timeline.reset();
+                    let current = (
+                        false,
+                        core.fullband_channels.len(),
+                        core.lfe_channel.is_some(),
+                    );
+                    check_shape(&mut shape, current)?;
+                    if offset == 0 {
+                        if core.fullband_channel_order.len() > MAX_OBJECTS {
+                            return Err(corrupt());
+                        }
+                        for (slot, &channel) in order.iter_mut().zip(&core.fullband_channel_order) {
+                            *slot = Some(channel);
+                        }
+                    } else if core
+                        .fullband_channel_order
+                        .iter()
+                        .enumerate()
+                        .any(|(i, channel)| order[i] != Some(*channel))
+                    {
                         return Err(corrupt());
                     }
-                    for (slot, &channel) in order.iter_mut().zip(&core.fullband_channel_order) {
-                        *slot = Some(channel);
+                    write_core(&mut self.buffers, core, offset, samples)?;
+                }
+                DecodedKind::Objects(pcm) => {
+                    let sequence = pcm.joc.sequence_counter;
+                    let continuous = self.joc_sequence.is_some_and(|previous| {
+                        sequence != 0 && sequence == if previous == 1023 { 1 } else { previous + 1 }
+                    });
+                    if !continuous {
+                        self.timeline.discontinuity(offset)?;
                     }
-                } else if core
-                    .fullband_channel_order
-                    .iter()
-                    .enumerate()
-                    .any(|(i, channel)| order[i] != Some(*channel))
-                {
-                    return Err(corrupt());
+                    self.joc_sequence = Some(sequence);
+                    check_shape(
+                        &mut shape,
+                        (
+                            true,
+                            pcm.object_channels.len(),
+                            pcm.core.lfe_channel.is_some(),
+                        ),
+                    )?;
+                    self.timeline.schedule(pcm, offset)?;
+                    write_objects(&mut self.buffers, pcm, offset, samples)?;
                 }
-                write_core(&mut self.buffers, &core, offset, samples)?;
-                None
-            };
-            if let Some(decoded) = object_frame {
-                let pcm = decoded.pcm;
-                let sequence = pcm.joc.sequence_counter;
-                let continuous = self.joc_sequence.is_some_and(|previous| {
-                    sequence != 0 && sequence == if previous == 1023 { 1 } else { previous + 1 }
-                });
-                if !continuous {
-                    self.timeline.discontinuity(offset)?;
-                }
-                self.joc_sequence = Some(sequence);
-                check_shape(
-                    &mut shape,
-                    (
-                        true,
-                        pcm.object_channels.len(),
-                        pcm.core.lfe_channel.is_some(),
-                    ),
-                )?;
-                self.timeline.schedule(&pcm, offset)?;
-                write_objects(&mut self.buffers, &pcm, offset, samples)?;
             }
             offset += samples;
+        }
+        if let Some(error) = decoded.error {
+            return Err(error);
         }
         if shape.is_some_and(|s| s.0) {
             self.timeline.emit(&mut self.buffers, epoch, rate, qpc, out);
@@ -224,17 +385,69 @@ impl DdpDecoder {
         }
         Ok(())
     }
+}
+
+/// Both halves in one place, for this crate's tests and offline callers.
+#[derive(Debug)]
+pub struct DdpDecoder {
+    front: DdpFront,
+    back: DdpBack,
+    decoded: DdpDecoded,
+}
+
+impl DdpDecoder {
+    pub fn new(config: DecodeConfig) -> Self {
+        Self {
+            front: DdpFront::new(),
+            back: DdpBack::new(config),
+            decoded: DdpDecoded::new(),
+        }
+    }
+
+    /// Decodes one 1536-frame access unit. Plain beds emit one scene; JOC emits
+    /// scenes at OAMD update/ramp boundaries whose frame counts sum to 1536.
+    /// Bed channels use nominal positions and JOC uses converted room positions.
+    /// The payload must contain exactly 1536 independent samples, each followed
+    /// by its dependents. Alternate independent presentations are refused.
+    /// Errors discard cross-frame state and emit no scene. Epoch changes reset.
+    pub fn push(
+        &mut self,
+        burst: &Burst<'_>,
+        qpc: u64,
+        epoch: u32,
+        out: &mut dyn FnMut(&SceneBlock<'_>),
+    ) -> Result<(), DecodeError> {
+        if self.back.epoch != Some(epoch) {
+            self.reset();
+        }
+        let result = self.decode(burst, qpc, epoch, out);
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+
+    fn decode(
+        &mut self,
+        burst: &Burst<'_>,
+        qpc: u64,
+        epoch: u32,
+        out: &mut dyn FnMut(&SceneBlock<'_>),
+    ) -> Result<(), DecodeError> {
+        if burst.data_type != DataType::Eac3 {
+            return Err(DecodeError::WrongRoute("a non-E-AC-3 burst in a DD+ epoch"));
+        }
+        // Refused before any upstream call, as the one-piece adapter did.
+        self.back.check_capacity()?;
+        // An upstream error travels in the delivery: the back returns it after
+        // checking the groups decoded before it.
+        let _upstream = self.front.decode(burst.payload, &mut self.decoded);
+        self.back.place(&self.decoded, qpc, epoch, out)
+    }
 
     pub fn reset(&mut self) {
-        self.core.reset();
-        for decoder in &mut self.dependent {
-            decoder.reset();
-        }
-        self.objects.reset();
-        self.timeline.reset();
-        self.epoch = None;
-        self.joc_sequence = None;
-        self.buffers.set_layout(0, false);
+        self.front.reset();
+        self.back.reset();
     }
 }
 
@@ -1112,6 +1325,207 @@ mod tests {
             .x = 0.0;
         pcm.oamd_payloads[0].0.isf_in_use = true;
         assert_no_alloc::assert_no_alloc(|| assert!(timeline.schedule(&pcm, 0).is_err()));
+    }
+
+    fn objects_delivery(sequence: u16, metadata: bool) -> DdpDecoded {
+        let mut pcm = synthetic_objects();
+        pcm.joc.sequence_counter = sequence;
+        if !metadata {
+            pcm.oamd_payloads.clear();
+        }
+        DdpDecoded {
+            groups: vec![DecodedGroup {
+                samples: FRAMES,
+                rate: 48_000,
+                kind: DecodedKind::Objects(pcm),
+            }],
+            error: None,
+        }
+    }
+
+    fn place(
+        back: &mut DdpBack,
+        decoded: &DdpDecoded,
+        epoch: u32,
+    ) -> Result<Vec<(u32, Position, f32)>, DecodeError> {
+        let mut scenes = Vec::new();
+        back.place(decoded, 9, epoch, &mut |scene| {
+            let object = scene.objects[0];
+            scenes.push((scene.epoch, object.position, object.spread));
+        })?;
+        Ok(scenes)
+    }
+
+    #[test]
+    fn ddp_back_resets_itself_on_an_epoch_change_and_after_a_place_error() {
+        let known = (room_to_direction(-0.5, 1.0, 0.5), 0.3);
+        let unknown = (Position::default(), 1.0);
+        let mut back = DdpBack::new(DecodeConfig::default());
+        let at = |epoch, (position, spread): (Position, f32)| vec![(epoch, position, spread)];
+
+        // OAMD positions carry over a continuous JOC sequence in one epoch.
+        assert_eq!(
+            place(&mut back, &objects_delivery(1, true), 1),
+            Ok(at(1, known))
+        );
+        assert_eq!(
+            place(&mut back, &objects_delivery(2, false), 1),
+            Ok(at(1, known))
+        );
+        // A new epoch forgets them although the sequence is continuous.
+        assert_eq!(
+            place(&mut back, &objects_delivery(3, false), 2),
+            Ok(at(2, unknown))
+        );
+        assert_eq!(
+            place(&mut back, &objects_delivery(4, true), 2),
+            Ok(at(2, known))
+        );
+
+        // A delivery that fails while it is written (an object channel shorter
+        // than its syncframe) emits nothing and resets: the next continuous
+        // delivery without metadata no longer finds the old position.
+        let mut short = objects_delivery(5, true);
+        let DecodedKind::Objects(pcm) = &mut short.groups[0].kind else {
+            unreachable!()
+        };
+        pcm.object_channels[0].truncate(FRAMES - 1);
+        assert!(matches!(
+            place(&mut back, &short, 2),
+            Err(DecodeError::Corrupt { .. })
+        ));
+        assert_eq!(
+            place(&mut back, &objects_delivery(6, false), 2),
+            Ok(at(2, unknown))
+        );
+
+        // So does an empty delivery.
+        assert_eq!(
+            place(&mut back, &objects_delivery(7, true), 2),
+            Ok(at(2, known))
+        );
+        assert!(matches!(
+            place(&mut back, &DdpDecoded::new(), 2),
+            Err(DecodeError::WrongRoute(_))
+        ));
+        assert_eq!(
+            place(&mut back, &objects_delivery(8, false), 2),
+            Ok(at(2, unknown))
+        );
+    }
+
+    #[test]
+    fn a_capture_side_error_in_an_earlier_group_still_wins() {
+        // What the front hands over when a later group fails upstream: the
+        // groups decoded before it and that group's error.
+        let upstream = unsupported("a later group failed upstream");
+        let known = (room_to_direction(-0.5, 1.0, 0.5), 0.3);
+        let unknown = (Position::default(), 1.0);
+        let mut back = DdpBack::new(DecodeConfig::default());
+
+        // The earlier group places cleanly, so the upstream error is returned;
+        // nothing is emitted and the back resets (the next continuous delivery
+        // without metadata no longer finds the old position).
+        assert_eq!(
+            place(&mut back, &objects_delivery(1, true), 1),
+            Ok(vec![(1, known.0, known.1)])
+        );
+        let mut partial = objects_delivery(2, true);
+        partial.error = Some(upstream);
+        assert_eq!(partial.frames(), FRAMES);
+        assert!(!partial.is_empty());
+        assert_eq!(place(&mut back, &partial, 1), Err(upstream));
+        assert_eq!(
+            place(&mut back, &objects_delivery(3, false), 1),
+            Ok(vec![(1, unknown.0, unknown.1)])
+        );
+
+        // The earlier group fails a capture-side check (an object channel
+        // shorter than its syncframe): that error wins, as it did when the
+        // one-piece adapter wrote each group before decoding the next.
+        let mut short = objects_delivery(4, true);
+        let DecodedKind::Objects(pcm) = &mut short.groups[0].kind else {
+            unreachable!()
+        };
+        pcm.object_channels[0].truncate(FRAMES - 1);
+        short.error = Some(upstream);
+        assert_eq!(place(&mut back, &short, 1), Err(corrupt()));
+
+        // An error with no group before it is still an error, not WrongRoute.
+        let only_error = DdpDecoded {
+            groups: Vec::new(),
+            error: Some(upstream),
+        };
+        assert_eq!(only_error.frames(), 0);
+        assert_eq!(only_error.frames_at_mix_rate(), 0);
+        assert_eq!(place(&mut back, &only_error, 1), Err(upstream));
+
+        // clear() forgets the error with the groups.
+        let mut cleared = partial;
+        cleared.clear();
+        assert!(cleared.is_empty());
+        assert_eq!(cleared.error(), None);
+    }
+
+    #[test]
+    fn ddp_joc_place_does_not_allocate() {
+        let first = objects_delivery(1, true);
+        let second = objects_delivery(2, false);
+        let mut back = DdpBack::new(DecodeConfig::default());
+        let mut scenes = 0usize;
+        let mut frames = 0usize;
+        assert_no_alloc::assert_no_alloc(|| {
+            for delivery in [&first, &second] {
+                back.place(delivery, 9, 1, &mut |scene| {
+                    scenes += 1;
+                    frames += scene.frames;
+                })
+                .unwrap();
+            }
+        });
+        assert!(scenes >= 2);
+        assert_eq!(frames, 2 * FRAMES);
+    }
+
+    #[test]
+    fn place_deferred_uses_the_delivery_epoch() {
+        use crate::{Decoded, Decoders, DeferredCodec};
+        use ssr_types::{BitstreamCodec, BitstreamFormat, SourceFormat};
+
+        let format = SourceFormat::Bitstream(BitstreamFormat {
+            codec: BitstreamCodec::Eac3Joc,
+            container_rate: 192_000,
+            container_channels: 2,
+            encoded_rate: 48_000,
+            encoded_channels: 0,
+        });
+        let delivery = |sequence, metadata| Decoded {
+            codec: Some(DeferredCodec::Ddp),
+            ddp: objects_delivery(sequence, metadata),
+        };
+        let known = (room_to_direction(-0.5, 1.0, 0.5), 0.3);
+        let unknown = (Position::default(), 1.0);
+        let mut decoders = Decoders::new(DecodeConfig::default());
+        decoders.select(&format, 7).unwrap();
+        let mut place = |decoded: &Decoded, epoch| {
+            let mut scenes = Vec::new();
+            decoders
+                .place_deferred(decoded, 9, epoch, &mut |scene| {
+                    let object = scene.objects[0];
+                    scenes.push((scene.epoch, object.position, object.spread));
+                })
+                .unwrap();
+            scenes
+        };
+
+        // The selected epoch is 7 throughout; the deliveries carry their own.
+        assert_eq!(place(&delivery(1, true), 3), vec![(3, known.0, known.1)]);
+        assert_eq!(place(&delivery(2, false), 3), vec![(3, known.0, known.1)]);
+        // A continuous delivery from another epoch resets the back first.
+        assert_eq!(
+            place(&delivery(3, false), 4),
+            vec![(4, unknown.0, unknown.1)]
+        );
     }
 
     #[test]

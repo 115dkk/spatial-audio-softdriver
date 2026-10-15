@@ -206,8 +206,15 @@ tests = [
   "decode::bed_table_uses_left_positive_angles",
   "decode::ddp_and_pcm_use_the_same_nominal_speaker_table",
   "decode::rejected_pushes_do_not_allocate_error_strings",
+  "decode::ddp_front_and_back_match_the_one_piece_decoder",
+  "decode::ddp_place_does_not_allocate",
+  "decode::ddp_back_resets_itself_on_an_epoch_change_and_after_a_place_error",
+  "decode::place_deferred_uses_the_delivery_epoch",
+  "decode::a_capture_side_error_in_an_earlier_group_still_wins",
+  "decode::ddp_scenes_match_the_pre_split_decoder_golden",
+  "decode::ddp_joc_place_does_not_allocate",
 ]
-note = "bed channels and LFE from pinned harletty-bridge eac3; shared ssr-types::Speaker nominal positions preserve PCM/DD+ angles and exclude measured BRIR presets. Fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. Upstream eac3 allocates per frame on the capture thread (5.1: 25 blocks, 37 KB per 32 ms frame after the first; its API returns owned channel buffers, and it is not forked, ADR 0007); adapter buffers and OAMD timeline are preallocated"
+note = "bed channels and LFE from pinned harletty-bridge eac3; shared ssr-types::Speaker nominal positions preserve PCM/DD+ angles and exclude measured BRIR presets. Fixture made with ffmpeg, see crates/decode/tests/fixtures/ddp/README.md. Upstream eac3 allocates per frame (5.1: 25 blocks, 37 KB per 32 ms frame after the first; its API returns owned channel buffers, and it is not forked, ADR 0007), so the adapter is split: DdpFront runs the upstream calls on the decode thread and DdpBack writes scenes on the capture thread without allocating (ADR 0031, engine.decode_thread); adapter buffers and OAMD timeline are preallocated"
 
 [[feature]]
 id = "decode.ddp_joc"
@@ -887,6 +894,30 @@ tests = [
   "engine::an_interval_waits_up_to_the_slack_for_an_active_lane_that_has_not_filled_it",
 ]
 note = "per-endpoint deframer, decoder, epoch and byte-clock state feed the ADR 0028 absolute 48 kHz timeline; rational polyphase Kaiser-sinc banks accept 44.1/48/88.2/96/176.4/192 kHz, retain bit-stable 44.1/48/96 output hashes, and use 512 taps for 176.4/192 kHz; each lane independently pans every scene into a planar speaker bed, with a fixed-seed 44.1/48/96 kHz, 22/64-direction, 64-object dense reference matrix covering spread and object-count changes; data-less Active lanes neither cover nor hold the clock, per-frame occupancy distinguishes filled, dropped and empty positions, and QPC idle advancement can emit silent beds after capture stops"
+
+[[feature]]
+id = "engine.decode_thread"
+kind = "pipeline"
+milestone = "M3"
+status = "implemented"
+tests = [
+  "engine::deferred_ddp_places_scenes_only_after_the_worker_runs",
+  "engine::a_decode_thread_that_falls_behind_refuses_bursts_and_the_lane_recovers",
+  "engine::a_reset_job_follows_the_bursts_queued_before_it",
+  "engine::in_flight_deliveries_are_waited_for_at_finish",
+  "engine::ddp_capture_section_does_not_allocate",
+  "engine::format_change_and_bitstream_decode_error_do_not_allocate",
+  "engine::a_delivery_batch_after_a_capture_backlog_does_not_cut_later_bursts",
+  "engine::scenes_that_arrive_together_at_a_generation_start_do_not_cut_later_scenes",
+  "engine::a_lane_resuming_after_a_long_pause_plays_from_the_frontier",
+  "engine::zero_padding_between_bursts_does_not_silence_a_bitstream_lane",
+  "engine::deliveries_from_before_a_lane_restart_are_discarded_and_counted",
+  "engine::a_delivery_later_than_the_lateness_bound_is_discarded_and_counted",
+  "engine::pcm_lane_resets_do_not_take_decode_jobs_from_a_bitstream_lane",
+  "engine::a_stop_in_the_same_read_as_the_last_burst_keeps_the_burst_whole",
+  "engine::the_decode_thread_is_promoted_as_its_own_kind",
+]
+note = "ADR 0031: the capture thread copies each complete E-AC-3 burst into one of 16 preallocated jobs (bitstream::MAX_PAYLOAD bytes each) and the ssr-decode thread runs the allocating upstream decoders; results come back through a second rtrb ring and are placed at the start of the next capture step, so the lane delay grows by one capture step. Reset jobs follow the bursts queued before them and are queued only for fronts that decoded since the last reset; a full queue refuses the burst with DecodeError::DecoderBehind (ChainErrorKind::DecoderBehind, counted as decode_refused). Each job carries the lane generation and the lane clock at submit: the chain discards a delivery from an earlier generation (a lane restart) or one later than MAX_DELAY_FRAMES of lane transport, counting its frames as dropped without an error event, so the mixer lane delay stays uncapped and a paused or zero-padded lane resumes from the frontier. A stop with deliveries in flight runs when the last one returns; a panic in the upstream decoder ends that job as a Corrupt error and the thread keeps running. Chains built by tests and offline tools keep the worker inline and run each job at the submit point, so offline rendering is unchanged; the runtime takes the worker with Chain::take_decode_worker"
 
 [[feature]]
 id = "engine.no_drop"

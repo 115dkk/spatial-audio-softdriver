@@ -179,6 +179,7 @@ fn dump_session_report_keeps_the_live_cli_key_contract() {
         "lost_bytes",
         "lane_underrun_frames",
         "dropped_frames",
+        "decode_refused",
         "volume_transitions_coalesced",
         "output_overflow_frames",
         "idle_blocks",

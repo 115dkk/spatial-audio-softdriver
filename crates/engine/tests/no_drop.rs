@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use engine::{BedBlock, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer};
+use engine::{BedBlock, MAX_DELAY_FRAMES, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer};
 use render::PanGeometry;
 use ssr_types::{Direction, Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 
@@ -640,4 +640,151 @@ fn representative_normal_paths_do_not_allocate() {
         mixer.lane_stop(0, &mut |_| {});
         mixer.finish(&mut |_| {});
     });
+}
+
+const DELIVERY: usize = 1_536;
+
+/// A signal whose samples name their frame in the lane's stream (1-based).
+fn counted(first: usize, frames: usize) -> Vec<f32> {
+    (first..first + frames)
+        .map(|frame| (frame + 1) as f32)
+        .collect()
+}
+
+fn push_counted(mixer: &mut SceneMixer, geometry: &PanGeometry, first: usize, frames: usize) {
+    let signal = counted(first, frames);
+    let mut objects = [Object::SILENT; MAX_OBJECTS];
+    let scene = block(
+        1,
+        &signal,
+        Position::from_angles(30.0, 0.0),
+        1.0,
+        &mut objects,
+    );
+    mixer.push_scene(0, &scene, Some(geometry)).unwrap();
+}
+
+#[test]
+fn scenes_that_arrive_together_at_a_generation_start_do_not_cut_later_scenes() {
+    const SCENES: usize = 43;
+    // `batch` deliveries' bytes arrive (a backlog READ) before any of their
+    // scenes; the scenes then come back to back, and the lane goes on one
+    // delivery of bytes, then its scene, per cycle.
+    let run = |batch: usize| {
+        let geometry = geometry();
+        let mut mixer = SceneMixer::new(config());
+        mixer.lane_start(0, 0);
+        let mut output = Vec::new();
+        for _ in 0..batch {
+            // Before its first scene the mixer has no layout: silent beds.
+            mixer.advance(0, DELIVERY as u64, &mut |bed| {
+                assert!(bed.silent);
+                output.extend(std::iter::repeat_n(0.0_f32.to_bits(), bed.frames));
+            });
+        }
+        for scene in 0..batch {
+            push_counted(&mut mixer, &geometry, scene * DELIVERY, DELIVERY);
+            assert_eq!(mixer.dropped_frames(), 0, "batch {batch}, scene {scene}");
+        }
+        for scene in batch..SCENES {
+            mixer.advance(0, DELIVERY as u64, &mut |bed| {
+                output.extend(direction(bed, 0).iter().map(|sample| sample.to_bits()));
+            });
+            push_counted(&mut mixer, &geometry, scene * DELIVERY, DELIVERY);
+            assert_eq!(mixer.dropped_frames(), 0, "batch {batch}, scene {scene}");
+        }
+        mixer.finish(&mut |bed| {
+            output.extend(direction(bed, 0).iter().map(|sample| sample.to_bits()));
+        });
+        assert_eq!(mixer.dropped_frames(), 0);
+        assert_eq!(mixer.lane_underrun_frames(), 0);
+        output
+    };
+    // One scene per cycle from the start: its first scene waits for one
+    // delivery of bytes and starts at the frontier, 1,440 frames in. Three
+    // together: the first waits for three and starts 4,320 frames in, and the
+    // lane's delay carries the batch. The measured shift is the difference,
+    // 2,880 frames (six intervals); after it every sample is the same.
+    let one_per_cycle = run(1);
+    let batched = run(3);
+    let shift = batched.len() - one_per_cycle.len();
+    assert_eq!(shift, 2_880);
+    assert!(
+        batched[..shift]
+            .iter()
+            .all(|bits| f32::from_bits(*bits) == 0.0)
+    );
+    assert_eq!(&batched[shift..], one_per_cycle.as_slice());
+}
+
+#[test]
+fn a_lane_resuming_after_a_long_pause_plays_from_the_frontier() {
+    let geometry = geometry();
+    let mut mixer = SceneMixer::new(config());
+    mixer.lane_start(0, 0);
+    let mut output = Vec::new();
+    let mut produced = 0;
+    // A regular lane: each 10 ms scene before its 10 ms of bytes, delay 0.
+    for _ in 0..4 {
+        push_counted(&mut mixer, &geometry, produced, MIX_FRAMES);
+        produced += MIX_FRAMES;
+        mixer.advance(0, MIX_FRAMES as u64, &mut |bed| {
+            output.extend_from_slice(direction(bed, 0));
+        });
+    }
+    // A paused or seeking player: IEC 61937 zero padding keeps the bytes
+    // coming for 300 ms with no scene, and the intervals are emitted late
+    // without this lane.
+    for _ in 0..30 {
+        mixer.advance(0, MIX_FRAMES as u64, &mut |bed| {
+            output.extend_from_slice(direction(bed, 0));
+        });
+    }
+    assert_eq!(mixer.dropped_frames(), 0);
+
+    // Playback resumes, each access unit's scene after its bytes. The first
+    // lands on the frontier (the delay grows by the pause) and every later
+    // one follows it.
+    let mut frontier = None;
+    for _ in 0..20 {
+        mixer.advance(0, DELIVERY as u64, &mut |bed| {
+            output.extend_from_slice(direction(bed, 0));
+        });
+        frontier.get_or_insert(output.len());
+        push_counted(&mut mixer, &geometry, produced, DELIVERY);
+        produced += DELIVERY;
+        assert_eq!(mixer.dropped_frames(), 0, "produced {produced}");
+    }
+    mixer.finish(&mut |bed| output.extend_from_slice(direction(bed, 0)));
+    assert_eq!(mixer.dropped_frames(), 0);
+    let frontier = frontier.unwrap();
+    // The frontier stands past the pause, which is longer than the 200 ms
+    // lateness bound: the lane's delay is bookkeeping and is not capped there.
+    assert!(frontier >= 34 * MIX_FRAMES);
+    assert!((frontier - 4 * MIX_FRAMES) as u64 > MAX_DELAY_FRAMES);
+
+    // Frame `p` of the stream is heard at timeline position `p` before the
+    // pause and `p + frontier - 4 * MIX_FRAMES` after it: silence in between,
+    // then every pushed frame in order from the frontier.
+    let gain = output[0];
+    assert!(gain > 0.0);
+    for (position, sample) in output.iter().enumerate().take(4 * MIX_FRAMES) {
+        assert_eq!(sample.to_bits(), ((position + 1) as f32 * gain).to_bits());
+    }
+    assert!(
+        output[4 * MIX_FRAMES..frontier]
+            .iter()
+            .all(|sample| *sample == 0.0)
+    );
+    let resumed = 20 * DELIVERY;
+    assert!(output.len() >= frontier + resumed);
+    for (offset, sample) in output[frontier..frontier + resumed].iter().enumerate() {
+        let frame = 4 * MIX_FRAMES + offset;
+        assert_eq!(
+            sample.to_bits(),
+            ((frame + 1) as f32 * gain).to_bits(),
+            "position {}",
+            frontier + offset
+        );
+    }
 }

@@ -1,8 +1,11 @@
 #![forbid(unsafe_code)]
 
 use bitstream::{Burst, DataType};
-use decode::{DecodeConfig, ddp::DdpDecoder};
-use ssr_types::Position;
+use decode::{
+    DecodeConfig, DecodeError,
+    ddp::{DdpBack, DdpDecoded, DdpDecoder, DdpFront},
+};
+use ssr_types::{Position, SceneBlock};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ddp/tones-5.1.eac3");
 
@@ -163,6 +166,128 @@ fn ddp_rejects_bad_access_units_without_emitting_and_recovers() {
     );
 }
 
+/// An emitted scene, owned, with every sample kept as its bits.
+#[derive(Debug, PartialEq)]
+struct OwnedScene {
+    epoch: u32,
+    frames: usize,
+    rate: u32,
+    source_qpc: u64,
+    objects: Vec<(u32, u32, u32, u32, u32, Vec<u32>)>,
+    lfe: Option<Vec<u32>>,
+}
+
+impl OwnedScene {
+    fn new(scene: &SceneBlock<'_>) -> Self {
+        let bits = |signal: &[f32]| signal.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        Self {
+            epoch: scene.epoch,
+            frames: scene.frames,
+            rate: scene.rate,
+            source_qpc: scene.source_qpc,
+            objects: scene
+                .objects
+                .iter()
+                .map(|o| {
+                    (
+                        o.position.x.to_bits(),
+                        o.position.y.to_bits(),
+                        o.position.z.to_bits(),
+                        o.gain.to_bits(),
+                        o.spread.to_bits(),
+                        bits(o.signal),
+                    )
+                })
+                .collect(),
+            lfe: scene.lfe.map(bits),
+        }
+    }
+}
+
+/// Every access unit of the fixture, with a corrupt one after the tenth and an
+/// epoch change at the twentieth: what the engine sees across errors.
+fn access_units() -> Vec<(Vec<u8>, u32)> {
+    let mut units = Vec::new();
+    let mut bytes = FIXTURE;
+    while !bytes.is_empty() {
+        let size = eac3::parse_header(bytes).unwrap().frame_size;
+        let (frame, rest) = bytes.split_at(size);
+        bytes = rest;
+        let epoch = if units.len() < 21 { 3 } else { 4 };
+        units.push((frame.to_vec(), epoch));
+        if units.len() == 10 {
+            units.push((frame[..size - 1].to_vec(), 3));
+        }
+    }
+    units
+}
+
+#[test]
+fn ddp_front_and_back_match_the_one_piece_decoder() {
+    let units = access_units();
+    let mut decoder = DdpDecoder::new(DecodeConfig::default());
+    let mut whole = Vec::new();
+    for (index, (payload, epoch)) in units.iter().enumerate() {
+        let mut scenes = Vec::new();
+        let result = decoder.push(
+            &burst(payload),
+            1_000 + index as u64,
+            *epoch,
+            &mut |scene| scenes.push(OwnedScene::new(scene)),
+        );
+        whole.push((result, scenes));
+    }
+
+    // The halves as the engine runs them: the front decodes every access unit
+    // ahead of the back, as the decode thread may; a new epoch resets the
+    // front (the chain queues a reset job on a format change). Every delivery
+    // is placed, a failed decode too: it carries the front's error, which the
+    // back returns after checking the groups decoded before it (and resets).
+    let mut front = DdpFront::new();
+    let mut front_epoch = None;
+    let decoded = units
+        .iter()
+        .map(|(payload, epoch)| {
+            if front_epoch.replace(*epoch) != Some(*epoch) {
+                front.reset();
+            }
+            let mut into = DdpDecoded::new();
+            let result = front.decode(payload, &mut into);
+            assert_eq!(result.err(), into.error());
+            assert!(!into.is_empty());
+            (result, into)
+        })
+        .collect::<Vec<_>>();
+    let mut back = DdpBack::new(DecodeConfig::default());
+    let mut halves = Vec::new();
+    for (index, ((result, into), (_, epoch))) in decoded.iter().zip(&units).enumerate() {
+        let mut scenes = Vec::new();
+        let placed = back.place(into, 1_000 + index as u64, *epoch, &mut |scene| {
+            scenes.push(OwnedScene::new(scene))
+        });
+        if let Err(error) = result {
+            assert_eq!(placed, Err(*error));
+        }
+        halves.push((placed, scenes));
+    }
+
+    assert_eq!(whole.len(), 33);
+    assert!(matches!(whole[10].0, Err(DecodeError::Corrupt { .. })));
+    assert_eq!(
+        whole.iter().filter(|(result, _)| result.is_err()).count(),
+        1
+    );
+    assert!(
+        whole
+            .iter()
+            .all(|(result, scenes)| scenes.len() == usize::from(result.is_ok()))
+    );
+    assert_eq!(whole[25].1[0].epoch, 4);
+    for (index, (one, two)) in whole.iter().zip(&halves).enumerate() {
+        assert_eq!(one, two, "access unit {index}");
+    }
+}
+
 /// Private raw E-AC-3 stream, not an IEC 61937 or media-container file.
 /// Vector redistribution rights could not be established for upstream's
 /// captured JOC fixture. This is deliberately ignored, not silently skipped.
@@ -213,4 +338,84 @@ fn ddp_joc_external_sample_has_positioned_objects() {
         })
         .unwrap();
     assert!(joc, "sample contains no JOC payload");
+}
+
+/// FNV-1a, 64-bit. The decode crate's tests have no SHA-256 (`sha2` is not
+/// one of its dev-dependencies), and a golden needs only a stable digest.
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn write_bits(&mut self, signal: &[f32]) {
+        for sample in signal {
+            self.write(&sample.to_bits().to_le_bytes());
+        }
+    }
+}
+
+/// The scenes of the one-piece `DdpDecoder` from before the split (commit
+/// b0a4db9) for every access unit of the fixture, in order, epoch 1 and QPC
+/// 1000 + index, hashed per scene as little-endian `frames` (u64), `rate`
+/// (u32), `source_qpc` (u64), object count (u64), then per object its
+/// position x, y, z, gain and spread as `to_bits` followed by every sample
+/// `to_bits`, then the LFE sample count (u64, 0 without LFE) and samples. The
+/// same 1,184,000 bytes hash to SHA-256
+/// 01a102d769a87a07e08f6e4b2b3e156ced4944d42e5c27b37cbb0568964c5ea9.
+///
+/// The upstream decoder's transforms call the platform's `sin` and `cos`, so
+/// the bits are pinned for the platform the golden was made on.
+#[test]
+#[cfg_attr(
+    not(all(target_os = "linux", target_arch = "x86_64")),
+    ignore = "the golden was made with x86_64 Linux libm; other platforms' sin/cos may round differently"
+)]
+fn ddp_scenes_match_the_pre_split_decoder_golden() {
+    const GOLDEN: u64 = 0xdc2f_a52d_76e8_4bcb;
+    let mut decoder = DdpDecoder::new(DecodeConfig::default());
+    let mut hash = Fnv1a64::new();
+    let mut bytes = FIXTURE;
+    let mut units = 0u64;
+    let mut scenes = 0;
+    while !bytes.is_empty() {
+        let size = eac3::parse_header(bytes).unwrap().frame_size;
+        let (payload, rest) = bytes.split_at(size);
+        bytes = rest;
+        decoder
+            .push(&burst(payload), 1_000 + units, 1, &mut |scene| {
+                scenes += 1;
+                hash.write(&(scene.frames as u64).to_le_bytes());
+                hash.write(&scene.rate.to_le_bytes());
+                hash.write(&scene.source_qpc.to_le_bytes());
+                hash.write(&(scene.objects.len() as u64).to_le_bytes());
+                for object in scene.objects {
+                    for value in [
+                        object.position.x,
+                        object.position.y,
+                        object.position.z,
+                        object.gain,
+                        object.spread,
+                    ] {
+                        hash.write(&value.to_bits().to_le_bytes());
+                    }
+                    hash.write_bits(object.signal);
+                }
+                let lfe = scene.lfe.unwrap_or(&[]);
+                hash.write(&(lfe.len() as u64).to_le_bytes());
+                hash.write_bits(lfe);
+            })
+            .unwrap();
+        units += 1;
+    }
+    assert_eq!((units, scenes), (32, 32));
+    assert_eq!(hash.0, GOLDEN, "got {:#018x}", hash.0);
 }

@@ -4,7 +4,7 @@ use assert_no_alloc::assert_no_alloc;
 use bitstream::{Burst, DataType};
 use decode::{
     DecodeConfig,
-    ddp::DdpDecoder,
+    ddp::{DdpBack, DdpDecoded, DdpDecoder, DdpFront},
     direct::{DirectLayout, DirectLayouts},
     pcm::PcmDecoder,
 };
@@ -180,4 +180,44 @@ fn rejected_pushes_do_not_allocate_error_strings() {
                 .is_err()
         );
     });
+}
+
+#[test]
+fn ddp_place_does_not_allocate() {
+    let fixture: &[u8] = include_bytes!("fixtures/ddp/tones-5.1.eac3");
+    let size = eac3::parse_header(fixture).unwrap().frame_size;
+    // The decode-thread half allocates; it runs outside the guard.
+    let mut front = DdpFront::new();
+    let mut decoded = [DdpDecoded::new(), DdpDecoded::new()];
+    front.decode(&fixture[..size], &mut decoded[0]).unwrap();
+    front
+        .decode(&fixture[size..2 * size], &mut decoded[1])
+        .unwrap();
+    let mut back = DdpBack::new(DecodeConfig::default());
+    let mut scenes = 0;
+    let mut frames = 0;
+    assert_no_alloc(|| {
+        for (index, decoded) in decoded.iter().enumerate() {
+            back.place(decoded, 40 + index as u64, 3, &mut |scene| {
+                assert!(scene.is_consistent());
+                assert_eq!((scene.epoch, scene.source_qpc), (3, 40 + index as u64));
+                assert_eq!(scene.objects.len(), 5);
+                assert!(scene.lfe.is_some());
+                scenes += 1;
+                frames += scene.frames;
+            })
+            .unwrap();
+        }
+        // An empty delivery is refused without allocating an error string.
+        assert!(
+            back.place(&DdpDecoded::new(), 0, 3, &mut |_| panic!(
+                "empty delivery emitted"
+            ))
+            .is_err()
+        );
+        back.reset();
+        back.place(&decoded[0], 50, 4, &mut |scene| frames += scene.frames)
+            .unwrap();
+    });
+    assert_eq!((scenes, frames), (2, 3 * 1536));
 }

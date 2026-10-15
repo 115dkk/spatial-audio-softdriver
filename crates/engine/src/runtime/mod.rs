@@ -1,6 +1,9 @@
 //! The real-time engine (M2): the capture/DSP thread runs the [`Chain`], the
 //! output thread feeds the device, and an N-channel 48 kHz crossing ring joins
-//! the two clock domains (ADR 0012).
+//! the two clock domains (ADR 0012). A third thread, `ssr-decode`, runs the
+//! upstream decoders that allocate per frame (E-AC-3) for the capture thread
+//! (ADR 0031); it is not real-time, and the thread hook registers it one
+//! MMCSS class below the real-time threads (`EngineThread::Decode`).
 //!
 //! ```text
 //! CaptureSource ──read──▶ capture/DSP thread ──Chain──▶ crossing ring (N ch, 48 kHz, rtrb)
@@ -9,6 +12,9 @@
 //!                                  └──────────────── output thread ──▶ OutputSink
 //!                                                    (ring level → PI → ppm;
 //!                                                     ASRC strategy resamples here)
+//!
+//! capture/DSP thread ──burst jobs (rtrb)──▶ decode thread (ssr-decode)
+//!                    ◀──decoded jobs (rtrb)──
 //! ```
 //!
 //! Neither real-time thread allocates or locks after start-up. The control
@@ -105,16 +111,21 @@ const FAULT_NONE: u32 = 0;
 const FAULT_CAPTURE: u32 = 1;
 const FAULT_OUTPUT: u32 = 2;
 
-/// Which real-time thread a [`ThreadHook`] runs on.
+/// Which engine thread a [`ThreadHook`] runs on. `Capture` and `Output` are
+/// the real-time threads: they never allocate, lock or block. `Decode`
+/// (`ssr-decode`, ADR 0031) is not real-time: it runs the allocating upstream
+/// decoders for the capture thread, which never waits for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RealtimeThread {
+pub enum EngineThread {
     Capture,
     Output,
+    Decode,
 }
 
-/// Called first thing on each real-time thread, e.g. to register it with MMCSS
-/// "Pro Audio" (ssr-sys provides that on Windows; tests pass nothing).
-pub type ThreadHook = Arc<dyn Fn(RealtimeThread) + Send + Sync>;
+/// Called first thing on each engine thread, e.g. to register it with MMCSS
+/// ("Pro Audio" for the real-time threads, "Audio" for the decode thread;
+/// ssr-sys provides that on Windows; tests pass nothing).
+pub type ThreadHook = Arc<dyn Fn(EngineThread) + Send + Sync>;
 
 /// One complete allocation-free real-time loop iteration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +152,9 @@ pub enum RtLoopEvent {
     /// The output thread left because the stream ended, not because the
     /// engine was stopped.
     OutputFinished,
+    /// Emitted by the decode thread after each job (burst or reset) is
+    /// returned to the capture thread.
+    DecodeJobEnd,
 }
 
 pub type RtEventHook = Arc<dyn Fn(RtLoopEvent) + Send + Sync>;
@@ -282,6 +296,8 @@ pub struct StopReport {
     pub lost_bytes: u64,
     pub lane_underrun_frames: u64,
     pub dropped_frames: u64,
+    /// E-AC-3 bursts dropped because the decode thread was behind (ADR 0031).
+    pub decode_refused: u64,
     pub output_overflow_frames: u64,
     pub idle_blocks: u64,
     pub dropped_events: u64,
@@ -313,8 +329,16 @@ pub struct Engine {
     capture_events: Consumer<RtEvent>,
     output_events: Consumer<RtEvent>,
     retired: Consumer<Box<Prepared>>,
-    capture_thread: Option<JoinHandle<Option<Box<Prepared>>>>,
+    capture_thread: Option<CaptureThreads>,
     output_thread: Option<JoinHandle<()>>,
+}
+
+/// The capture/DSP thread and the decode thread it hands bursts to.
+struct CaptureThreads {
+    capture: JoinHandle<Option<Box<Prepared>>>,
+    /// `ssr-decode` (ADR 0031); joined after the capture thread. It parks for
+    /// up to a second between jobs, so a stop unparks it through this handle.
+    decode: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -497,6 +521,39 @@ where
     if let Some(prepared) = prepared {
         drop(chain.set_prepared(prepared));
     }
+    // The decode thread runs the allocating upstream decoders (ADR 0031). It is
+    // not a real-time thread; its hook gives it its own scheduling class.
+    let decode_thread = match chain.take_decode_worker() {
+        Some(worker) => {
+            let decode_shared = Arc::clone(&shared);
+            let decode_hook = config.thread_hook.clone();
+            let decode_events = config.rt_event.clone();
+            match std::thread::Builder::new()
+                .name("ssr-decode".into())
+                .spawn(move || {
+                    if let Some(hook) = &decode_hook {
+                        hook(EngineThread::Decode);
+                    }
+                    match &decode_events {
+                        Some(hook) => worker.run_until(&decode_shared.stop, &mut || {
+                            hook(RtLoopEvent::DecodeJobEnd)
+                        }),
+                        None => worker.run_until(&decode_shared.stop, &mut || {}),
+                    }
+                }) {
+                Ok(thread) => {
+                    chain.set_decode_wake(thread.thread().clone());
+                    Some(thread)
+                }
+                Err(error) => {
+                    shared.stop.store(true, Ordering::Release);
+                    let _ = output_thread.join();
+                    return Err(StartError::Thread(error.to_string()));
+                }
+            }
+        }
+        None => None,
+    };
     let capture_shared = Arc::clone(&shared);
     let capture_thread = match std::thread::Builder::new()
         .name("ssr-capture-dsp".into())
@@ -517,6 +574,10 @@ where
         Err(error) => {
             shared.stop.store(true, Ordering::Release);
             let _ = output_thread.join();
+            if let Some(thread) = decode_thread {
+                thread.thread().unpark();
+                let _ = thread.join();
+            }
             return Err(StartError::Thread(error.to_string()));
         }
     };
@@ -527,7 +588,10 @@ where
         capture_events,
         output_events,
         retired,
-        capture_thread: Some(capture_thread),
+        capture_thread: Some(CaptureThreads {
+            capture: capture_thread,
+            decode: decode_thread,
+        }),
         output_thread: Some(output_thread),
     })
 }
@@ -571,10 +635,18 @@ impl Engine {
 
     fn stop_and_join(&mut self) -> StopReport {
         self.shared.stop.store(true, Ordering::Release);
-        if let Some(thread) = self.capture_thread.take()
-            && let Ok(retired) = thread.join()
-        {
-            drop(retired);
+        if let Some(threads) = self.capture_thread.take() {
+            // Wake the decode thread to see the stop. An unpark before its
+            // park makes that park return at once, so the wake is not lost.
+            if let Some(decode) = &threads.decode {
+                decode.thread().unpark();
+            }
+            if let Ok(retired) = threads.capture.join() {
+                drop(retired);
+            }
+            if let Some(decode) = threads.decode {
+                let _ = decode.join();
+            }
         }
         if let Some(thread) = self.output_thread.take() {
             let _ = thread.join();
@@ -586,6 +658,7 @@ impl Engine {
             lost_bytes: self.shared.lost_bytes.load(Ordering::Acquire),
             lane_underrun_frames: self.shared.lane_underrun_frames.load(Ordering::Acquire),
             dropped_frames: self.shared.dropped_frames.load(Ordering::Acquire),
+            decode_refused: self.shared.decode_refused.load(Ordering::Acquire),
             output_overflow_frames: self.shared.output_overflow_frames.load(Ordering::Acquire),
             idle_blocks: self.shared.idle_blocks.load(Ordering::Acquire),
             dropped_events: self.shared.dropped_events.load(Ordering::Acquire),
@@ -752,6 +825,7 @@ struct Shared {
     /// the crossing ring ([`ArrivalPeak`]); the output primes for it.
     arrival_frames: AtomicU64,
     dropped_frames: AtomicU64,
+    decode_refused: AtomicU64,
     skipped_records: AtomicU64,
     volume_transitions_coalesced: AtomicU64,
     output_overflow_frames: AtomicU64,
@@ -807,6 +881,7 @@ impl Shared {
             lane_underrun_frames: AtomicU64::new(0),
             arrival_frames: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
+            decode_refused: AtomicU64::new(0),
             skipped_records: AtomicU64::new(0),
             volume_transitions_coalesced: AtomicU64::new(0),
             output_overflow_frames: AtomicU64::new(0),
@@ -1079,6 +1154,7 @@ impl Shared {
             lost_bytes: self.lost_bytes.load(Ordering::Acquire),
             lane_underrun_frames: self.lane_underrun_frames.load(Ordering::Acquire),
             dropped_frames: self.dropped_frames.load(Ordering::Acquire),
+            decode_refused: self.decode_refused.load(Ordering::Acquire),
             volume_transitions_coalesced: self.volume_transitions_coalesced.load(Ordering::Acquire),
             output_overflow_frames: self.output_overflow_frames.load(Ordering::Acquire),
             idle_blocks: self.idle_blocks.load(Ordering::Acquire),
@@ -1332,6 +1408,9 @@ fn capture_rt_step<C: CaptureSource>(
         .dropped_frames
         .store(chain.dropped_frames(), Ordering::Release);
     shared
+        .decode_refused
+        .store(chain.decode_refused(), Ordering::Release);
+    shared
         .skipped_records
         .store(chain.skipped_records(), Ordering::Release);
     shared
@@ -1353,7 +1432,7 @@ fn capture_thread_main<C: CaptureSource>(
     mut chain: Chain,
 ) -> Option<Box<Prepared>> {
     if let Some(hook) = &config.thread_hook {
-        hook(RealtimeThread::Capture);
+        hook(EngineThread::Capture);
     }
     let mut read_buffer = vec![0_u8; config.read_buffer_bytes];
     let mut events = EventWriter::new(event_producer, Arc::clone(&shared));
@@ -1447,6 +1526,9 @@ fn capture_thread_main<C: CaptureSource>(
     shared
         .dropped_frames
         .store(chain.dropped_frames(), Ordering::Release);
+    shared
+        .decode_refused
+        .store(chain.decode_refused(), Ordering::Release);
     shared
         .skipped_records
         .store(chain.skipped_records(), Ordering::Release);
@@ -1689,7 +1771,7 @@ fn output_thread_main<O: OutputOpener>(
     capacity_frames: usize,
 ) {
     if let Some(hook) = &config.thread_hook {
-        hook(RealtimeThread::Output);
+        hook(EngineThread::Output);
     }
     let mut opener = output;
     let mut sink = match opener.open(initial_layout) {
