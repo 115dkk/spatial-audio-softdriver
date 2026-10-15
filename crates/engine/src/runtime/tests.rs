@@ -305,6 +305,8 @@ struct ClockRun {
     /// Lowest and highest correction over the second half, in ppm.
     ppm: (f64, f64),
     final_ppm: f64,
+    /// Control windows completed over the second half.
+    windows: u32,
 }
 
 fn simulate_clock(
@@ -328,14 +330,24 @@ fn simulate_clock_from(
     simulate_clock_with(skew_ppm, block, period, trim, seconds, backlog_ms, 0.0)
 }
 
+/// The setpoint for a source that delivers `block` frames at a time: its
+/// largest capture step is that many frames rounded up to whole mixer blocks
+/// (a 1,536-frame E-AC-3 sync frame lands as three or four 480-frame blocks).
 fn simulated_setpoint_ms(block: usize, period: usize) -> f64 {
-    trough_setpoint_frames(480.0, period as f64, block as f64, f64::INFINITY) / 48.0
+    let delivery = block.div_ceil(crate::MIX_FRAMES) * crate::MIX_FRAMES;
+    trough_setpoint_frames(480.0, period as f64, delivery as f64, f64::INFINITY) / 48.0
 }
 
 /// Drives the production crossing producer and output state. Source time is
-/// continuous, but a complete mixer block becomes visible atomically; optional
-/// late deliveries are held for exactly one output call. A starting backlog
+/// continuous, and the source delivers `block` frames at a time. Each capture
+/// step cuts what became visible into whole mixer blocks, as the mixer does,
+/// and carries the rest to the next step: a 1,536-frame E-AC-3 sync frame
+/// lands as three blocks four times and then four. Optional late deliveries
+/// are held for exactly one output call and land together. A starting backlog
 /// lands as one capture step, as when capture opens on a full driver ring.
+///
+/// Every scenario must have played: it fails unless most second-half control
+/// windows completed and the ring took every block.
 fn simulate_clock_with(
     skew_ppm: f64,
     block: usize,
@@ -374,36 +386,44 @@ fn simulate_clock_with(
     );
     let (capture_events, _capture_event_consumer) = RingBuffer::new(EVENT_QUEUE_CAPACITY);
     let mut events = EventWriter::new(capture_events, Arc::clone(&shared));
-    let samples = vec![0.25; block];
-    let push_delivery = |crossing: &mut CrossingProducer, events: &mut EventWriter| {
-        crossing.push(
-            crate::chain::BlockOut {
-                epoch: 1,
-                rate: crate::MIX_RATE,
-                source_qpc: 0,
-                channels: 1,
-                channel_mask: 1,
-                frames: block,
-                samples: &samples,
-                silent: false,
-                idle: false,
-            },
-            events,
-            &shared,
-        );
-        shared.arrival_frames.store(block as u64, Ordering::Release);
-    };
+    let samples = vec![0.25; crate::MIX_FRAMES];
+    let mut residual = 0_usize;
+    let mut arrivals = ArrivalPeak::new();
+    // One capture step: the source frames that became visible, in whole mixer
+    // blocks, recorded as the capture loop records a step.
+    let mut capture_step =
+        |source_frames: usize, crossing: &mut CrossingProducer, events: &mut EventWriter| {
+            residual += source_frames;
+            let blocks = residual / crate::MIX_FRAMES;
+            residual -= blocks * crate::MIX_FRAMES;
+            for _ in 0..blocks {
+                crossing.push(
+                    crate::chain::BlockOut {
+                        epoch: 1,
+                        rate: crate::MIX_RATE,
+                        source_qpc: 0,
+                        channels: 1,
+                        channel_mask: 1,
+                        frames: crate::MIX_FRAMES,
+                        samples: &samples,
+                        silent: false,
+                        idle: false,
+                    },
+                    events,
+                    &shared,
+                );
+            }
+            if blocks != 0 {
+                shared.arrival_frames.store(
+                    arrivals.record((blocks * crate::MIX_FRAMES) as u64),
+                    Ordering::Release,
+                );
+            }
+        };
     let initial_frames = (backlog_ms * f64::from(crate::MIX_RATE) / 1_000.0).round() as usize;
     let initial_deliveries = initial_frames.div_ceil(block);
-    for _ in 0..initial_deliveries {
-        push_delivery(&mut crossing, &mut events);
-    }
-    let mut arrivals = ArrivalPeak::new();
     if initial_deliveries != 0 {
-        shared.arrival_frames.store(
-            arrivals.record((initial_deliveries * block) as u64),
-            Ordering::Release,
-        );
+        capture_step(initial_deliveries * block, &mut crossing, &mut events);
     }
 
     let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
@@ -425,17 +445,12 @@ fn simulate_clock_with(
         trough: (f64::INFINITY, f64::NEG_INFINITY),
         ppm: (f64::INFINITY, f64::NEG_INFINITY),
         final_ppm: 0.0,
+        windows: 0,
     };
     for index in 0..periods {
         // Held deliveries land together, as one capture step.
-        for _ in 0..held_deliveries {
-            push_delivery(&mut crossing, &mut events);
-        }
         if held_deliveries != 0 {
-            shared.arrival_frames.store(
-                arrivals.record((held_deliveries * block) as u64),
-                Ordering::Release,
-            );
+            capture_step(held_deliveries * block, &mut crossing, &mut events);
         }
         held_deliveries = 0;
         let trim_ppm = if trim { requested_trim(&shared) } else { 0.0 };
@@ -447,10 +462,7 @@ fn simulate_clock_with(
             } else {
                 // On time, each delivery is its own capture step, however
                 // many land within one output period.
-                push_delivery(&mut crossing, &mut events);
-                shared
-                    .arrival_frames
-                    .store(arrivals.record(block as u64), Ordering::Release);
+                capture_step(block, &mut crossing, &mut events);
             }
         }
         output.fill(&mut period_buffer);
@@ -466,11 +478,31 @@ fn simulate_clock_with(
             if index * 2 >= periods {
                 run.trough = (run.trough.0.min(trough), run.trough.1.max(trough));
                 run.ppm = (run.ppm.0.min(ppm), run.ppm.1.max(ppm));
+                run.windows += 1;
             }
         }
     }
     run.underruns = shared.underruns.load(Ordering::Acquire) as u32;
     run.final_ppm = f64::from_bits(shared.clock_ppm_bits.load(Ordering::Acquire));
+    let label = format!(
+        "block {block} period {period} skew {skew_ppm} trim {trim} backlog {backlog_ms} late {late}"
+    );
+    let expected_windows = seconds / 2.0 / CONTROL_WINDOW_SECONDS;
+    assert!(
+        f64::from(run.windows) >= 0.8 * expected_windows,
+        "{label}: {} of about {expected_windows} second-half windows completed",
+        run.windows
+    );
+    assert!(
+        run.trough.0.is_finite() && run.trough.1.is_finite(),
+        "{label}: trough {:?} ms",
+        run.trough
+    );
+    assert_eq!(
+        shared.output_overflow_frames.load(Ordering::Acquire),
+        0,
+        "{label}: the ring refused blocks"
+    );
     run
 }
 
@@ -657,6 +689,40 @@ fn the_reference_follows_a_setpoint_only_once_it_holds() {
         let (_, ppm) = controller.observe(reference, 0.25, 30.0, mode).unwrap();
         assert_eq!(ppm, fill, "{mode:?}");
         assert_eq!(controller.reference_ms, Some(20.25), "{mode:?}");
+        // A live target change while coalesced deliveries keep the setpoint
+        // flickering, so that no value holds five windows in a row: the
+        // reference still moves on, to the lower of the two.
+        for window in 0..60 {
+            let reference = controller.reference_ms.unwrap();
+            let setpoint = if window % 2 == 0 { 40.0 } else { 50.0 };
+            let (_, ppm) = controller.observe(reference, 0.25, setpoint, mode).unwrap();
+            assert_eq!(ppm, fill, "{mode:?} window {window}");
+        }
+        assert_eq!(controller.reference_ms, Some(35.25), "{mode:?}");
+    }
+}
+
+#[test]
+fn a_restarted_reference_ignores_the_window_begun_before_the_refill() {
+    for mode in [ClockMode::Trim, ClockMode::Asrc] {
+        let drain = match mode {
+            ClockMode::Trim => -PI_LIMIT_PPM / 2.0,
+            ClockMode::Asrc => PI_LIMIT_PPM / 2.0,
+        };
+        let mut controller = TroughController::new();
+        assert_eq!(
+            controller.observe(20.0, 0.25, 20.0, mode),
+            Some((20.0, 0.0))
+        );
+        // Part of a window, nearly dry, then an underrun and a refill.
+        assert_eq!(controller.observe(5.0, 0.125, 20.0, mode), None);
+        controller.restart_reference();
+        assert_eq!(
+            controller.observe(40.0, 0.25, 20.0, mode),
+            Some((40.0, drain)),
+            "{mode:?}"
+        );
+        assert_eq!(controller.reference_ms, Some(39.75), "{mode:?}");
     }
 }
 
@@ -698,7 +764,11 @@ fn clock_holds_the_trough_without_chasing_the_block_sawtooth() {
     ignore = "drives the real resampler for minutes of audio; run with --release (CI's release test jobs do)"
 )]
 fn clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim() {
-    for (block, period) in [(480, 144), (1_536, 144), (1_536, 480)] {
+    // Periods shorter than a mixer block. With a period of a block or longer
+    // the level moves in whole blocks (the mixer hands E-AC-3 over in 10 ms
+    // blocks too), so the trough steps by a block at each phase slip
+    // instead (a_period_as_long_as_a_block_survives_phase_slips_and_late_blocks).
+    for (block, period) in [(480, 144), (1_536, 144)] {
         for trim in [false, true] {
             for skew in [-300.0, 300.0] {
                 let run = simulate_clock(skew, block, period, trim, 300.0);
@@ -734,12 +804,13 @@ fn audible_priming_excess_drains_without_winding_up_the_clock() {
     // the integral learned it as clock skew, it kept draining past the
     // target, the output ran dry, primed again with the excess, and the
     // cycle repeated every ~20 s (the CI soaks' underruns).
-    // Periods shorter than a block, at any skew the simulation covers; and
-    // every period at no skew (the CI soaks: a QPC-paced dump into a
-    // QPC-clocked virtual cable). Longer periods under skew starve now
-    // and then for another reason (clock_with_a_long_period_stays_bounded).
-    let short = [(480, 144), (1_536, 144), (1_536, 480)].map(|case| (case, [-300.0, 0.0, 300.0]));
-    let long = [(480, 480), (480, 960), (1_536, 960)].map(|case| (case, [0.0; 3]));
+    // Periods shorter than a mixer block, at any skew the simulation covers;
+    // and every period at no skew (the CI soaks: a QPC-paced dump into a
+    // QPC-clocked virtual cable). Under skew the trough of a period of a
+    // block or longer steps by a block at each phase slip
+    // (a_period_as_long_as_a_block_survives_phase_slips_and_late_blocks).
+    let short = [(480, 144), (1_536, 144)].map(|case| (case, [-300.0, 0.0, 300.0]));
+    let long = [(480, 480), (1_536, 480), (480, 960), (1_536, 960)].map(|case| (case, [0.0; 3]));
     for ((block, period), skews) in short.into_iter().chain(long) {
         for skew in skews {
             for backlog in [30.0, 60.0] {
@@ -768,14 +839,15 @@ fn audible_priming_excess_drains_without_winding_up_the_clock() {
     ignore = "drives the real resampler for minutes of audio; run with --release (CI's release test jobs do)"
 )]
 fn a_period_as_long_as_a_block_survives_phase_slips_and_late_blocks() {
-    // A 10 ms shared period with 10 ms PCM blocks, and a 20 ms exclusive
-    // period with PCM or E-AC-3. While every period gets its block the
-    // trough is flat; as the arrival phase drifts past the period boundary
-    // one period gets none, and so does a period whose block lands late.
-    // Held at the bare target the ring was one block from empty there and
-    // starved about once per phase slip (33 s at 300 ppm for 10 ms
-    // blocks); the setpoint keeps that block as margin.
-    for (block, period) in [(480, 480), (480, 960), (1_536, 960)] {
+    // A 10 ms shared period and a 20 ms exclusive period, with PCM or
+    // E-AC-3; the mixer hands both over in 10 ms blocks (E-AC-3 three or four
+    // at a time). While every period gets its blocks the trough is flat; as
+    // the arrival phase drifts past the period boundary one period gets one
+    // block fewer, and so does a period whose block lands late. Held at the
+    // bare target the ring was one block from empty there and starved about
+    // once per phase slip (33 s at 300 ppm for 10 ms blocks); the setpoint
+    // keeps that block as margin.
+    for (block, period) in [(480, 480), (1_536, 480), (480, 960), (1_536, 960)] {
         for skew in [-300.0, -100.0, 0.0, 100.0, 300.0] {
             for late in [0.0, 0.02] {
                 for trim in [false, true] {

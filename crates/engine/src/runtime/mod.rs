@@ -80,10 +80,13 @@ const RECONNECT_MAX_MS: u64 = 5_000;
 // error is in milliseconds; P turns one millisecond into
 // 60 ppm and I adds 3 ppm per millisecond-second. Larger gains chase the
 // sawtooth itself (2,000 and 200 swung the ratio between the ±2,000 ppm limits
-// on hardware). The quantized simulation in the tests holds the trough within
-// ±1.5 ms of target at ±300 ppm skew without reaching the limit; a QPC-paced
-// source against a USB DAC crystal is within about ±100 ppm, and the limit
-// only bounds transients.
+// on hardware). The clock tests, driving the real output with the mixer's
+// 10 ms blocks, hold the trough within ±2 ms of the setpoint at ±300 ppm skew
+// without reaching the limit when the period is shorter than a block; at a
+// period of a block or longer the level moves in whole blocks and the tests
+// require no underrun and no late saturation. A QPC-paced source against a
+// USB DAC crystal is within about ±100 ppm, and the limit only bounds
+// transients.
 // The integral learns only within this many milliseconds of the setpoint; P
 // alone drains larger errors (see PiController::update). With a period at
 // least as long as a delivery the trough is flat between phase slips and

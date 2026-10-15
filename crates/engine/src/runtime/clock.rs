@@ -16,17 +16,20 @@ pub(super) const PI_LIMIT_PPM: f64 = 2_000.0;
 pub(super) const PI_KP: f64 = 60.0;
 pub(super) const PI_KI: f64 = 3.0;
 const PI_INTEGRAL_BAND_MS: f64 = 12.0;
-const CONTROL_WINDOW_SECONDS: f64 = 0.2;
+pub(super) const CONTROL_WINDOW_SECONDS: f64 = 0.2;
 /// How fast the trough the PI follows moves to the setpoint, in milliseconds
 /// of ring level per second; one millisecond per second is a 1,000 ppm
 /// correction. Half the limit leaves the other half for clock skew.
 const REFERENCE_SLEW_MS_PER_SECOND: f64 = PI_LIMIT_PPM / 2.0 / 1_000.0;
-/// Windows a new setpoint must hold before the reference moves to it. A late
+/// The reference moves to the lowest setpoint of this many recent windows,
+/// so a raised setpoint must hold that long before it is followed. A late
 /// capture step that delivers two blocks at once raises the largest recent
 /// delivery (see `ArrivalPeak`) for eight steps, up to a quarter second of
 /// E-AC-3; followed with the feedforward, that flicker added 1,000 ppm to
-/// the dip the late step itself left and reached the limit.
-pub(super) const SETPOINT_SETTLE_WINDOWS: u32 = 5;
+/// the dip the late step itself left and reached the limit. The lowest, not
+/// one that held: with such steps every second no setpoint holds five
+/// windows in a row, and a live target change would never be followed.
+pub(super) const SETPOINT_SETTLE_WINDOWS: usize = 5;
 const ARRIVAL_WINDOW: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,12 +407,10 @@ pub(super) struct TroughController {
     /// Where the trough of the window being measured should end, in ms;
     /// `None` until the first window after (re)priming.
     pub(super) reference_ms: Option<f64>,
-    /// The setpoint the reference moves to, in ms: the first one seen, then
-    /// one that held [`SETPOINT_SETTLE_WINDOWS`] windows.
-    pub(super) settled_ms: Option<f64>,
-    /// The latest setpoint and how many windows in a row it has held.
-    pub(super) candidate_ms: f64,
-    pub(super) candidate_windows: u32,
+    /// The setpoints of the last [`SETPOINT_SETTLE_WINDOWS`] windows, in ms
+    /// (infinite until seen), and where the next one goes.
+    pub(super) recent_setpoints_ms: [f64; SETPOINT_SETTLE_WINDOWS],
+    pub(super) next_setpoint: usize,
 }
 
 impl TroughController {
@@ -419,9 +420,8 @@ impl TroughController {
             trough_ms: f64::INFINITY,
             seconds: 0.0,
             reference_ms: None,
-            settled_ms: None,
-            candidate_ms: f64::NAN,
-            candidate_windows: 0,
+            recent_setpoints_ms: [f64::INFINITY; SETPOINT_SETTLE_WINDOWS],
+            next_setpoint: 0,
         }
     }
 
@@ -429,10 +429,14 @@ impl TroughController {
         *self = Self::new();
     }
 
-    /// Priming ended: the next window's trough is where the reference
-    /// starts. The learned skew stays.
+    /// Priming ended: the next window, measured from here, is where the
+    /// reference starts. A window begun before the ring ran dry or was
+    /// refilled would start it at a level the ring no longer has. The learned
+    /// skew stays.
     pub(super) fn restart_reference(&mut self) {
         self.reference_ms = None;
+        self.trough_ms = f64::INFINITY;
+        self.seconds = 0.0;
     }
 
     /// Records the level left after one period; when a window completes,
@@ -452,17 +456,13 @@ impl TroughController {
         }
         let trough_ms = self.trough_ms;
         let seconds = self.seconds;
-        // A setpoint that holds comes from the same inputs, so it compares equal.
-        if setpoint_ms == self.candidate_ms {
-            self.candidate_windows = self.candidate_windows.saturating_add(1);
-        } else {
-            self.candidate_ms = setpoint_ms;
-            self.candidate_windows = 1;
-        }
-        if self.settled_ms.is_none() || self.candidate_windows >= SETPOINT_SETTLE_WINDOWS {
-            self.settled_ms = Some(self.candidate_ms);
-        }
-        let goal_ms = self.settled_ms.unwrap_or(setpoint_ms);
+        self.recent_setpoints_ms[self.next_setpoint] = setpoint_ms;
+        self.next_setpoint = (self.next_setpoint + 1) % SETPOINT_SETTLE_WINDOWS;
+        let goal_ms = self
+            .recent_setpoints_ms
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
         let reference_ms = self.reference_ms.unwrap_or(trough_ms);
         // Where the next window should end, and the drain (positive) or fill
         // that takes over a window as long as this one.
