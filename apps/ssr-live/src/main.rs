@@ -10,13 +10,23 @@
 //!   a dump instead of the ring (`--loop` repeats it) and `--report` writes
 //!   the run's figures as JSON, which is how CI soaks the live path.
 //! * `devices` lists render endpoints.
+//! * `host` drives the supervisor's Windows host adapter
+//!   (`ssr_sys::WindowsHost`) and prints one JSON document per call (shapes
+//!   in `host_json`): `show` the platform, driver, endpoints and default
+//!   roles, `set-default` one role, `setup` one elevated `ssr-setup` task.
+//!   CI checks the adapter with it (`tools/ci/host_check.py`,
+//!   `tools/ci/host_role_check.py`).
 //!
 //! The SAL device opens only from an administrator prompt.
 
-use std::path::PathBuf;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod host_json;
+
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use ssr_types::{Role, SetupTask};
 
 #[derive(Parser)]
 #[command(
@@ -213,6 +223,274 @@ mod endpoint_tests {
     }
 }
 
+/// `ssr-setup.exe`, beside `ssr-live.exe` or in the package directory.
+const SETUP_EXE: &str = "ssr-setup.exe";
+
+/// The state directory under the temporary directory when `--state-dir` is
+/// not given.
+const HOST_STATE_DIR: &str = "ssr-live-host";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RoleArg {
+    Console,
+    Multimedia,
+    Communications,
+}
+
+impl From<RoleArg> for Role {
+    fn from(role: RoleArg) -> Self {
+        match role {
+            RoleArg::Console => Role::Console,
+            RoleArg::Multimedia => Role::Multimedia,
+            RoleArg::Communications => Role::Communications,
+        }
+    }
+}
+
+/// The `ssr-setup` tasks, in the order `host setup --help` lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SetupKind {
+    /// Trust the package's test certificate, create the root device, install
+    /// the driver and apply the endpoints' exclusive-mode policy.
+    Install,
+    /// Remove the current and legacy devices, driver packages, orphan services
+    /// and test certificates.
+    Uninstall,
+    /// Reinstall the driver on the device and apply the exclusive-mode policy,
+    /// or install when there is no device.
+    Repair,
+    /// Disable and enable the device.
+    RestartDevice,
+    /// Set the driver's endpoint mask (--endpoint-mask), restart the device
+    /// and apply the exclusive-mode policy to the endpoints it enables.
+    SetFormats,
+}
+
+#[derive(Subcommand, Debug)]
+enum HostCommand {
+    /// Print the platform, the driver state, every render endpoint (ours with
+    /// its endpoint number) and the default device of each role.
+    Show {
+        /// Directory for ssr-setup's result file and the restore point
+        /// [default: %TEMP%\ssr-live-host].
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Make a render endpoint the default device of one role.
+    SetDefault {
+        /// The role whose default device changes.
+        #[arg(long, value_enum)]
+        role: RoleArg,
+        /// The endpoint id, as `host show` prints it.
+        #[arg(long)]
+        id: String,
+        /// Directory for ssr-setup's result file and the restore point
+        /// [default: %TEMP%\ssr-live-host].
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+    /// Run one administrator task through an elevated ssr-setup (one UAC
+    /// prompt).
+    ///
+    /// ssr-setup.exe runs from --package-dir when that directory holds one, and
+    /// otherwise from beside ssr-live.exe; install and repair take
+    /// spatialsoftreceiver.inf and spatialsoftreceiver-test.cer from the
+    /// directory of the ssr-setup.exe that runs. ssr-live copies nothing: put
+    /// ssr-setup.exe into the package directory first (the CI step copies the
+    /// binaries into the kit directory before it calls this).
+    Setup {
+        #[arg(value_enum)]
+        task: SetupKind,
+        /// With set-formats: the driver's EndpointMask, bit n enables endpoint n
+        /// (1-15).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..16))]
+        endpoint_mask: Option<u8>,
+        /// The driver package directory (spatialsoftreceiver.inf, its catalog
+        /// and driver, the test certificate, and ssr-setup.exe).
+        #[arg(long)]
+        package_dir: PathBuf,
+        /// Directory for ssr-setup's result file and the restore point
+        /// [default: %TEMP%\ssr-live-host].
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+}
+
+/// The task `host setup` asks for; `--endpoint-mask` belongs to set-formats
+/// and set-formats needs it.
+fn setup_task(kind: SetupKind, endpoint_mask: Option<u8>) -> Result<SetupTask, String> {
+    match (kind, endpoint_mask) {
+        (SetupKind::SetFormats, Some(endpoint_mask)) => Ok(SetupTask::SetFormats { endpoint_mask }),
+        (SetupKind::SetFormats, None) => Err("set-formats needs --endpoint-mask".to_owned()),
+        (_, Some(_)) => Err("--endpoint-mask belongs to set-formats only".to_owned()),
+        (SetupKind::Install, None) => Ok(SetupTask::Install),
+        (SetupKind::Uninstall, None) => Ok(SetupTask::Uninstall),
+        (SetupKind::Repair, None) => Ok(SetupTask::Repair),
+        (SetupKind::RestartDevice, None) => Ok(SetupTask::RestartDevice),
+    }
+}
+
+/// `--state-dir`, or `ssr-live-host` under the temporary directory.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn host_state_dir(state_dir: Option<PathBuf>, temp_dir: &Path) -> PathBuf {
+    state_dir.unwrap_or_else(|| temp_dir.join(HOST_STATE_DIR))
+}
+
+/// The `ssr-setup.exe` that `host setup` runs: the package directory's when it
+/// holds one, else `sibling` (the one beside ssr-live.exe). The adapter takes
+/// the package files from the chosen executable's directory.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn package_setup_exe(
+    package_dir: &Path,
+    sibling: PathBuf,
+    is_file: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    let packaged = package_dir.join(SETUP_EXE);
+    if is_file(&packaged) {
+        packaged
+    } else {
+        sibling
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<HostCommand, clap::Error> {
+        let mut line = vec!["ssr-live", "host"];
+        line.extend_from_slice(args);
+        let cli = Cli::try_parse_from(line)?;
+        let Command::Host { command } = cli.command else {
+            panic!("expected the host command");
+        };
+        Ok(command)
+    }
+
+    #[test]
+    fn host_subcommands_parse_their_documented_lines() {
+        let HostCommand::Show { state_dir } = parse(&["show"]).unwrap() else {
+            panic!("expected show");
+        };
+        assert_eq!(state_dir, None);
+        let HostCommand::Show { state_dir } = parse(&["show", "--state-dir", "s"]).unwrap() else {
+            panic!("expected show");
+        };
+        assert_eq!(state_dir, Some(PathBuf::from("s")));
+
+        for (name, role) in [
+            ("console", Role::Console),
+            ("multimedia", Role::Multimedia),
+            ("communications", Role::Communications),
+        ] {
+            let HostCommand::SetDefault {
+                role: parsed, id, ..
+            } = parse(&[
+                "set-default",
+                "--role",
+                name,
+                "--id",
+                "{0.0.0.00000000}.{a}",
+            ])
+            .unwrap()
+            else {
+                panic!("expected set-default");
+            };
+            assert_eq!(Role::from(parsed), role);
+            assert_eq!(id, "{0.0.0.00000000}.{a}");
+        }
+        assert!(parse(&["set-default", "--role", "default", "--id", "x"]).is_err());
+        assert!(parse(&["set-default", "--role", "console"]).is_err());
+
+        for (name, kind) in [
+            ("install", SetupKind::Install),
+            ("uninstall", SetupKind::Uninstall),
+            ("repair", SetupKind::Repair),
+            ("restart-device", SetupKind::RestartDevice),
+            ("set-formats", SetupKind::SetFormats),
+        ] {
+            let HostCommand::Setup {
+                task,
+                endpoint_mask,
+                package_dir,
+                state_dir,
+            } = parse(&["setup", name, "--package-dir", "kit"]).unwrap()
+            else {
+                panic!("expected setup");
+            };
+            assert_eq!((task, endpoint_mask), (kind, None));
+            assert_eq!(package_dir, PathBuf::from("kit"));
+            assert_eq!(state_dir, None);
+        }
+        assert!(parse(&["setup", "install"]).is_err());
+        assert!(parse(&["setup", "reinstall", "--package-dir", "kit"]).is_err());
+        for mask in ["0", "16", "x"] {
+            assert!(
+                parse(&[
+                    "setup",
+                    "set-formats",
+                    "--endpoint-mask",
+                    mask,
+                    "--package-dir",
+                    "kit"
+                ])
+                .is_err()
+            );
+        }
+        let HostCommand::Setup { endpoint_mask, .. } = parse(&[
+            "setup",
+            "set-formats",
+            "--endpoint-mask",
+            "7",
+            "--package-dir",
+            "kit",
+        ])
+        .unwrap() else {
+            panic!("expected setup");
+        };
+        assert_eq!(endpoint_mask, Some(7));
+    }
+
+    #[test]
+    fn setup_task_needs_the_mask_for_set_formats_only() {
+        assert_eq!(
+            setup_task(SetupKind::SetFormats, Some(5)),
+            Ok(SetupTask::SetFormats { endpoint_mask: 5 })
+        );
+        assert!(setup_task(SetupKind::SetFormats, None).is_err());
+        for (kind, task) in [
+            (SetupKind::Install, SetupTask::Install),
+            (SetupKind::Uninstall, SetupTask::Uninstall),
+            (SetupKind::Repair, SetupTask::Repair),
+            (SetupKind::RestartDevice, SetupTask::RestartDevice),
+        ] {
+            assert_eq!(setup_task(kind, None), Ok(task));
+            assert!(setup_task(kind, Some(7)).is_err());
+        }
+    }
+
+    #[test]
+    fn state_dir_defaults_under_the_temporary_directory() {
+        let temp = Path::new("tmp");
+        assert_eq!(host_state_dir(None, temp), temp.join("ssr-live-host"));
+        assert_eq!(
+            host_state_dir(Some(PathBuf::from("mine")), temp),
+            PathBuf::from("mine")
+        );
+    }
+
+    #[test]
+    fn setup_exe_comes_from_the_package_dir_when_it_holds_one() {
+        let kit = Path::new("kit");
+        let sibling = PathBuf::from("bin").join(SETUP_EXE);
+        assert_eq!(
+            package_setup_exe(kit, sibling.clone(), |path| path == kit.join(SETUP_EXE)),
+            kit.join(SETUP_EXE)
+        );
+        assert_eq!(package_setup_exe(kit, sibling.clone(), |_| false), sibling);
+    }
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Command {
@@ -293,6 +571,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Query and drive the Windows host adapter; prints one JSON document.
+    Host {
+        #[command(subcommand)]
+        command: HostCommand,
+    },
 }
 
 fn main() -> ExitCode {
@@ -341,6 +624,21 @@ fn main() -> ExitCode {
             direct_layouts,
         }),
         Command::Devices { formats, json } => platform::devices(formats, json),
+        Command::Host { command } => match command {
+            HostCommand::Show { state_dir } => platform::host_show(state_dir),
+            HostCommand::SetDefault {
+                role,
+                id,
+                state_dir,
+            } => platform::host_set_default(role.into(), id, state_dir),
+            HostCommand::Setup {
+                task,
+                endpoint_mask,
+                package_dir,
+                state_dir,
+            } => setup_task(task, endpoint_mask)
+                .and_then(|task| platform::host_setup(&task, &package_dir, state_dir)),
+        },
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -370,10 +668,15 @@ mod platform {
     use ssr_sys::driver_ring::{DriverRing, DriverRingObserver};
     use ssr_sys::mmcss::{self, MmcssGuard};
     use ssr_sys::output::WasapiOpener;
-    use ssr_sys::{devices, qpc, sal::SalRing};
-    use ssr_types::{CaptureError, CaptureSource, TrimUnsupported};
+    use ssr_sys::{WindowsHost, devices, qpc, sal::SalRing};
+    use ssr_types::{
+        CaptureError, CaptureSource, DeviceId, Host, Role, SetupTask, TrimUnsupported,
+    };
 
-    use super::{CaptureKind, Clock, parse_endpoints};
+    use super::{
+        CaptureKind, Clock, SETUP_EXE, host_json, host_state_dir, package_setup_exe,
+        parse_endpoints,
+    };
 
     pub struct PlayOptions {
         pub source: CaptureKind,
@@ -988,6 +1291,76 @@ mod platform {
         Ok(())
     }
 
+    /// `ssr-setup.exe` beside the running ssr-live.exe.
+    fn sibling_setup_exe() -> Result<PathBuf, String> {
+        let exe = std::env::current_exe()
+            .map_err(|error| format!("cannot locate ssr-live.exe: {error}"))?;
+        Ok(exe.with_file_name(SETUP_EXE))
+    }
+
+    /// The adapter `host` drives. Both paths are made absolute: the elevated
+    /// `ssr-setup` does not start in this process's directory, and it is given
+    /// the package files and its result file by path.
+    fn windows_host(setup_exe: &Path, state_dir: Option<PathBuf>) -> Result<WindowsHost, String> {
+        let absolute = |path: &Path| {
+            std::path::absolute(path).map_err(|error| format!("{}: {error}", path.display()))
+        };
+        let state_dir = host_state_dir(state_dir, &std::env::temp_dir());
+        Ok(WindowsHost::new(
+            absolute(setup_exe)?,
+            absolute(&state_dir)?,
+        ))
+    }
+
+    /// Prints the answer's document, if any, then fails with its error.
+    fn print_answer(answer: host_json::Answer) -> Result<(), String> {
+        if let Some(document) = &answer.stdout {
+            println!("{}", host_json::to_ascii_json(document));
+        }
+        answer.error.map_or(Ok(()), Err)
+    }
+
+    pub fn host_show(state_dir: Option<PathBuf>) -> Result<(), String> {
+        let mut host = windows_host(&sibling_setup_exe()?, state_dir)?;
+        let platform = host.platform();
+        let driver = host.driver();
+        let outputs = host.outputs();
+        let roles = host.default_roles();
+        let document = host_json::show_json(&platform, &driver, &outputs, &roles);
+        println!("{}", host_json::to_ascii_json(&document));
+        Ok(())
+    }
+
+    pub fn host_set_default(
+        role: Role,
+        id: String,
+        state_dir: Option<PathBuf>,
+    ) -> Result<(), String> {
+        let mut host = windows_host(&sibling_setup_exe()?, state_dir)?;
+        let id = DeviceId(id);
+        let result = host.set_default_role(role, &id);
+        print_answer(host_json::set_default_answer(role, &id, result))
+    }
+
+    pub fn host_setup(
+        task: &SetupTask,
+        package_dir: &Path,
+        state_dir: Option<PathBuf>,
+    ) -> Result<(), String> {
+        let package_dir = std::path::absolute(package_dir)
+            .map_err(|error| format!("{}: {error}", package_dir.display()))?;
+        let setup_exe = package_setup_exe(&package_dir, sibling_setup_exe()?, Path::is_file);
+        if setup_exe != package_dir.join(SETUP_EXE) {
+            eprintln!(
+                "ssr-live: {} holds no {SETUP_EXE}; running {} with the package files beside it",
+                package_dir.display(),
+                setup_exe.display()
+            );
+        }
+        let mut host = windows_host(&setup_exe, state_dir)?;
+        print_answer(host_json::setup_answer(host.run_setup(task)))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1252,6 +1625,26 @@ mod platform {
     }
 
     pub fn devices(_formats: bool, _json: bool) -> Result<(), String> {
+        Err("ssr-live runs on Windows only".to_owned())
+    }
+
+    pub fn host_show(_state_dir: Option<PathBuf>) -> Result<(), String> {
+        Err("ssr-live runs on Windows only".to_owned())
+    }
+
+    pub fn host_set_default(
+        _role: ssr_types::Role,
+        _id: String,
+        _state_dir: Option<PathBuf>,
+    ) -> Result<(), String> {
+        Err("ssr-live runs on Windows only".to_owned())
+    }
+
+    pub fn host_setup(
+        _task: &ssr_types::SetupTask,
+        _package_dir: &Path,
+        _state_dir: Option<PathBuf>,
+    ) -> Result<(), String> {
         Err("ssr-live runs on Windows only".to_owned())
     }
 }

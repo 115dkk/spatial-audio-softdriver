@@ -26,9 +26,16 @@ name: Driver
 #              out (tools/ci/driver_e2e_check.py), an IOCTL fuzzer attacks
 #              the control device (tools/ci/ioctl_fuzz.py), the device
 #              restarts five times (each restart unloads and reloads the
-#              image), all under Driver Verifier (tools/ci/verifier.ps1), and
-#              the kit's collect.ps1 and uninstall.ps1 run as a tester would
-#              run them
+#              image), all under Driver Verifier (tools/ci/verifier.ps1); the
+#              app's Windows host adapter reads the driver, the endpoints
+#              with their KS-mapped numbers and the default roles and
+#              switches the roles through IPolicyConfig (ssr-live host,
+#              tools/ci/host_check.py, host_role_check.py); the kit's
+#              collect.ps1 runs as a tester would; then ssr-setup, elevated
+#              through the host adapter, uninstalls, installs from the kit,
+#              changes the endpoint mask, restarts, repairs and uninstalls
+#              (ADR 0032), after which the kit's uninstall.ps1 must find
+#              nothing left
 #   faults     the same kit with the driver's own fault switch on both
 #              images: each resource acquisition of a load (DriverEntry,
 #              AddDevice, StartDevice) and then of playing (streams, the
@@ -402,6 +409,37 @@ jobs:
         if: ${{ !cancelled() && steps.e2e-build.outcome == 'success' }}
         run: cargo test --locked --release -p ssr-sys --test driver_ring -- --ignored --nocapture
 
+      # ADR 0032: the app's Windows host adapter against the installed driver.
+      # `ssr-live host show` lists the render endpoints with the driver's
+      # endpoint numbers found through the KS filter references; the Rust
+      # mapping must agree with endpoints.ps1's, the driver must read as
+      # installed with the exclusive policy applied, and the three default
+      # roles must be readable. Then IPolicyConfig (undocumented, declared by
+      # one vtable slot) switches each role to our main endpoint and back.
+      - name: Build ssr-setup beside ssr-live for the host checks
+        id: host-build
+        if: ${{ !cancelled() && steps.e2e-build.outcome == 'success' }}
+        shell: bash
+        run: cargo build --locked --release -p ssr-setup
+
+      - name: The host adapter sees the driver and the endpoints (tools/ci/host_check.py)
+        if: ${{ !cancelled() && steps.host-build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $state = Join-Path $env:RUNNER_TEMP 'host-state'
+          powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/ci/endpoints.ps1 | Set-Content -Encoding UTF8 (Join-Path $env:RUNNER_TEMP 'endpoints.json')
+          & target/release/ssr-live.exe host show --state-dir $state | Set-Content -Encoding UTF8 (Join-Path $env:RUNNER_TEMP 'host.json')
+          if ($LASTEXITCODE -ne 0) { throw "ssr-live host show exited $LASTEXITCODE" }
+          python tools/ci/host_check.py --host (Join-Path $env:RUNNER_TEMP 'host.json') --endpoints (Join-Path $env:RUNNER_TEMP 'endpoints.json') --expect-mask 7 --expect-driver installed --expect-policy applied --summary (Join-Path $env:RUNNER_TEMP 'host-check.json')
+          if ($LASTEXITCODE -ne 0) { throw "host_check.py exited $LASTEXITCODE" }
+
+      - name: Default roles to our endpoint and back (IPolicyConfig, tools/ci/host_role_check.py)
+        if: ${{ !cancelled() && steps.host-build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          python tools/ci/host_role_check.py --ssr-live target/release/ssr-live.exe --summary (Join-Path $env:RUNNER_TEMP 'host-roles.json') --state-dir (Join-Path $env:RUNNER_TEMP 'host-state')
+          if ($LASTEXITCODE -ne 0) { throw "host_role_check.py exited $LASTEXITCODE" }
+
       - name: Crash stacks of ssr-live (cdb on any dump)
         if: ${{ failure() && steps.e2e-build.outcome == 'success' }}
         shell: pwsh
@@ -497,6 +535,74 @@ jobs:
             ${{ runner.temp }}/spatialsoftreceiver-ks-*.etl
             ${{ runner.temp }}/spatialsoftreceiver-ks-*.xml
             ${{ runner.temp }}/report/*.zip
+          if-no-files-found: ignore
+
+      # ADR 0032: the administrator helper the app will ship, run through the
+      # host adapter's elevated launch (the runner is already elevated, so
+      # there is no prompt), against the same kit: uninstall what install.ps1
+      # installed, install again from the kit's inf and certificate, narrow the
+      # endpoint mask and widen it back (set-formats restarts the device and
+      # writes the exclusive policy on the endpoints it enables), restart,
+      # repair, and uninstall through ssr-setup's own command line. The host
+      # adapter reads the driver state after each. The kit's uninstall.ps1
+      # below then finds nothing left, which is the proof that ssr-setup's
+      # uninstall is complete.
+      - name: ssr-setup through the host adapter (uninstall, install, set-formats, restart, repair, uninstall)
+        id: setup-cycle
+        if: ${{ !cancelled() && steps.host-build.outcome == 'success' && steps.install.outputs.kit != '' }}
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $kit = '${{ steps.install.outputs.kit }}'
+          $state = Join-Path $env:RUNNER_TEMP 'host-state'
+          Copy-Item target/release/ssr-setup.exe (Join-Path $kit 'ssr-setup.exe') -Force
+          function Invoke-Setup([string[]] $Arguments) {
+            $lines = & target/release/ssr-live.exe host setup @Arguments --package-dir $kit --state-dir $state
+            $text = $lines -join "`n"
+            if ($LASTEXITCODE -ne 0) { throw "ssr-live host setup $($Arguments -join ' ') exited ${LASTEXITCODE}: $text" }
+            $result = $text | ConvertFrom-Json
+            Write-Host "setup $($Arguments -join ' '): $($result.message)"
+            if (-not $result.ok) { throw "setup $($Arguments -join ' ') failed: $text" }
+            if ($result.reboot_required) { throw "setup $($Arguments -join ' ') asked for a reboot" }
+          }
+          function Assert-Host([int] $Mask, [string] $Driver, [string] $Policy, [string] $Label) {
+            powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/ci/endpoints.ps1 | Set-Content -Encoding UTF8 (Join-Path $env:RUNNER_TEMP "endpoints-$Label.json")
+            & target/release/ssr-live.exe host show --state-dir $state | Set-Content -Encoding UTF8 (Join-Path $env:RUNNER_TEMP "host-$Label.json")
+            if ($LASTEXITCODE -ne 0) { throw "ssr-live host show ($Label) exited $LASTEXITCODE" }
+            python tools/ci/host_check.py --host (Join-Path $env:RUNNER_TEMP "host-$Label.json") --endpoints (Join-Path $env:RUNNER_TEMP "endpoints-$Label.json") --expect-mask $Mask --expect-driver $Driver --expect-policy $Policy --summary (Join-Path $env:RUNNER_TEMP "host-check-$Label.json")
+            if ($LASTEXITCODE -ne 0) { throw "host_check.py ($Label) exited $LASTEXITCODE" }
+          }
+          function Assert-Policy([int] $Mask, [string] $Label) {
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools/ci/exclusive_policy_check.ps1 -ExpectMask $Mask -Summary (Join-Path $env:RUNNER_TEMP "exclusive-policy-$Label.json")
+            if ($LASTEXITCODE -ne 0) { throw "exclusive_policy_check.ps1 ($Label) exited $LASTEXITCODE" }
+          }
+          Invoke-Setup @('uninstall')
+          Assert-Host 7 'not-installed' 'any' 'after-uninstall'
+          Invoke-Setup @('install')
+          Assert-Host 7 'installed' 'applied' 'after-install'
+          Assert-Policy 7 'after-install'
+          Invoke-Setup @('set-formats', '--endpoint-mask', '3')
+          Assert-Host 3 'installed' 'applied' 'mask-3'
+          Assert-Policy 3 'mask-3'
+          Invoke-Setup @('set-formats', '--endpoint-mask', '7')
+          Assert-Host 7 'installed' 'applied' 'mask-7'
+          Invoke-Setup @('restart-device')
+          Invoke-Setup @('repair')
+          Assert-Host 7 'installed' 'applied' 'after-repair'
+          Assert-Policy 7 'after-repair'
+          $lines = & (Join-Path $kit 'ssr-setup.exe') uninstall --result (Join-Path $env:RUNNER_TEMP 'setup-uninstall.json')
+          if ($LASTEXITCODE -ne 0) { throw "ssr-setup uninstall exited ${LASTEXITCODE}: $($lines -join ' ')" }
+          Assert-Host 7 'not-installed' 'any' 'final'
+
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.host-build.outcome == 'success'
+        with:
+          name: host-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/host*.json
+            ${{ runner.temp }}/endpoints*.json
+            ${{ runner.temp }}/exclusive-policy-*.json
+            ${{ runner.temp }}/setup-uninstall.json
           if-no-files-found: ignore
 
       # Last: the tester's uninstaller must leave no device, driver package,
