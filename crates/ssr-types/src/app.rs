@@ -1,20 +1,24 @@
-//! Intent and snapshot: the whole contract between the screen and Rust (draft).
+//! Intent and snapshot: the whole contract between the screen and Rust.
 //!
 //! The screen sends only intents and draws only snapshots; it keeps no state of
-//! its own, so reopening the window draws the same picture. The supervisor
-//! that consumes these arrives in M4; the variants below follow the
-//! architecture document and may change when it does.
+//! its own, so reopening the window draws the same picture (ADR 0001). The
+//! `supervisor` state machine consumes the intents and produces the snapshots
+//! (ADR 0013).
 
 use std::path::PathBuf;
 
 use crate::layout::DirectionId;
+use crate::ports::{DeviceId, DriverState, Platform};
 use crate::status::EngineStatus;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Intent {
     BeginSetup,
     InstallDriver,
-    ChooseOutput(String),
+    /// Looks at the PC again after the user did something outside the app
+    /// (a reboot, test signing, a repair), or leaves the faulted state.
+    Recheck,
+    ChooseOutput(DeviceId),
     ImportBrir(PathBuf),
     ImportHeadphoneFir(PathBuf),
     SwitchProfile(String),
@@ -26,19 +30,54 @@ pub enum Intent {
     Quit,
 }
 
+/// The first-run wizard's steps, in the order the checks run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupStep {
+    Welcome,
+    /// The PC cannot run this build: an unsupported OS build or architecture
+    /// (the error says which).
+    Unsupported,
+    /// The driver package needs test signing and the PC does not have it on
+    /// (Secure Boot state in the error).
+    NotTestSigning,
+    /// The driver is not installed or Windows reports a problem code for it.
+    Driver,
+    RebootRequired,
+    ChooseOutput,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
-    Setup(u8),
+    Setup(SetupStep),
     Ready,
     Running,
-    Idle,
-    Faulted(String),
+    Faulted,
+    Quit,
+}
+
+/// An output the user may choose, or has chosen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputChoice {
+    pub id: DeviceId,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub phase: Phase,
     pub engine: Option<EngineStatus>,
+    /// Outputs the user may choose: active, and never our own endpoints.
+    pub outputs: Vec<OutputChoice>,
+    pub chosen_output: Option<OutputChoice>,
+    pub driver: Option<DriverState>,
+    pub platform: Option<Platform>,
+    /// The three default roles point at our main endpoint.
+    pub roles_taken: bool,
+    /// The last error, cleared by the next intent that succeeds.
+    pub error: Option<UserError>,
+    /// Facts the screen shows as is (a previous default device that
+    /// disappeared, ...).
+    pub notes: Vec<String>,
 }
 
 /// An error the screen shows as is: the sentence and the next action.
@@ -53,5 +92,7 @@ pub struct UserError {
 pub enum NextAction {
     Retry,
     OpenSettings,
+    /// Restart Windows, then recheck.
+    Reboot,
     None,
 }

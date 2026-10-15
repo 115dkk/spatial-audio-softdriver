@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use engine::{EngineEvent, LiveChange, OutputProfile, StartOptions};
+use ssr_types::app::{NextAction, Phase, Snapshot, UserError};
 use ssr_types::{CaptureError, CaptureSource, EngineFault, EngineStatus, OutputOpener};
 
 use crate::driver_stats::{
@@ -296,17 +297,25 @@ impl Session {
         self.engine.status()
     }
 
-    pub fn snapshot(&self) -> ssr_types::app::Snapshot {
+    /// The session alone, as the screen would see it: Running, or Faulted
+    /// with the fault as the error. The fields only the state machine knows
+    /// keep their defaults.
+    pub fn snapshot(&self) -> Snapshot {
         let status = self.status();
-        let phase = status
-            .fault
-            .as_ref()
-            .map_or(ssr_types::app::Phase::Running, |fault| {
-                ssr_types::app::Phase::Faulted(format!("{fault:?}"))
-            });
-        ssr_types::app::Snapshot {
+        let (phase, error) = match &status.fault {
+            Some(fault) => (Phase::Faulted, Some(fault_error(fault))),
+            None => (Phase::Running, None),
+        };
+        Snapshot {
             phase,
             engine: Some(status),
+            outputs: Vec::new(),
+            chosen_output: None,
+            driver: None,
+            platform: None,
+            roles_taken: false,
+            error,
+            notes: Vec::new(),
         }
     }
 
@@ -399,6 +408,14 @@ fn sample(source: &SharedStatsSource) -> Result<(u64, ssr_abi::DriverStats), Str
         .lock()
         .map_err(|_| "driver statistics source lock was poisoned".to_owned())?
         .sample()
+}
+
+/// The error the screen shows for a session that faulted on its own.
+fn fault_error(fault: &EngineFault) -> UserError {
+    UserError {
+        message: format!("엔진이 멈췄습니다: {fault:?}"),
+        next: NextAction::Retry,
+    }
 }
 
 fn stats_lock_error() -> CaptureError {

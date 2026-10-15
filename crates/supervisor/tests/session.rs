@@ -1,18 +1,16 @@
 #![forbid(unsafe_code)]
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use engine::adapters::{DumpCapture, NullOpener};
-use speakers::{SpeakerConfig, SpeakerProfile, SpeakerRange};
-use ssr_abi::{RecordWriter, dump_header_bytes, wave_format_bytes};
-use ssr_types::{
-    OutputError, OutputFormat, OutputLayout, OutputOpener, OutputSink, PcmFormat, SampleType,
-    SourceFormat,
-};
-use supervisor::{DriverStatsSource, RequestFields, Session, SessionConfig, SessionError};
+use common::{capture, config};
+use engine::adapters::NullOpener;
+use ssr_types::{OutputError, OutputFormat, OutputLayout, OutputOpener, OutputSink};
+use supervisor::{DriverStatsSource, RequestFields, Session, SessionError};
 
 struct FailingOpener;
 
@@ -37,96 +35,6 @@ impl OutputSink for FailingSink {
 
     fn next_period(&mut self, _fill: &mut dyn FnMut(&mut [f32])) -> Result<u64, OutputError> {
         Err(OutputError::Removed)
-    }
-}
-
-fn profile() -> engine::OutputProfile {
-    engine::OutputProfile::Speakers(SpeakerProfile {
-        name: "test".into(),
-        device_channels: 2,
-        channel_mask: 3,
-        gain_db: 0.0,
-        limiter_ceiling_dbfs: 0.0,
-        crossover_hz: 80.0,
-        lfe_gain_db: 10.0,
-        speakers: vec![
-            SpeakerConfig {
-                name: "FL".into(),
-                azimuth_deg: 30.0,
-                elevation_deg: 0.0,
-                channel: 0,
-                distance_m: None,
-                delay_ms: None,
-                trim_db: 0.0,
-                range: SpeakerRange::Full,
-                crossover_hz: None,
-                fir: None,
-            },
-            SpeakerConfig {
-                name: "FR".into(),
-                azimuth_deg: -30.0,
-                elevation_deg: 0.0,
-                channel: 1,
-                distance_m: None,
-                delay_ms: None,
-                trim_db: 0.0,
-                range: SpeakerRange::Full,
-                crossover_hz: None,
-                fir: None,
-            },
-        ],
-        subwoofers: Vec::new(),
-        bass_to: Vec::new(),
-    })
-}
-
-fn dump() -> Vec<u8> {
-    let format = SourceFormat::Pcm(PcmFormat {
-        channels: 2,
-        sample_rate: 48_000,
-        bits_per_sample: 32,
-        valid_bits: 32,
-        sample_type: SampleType::Float,
-        channel_mask: 3,
-    });
-    let mut records = vec![0; 16_384];
-    let mut writer = RecordWriter::new(&mut records);
-    assert!(writer.format_change(1, 0, &wave_format_bytes(&format)));
-    assert!(writer.stream_start(1, 0));
-    let samples = 0.125_f32.to_le_bytes().repeat(480 * 2);
-    assert!(writer.data(1, 0, 0, &samples));
-    let len = writer.len();
-    let mut dump = dump_header_bytes(1_000_000);
-    dump.extend_from_slice(&records[..len]);
-    dump
-}
-
-fn capture() -> DumpCapture {
-    let now = Arc::new(AtomicU64::new(0));
-    DumpCapture::from_dump(
-        &dump(),
-        1_000_000,
-        move || now.fetch_add(20_000, Ordering::AcqRel),
-        None,
-        false,
-    )
-    .unwrap()
-}
-
-fn config() -> SessionConfig {
-    SessionConfig {
-        engine: engine::EngineConfig {
-            chain: engine::ChainConfig {
-                arrival_slack_frames: 0,
-                ..Default::default()
-            },
-            read_wait: Duration::ZERO,
-            ..Default::default()
-        },
-        profile: profile(),
-        qpc_frequency: 1_000_000,
-        mute: false,
-        recorder: None,
     }
 }
 
@@ -252,10 +160,9 @@ fn snapshot_is_running_without_a_fault() {
         None,
     )
     .unwrap();
-    assert!(matches!(
-        session.snapshot().phase,
-        ssr_types::app::Phase::Running
-    ));
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.phase, ssr_types::app::Phase::Running);
+    assert_eq!(snapshot.error, None);
     session.stop().unwrap();
 }
 
@@ -265,7 +172,11 @@ fn snapshot_is_faulted_after_permanent_output_failure() {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         session.poll().unwrap();
-        if matches!(session.snapshot().phase, ssr_types::app::Phase::Faulted(_)) {
+        let snapshot = session.snapshot();
+        if snapshot.phase == ssr_types::app::Phase::Faulted {
+            let error = snapshot.error.expect("a fault carries its error");
+            assert!(error.message.starts_with("엔진이 멈췄습니다: OutputLost"));
+            assert_eq!(error.next, ssr_types::app::NextAction::Retry);
             break;
         }
         assert!(

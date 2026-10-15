@@ -699,8 +699,35 @@ note = "DriverRing opens the ssr-abi CONTROL_DEVICE_PATH (SpatialSoftReceiver), 
 id = "supervisor.state_machine"
 kind = "app"
 milestone = "M4"
-status = "planned"
-tests = []
+status = "partial"
+tests = [
+  "supervisor::the_wizard_walks_every_step_on_a_fresh_pc",
+  "supervisor::a_declined_prompt_and_a_failed_install_stay_on_the_driver_step",
+  "supervisor::problem_code_52_names_test_signing",
+  "supervisor::a_driver_problem_asks_for_a_repair",
+  "supervisor::another_architecture_is_unsupported",
+  "supervisor::a_changed_device_id_is_found_by_name_and_remembered",
+  "supervisor::an_ambiguous_name_is_not_guessed",
+  "supervisor::restore_leaves_roles_the_user_changed_meanwhile",
+  "supervisor::restore_notes_a_previous_device_that_disappeared",
+  "supervisor::a_previous_role_already_ours_falls_back_to_the_chosen_output",
+  "supervisor::a_gone_previous_device_falls_back_to_the_chosen_output",
+  "supervisor::a_failed_role_change_rolls_back_and_removes_the_restore_point",
+  "supervisor::a_failed_launch_restores_the_roles",
+  "supervisor::an_engine_fault_stops_restores_and_faults",
+  "supervisor::a_recoverable_fault_keeps_running_until_the_engine_reconnects",
+  "supervisor::a_fault_that_outlasts_the_grace_stops_and_restores",
+  "supervisor::quit_from_running_stops_and_restores",
+  "supervisor::intents_after_quit_are_refused",
+  "supervisor::unlisted_and_unwired_intents_leave_the_state_alone",
+  "supervisor::a_refused_intent_keeps_the_step_explanation",
+  "supervisor::a_hidden_main_endpoint_refuses_to_enable",
+  "supervisor::new_starts_ready_when_the_driver_and_the_output_are_present",
+  "supervisor::new_starts_at_welcome_otherwise",
+  "supervisor::a_real_session_runs_behind_the_engine_handle",
+  "supervisor::restore_point_round_trips_and_rejects_other_versions",
+]
+note = "ADR 0013: supervisor::machine holds the wizard steps (Welcome, Unsupported, NotTestSigning, Driver, RebootRequired, ChooseOutput), Ready, Running, Faulted and Quit; the OS is reached only through the ssr-types Host port (platform facts, driver state, outputs with our endpoint numbers, the three default roles, ssr-setup, the restore point) and the engine through Launcher/EngineHandle (Session implements it). Enabling writes the restore point, takes the three roles and launches; disabling, a fault and quit restore only the roles that still point at us (restore_roles, shared with the guard), falling back to the chosen output when the previous device is gone or was ours. A recoverable engine fault (lost output or capture) keeps Running while the engine reconnects and stops only after Config::fault_grace (15 s). The chosen output is kept by id and name and re-found by a unique name after an id change. Tested on Linux with a scripted Fake Host and a fake engine, plus one real Session behind the handle. Still planned: the Windows Host adapter (IPolicyConfig, SetupAPI through ssr-setup, next slice with its unsafe-budget ADR), BRIR/profile/gain intents, and the Tauri shell"
 
 [[feature]]
 id = "supervisor.live_session"
@@ -773,9 +800,15 @@ note = "VST 2 adapter from a Rust translation of Xaymar's clean-room vst2sdk hea
 id = "app.default_device_guard"
 kind = "app"
 milestone = "M4"
-status = "planned"
-tests = []
-note = "ssr-guard restores the three default device roles when the app exits abnormally (ADR 0023, proposed)"
+status = "partial"
+tests = [
+  "supervisor::a_dead_app_restores_once",
+  "supervisor::a_stall_restarts_then_restores",
+  "supervisor::moving_counters_are_not_a_stall",
+  "supervisor::unreadable_counters_count_as_a_stall",
+  "supervisor::the_guard_gives_the_roles_back_from_the_restore_point_alone",
+]
+note = "ssr-guard restores the three default device roles when the app exits abnormally (ADR 0023 decision 4). supervisor::guard is the decision core: an app that died restores once; output-period and capture-read counters unchanged for 2 s (or unreadable) mean a stall, which restarts the app once and restores on the second stall; the restore reuses supervisor::restore_roles on the restore point the supervisor wrote. Still planned: the ssr-guard process (shared-memory counters, process watch, notification) in the Windows slice"
 
 # ---- Entrances (ADR 0024, 0025) ----
 
