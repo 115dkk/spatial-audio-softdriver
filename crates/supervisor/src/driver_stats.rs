@@ -1,11 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use ssr_abi::DriverStats;
-
-/// Supplies one generation-tagged driver statistics snapshot.
-pub trait DriverStatsSource: Send {
-    fn sample(&self) -> Result<(u64, DriverStats), String>;
-}
+pub use ssr_abi::DriverStatsSource;
 
 /// Driver counters accumulated across reconnect generations.
 #[derive(Clone, Copy, Debug)]

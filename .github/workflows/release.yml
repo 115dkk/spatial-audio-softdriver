@@ -81,6 +81,10 @@ jobs:
 
       - uses: ./.github/actions/rust-toolchain
 
+      # The app embeds the built screens at compile time, and the workspace
+      # test compiles the app on Windows.
+      - uses: ./.github/actions/ui-dist
+
       - name: Test (release mode)
         run: cargo test --workspace --release --locked
 

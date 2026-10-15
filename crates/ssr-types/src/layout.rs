@@ -8,7 +8,10 @@
 use crate::scene::Position;
 
 /// Index of a direction within its [`Layout`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct DirectionId(pub u16);
 
 impl DirectionId {

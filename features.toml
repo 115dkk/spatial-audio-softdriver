@@ -703,6 +703,7 @@ status = "partial"
 tests = [
   "supervisor::the_wizard_walks_every_step_on_a_fresh_pc",
   "supervisor::a_declined_prompt_and_a_failed_install_stay_on_the_driver_step",
+  "supervisor::a_recheck_at_the_output_step_lists_the_outputs_again",
   "supervisor::problem_code_52_names_test_signing",
   "supervisor::a_driver_problem_asks_for_a_repair",
   "supervisor::another_architecture_is_unsupported",
@@ -729,7 +730,7 @@ tests = [
   "supervisor::a_real_session_runs_behind_the_engine_handle",
   "supervisor::restore_point_round_trips_and_rejects_other_versions",
 ]
-note = "ADR 0013: supervisor::machine holds the wizard steps (Welcome, Unsupported, NotTestSigning, Driver, RebootRequired, ChooseOutput), Ready, Running, Faulted and Quit; the OS is reached only through the ssr-types Host port (platform facts, driver state, outputs with our endpoint numbers, the three default roles, ssr-setup, the restore point) and the engine through Launcher/EngineHandle (Session implements it). Enabling writes the restore point, takes the three roles and launches; disabling, a fault and quit restore only the roles that still point at us (restore_roles, shared with the guard), falling back to the chosen output when the previous device is gone or was ours. A recoverable engine fault (lost output or capture) keeps Running while the engine reconnects and stops only after Config::fault_grace (15 s). The chosen output is kept by id and name and re-found by a unique name after an id change. Tested on Linux with a scripted Fake Host and a fake engine, plus one real Session behind the handle. Still planned: the Windows Host adapter (IPolicyConfig, SetupAPI through ssr-setup, next slice with its unsafe-budget ADR), BRIR/profile/gain intents, and the Tauri shell"
+note = "ADR 0013: supervisor::machine holds the wizard steps (Welcome, Unsupported, NotTestSigning, Driver, RebootRequired, ChooseOutput), Ready, Running, Faulted and Quit; the OS is reached only through the ssr-types Host port (platform facts, driver state, outputs with our endpoint numbers, the three default roles, ssr-setup, the restore point) and the engine through Launcher/EngineHandle (Session implements it). Enabling writes the restore point, takes the three roles and launches; disabling, a fault and quit restore only the roles that still point at us (restore_roles, shared with the guard), falling back to the chosen output when the previous device is gone or was ours. A recoverable engine fault (lost output or capture) keeps Running while the engine reconnects and stops only after Config::fault_grace (15 s). The chosen output is kept by id and name and re-found by a unique name after an id change. Tested on Linux with a scripted Fake Host and a fake engine, plus one real Session behind the handle. The Windows Host adapter is ssr-sys::host (ADR 0032) and the Tauri shell drives the machine from its control thread (app.shell). Still planned: BRIR/profile/gain intents"
 
 [[feature]]
 id = "supervisor.live_session"
@@ -1139,3 +1140,25 @@ tests = [
 ]
 note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional one-output mono room FIR (subwoofers included, without a discarded second-ear FFT), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). ssr-live and ssr-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
 
+[[feature]]
+id = "app.shell"
+kind = "app"
+milestone = "M4"
+status = "partial"
+tests = [
+  "spatial-softreceiver::the_first_snapshot_is_emitted_before_any_intent",
+  "spatial-softreceiver::intents_walk_the_wizard_and_persist_the_output",
+  "spatial-softreceiver::running_emits_meters_at_the_tick_rate",
+  "spatial-softreceiver::a_refused_intent_returns_its_error_and_keeps_the_phase",
+  "spatial-softreceiver::quit_restores_the_roles_and_ends_the_thread",
+  "spatial-softreceiver::a_dropped_bridge_quits_the_supervisor",
+  "spatial-softreceiver::dispatch_after_the_thread_ended_is_an_error",
+  "spatial-softreceiver::a_panicking_launcher_still_quits_the_supervisor",
+  "spatial-softreceiver::settings_round_trip",
+  "spatial-softreceiver::a_broken_or_foreign_settings_file_starts_fresh",
+  "spatial-softreceiver::state_dir_falls_back_to_the_temp_dir_without_local_app_data",
+  "spatial-softreceiver::args_parse_smoke_and_minimized",
+  "ssr-types::typescript_bindings_match_the_types",
+  "ssr-types::snapshot_fixtures_match_the_types",
+]
+note = "ADR 0001 (2026-10-15 addendum): apps/spatial-softreceiver is the Tauri 2 shell. A control thread (never the UI thread, so the Windows host can join the multithreaded apartment) owns the supervisor: it takes intents over a channel, polls every 33 ms, emits the `snapshot` event when the phase, an intent or a notice changes it (and every second when the output list differs), emits `meters` (EngineStatus) at the tick rate while Running, and persists supervisor::Settings as %LOCALAPPDATA%\\Spatial SoftReceiver\\settings.json after new and every successful intent. Two commands (dispatch, snapshot) and two events are the whole IPC; the TypeScript bindings (ui/src/bindings.ts) and the snapshot fixtures the screens are tested with are generated from ssr-types by tests/ui_contract.rs and compared in CI. The Windows launcher opens the driver ring, WASAPI (exclusive with shared fallback) and a stereo speaker profile until a BRIR set is imported. Tray (open, enable/disable, quit), close to tray, single instance, autostart on login, and a --smoke mode the Windows CI runs (WebView2 draws the screens and asks for a snapshot). The screens (ui/, vitest + gallery screenshots) are the wizard, the status screen with 30 Hz meters, a profile screen whose intents the supervisor still refuses, and settings. Still planned: profile intents, the object map, the installer and Velopack updates, English text, ssr-guard"

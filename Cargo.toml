@@ -62,6 +62,9 @@ wasapi = "0.25"
 thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.152"
+# TypeScript bindings of the screen contract (ssr-types feature "ts", ADR 0001).
+specta = { version = "=2.0.0-rc.22", features = ["derive"] }
+specta-typescript = "=0.0.9"
 toml = "1.1.8"
 zerocopy = { version = "0.8.62", features = ["derive"] }
 realfft = "3.5.0"
@@ -75,6 +78,13 @@ proptest = "1.12.0"
 # and release-mode tests must check real-time paths too.
 assert_no_alloc = { version = "1.1.2", default-features = false }
 eac3 = { git = "https://github.com/harletty/harletty-bridge", rev = "639f0f10f5399755578158bfa598dcea6f60577d" }
+# The app's shell (ADR 0001). Only apps/spatial-softreceiver uses them, and only
+# on Windows; tauri-build runs from its build script.
+tauri = "2.12.4"
+tauri-build = "2.7.3"
+tauri-plugin-single-instance = "2.5.4"
+tauri-plugin-dialog = "2.8.3"
+tauri-plugin-autostart = "2.7.0"
 
 [profile.release]
 lto = "thin"

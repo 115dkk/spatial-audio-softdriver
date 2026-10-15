@@ -5,7 +5,9 @@
 //! a [`SourceFormat`] and the engine picks a decoder adapter from that.
 
 /// How PCM samples are stored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum SampleType {
     /// Little-endian signed integer, `bits_per_sample` wide in the container.
     Int,
@@ -14,7 +16,8 @@ pub enum SampleType {
 }
 
 /// Interleaved PCM as Windows' mixer writes it with spatial sound off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct PcmFormat {
     pub channels: u16,
     pub sample_rate: u32,
@@ -35,15 +38,22 @@ impl PcmFormat {
 }
 
 /// The codec an IEC 61937 stream announces through its KS subtype.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum BitstreamCodec {
+    #[serde(rename = "ac3")]
     Ac3,
+    #[serde(rename = "eac3")]
     Eac3,
+    #[serde(rename = "eac3_joc")]
     Eac3Joc,
     /// Dolby MLP, the TrueHD bitstream.
     TrueHd,
+    #[serde(rename = "mat20")]
     Mat20,
     /// MAT 2.1, what Windows spatial sound's "Dolby Atmos for home theater" writes.
+    #[serde(rename = "mat21")]
     Mat21,
     Dts,
     DtsHd,
@@ -55,7 +65,8 @@ pub enum BitstreamCodec {
 /// An IEC 61937 stream: the container rate and channel count the burst stream
 /// rides in (2 ch / 48 kHz for AC-3, 2 ch / 192 kHz for DD+, 8 ch / 192 kHz
 /// "HBR" for MAT and TrueHD).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct BitstreamFormat {
     pub codec: BitstreamCodec,
     pub container_rate: u32,
@@ -73,7 +84,9 @@ impl BitstreamFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum SourceFormat {
     Pcm(PcmFormat),
     Bitstream(BitstreamFormat),

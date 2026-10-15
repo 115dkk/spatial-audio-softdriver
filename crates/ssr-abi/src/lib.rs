@@ -51,5 +51,14 @@ pub use wave::{
 };
 pub use wire::*;
 
+/// Supplies one generation-tagged sample of the driver's [`DriverStats`]: the
+/// generation changes when the ring is reopened, so a reader can tell a
+/// restarted counter from a continued one. The driver ring's observer
+/// implements it on Windows; `supervisor` totals the samples across
+/// reconnects.
+pub trait DriverStatsSource: Send {
+    fn sample(&self) -> Result<(u64, DriverStats), String>;
+}
+
 /// Compatibility alias for callers using the original constant name.
 pub const DEVICE_PATH: &str = CONTROL_DEVICE_PATH;

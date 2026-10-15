@@ -75,7 +75,9 @@ impl OutputLayout {
 }
 
 /// The mode in which an output sink was actually opened.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     #[default]
     Exclusive,
@@ -190,10 +192,15 @@ pub struct OutputDevice {
 /// The operating system's identifier of a render endpoint (the `IMMDevice`
 /// id). It can change across reboots; the supervisor keeps the name as a
 /// fallback.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct DeviceId(pub String);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum DeviceState {
     Active,
     Disabled,
@@ -203,7 +210,9 @@ pub enum DeviceState {
 
 /// The three roles Windows keeps a default render device for (eConsole,
 /// eMultimedia, eCommunications).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     Console,
     Multimedia,
@@ -242,7 +251,9 @@ impl DefaultRoles {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum SecureBoot {
     Enabled,
     Disabled,
@@ -250,15 +261,19 @@ pub enum SecureBoot {
     Unsupported,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum Arch {
     X64,
+    #[serde(rename = "arm64")]
     Arm64,
     Other,
 }
 
 /// What the machine learns about the PC once per run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct Platform {
     pub os_build: u32,
     pub arch: Arch,
@@ -266,7 +281,9 @@ pub struct Platform {
     pub secure_boot: SecureBoot,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum DriverState {
     NotInstalled,
     /// `problem_code` is DEVPKEY_Device_ProblemCode (0 is fine, 52 is an
@@ -284,7 +301,9 @@ pub enum DriverState {
 /// other apps from opening the primary and music endpoints exclusively and
 /// let them open the passthrough endpoint so. The host reads them; only
 /// `ssr-setup` writes them (install, repair, set-formats).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum PolicyState {
     /// Every active endpoint of ours that the policy covers has the values
     /// `ssr-setup` writes.
@@ -353,3 +372,17 @@ pub trait Host {
 /// The longest a capture read may wait before the engine checks for a stop
 /// request; keeps shutdown prompt without polling.
 pub const MAX_CAPTURE_WAIT: Duration = Duration::from_millis(100);
+
+/// Which engine thread `engine::ThreadHook` runs on. `Capture` and `Output`
+/// are the real-time threads: they never allocate, lock or block. `Decode`
+/// (`ssr-decode`, ADR 0031) is not real-time: it runs the allocating upstream
+/// decoders for the capture thread, which never waits for it.
+///
+/// It lives here, not in `engine`, so `ssr-sys` can provide the hook that
+/// registers each thread with MMCSS without depending on the engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EngineThread {
+    Capture,
+    Output,
+    Decode,
+}

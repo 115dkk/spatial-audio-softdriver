@@ -1,0 +1,47 @@
+[
+  {
+    "kind": "begin_setup"
+  },
+  {
+    "kind": "install_driver"
+  },
+  {
+    "kind": "recheck"
+  },
+  {
+    "kind": "choose_output",
+    "value": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}"
+  },
+  {
+    "kind": "import_brir",
+    "value": "C:\\Users\\me\\BRIR\\living-room"
+  },
+  {
+    "kind": "import_headphone_fir",
+    "value": "C:\\Users\\me\\hd650.wav"
+  },
+  {
+    "kind": "switch_profile",
+    "value": "거실"
+  },
+  {
+    "kind": "set_gain",
+    "value": -3.5
+  },
+  {
+    "kind": "test_direction",
+    "value": 7
+  },
+  {
+    "kind": "enable"
+  },
+  {
+    "kind": "disable"
+  },
+  {
+    "kind": "start_diagnostic_recording"
+  },
+  {
+    "kind": "quit"
+  }
+]

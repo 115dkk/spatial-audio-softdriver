@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the main window's screen may call: the app's own commands (dispatch, snapshot), events, showing and focusing its window, the file dialog and the login autostart switch.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "dialog:default",
+    "autostart:default"
+  ]
+}

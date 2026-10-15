@@ -1,0 +1,16 @@
+[
+  "setup-welcome",
+  "setup-unsupported",
+  "setup-not-test-signing",
+  "setup-driver-not-installed",
+  "setup-driver-problem",
+  "setup-driver-declined",
+  "setup-reboot-required",
+  "setup-choose-output",
+  "ready",
+  "ready-output-renamed",
+  "running",
+  "running-reconnecting",
+  "faulted",
+  "quit"
+]

@@ -9,9 +9,15 @@ name: CI
 #             ssr-policy gates (forbid unsafe, unsafe budget, feature registry,
 #             Windows code only in ssr-sys), the release gate's unit tests and
 #             the CI tools' unit tests
+#   ui        the app's screens (apps/spatial-softreceiver/ui): fonts pinned
+#             by SHA-256, tsc, vitest, the generated TypeScript bindings and
+#             snapshot fixtures compared with ssr-types (tests/ui_contract.rs),
+#             and gallery screenshots of every screen state as an artifact
 #   test      cargo test on Linux, Windows Server 2022 and 2025 (x64) and
-#             Windows 11 (ARM64), debug and release; on x64 Windows also the
-#             generated driver header compiled as C89, C11 and C++17
+#             Windows 11 (ARM64), debug and release; on Windows also the app
+#             started for real (--smoke: WebView2 draws the screens and asks
+#             for a snapshot); on x64 Windows also the generated driver header
+#             compiled as C89, C11 and C++17
 #   replay    the replay fixtures rendered twice (hashes must match) and,
 #             on pull requests, against the base commit (reported, not failed)
 #   audio     Windows Server 2022 and 2025 with a virtual audio cable
@@ -65,9 +71,15 @@ jobs:
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The app embeds ui/dist at compile time (tauri::generate_context!), so
+      # the screens are built before any Windows-target step; tauri-build also
+      # compiles the app's Windows resource file, which needs llvm-rc here.
+      - uses: ./.github/actions/ui-dist
+      - uses: ./.github/actions/windows-cross-tools
+
       # Type-checking needs no linker, so the Windows targets are linted here
-      # too; the cfg(windows) modules of ssr-sys and ssr-live are otherwise
-      # compiled on Windows but never linted.
+      # too; the cfg(windows) modules of ssr-sys, ssr-live and the app's shell
+      # are otherwise compiled on Windows but never linted.
       - name: cargo clippy for Windows x64 and ARM64 (deny warnings)
         run: |
           for target in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
@@ -94,6 +106,44 @@ jobs:
           python -m pip install --quiet -r tools/ci/requirements.txt
           python -m unittest discover -s tools/ci -p "test_*.py" -v
 
+  ui:
+    name: screens (tsc, vitest, contract, screenshots)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/rust-toolchain
+        with:
+          cache-key: ui
+
+      - uses: ./.github/actions/ui-dist
+
+      - name: Type check and unit tests (apps/spatial-softreceiver/ui)
+        working-directory: apps/spatial-softreceiver/ui
+        run: |
+          npm run check
+          npm test
+
+      # The bindings the screens compile against and the fixtures they are
+      # tested with are generated from ssr-types; a type change without its
+      # regenerated files fails here (SSR_UI_BLESS=1 regenerates them).
+      - name: The committed bindings and fixtures match ssr-types (tests/ui_contract.rs)
+        run: cargo test -p ssr-types --features ts --test ui_contract --locked
+
+      - name: Gallery screenshots of every screen state (Playwright, Chromium)
+        working-directory: apps/spatial-softreceiver/ui
+        env:
+          SSR_UI_SHOTS_DIR: ${{ runner.temp }}/ui-shots
+        run: |
+          npx playwright install --with-deps chromium
+          npm run shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-shots
+          path: ${{ runner.temp }}/ui-shots
+          if-no-files-found: error
+
   test:
     name: cargo test (${{ matrix.os }}, ${{ matrix.profile }})
     needs: lint
@@ -114,6 +164,8 @@ jobs:
         with:
           cache-key: test-${{ matrix.profile }}
 
+      - uses: ./.github/actions/ui-dist
+
       # --no-fail-fast: one failing test binary must not hide the others,
       # many of which (ssr-sys, ssr-live platform) run only on Windows.
       - name: cargo test --workspace
@@ -123,6 +175,16 @@ jobs:
       - name: cargo test --doc
         if: matrix.profile == 'debug'
         run: cargo test --workspace --doc --locked
+
+      # The shell starts for real: WebView2 loads the built screens, the
+      # screen asks for its first snapshot over the IPC and the app quits
+      # with 0 (ADR 0001, 2026-10-15). Without the driver it shows the
+      # wizard's first step, which is all the smoke needs.
+      - name: The app starts, draws the screens and quits (--smoke)
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 10
+        run: cargo run --locked -p spatial-softreceiver $PROFILE_FLAG -- --smoke 90
 
       - name: Driver header compiles as C89, C11 and C++17 (MSVC)
         if: runner.os == 'Windows' && runner.arch == 'X64' && matrix.profile == 'debug'
@@ -412,6 +474,9 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --document-private-items --locked
+
+      - uses: ./.github/actions/ui-dist
+      - uses: ./.github/actions/windows-cross-tools
 
       - name: cargo doc for the Windows target (the cfg(windows) modules)
         env:

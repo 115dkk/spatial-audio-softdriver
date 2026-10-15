@@ -11,7 +11,9 @@ use crate::{format::SourceFormat, ports::OutputMode};
 pub const ENGINE_ENDPOINTS: usize = 4;
 
 /// Stable chain-error classifications published by the live engine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum ChainErrorKind {
     UnsupportedCodec,
@@ -30,7 +32,9 @@ pub enum ChainErrorKind {
 }
 
 /// Why an entrance's current source format cannot be decoded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum UnsupportedReason {
     Format = 1,
@@ -128,9 +132,40 @@ impl ChainErrorKind {
     }
 }
 
+/// Serializes as a map from [`ChainErrorKind::name`] to the count (every kind,
+/// zeros included); a map read back ignores names it does not know and takes
+/// missing ones as zero, so a screen built against an older or newer list
+/// still reads it. The TypeScript side sees `ChainErrorMap`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ChainErrorCounts {
     counts: [u64; ChainErrorKind::COUNT],
+}
+
+/// What [`ChainErrorCounts`] looks like on the wire: a record keyed by the
+/// kind's name. Only the TypeScript bindings use this type.
+#[cfg(feature = "ts")]
+#[derive(Debug, specta::Type)]
+#[allow(dead_code)]
+pub struct ChainErrorMap(std::collections::BTreeMap<String, u64>);
+
+impl serde::Serialize for ChainErrorCounts {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(ChainErrorKind::COUNT))?;
+        for (kind, count) in self.iter() {
+            map.serialize_entry(kind.name(), &count)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ChainErrorCounts {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = std::collections::BTreeMap::<String, u64>::deserialize(deserializer)?;
+        Ok(Self::from_fn(|kind| {
+            map.get(kind.name()).copied().unwrap_or(0)
+        }))
+    }
 }
 
 impl ChainErrorCounts {
@@ -158,7 +193,8 @@ impl ChainErrorCounts {
 /// Latency of the whole chain, from the driver's record QPC to the output
 /// device's playback QPC (the time inside the source application is not part
 /// of it).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct LatencyStats {
     pub p50_ms: f32,
     pub p99_ms: f32,
@@ -167,21 +203,26 @@ pub struct LatencyStats {
 }
 
 /// Why the engine stopped making sound on its own.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum EngineFault {
     CaptureLost(String),
     OutputLost(String),
 }
 
 /// The clock-domain strategy selected when the engine starts.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum ClockStatus {
     Trim,
     #[default]
     Asrc,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct EndpointStatus {
     pub format: Option<SourceFormat>,
     pub epoch: u32,
@@ -193,13 +234,15 @@ pub struct EndpointStatus {
     /// the entrance and never faults the other entrances.
     pub unsupported: Option<UnsupportedReason>,
     /// Every chain error attributed to this entrance, by stable kind.
+    #[cfg_attr(feature = "ts", specta(type = ChainErrorMap))]
     pub chain_errors: ChainErrorCounts,
 }
 
 /// What the output saw in the period that last found the crossing ring short,
 /// to tell an empty ring from one the output could not take from. Frame
 /// counts are in scene frames.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct UnderrunSnapshot {
     /// Frames in the ring's audio samples when the period began.
     pub ring_frames: u32,
@@ -216,10 +259,12 @@ pub struct UnderrunSnapshot {
     pub since_block_ms: f32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct EngineStatus {
     pub endpoints: [EndpointStatus; ENGINE_ENDPOINTS],
     /// Chain errors whose malformed record did not identify an entrance.
+    #[cfg_attr(feature = "ts", specta(type = ChainErrorMap))]
     pub unattributed_chain_errors: ChainErrorCounts,
     /// Records naming an endpoint beyond the driver's range.
     pub skipped_records: u64,

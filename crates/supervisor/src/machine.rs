@@ -66,7 +66,7 @@ pub trait Launcher {
 /// rewrite the stored id (an output found again by its name). A `handle` that
 /// fails after such a rewrite leaves the old id persisted, which the name finds
 /// again next time.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     /// The chosen output, remembered by id and name: the id can change across
     /// reboots, the name is the fallback.
@@ -240,11 +240,16 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         if let Some(reconnecting) = &self.reconnecting
             && now.saturating_duration_since(reconnecting.since) >= self.config.fault_grace
         {
+            let what = match &reconnecting.fault {
+                EngineFault::OutputLost(detail) => {
+                    format!("출력 장치와의 연결이 끊어졌습니다: {detail}")
+                }
+                EngineFault::CaptureLost(_) => "캡처 장치와의 연결이 끊어졌습니다.".to_owned(),
+            };
             let error = user_error(
                 format!(
-                    "엔진이 {}초 동안 다시 연결하지 못했습니다: {:?}",
-                    self.config.fault_grace.as_secs(),
-                    reconnecting.fault
+                    "엔진이 {}초 동안 다시 연결하지 못했습니다. {what}",
+                    self.config.fault_grace.as_secs()
                 ),
                 NextAction::Retry,
             );
@@ -282,6 +287,16 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         &self.settings
     }
 
+    pub fn phase(&self) -> &Phase {
+        &self.phase
+    }
+
+    /// The running engine's status without listing the host's outputs, for
+    /// the shell's 30 Hz meters; `None` outside Running.
+    pub fn engine_status(&self) -> Option<EngineStatus> {
+        self.engine.as_ref().map(|engine| engine.status())
+    }
+
     fn dispatch(&mut self, intent: Intent) -> Outcome {
         if self.phase == Phase::Quit {
             return refused();
@@ -305,12 +320,15 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 }
                 _ => return refused(),
             },
+            // At the output step a recheck lists the outputs again (a device
+            // plugged in meanwhile) and resumes when the settings name one.
             Intent::Recheck => match self.phase {
                 Phase::Setup(
                     SetupStep::Unsupported
                     | SetupStep::NotTestSigning
                     | SetupStep::RebootRequired
-                    | SetupStep::Driver,
+                    | SetupStep::Driver
+                    | SetupStep::ChooseOutput,
                 ) => self.evaluate(),
                 Phase::Faulted => {
                     self.phase = Phase::Ready;

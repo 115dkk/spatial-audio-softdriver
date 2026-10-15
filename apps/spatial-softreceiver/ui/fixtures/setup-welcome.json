@@ -1,0 +1,14 @@
+{
+  "phase": {
+    "kind": "setup",
+    "value": "welcome"
+  },
+  "engine": null,
+  "outputs": [],
+  "chosen_output": null,
+  "driver": null,
+  "platform": null,
+  "roles_taken": false,
+  "error": null,
+  "notes": []
+}

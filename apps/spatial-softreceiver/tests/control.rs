@@ -1,0 +1,254 @@
+#![forbid(unsafe_code)]
+
+//! The control thread against a fake host and a quiet engine (ADR 0001): the
+//! first snapshot, intents and their snapshots, the 30 Hz meters, refusals,
+//! and both ways the thread ends.
+
+mod common;
+
+use std::time::Duration;
+
+use common::{
+    DEV_A, DEV_A_NAME, FakeHost, FakeLauncher, MemoryStore, PanickingLauncher, Recorder, id,
+    wait_until,
+};
+use spatial_softreceiver::control::{self, Bridge, ControlConfig};
+use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep};
+
+/// Long enough for any one step on a loaded runner.
+const PATIENCE: Duration = Duration::from_secs(5);
+
+fn start(
+    host: &FakeHost,
+    store: &MemoryStore,
+    recorder: &Recorder,
+) -> (Bridge, std::thread::JoinHandle<()>) {
+    control::spawn(
+        host.clone(),
+        FakeLauncher,
+        common::config(),
+        ControlConfig::default(),
+        store.clone(),
+        recorder.clone(),
+    )
+}
+
+#[test]
+fn the_first_snapshot_is_emitted_before_any_intent() {
+    let (host, store, recorder) = (FakeHost::new(), MemoryStore::default(), Recorder::default());
+    let (_bridge, _thread) = start(&host, &store, &recorder);
+
+    assert!(
+        recorder.wait_for_snapshots(Duration::from_millis(100), |snapshots| !snapshots
+            .is_empty()),
+        "no snapshot within 100 ms"
+    );
+    let snapshots = recorder.snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].phase, Phase::Setup(SetupStep::Welcome));
+}
+
+#[test]
+fn intents_walk_the_wizard_and_persist_the_output() {
+    let (host, store, recorder) = (FakeHost::new(), MemoryStore::default(), Recorder::default());
+    let (bridge, _thread) = start(&host, &store, &recorder);
+    assert!(recorder.wait_for_snapshots(PATIENCE, |snapshots| snapshots.len() == 1));
+
+    bridge
+        .dispatch(Intent::BeginSetup)
+        .expect("the wizard starts");
+    assert!(recorder.wait_for_snapshots(PATIENCE, |snapshots| snapshots.len() == 2));
+    assert_eq!(
+        recorder.snapshots()[1].phase,
+        Phase::Setup(SetupStep::ChooseOutput)
+    );
+
+    bridge
+        .dispatch(Intent::ChooseOutput(id(DEV_A)))
+        .expect("the output is chosen");
+    assert!(recorder.wait_for_snapshots(PATIENCE, |snapshots| snapshots.len() == 3));
+    let ready = &recorder.snapshots()[2];
+    assert_eq!(ready.phase, Phase::Ready);
+    let chosen = OutputChoice {
+        id: id(DEV_A),
+        name: DEV_A_NAME.to_owned(),
+    };
+    assert_eq!(ready.chosen_output, Some(chosen.clone()));
+    assert_eq!(store.settings().output, Some(chosen));
+    assert_eq!(bridge.snapshot().phase, Phase::Ready);
+}
+
+#[test]
+fn running_emits_meters_at_the_tick_rate() {
+    let host = FakeHost::new();
+    let store = MemoryStore::with_output(DEV_A, DEV_A_NAME);
+    let recorder = Recorder::default();
+    let (bridge, _thread) = start(&host, &store, &recorder);
+
+    bridge.dispatch(Intent::Enable).expect("the engine starts");
+    assert_eq!(bridge.snapshot().phase, Phase::Running);
+    let before = recorder.meters();
+    std::thread::sleep(Duration::from_millis(300));
+    let meters = recorder.meters() - before;
+    assert!(meters >= 5, "{meters} meters in 300 ms");
+
+    bridge.dispatch(Intent::Disable).expect("the engine stops");
+    assert!(recorder.wait_for_snapshots(PATIENCE, |snapshots| {
+        snapshots
+            .last()
+            .is_some_and(|last| last.phase == Phase::Ready)
+    }));
+    let after_disable = recorder.meters();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(recorder.meters(), after_disable, "meters after Disable");
+}
+
+#[test]
+fn a_refused_intent_returns_its_error_and_keeps_the_phase() {
+    let host = FakeHost::new();
+    let store = MemoryStore::with_output(DEV_A, DEV_A_NAME);
+    let recorder = Recorder::default();
+    let (bridge, _thread) = start(&host, &store, &recorder);
+    assert_eq!(bridge.snapshot().phase, Phase::Ready);
+
+    let error = bridge
+        .dispatch(Intent::InstallDriver)
+        .expect_err("installing is not possible when Ready");
+    assert!(!error.message.is_empty());
+    assert_eq!(bridge.snapshot().phase, Phase::Ready);
+    assert!(
+        !host
+            .world()
+            .calls
+            .iter()
+            .any(|call| call.starts_with("setup")),
+        "the refused intent ran ssr-setup"
+    );
+}
+
+#[test]
+fn quit_restores_the_roles_and_ends_the_thread() {
+    let host = FakeHost::new();
+    let store = MemoryStore::with_output(DEV_A, DEV_A_NAME);
+    let recorder = Recorder::default();
+    let (bridge, thread) = start(&host, &store, &recorder);
+
+    bridge.dispatch(Intent::Enable).expect("the engine starts");
+    assert!(bridge.snapshot().roles_taken);
+    host.world().calls.clear();
+
+    bridge.dispatch(Intent::Quit).expect("the supervisor quits");
+    thread
+        .join()
+        .expect("the control thread ends without a panic");
+
+    assert_eq!(recorder.quits(), 1);
+    assert_eq!(
+        recorder.snapshots().last().map(|last| last.phase.clone()),
+        Some(Phase::Quit)
+    );
+    let calls = host.world().calls.clone();
+    for role in ["Console", "Multimedia", "Communications"] {
+        assert!(
+            calls.contains(&format!("set {role} {DEV_A}")),
+            "{role} was not given back: {calls:?}"
+        );
+    }
+    assert!(
+        calls.contains(&"remove restore point".to_owned()),
+        "{calls:?}"
+    );
+    assert_eq!(host.world().restore_point, None);
+}
+
+#[test]
+fn a_dropped_bridge_quits_the_supervisor() {
+    let host = FakeHost::new();
+    let store = MemoryStore::with_output(DEV_A, DEV_A_NAME);
+    let recorder = Recorder::default();
+    let (bridge, thread) = start(&host, &store, &recorder);
+    bridge.dispatch(Intent::Enable).expect("the engine starts");
+    host.world().calls.clear();
+
+    let copy = bridge.clone();
+    drop(bridge);
+    assert!(
+        !wait_until(Duration::from_millis(100), || thread.is_finished()),
+        "the thread ended while a clone of the bridge was alive"
+    );
+    drop(copy);
+    assert!(wait_until(PATIENCE, || thread.is_finished()));
+    thread
+        .join()
+        .expect("the control thread ends without a panic");
+
+    assert_eq!(recorder.quits(), 1);
+    let calls = host.world().calls.clone();
+    assert!(calls.contains(&format!("set Console {DEV_A}")), "{calls:?}");
+    assert!(
+        calls.contains(&"remove restore point".to_owned()),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn dispatch_after_the_thread_ended_is_an_error() {
+    let (host, store, recorder) = (FakeHost::new(), MemoryStore::default(), Recorder::default());
+    let (bridge, thread) = start(&host, &store, &recorder);
+    bridge.dispatch(Intent::Quit).expect("the supervisor quits");
+    thread
+        .join()
+        .expect("the control thread ends without a panic");
+
+    let error = bridge
+        .dispatch(Intent::BeginSetup)
+        .expect_err("nobody is left to handle it");
+    assert_eq!(error.message, "앱이 종료되는 중입니다.");
+    assert_eq!(error.next, NextAction::None);
+    assert_eq!(bridge.snapshot().phase, Phase::Quit);
+}
+
+#[test]
+fn a_panicking_launcher_still_quits_the_supervisor() {
+    let host = FakeHost::new();
+    let store = MemoryStore::with_output(DEV_A, DEV_A_NAME);
+    let recorder = Recorder::default();
+    let (bridge, thread) = control::spawn(
+        host.clone(),
+        PanickingLauncher,
+        common::config(),
+        ControlConfig::default(),
+        store,
+        recorder.clone(),
+    );
+    assert_eq!(bridge.snapshot().phase, Phase::Ready);
+
+    // The panic drops the reply: the caller hears that the app is quitting.
+    let error = bridge
+        .dispatch(Intent::Enable)
+        .expect_err("the launcher panicked");
+    assert_eq!(error.message, "앱이 종료되는 중입니다.");
+    assert!(wait_until(PATIENCE, || thread.is_finished()));
+    thread
+        .join()
+        .expect("the panic is caught on the control thread");
+
+    assert_eq!(recorder.quits(), 1);
+    let calls = host.world().calls.clone();
+    for role in ["Console", "Multimedia", "Communications"] {
+        assert!(
+            calls.contains(&format!("set {role} ours-0")),
+            "{role} was not taken: {calls:?}"
+        );
+        assert!(
+            calls.contains(&format!("set {role} {DEV_A}")),
+            "{role} was not given back: {calls:?}"
+        );
+    }
+    assert!(
+        calls.contains(&"remove restore point".to_owned()),
+        "{calls:?}"
+    );
+    assert_eq!(host.world().restore_point, None);
+    assert_eq!(bridge.snapshot().phase, Phase::Quit);
+}

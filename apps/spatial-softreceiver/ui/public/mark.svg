@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Spatial SoftReceiver">
+  <!-- The same mark tools/ui-icons.py draws; change both together. -->
+  <rect width="1024" height="1024" rx="208" fill="#11171e"/>
+  <g fill="none" stroke="#3bc9db" stroke-width="72">
+    <circle cx="512" cy="512" r="368"/>
+    <circle cx="512" cy="680" r="200"/>
+  </g>
+  <circle cx="512" cy="760" r="64" fill="#f4f7fa"/>
+</svg>

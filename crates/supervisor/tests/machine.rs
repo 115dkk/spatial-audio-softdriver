@@ -458,6 +458,46 @@ fn the_wizard_walks_every_step_on_a_fresh_pc() {
 }
 
 #[test]
+fn a_recheck_at_the_output_step_lists_the_outputs_again() {
+    let mut world = ready_pc();
+    world.outputs.retain(|output| output.endpoint.is_some());
+    let (shared, mut supervisor) = start(world, Settings::default());
+    supervisor.handle(Intent::BeginSetup).unwrap();
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Setup(SetupStep::ChooseOutput));
+    assert!(snapshot.outputs.is_empty());
+
+    // The user plugs the DAC in and asks again.
+    shared.get().outputs.push(device(DAC, DAC_NAME, None));
+    supervisor.handle(Intent::Recheck).unwrap();
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Setup(SetupStep::ChooseOutput));
+    assert_eq!(snapshot.outputs, vec![dac_choice()]);
+    assert_eq!(snapshot.error, None);
+
+    // With a remembered output that is present again, the recheck resumes.
+    let mut world = ready_pc();
+    world.outputs.retain(|output| output.endpoint.is_some());
+    let (shared, mut supervisor) = start(world, dac_settings());
+    assert_eq!(
+        supervisor.handle(Intent::BeginSetup),
+        Err(error(
+            &format!("저장된 출력 장치를 찾을 수 없습니다: {DAC_NAME}"),
+            NextAction::OpenSettings
+        ))
+    );
+    assert_eq!(
+        supervisor.snapshot().phase,
+        Phase::Setup(SetupStep::ChooseOutput)
+    );
+    shared.get().outputs.push(device(DAC, DAC_NAME, None));
+    supervisor.handle(Intent::Recheck).unwrap();
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Ready);
+    assert_eq!(snapshot.error, None);
+}
+
+#[test]
 fn a_declined_prompt_and_a_failed_install_stay_on_the_driver_step() {
     let mut world = ready_pc();
     world.driver = DriverState::NotInstalled;
@@ -1121,7 +1161,7 @@ fn a_fault_that_outlasts_the_grace_stops_and_restores() {
     assert_eq!(
         snapshot.error,
         Some(error(
-            "엔진이 15초 동안 다시 연결하지 못했습니다: OutputLost(\"the DAC was removed\")",
+            "엔진이 15초 동안 다시 연결하지 못했습니다. 출력 장치와의 연결이 끊어졌습니다: the DAC was removed",
             NextAction::Retry
         ))
     );
