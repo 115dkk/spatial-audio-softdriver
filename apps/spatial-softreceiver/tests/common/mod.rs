@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use spatial_softreceiver::control::{Emitter, SettingsStore};
-use ssr_types::app::{OutputChoice, Snapshot};
+use ssr_types::app::{Heartbeat, OutputChoice, Snapshot};
 use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DefaultRoles, DeviceId, DeviceState, DriverState, EngineStatus, Host, HostError,
@@ -172,6 +172,7 @@ impl EngineHandle for QuietEngine {
 pub enum Event {
     Snapshot(Box<Snapshot>),
     Meters,
+    Heartbeat(Heartbeat),
     Quit,
 }
 
@@ -195,6 +196,16 @@ impl Recorder {
 
     pub fn meters(&self) -> usize {
         self.count(&Event::Meters)
+    }
+
+    pub fn heartbeats(&self) -> Vec<Heartbeat> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Heartbeat(heartbeat) => Some(heartbeat),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn quits(&self) -> usize {
@@ -221,6 +232,10 @@ impl Emitter for Recorder {
 
     fn meters(&self, _status: &EngineStatus) {
         self.push(Event::Meters);
+    }
+
+    fn heartbeat(&self, heartbeat: &Heartbeat) {
+        self.push(Event::Heartbeat(*heartbeat));
     }
 
     fn quit(&self) {

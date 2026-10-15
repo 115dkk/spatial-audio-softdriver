@@ -117,6 +117,10 @@ fn state_dir_falls_back_to_the_temp_dir_without_local_app_data() {
         paths::setup_exe(Path::new("app")),
         Path::new("app").join("ssr-setup.exe")
     );
+    assert_eq!(
+        paths::guard_exe(Path::new("app")),
+        Path::new("app").join("ssr-guard.exe")
+    );
 }
 
 #[test]
@@ -127,35 +131,54 @@ fn args_parse_smoke_and_minimized() {
         parse(&["--minimized"]),
         Ok(Args {
             smoke: None,
-            minimized: true
+            minimized: true,
+            guarded: false,
+            resume: false,
         })
     );
     assert_eq!(
         parse(&["--smoke"]),
         Ok(Args {
             smoke: Some(Duration::from_secs(30)),
-            minimized: false
+            minimized: false,
+            guarded: false,
+            resume: false,
         })
     );
     assert_eq!(
         parse(&["--smoke", "90"]),
         Ok(Args {
             smoke: Some(Duration::from_secs(90)),
-            minimized: false
+            minimized: false,
+            guarded: false,
+            resume: false,
         })
     );
     assert_eq!(
         parse(&["--smoke", "--minimized"]),
         Ok(Args {
             smoke: Some(Duration::from_secs(30)),
-            minimized: true
+            minimized: true,
+            guarded: false,
+            resume: false,
         })
     );
     assert_eq!(
         parse(&["--minimized", "--smoke", "5"]),
         Ok(Args {
             smoke: Some(Duration::from_secs(5)),
-            minimized: true
+            minimized: true,
+            guarded: false,
+            resume: false,
+        })
+    );
+    assert_eq!(
+        parse(&["--guarded", "--resume", "--minimized"]),
+        Ok(Args {
+            smoke: None,
+            minimized: true,
+            guarded: true,
+            resume: true,
         })
     );
     for wrong in [

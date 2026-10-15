@@ -831,15 +831,36 @@ note = "VST 2 adapter from a Rust translation of Xaymar's clean-room vst2sdk hea
 id = "app.default_device_guard"
 kind = "app"
 milestone = "M4"
-status = "partial"
+status = "implemented"
 tests = [
   "supervisor::a_dead_app_restores_once",
   "supervisor::a_stall_restarts_then_restores",
   "supervisor::moving_counters_are_not_a_stall",
   "supervisor::unreadable_counters_count_as_a_stall",
   "supervisor::the_guard_gives_the_roles_back_from_the_restore_point_alone",
+  "supervisor::idling_stops_the_clock_but_keeps_the_restart_spent",
+  "engine::progress_counters_follow_reads_and_periods",
+  "ssr-guard::a_clean_exit_restores_nothing",
+  "ssr-guard::an_exit_with_a_restore_point_restores_and_marks",
+  "ssr-guard::a_restore_point_of_another_instance_is_left_alone_on_exit",
+  "ssr-guard::a_guard_that_launched_nothing_restores_nothing",
+  "ssr-guard::a_stall_restarts_once_then_restores",
+  "ssr-guard::a_failed_respawn_keeps_the_restoration_notes",
+  "ssr-guard::lines_while_not_running_are_not_a_stall",
+  "ssr-guard::silence_while_running_is_a_stall",
+  "ssr-guard::a_slow_start_after_the_restart_is_not_a_stall",
+  "ssr-guard::a_stall_after_the_app_was_off_still_restores",
+  "ssr-guard::a_slow_start_without_the_roles_is_waited_for",
+  "ssr-guard::an_app_that_holds_the_roles_but_never_runs_is_restored_without_a_restart",
+  "ssr-guard::the_takeover_clock_starts_when_the_roles_are_seen_held",
+  "ssr-guard::a_stale_restore_point_of_another_app_does_not_start_the_takeover_clock",
+  "ssr-guard::garbage_lines_are_ignored",
+  "ssr-guard::the_owner_rule",
+  "ssr-guard::the_marker_round_trips",
+  "ssr-guard::a_window_request_is_taken_once",
+  "ssr-guard::heartbeat_lines_parse",
 ]
-note = "ssr-guard restores the three default device roles when the app exits abnormally (ADR 0023 decision 4). supervisor::guard is the decision core: an app that died restores once; output-period and capture-read counters unchanged for 2 s (or unreadable) mean a stall, which restarts the app once and restores on the second stall; the restore reuses supervisor::restore_roles on the restore point the supervisor wrote. Still planned: the ssr-guard process (shared-memory counters, process watch, notification) in the Windows slice"
+note = "ADR 0023 decision 4 as ADR 0033 reshaped it: ssr-guard (user rights, no unsafe) launches the app with its stdout piped and reads one heartbeat line per second (Running, output periods, capture reads; the engine counts both on the real-time threads with atomics). supervisor::guard decides: EOF with a restore point is an abnormal exit and restores; counters still, or no line, for 2 s while Running is a stall, which kills, restores, and relaunches the app once with --resume, and a second stall restores for good. Each restore leaves guard-restored.json, which the next app turns into a note. An app that holds the roles (its restore point exists) but sends no heartbeat for 15 s is killed and restored without a restart (marker reason stuck), and the control thread sends a not-Running heartbeat before working on a Quit so the quit's step is not a stall. A restore point names its owner (app_pid); the guard uses only one that is unowned or its own child's (a guard that launched nothing restores nothing), so a guard that outlived its app, or a second launch turned away by the single instance rule, never takes a running instance's roles. The control thread sends a not-Running heartbeat at start and before Disable or Quit, so neither step is a stall. One guard per state directory (guard.lock): a second launch's guard writes a show-window request the running app's shell takes once a second. driver.yml runs tools/ci/guard_check.py against a fake app (tools/ci/fake_app.py) for an exit, a stall with one restart, and a clean quit, checking the roles through ssr-live host show. Still planned: a toast when the guard restored (WinRT)"
 
 # ---- Entrances (ADR 0024, 0025) ----
 
@@ -1149,6 +1170,7 @@ tests = [
   "spatial-softreceiver::the_first_snapshot_is_emitted_before_any_intent",
   "spatial-softreceiver::intents_walk_the_wizard_and_persist_the_output",
   "spatial-softreceiver::running_emits_meters_at_the_tick_rate",
+  "spatial-softreceiver::a_guarded_control_thread_writes_a_heartbeat_each_refresh",
   "spatial-softreceiver::a_refused_intent_returns_its_error_and_keeps_the_phase",
   "spatial-softreceiver::quit_restores_the_roles_and_ends_the_thread",
   "spatial-softreceiver::a_dropped_bridge_quits_the_supervisor",
@@ -1161,4 +1183,4 @@ tests = [
   "ssr-types::typescript_bindings_match_the_types",
   "ssr-types::snapshot_fixtures_match_the_types",
 ]
-note = "ADR 0001 (2026-10-15 addendum): apps/spatial-softreceiver is the Tauri 2 shell. A control thread (never the UI thread, so the Windows host can join the multithreaded apartment) owns the supervisor: it takes intents over a channel, polls every 33 ms, emits the `snapshot` event when the phase, an intent or a notice changes it (and every second when the output list differs), emits `meters` (EngineStatus) at the tick rate while Running, and persists supervisor::Settings as %LOCALAPPDATA%\\Spatial SoftReceiver\\settings.json after new and every successful intent. Two commands (dispatch, snapshot) and two events are the whole IPC; the TypeScript bindings (ui/src/bindings.ts) and the snapshot fixtures the screens are tested with are generated from ssr-types by tests/ui_contract.rs and compared in CI. The Windows launcher opens the driver ring, WASAPI (exclusive with shared fallback) and a stereo speaker profile until a BRIR set is imported. Tray (open, enable/disable, quit), close to tray, single instance, autostart on login, and a --smoke mode the Windows CI runs (WebView2 draws the screens and asks for a snapshot). The screens (ui/, vitest + gallery screenshots) are the wizard, the status screen with 30 Hz meters, a profile screen whose intents the supervisor still refuses, and settings. Still planned: profile intents, the object map, the installer and Velopack updates, English text, ssr-guard"
+note = "ADR 0001 (2026-10-15 addendum): apps/spatial-softreceiver is the Tauri 2 shell. A control thread (never the UI thread, so the Windows host can join the multithreaded apartment) owns the supervisor: it takes intents over a channel, polls every 33 ms, emits the `snapshot` event when the phase, an intent or a notice changes it (and every second when the output list differs), emits `meters` (EngineStatus) at the tick rate while Running, and persists supervisor::Settings as %LOCALAPPDATA%\\Spatial SoftReceiver\\settings.json after new and every successful intent. Two commands (dispatch, snapshot) and two events are the whole IPC; the TypeScript bindings (ui/src/bindings.ts) and the snapshot fixtures the screens are tested with are generated from ssr-types by tests/ui_contract.rs and compared in CI. The Windows launcher opens the driver ring, WASAPI (exclusive with shared fallback) and a stereo speaker profile until a BRIR set is imported. Tray (open, enable/disable, quit), close to tray, single instance, autostart on login, and a --smoke mode the Windows CI runs (WebView2 draws the screens and asks for a snapshot). The screens (ui/, vitest + gallery screenshots) are the wizard, the status screen with 30 Hz meters, a profile screen whose intents the supervisor still refuses, and settings. Still planned: profile intents, the object map, the installer and Velopack updates, English text. ADR 0033: an ordinary launch starts ssr-guard and exits; the guard launches the app with --guarded, and that app writes a one-line heartbeat (ssr_types::app::Heartbeat) to stdout every refresh; --resume (after the guard restarted it) enables once from Ready. At startup a restore point left by a previous instance is restored before the supervisor exists, and the guard's marker becomes a note on the first snapshot (Supervisor::note)"

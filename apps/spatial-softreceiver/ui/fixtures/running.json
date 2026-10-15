@@ -148,6 +148,8 @@
       "produced_frames": 96,
       "since_block_ms": 31.5
     },
+    "output_periods": 12345,
+    "capture_reads": 6789,
     "output_restarts": 0,
     "output_rate": 48000,
     "trim_available": true,

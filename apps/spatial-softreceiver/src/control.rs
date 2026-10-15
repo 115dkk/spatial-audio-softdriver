@@ -29,7 +29,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use ssr_types::app::{Intent, NextAction, Phase, Snapshot, UserError};
+use ssr_types::app::{Heartbeat, Intent, NextAction, Phase, Snapshot, UserError};
 use ssr_types::{EngineStatus, Host};
 use supervisor::machine::Config;
 use supervisor::{Launcher, Settings, Supervisor};
@@ -53,6 +53,8 @@ pub enum Request {
 pub trait Emitter: Send + 'static {
     fn snapshot(&self, snapshot: &Snapshot);
     fn meters(&self, status: &EngineStatus);
+    /// One line per refresh for ADR 0033's parent process.
+    fn heartbeat(&self, heartbeat: &Heartbeat);
     /// Once, when the supervisor has entered Quit and the control thread
     /// ends.
     fn quit(&self);
@@ -133,6 +135,7 @@ pub fn spawn<H, L, E, S>(
     control: ControlConfig,
     store: S,
     emitter: E,
+    initial_notes: Vec<String>,
 ) -> (Bridge, JoinHandle<()>)
 where
     H: Host + Send + 'static,
@@ -144,7 +147,10 @@ where
     let thread = thread::Builder::new()
         .name("ssr-control".to_owned())
         .spawn(move || {
-            let supervisor = Supervisor::new(host, launcher, config, store.load());
+            let mut supervisor = Supervisor::new(host, launcher, config, store.load());
+            for note in initial_notes {
+                supervisor.note(note);
+            }
             store.save(supervisor.settings());
             let mut thread = ControlThread {
                 supervisor,
@@ -173,6 +179,7 @@ struct ControlThread<H: Host, L: Launcher, E: Emitter, S: SettingsStore> {
 impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, S> {
     fn run(&mut self, rx: &Receiver<Request>) {
         self.publish();
+        self.heartbeat();
         let started = Instant::now();
         let mut next_tick = started + self.control.tick;
         let mut next_refresh = started + self.control.refresh;
@@ -241,6 +248,17 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
     /// ends.
     fn intent(&mut self, intent: Intent, reply: &Sender<Result<(), UserError>>) -> bool {
         let described = format!("{intent:?}");
+        if matches!(intent, Intent::Disable | Intent::Quit) {
+            // Both stop the engine and give the roles back in one step,
+            // during which no heartbeat goes out: the guard must not take
+            // that for a stalled, Running app and bring the engine back
+            // (ADR 0033).
+            self.emitter.heartbeat(&Heartbeat {
+                running: false,
+                output_periods: 0,
+                capture_reads: 0,
+            });
+        }
         let result = self.supervisor.handle(intent);
         match &result {
             Ok(()) => {
@@ -277,10 +295,20 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
         }
     }
 
+    /// One heartbeat line for the guard (ADR 0033): whether the supervisor
+    /// is Running and the engine's progress counters.
+    fn heartbeat(&mut self) {
+        let status = self.supervisor.engine_status();
+        self.emitter
+            .heartbeat(&heartbeat_of(self.supervisor.phase(), status.as_ref()));
+    }
+
     /// Sends a snapshot only when it differs from the last one sent, engine
     /// status aside.
     fn refresh(&mut self) {
         let snapshot = self.supervisor.snapshot();
+        self.emitter
+            .heartbeat(&heartbeat_of(&snapshot.phase, snapshot.engine.as_ref()));
         if self.last.as_ref() != Some(&without_engine(&snapshot)) {
             self.send(snapshot);
         }
@@ -311,6 +339,17 @@ fn panic_message(panic: &(dyn Any + Send)) -> &str {
         .copied()
         .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("no message")
+}
+
+fn heartbeat_of(phase: &Phase, engine: Option<&EngineStatus>) -> Heartbeat {
+    let (output_periods, capture_reads) = engine.map_or((0, 0), |status| {
+        (status.output_periods, status.capture_reads)
+    });
+    Heartbeat {
+        running: *phase == Phase::Running,
+        output_periods,
+        capture_reads,
+    }
 }
 
 fn without_engine(snapshot: &Snapshot) -> Snapshot {

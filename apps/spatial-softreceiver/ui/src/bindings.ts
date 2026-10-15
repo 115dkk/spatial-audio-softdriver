@@ -7,15 +7,15 @@ export type Arch = "x64" | "arm64" | "other"
 /**
  * The codec an IEC 61937 stream announces through its KS subtype.
  */
-export type BitstreamCodec = "ac3" | "eac3" | "eac3_joc" | 
+export type BitstreamCodec = "ac3" | "eac3" | "eac3_joc" |
 /**
  * Dolby MLP, the TrueHD bitstream.
  */
-"true_hd" | "mat20" | 
+"true_hd" | "mat20" |
 /**
  * MAT 2.1, what Windows spatial sound's "Dolby Atmos for home theater" writes.
  */
-"mat21" | "dts" | "dts_hd" | 
+"mat21" | "dts" | "dts_hd" |
 /**
  * A subtype the driver compiled in but no adapter knows; carries the GUID's
  * first field so the status screen can name it.
@@ -27,11 +27,11 @@ export type BitstreamCodec = "ac3" | "eac3" | "eac3_joc" |
  * rides in (2 ch / 48 kHz for AC-3, 2 ch / 192 kHz for DD+, 8 ch / 192 kHz
  * "HBR" for MAT and TrueHD).
  */
-export type BitstreamFormat = { codec: BitstreamCodec; container_rate: number; container_channels: number; 
+export type BitstreamFormat = { codec: BitstreamCodec; container_rate: number; container_channels: number;
 /**
  * `dwEncodedSamplesPerSec` from WAVEFORMATEXTENSIBLE_IEC61937, 0 if absent.
  */
-encoded_rate: number; 
+encoded_rate: number;
 /**
  * `dwEncodedChannelCount`, 0 if absent.
  */
@@ -60,24 +60,24 @@ export type DeviceId = string
  */
 export type DirectionId = number
 
-export type DriverState = { kind: "not_installed" } | 
+export type DriverState = { kind: "not_installed" } |
 /**
  * `problem_code` is DEVPKEY_Device_ProblemCode (0 is fine, 52 is an
  * unsigned driver).
  */
 { kind: "installed"; value: { problem_code: number; service_running: boolean; exclusive_policy: PolicyState } } | { kind: "reboot_required" }
 
-export type EndpointStatus = { format: SourceFormat | null; epoch: number; 
+export type EndpointStatus = { format: SourceFormat | null; epoch: number;
 /**
  * Endpoint gain after combining its channel controls. Muting is carried
  * separately so status never needs a `-inf` floating-point sentinel.
  */
-volume_db: number; muted: boolean; 
+volume_db: number; muted: boolean;
 /**
  * Why this entrance's current format cannot be decoded. This is local to
  * the entrance and never faults the other entrances.
  */
-unsupported: UnsupportedReason | null; 
+unsupported: UnsupportedReason | null;
 /**
  * Every chain error attributed to this entrance, by stable kind.
  */
@@ -88,104 +88,112 @@ chain_errors: ChainErrorMap }
  */
 export type EngineFault = { kind: "capture_lost"; value: string } | { kind: "output_lost"; value: string }
 
-export type EngineStatus = { endpoints: [EndpointStatus, EndpointStatus, EndpointStatus, EndpointStatus]; 
+export type EngineStatus = { endpoints: [EndpointStatus, EndpointStatus, EndpointStatus, EndpointStatus];
 /**
  * Chain errors whose malformed record did not identify an entrance.
  */
-unattributed_chain_errors: ChainErrorMap; 
+unattributed_chain_errors: ChainErrorMap;
 /**
  * Records naming an endpoint beyond the driver's range.
  */
-skipped_records: number; latency: LatencyStats; 
+skipped_records: number; latency: LatencyStats;
 /**
  * Lowest crossing-ring level over the last control window, in
  * milliseconds of rendered signal: the margin the clock controller holds
  * at the configured target.
  */
-ring_level_ms: number; 
+ring_level_ms: number;
 /**
  * Times the output found the crossing ring empty.
  */
-underruns: number; 
+underruns: number;
 /**
  * The last of those times, as the output saw it.
  */
-last_underrun: UnderrunSnapshot | null; 
+last_underrun: UnderrunSnapshot | null;
+/**
+ * Output periods completed, including periods filled with silence.
+ */
+output_periods: number;
+/**
+ * Capture reads returned, including reads that returned zero bytes.
+ */
+capture_reads: number;
 /**
  * Times the output device's stream was restarted after it stalled.
  */
-output_restarts: number; 
+output_restarts: number;
 /**
  * Sample rate of the currently open output sink, or zero before open.
  */
-output_rate: number; 
+output_rate: number;
 /**
  * Whether the capture source accepted rate trim when the engine started.
  */
-trim_available: boolean; 
+trim_available: boolean;
 /**
  * Layout of the currently open output sink.
  */
-output_channels: number; output_channel_mask: number; 
+output_channels: number; output_channel_mask: number;
 /**
  * Times the output sink was reopened for a changed layout.
  */
-output_reopens: number; 
+output_reopens: number;
 /**
  * Successful output reopens after an I/O or device error.
  */
-output_reconnects: number; 
+output_reconnects: number;
 /**
  * Output-open attempts made while recovering from an I/O or device error.
  */
-output_reconnect_attempts: number; output_mode: OutputMode; output_fell_back: boolean; 
+output_reconnect_attempts: number; output_mode: OutputMode; output_fell_back: boolean;
 /**
  * Channels in the shared engine's mix format when fallback occurred.
  */
-output_mix_channels: number; 
+output_mix_channels: number;
 /**
  * Observed output periods per second divided by the nominal period rate.
  */
-output_cadence_ratio: number; output_cadence_faults: number; 
+output_cadence_ratio: number; output_cadence_faults: number;
 /**
  * Bytes the driver reported lost to overruns.
  */
-lost_bytes: number; 
+lost_bytes: number;
 /**
  * Timeline frames emitted without data from an active entrance.
  */
-lane_underrun_frames: number; 
+lane_underrun_frames: number;
 /**
  * Source frames discarded because an entrance outran its bounded queue.
  */
-dropped_frames: number; 
+dropped_frames: number;
 /**
  * E-AC-3 bursts dropped because the decode thread had not returned the
  * deliveries queued before them (ADR 0031).
  */
-decode_refused: number; 
+decode_refused: number;
 /**
  * Volume transitions coalesced after an entrance's bounded queue filled.
  */
-volume_transitions_coalesced: number; 
+volume_transitions_coalesced: number;
 /**
  * Rendered frames that could not enter the crossing ring.
  */
-output_overflow_frames: number; 
+output_overflow_frames: number;
 /**
  * Idle-time blocks generated to advance tails and state.
  */
-idle_blocks: number; 
+idle_blocks: number;
 /**
  * Real-time events that could not enter an event queue.
  */
-dropped_events: number; clock: ClockStatus; 
+dropped_events: number; clock: ClockStatus;
 /**
  * Current clock correction in ppm (trim or resampling ratio).
  */
 clock_ppm: number; fault: EngineFault | null }
 
-export type Intent = { kind: "begin_setup" } | { kind: "install_driver" } | 
+export type Intent = { kind: "begin_setup" } | { kind: "install_driver" } |
 /**
  * Looks at the PC again after the user did something outside the app
  * (a reboot, test signing, a repair, a device plugged in at the output
@@ -198,13 +206,13 @@ export type Intent = { kind: "begin_setup" } | { kind: "install_driver" } |
  * device's playback QPC (the time inside the source application is not part
  * of it).
  */
-export type LatencyStats = { p50_ms: number; p99_ms: number; 
+export type LatencyStats = { p50_ms: number; p99_ms: number;
 /**
  * Blocks the statistics were computed from.
  */
 samples: number }
 
-export type NextAction = "retry" | "open_settings" | 
+export type NextAction = "retry" | "open_settings" |
 /**
  * Restart Windows, then recheck.
  */
@@ -223,15 +231,15 @@ export type OutputMode = "exclusive" | "shared"
 /**
  * Interleaved PCM as Windows' mixer writes it with spatial sound off.
  */
-export type PcmFormat = { channels: number; sample_rate: number; 
+export type PcmFormat = { channels: number; sample_rate: number;
 /**
  * Container width per sample (16, 24 or 32).
  */
-bits_per_sample: number; 
+bits_per_sample: number;
 /**
  * Significant bits within the container.
  */
-valid_bits: number; sample_type: SampleType; 
+valid_bits: number; sample_type: SampleType;
 /**
  * `dwChannelMask` (`SPEAKER_FRONT_LEFT` = bit 0, ...); 0 when the source
  * gave none, in which case the standard order for `channels` applies.
@@ -252,17 +260,17 @@ export type Platform = { os_build: number; arch: Arch; test_signing: boolean; se
  * let them open the passthrough endpoint so. The host reads them; only
  * `ssr-setup` writes them (install, repair, set-formats).
  */
-export type PolicyState = 
+export type PolicyState =
 /**
  * Every active endpoint of ours that the policy covers has the values
  * `ssr-setup` writes.
  */
-"applied" | 
+"applied" |
 /**
  * One of them lacks them, as after an install that finished with a
  * reboot: a repair applies them.
  */
-"missing" | 
+"missing" |
 /**
  * No endpoint of ours is active yet, or a read failed. The supervisor
  * treats it as fine.
@@ -272,17 +280,17 @@ export type PolicyState =
 /**
  * How PCM samples are stored.
  */
-export type SampleType = 
+export type SampleType =
 /**
  * Little-endian signed integer, `bits_per_sample` wide in the container.
  */
-"int" | 
+"int" |
 /**
  * Little-endian IEEE float (32 bits).
  */
 "float"
 
-export type SecureBoot = "enabled" | "disabled" | 
+export type SecureBoot = "enabled" | "disabled" |
 /**
  * The firmware has no Secure Boot (legacy BIOS).
  */
@@ -291,35 +299,35 @@ export type SecureBoot = "enabled" | "disabled" |
 /**
  * The first-run wizard's steps, in the order the checks run.
  */
-export type SetupStep = "welcome" | 
+export type SetupStep = "welcome" |
 /**
  * The PC cannot run this build: an unsupported OS build or architecture
  * (the error says which).
  */
-"unsupported" | 
+"unsupported" |
 /**
  * The driver package needs test signing and the PC does not have it on
  * (Secure Boot state in the error).
  */
-"not_test_signing" | 
+"not_test_signing" |
 /**
  * The driver is not installed or Windows reports a problem code for it.
  */
 "driver" | "reboot_required" | "choose_output"
 
-export type Snapshot = { phase: Phase; engine: EngineStatus | null; 
+export type Snapshot = { phase: Phase; engine: EngineStatus | null;
 /**
  * Outputs the user may choose: active, and never our own endpoints.
  */
-outputs: OutputChoice[]; chosen_output: OutputChoice | null; driver: DriverState | null; platform: Platform | null; 
+outputs: OutputChoice[]; chosen_output: OutputChoice | null; driver: DriverState | null; platform: Platform | null;
 /**
  * The three default roles point at our main endpoint.
  */
-roles_taken: boolean; 
+roles_taken: boolean;
 /**
  * The last error, cleared by the next intent that succeeds.
  */
-error: UserError | null; 
+error: UserError | null;
 /**
  * Facts the screen shows as is (a previous default device that
  * disappeared, ...).
@@ -333,28 +341,28 @@ export type SourceFormat = { kind: "pcm"; value: PcmFormat } | { kind: "bitstrea
  * to tell an empty ring from one the output could not take from. Frame
  * counts are in scene frames.
  */
-export type UnderrunSnapshot = { 
+export type UnderrunSnapshot = {
 /**
  * Frames in the ring's audio samples when the period began.
  */
-ring_frames: number; 
+ring_frames: number;
 /**
  * Frames the timing markers accounted for (what priming and the clock
  * controller see).
  */
-marker_frames: number; 
+marker_frames: number;
 /**
  * Frames of the current output layout the period could take.
  */
-layout_frames: number; 
+layout_frames: number;
 /**
  * Frames the period needed (for the resampler, its whole take).
  */
-needed_frames: number; 
+needed_frames: number;
 /**
  * Output frames the period produced before it ran short.
  */
-produced_frames: number; 
+produced_frames: number;
 /**
  * Milliseconds since the capture side last put a block into the ring.
  */

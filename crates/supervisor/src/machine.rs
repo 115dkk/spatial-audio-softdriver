@@ -136,6 +136,7 @@ pub struct Supervisor<H: Host, L: Launcher> {
     platform: Option<Platform>,
     error: Option<UserError>,
     notes: Vec<String>,
+    shell_notes: Vec<String>,
 }
 
 impl<H: Host, L: Launcher> fmt::Debug for Supervisor<H, L> {
@@ -170,6 +171,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             platform: None,
             error: None,
             notes: Vec::new(),
+            shell_notes: Vec::new(),
         };
         let driver = supervisor.host.get_mut().driver();
         let fine = driver_is_fine(&driver);
@@ -279,12 +281,22 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             platform: self.platform.clone(),
             roles_taken: self.taken.is_some(),
             error: self.error.clone(),
-            notes: self.notes.clone(),
+            notes: self
+                .shell_notes
+                .iter()
+                .chain(&self.notes)
+                .cloned()
+                .collect(),
         }
     }
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Adds a fact supplied by the shell. Setup begins by clearing old facts.
+    pub fn note(&mut self, note: String) {
+        self.shell_notes.push(note);
     }
 
     pub fn phase(&self) -> &Phase {
@@ -316,6 +328,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             Intent::BeginSetup => match self.phase {
                 Phase::Setup(SetupStep::Welcome) => {
                     self.notes.clear();
+                    self.shell_notes.clear();
                     self.evaluate()
                 }
                 _ => return refused(),

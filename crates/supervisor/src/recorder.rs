@@ -180,6 +180,11 @@ impl Recorder {
         let writer_stopped = Arc::clone(&stopped);
         let handle = thread::spawn(move || -> Result<(), String> {
             loop {
+                // The flag first, the ring second: a read handed to the ring
+                // before the flag was set is then seen by this very check, so
+                // stopping never leaves the last read behind. The other way
+                // round, a read pushed between the two loads was lost.
+                let stopped = writer_stopped.load(Ordering::Acquire);
                 let available = consumer.slots();
                 if available > 0 {
                     let chunk = consumer
@@ -189,7 +194,7 @@ impl Recorder {
                     writer.write_all(a).map_err(|error| error.to_string())?;
                     writer.write_all(b).map_err(|error| error.to_string())?;
                     chunk.commit_all();
-                } else if writer_stopped.load(Ordering::Acquire) {
+                } else if stopped {
                     break;
                 } else {
                     thread::sleep(Duration::from_millis(5));

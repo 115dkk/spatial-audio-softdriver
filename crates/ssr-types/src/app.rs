@@ -11,6 +11,14 @@ use crate::layout::DirectionId;
 use crate::ports::{DeviceId, DriverState, Platform};
 use crate::status::EngineStatus;
 
+/// One line on the pipe from a guarded app (ADR 0033).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Heartbeat {
+    pub running: bool,
+    pub output_periods: u64,
+    pub capture_reads: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]

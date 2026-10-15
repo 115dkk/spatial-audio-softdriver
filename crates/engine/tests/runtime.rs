@@ -1059,6 +1059,40 @@ fn auto_selects_trim_only_when_capture_and_output_support_it() {
 }
 
 #[test]
+fn progress_counters_follow_reads_and_periods() {
+    let lockstep = Arc::new(Lockstep::default());
+    let state = SinkState::lockstep(0, Arc::clone(&lockstep));
+    let capture = RecordsCapture {
+        records: Vec::new(),
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: Some(Arc::clone(&lockstep)),
+        stay_open: true,
+    };
+    let engine = start_with_clock(
+        lockstep_config(ClockPreference::Asrc, Arc::clone(&lockstep)),
+        capture,
+        opener(state, RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+
+    assert_eq!(engine.status().capture_reads, 0);
+    assert_eq!(engine.status().output_periods, 0);
+    lockstep.step_read(3);
+    lockstep.step_period(5);
+    let status = engine.status();
+    assert_eq!(status.capture_reads, 3);
+    assert_eq!(status.output_periods, 5);
+
+    lockstep.release();
+    let _ = engine.stop();
+}
+
+#[test]
 fn format_change_does_not_change_the_startup_clock_or_mix_rate() {
     let lockstep = Arc::new(Lockstep::default());
     let state = SinkState::lockstep(0, Arc::clone(&lockstep));

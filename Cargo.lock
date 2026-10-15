@@ -3806,6 +3806,7 @@ dependencies = [
  "serde",
  "serde_json",
  "speakers",
+ "ssr-guard",
  "ssr-sys",
  "ssr-types",
  "supervisor",
@@ -3882,6 +3883,17 @@ dependencies = [
  "ssr-types",
  "thiserror 2.0.21",
  "zerocopy",
+]
+
+[[package]]
+name = "ssr-guard"
+version = "0.10.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ssr-sys",
+ "ssr-types",
+ "supervisor",
 ]
 
 [[package]]

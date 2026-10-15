@@ -786,6 +786,8 @@ struct Shared {
     mute: AtomicBool,
     blocks: AtomicU64,
     underruns: AtomicU64,
+    output_periods: AtomicU64,
+    capture_reads: AtomicU64,
     /// Origin of the nanosecond stamps below.
     started: Instant,
     /// When the capture side last put a block into the crossing ring.
@@ -848,6 +850,8 @@ impl Shared {
             mute: AtomicBool::new(false),
             blocks: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            output_periods: AtomicU64::new(0),
+            capture_reads: AtomicU64::new(0),
             started: Instant::now(),
             last_block_ns: AtomicU64::new(0),
             underrun_sequence: AtomicU64::new(0),
@@ -1125,6 +1129,8 @@ impl Shared {
             ring_level_ms: f32::from_bits(self.ring_level_bits.load(Ordering::Acquire)),
             underruns: self.underruns.load(Ordering::Acquire),
             last_underrun: self.last_underrun(),
+            output_periods: self.output_periods.load(Ordering::Acquire),
+            capture_reads: self.capture_reads.load(Ordering::Acquire),
             output_restarts: self.output_restarts.load(Ordering::Acquire),
             output_rate: self.device_rate.load(Ordering::Acquire),
             trim_available: self.trim_available.load(Ordering::Acquire),
@@ -1376,7 +1382,9 @@ fn capture_rt_step<C: CaptureSource>(
         };
     }
 
-    let bytes = match capture.read(read_buffer, read_wait) {
+    let read = capture.read(read_buffer, read_wait);
+    shared.capture_reads.fetch_add(1, Ordering::Relaxed);
+    let bytes = match read {
         Ok(bytes) => bytes,
         Err(CaptureError::Ended) => {
             shared.capture_input_ended.store(true, Ordering::Release);
@@ -1699,6 +1707,7 @@ fn output_rt_step<S: OutputSink>(
         Ok(qpc) => qpc,
         Err(error) => return OutputStep::Lost(error),
     };
+    shared.output_periods.fetch_add(1, Ordering::Relaxed);
     let restarts = sink.restarts();
     if restarts > *sink_restart_baseline {
         shared

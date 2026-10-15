@@ -10,6 +10,7 @@ pub const STATE_DIR: &str = "Spatial SoftReceiver";
 
 /// The administrator helper, next to the app's executable.
 pub const SETUP_EXE: &str = "ssr-setup.exe";
+pub const GUARD_EXE: &str = "ssr-guard.exe";
 
 /// `%LOCALAPPDATA%\Spatial SoftReceiver`, given the value of `LOCALAPPDATA`;
 /// without one (a test, or a session that lacks it) the same name under the
@@ -32,6 +33,11 @@ pub fn setup_exe(exe_dir: &Path) -> PathBuf {
     exe_dir.join(SETUP_EXE)
 }
 
+/// `ssr-guard.exe` beside the app executable (ADR 0033).
+pub fn guard_exe(exe_dir: &Path) -> PathBuf {
+    exe_dir.join(GUARD_EXE)
+}
+
 /// The app's command line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Args {
@@ -41,6 +47,10 @@ pub struct Args {
     /// `--minimized`: start in the tray without showing the window (the login
     /// autostart passes it).
     pub minimized: bool,
+    /// The guard already owns this process and reads its stdout (ADR 0033).
+    pub guarded: bool,
+    /// Resume a session after the guard restarted the app.
+    pub resume: bool,
 }
 
 impl Args {
@@ -61,6 +71,10 @@ impl Args {
             let arg = arg.as_ref();
             if arg == "--minimized" {
                 parsed.minimized = true;
+            } else if arg == "--guarded" {
+                parsed.guarded = true;
+            } else if arg == "--resume" {
+                parsed.resume = true;
             } else if arg == "--smoke" {
                 let seconds = args
                     .peek()

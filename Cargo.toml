@@ -35,6 +35,7 @@ brir = { path = "crates/brir" }
 speakers = { path = "crates/speakers" }
 engine = { path = "crates/engine" }
 supervisor = { path = "crates/supervisor" }
+ssr-guard = { path = "apps/ssr-guard" }
 ssr-sys = { path = "crates/ssr-sys" }
 ssr-setup-sys = { path = "crates/ssr-setup-sys" }
 

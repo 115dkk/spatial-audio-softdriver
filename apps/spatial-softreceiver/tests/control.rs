@@ -30,6 +30,7 @@ fn start(
         ControlConfig::default(),
         store.clone(),
         recorder.clone(),
+        Vec::new(),
     )
 }
 
@@ -101,6 +102,53 @@ fn running_emits_meters_at_the_tick_rate() {
     let after_disable = recorder.meters();
     std::thread::sleep(Duration::from_millis(150));
     assert_eq!(recorder.meters(), after_disable, "meters after Disable");
+}
+
+#[test]
+fn a_guarded_control_thread_writes_a_heartbeat_each_refresh() {
+    let host = FakeHost::new();
+    let store = MemoryStore::with_output(DEV_A, DEV_A_NAME);
+    let recorder = Recorder::default();
+    let (bridge, _thread) = control::spawn(
+        host,
+        FakeLauncher,
+        common::config(),
+        ControlConfig {
+            tick: Duration::from_millis(5),
+            refresh: Duration::from_millis(25),
+        },
+        store,
+        recorder.clone(),
+        Vec::new(),
+    );
+    assert!(wait_until(PATIENCE, || !recorder.heartbeats().is_empty()));
+    bridge.dispatch(Intent::Enable).expect("the engine starts");
+    assert!(wait_until(PATIENCE, || {
+        recorder
+            .heartbeats()
+            .iter()
+            .filter(|heartbeat| heartbeat.running)
+            .count()
+            >= 3
+    }));
+    let heartbeats = recorder.heartbeats();
+    // The thread's first line, before Enable, says not Running; from the
+    // Enable on, every line says Running.
+    assert!(!heartbeats[0].running);
+    assert!(
+        heartbeats
+            .iter()
+            .skip_while(|heartbeat| !heartbeat.running)
+            .all(|heartbeat| heartbeat.running)
+    );
+
+    // Disable announces itself with a not-Running line before the engine
+    // stops (ADR 0033), so the guard never takes the stop for a stall.
+    let before = recorder.heartbeats().len();
+    bridge.dispatch(Intent::Disable).expect("the engine stops");
+    let heartbeats = recorder.heartbeats();
+    assert!(heartbeats.len() > before);
+    assert!(!heartbeats[before].running);
 }
 
 #[test]
@@ -220,6 +268,7 @@ fn a_panicking_launcher_still_quits_the_supervisor() {
         ControlConfig::default(),
         store,
         recorder.clone(),
+        Vec::new(),
     );
     assert_eq!(bridge.snapshot().phase, Phase::Ready);
 
