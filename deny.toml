@@ -15,6 +15,8 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "ISC",
+    # webpki-roots (velopack -> ureq -> rustls): Mozilla's root store, data under a permissive data license.
+    "CDLA-Permissive-2.0",
     "MIT",
     "MIT-0",
     # The app's Tauri shell: cssparser, cssparser-macros, dtoa-short and

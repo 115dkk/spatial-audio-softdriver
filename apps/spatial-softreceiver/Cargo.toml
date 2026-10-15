@@ -24,6 +24,12 @@ workspace = true
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Velopack's install hooks and self-update (ADR 0001 addendum). Off by
+# default: its TLS stack (ring) does not cross-compile for the MSVC targets
+# from Linux, where the workspace's Windows-target clippy and doc run. The
+# release build and the Windows CI builds turn it on; without it the update
+# module is a stub that says so in the log.
+updater = ["dep:velopack"]
 
 [dependencies]
 ssr-types.workspace = true
@@ -40,6 +46,7 @@ tauri = { workspace = true, features = ["tray-icon"] }
 tauri-plugin-single-instance.workspace = true
 tauri-plugin-dialog.workspace = true
 tauri-plugin-autostart.workspace = true
+velopack = { workspace = true, optional = true }
 
 [build-dependencies]
 tauri-build.workspace = true

@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use ssr_sys::WindowsHost;
 use ssr_sys::host::RESTORE_POINT_FILE;
 use ssr_types::EngineStatus;
-use ssr_types::app::{Heartbeat, Intent, Phase, Snapshot, UserError};
+use ssr_types::app::{Heartbeat, Intent, NextAction, Phase, Snapshot, UserError};
 use supervisor::machine::Config;
 use supervisor::restore_point::{self, RestorePoint};
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -52,6 +52,7 @@ use crate::launcher::WindowsLauncher;
 use crate::log::{self, Log};
 use crate::paths::{self, Args};
 use crate::settings::JsonSettingsFile;
+use crate::update::{UpdateState, Updater};
 
 /// The window `tauri.conf.json` creates.
 const MAIN_WINDOW: &str = "main";
@@ -64,6 +65,8 @@ const MENU_QUIT: &str = "quit";
 pub const SNAPSHOT_EVENT: &str = "snapshot";
 /// The event that carries an [`EngineStatus`] while Running.
 pub const METERS_EVENT: &str = "meters";
+/// The event that carries an [`UpdateState`] once an update is downloaded.
+pub const UPDATE_EVENT: &str = "update";
 
 /// How long an exit the app did not start waits for the supervisor to quit.
 const QUIT_WAIT: Duration = Duration::from_secs(3);
@@ -102,7 +105,12 @@ pub fn run(args: Args) -> Result<(), String> {
             Some(vec!["--minimized"]),
         ))
         .manage(smoke)
-        .invoke_handler(tauri::generate_handler![dispatch, snapshot])
+        .invoke_handler(tauri::generate_handler![
+            dispatch,
+            snapshot,
+            update_state,
+            apply_update
+        ])
         .setup(move |app| setup(app, args, &setup_smoke, &setup_ending))
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -155,6 +163,40 @@ fn snapshot(bridge: tauri::State<'_, Bridge>, smoke: tauri::State<'_, SmokeFlag>
     let snapshot = bridge.snapshot();
     smoke.0.store(true, Ordering::SeqCst);
     snapshot
+}
+
+/// The screen asks what the updater holds: the running version and a
+/// downloaded one.
+#[tauri::command(async)]
+fn update_state(updater: tauri::State<'_, Updater>) -> UpdateState {
+    updater.state()
+}
+
+/// Starts Velopack's updater, which waits for this process to exit, then
+/// quits the supervisor (the roles go back) and with it the app. The updater
+/// applies the downloaded update and starts the app again, which starts its
+/// own guard.
+#[tauri::command(async)]
+fn apply_update(
+    updater: tauri::State<'_, Updater>,
+    bridge: tauri::State<'_, Bridge>,
+) -> Result<(), UserError> {
+    let Some(pending) = updater.pending() else {
+        return Err(UserError {
+            message: "받아 둔 업데이트가 없습니다.".to_owned(),
+            next: NextAction::None,
+        });
+    };
+    pending.apply_after_exit().map_err(|message| UserError {
+        message,
+        next: NextAction::None,
+    })?;
+    log::line(&format!(
+        "shell: the updater waits for the exit; quitting to apply {}",
+        pending.version()
+    ));
+    send(bridge.inner(), Intent::Quit);
+    Ok(())
 }
 
 fn setup(
@@ -222,6 +264,12 @@ fn setup(
         initial_notes,
     );
     app.manage(bridge.clone());
+    let update_handle = app.handle().clone();
+    app.manage(Updater::spawn(state_dir.clone(), move |state| {
+        if let Err(error) = update_handle.emit(UPDATE_EVENT, state) {
+            log::line(&format!("shell: the update event failed: {error}"));
+        }
+    }));
     if args.resume && bridge.snapshot().phase == Phase::Ready {
         send(&bridge, Intent::Enable);
     }
@@ -568,7 +616,7 @@ fn quit_within(bridge: &Bridge, limit: Duration) -> QuitOutcome {
 /// ([`restore_point::restore`]: `restore_roles`, then the file is removed).
 /// Without a restore point the roles are not ours and nothing happens. Makes
 /// the host's COM calls, so never on the UI thread.
-fn last_resort_restore(state_dir: &Path) -> Vec<String> {
+pub(crate) fn last_resort_restore(state_dir: &Path) -> Vec<String> {
     let path = state_dir.join(RESTORE_POINT_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,

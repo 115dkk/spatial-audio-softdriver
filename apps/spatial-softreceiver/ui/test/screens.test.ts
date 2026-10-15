@@ -139,6 +139,34 @@ describe('what each state says', () => {
     expect(textOf()).toContain('26100');
     expect(textOf()).toContain('적용됨');
     expect(buttons()).toContain('진단 녹화 시작');
+    // No updater outside Tauri: the panel says so and offers no button.
+    expect(textOf()).toContain('앱 안에서만 확인합니다.');
+    expect(root.querySelector('[data-key="update-apply"]')).toBeNull();
+  });
+
+  it('the settings screen offers the downloaded update with its version', async () => {
+    const base = createMockApi(fixture('ready'));
+    let applied = 0;
+    const api: Api = {
+      ...base,
+      shell: {
+        ...base.shell,
+        native: true,
+        updateState: async () => ({ current: '0.11.0', ready: '0.12.0' }),
+        applyUpdate: async () => {
+          applied += 1;
+        },
+        onUpdate: async () => () => {},
+      },
+    };
+    const app = mountApp(root, api, { tab: 'settings' });
+    app.draw(fixture('ready'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(textOf()).toContain('지금 버전 0.11.0');
+    expect(textOf()).toContain('새 버전 0.12.0을 받았습니다.');
+    root.querySelector<HTMLButtonElement>('[data-key="update-apply"]')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(applied).toBe(1);
   });
 });
 

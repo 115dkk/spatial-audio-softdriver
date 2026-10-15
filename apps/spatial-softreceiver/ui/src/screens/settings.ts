@@ -1,9 +1,10 @@
-// The settings screen: login autostart, diagnostic recording, and what the
-// supervisor knows about the PC and the driver.
+// The settings screen: login autostart, the app's update, diagnostic
+// recording, and what the supervisor knows about the PC and the driver.
 
-import { facts, h } from '../dom';
+import { toUserError } from '../api';
+import { type Child, facts, h } from '../dom';
 import { text } from '../text';
-import { type Context, type Drawn, intentButton, panel } from './common';
+import { type Context, type Drawn, button, intentButton, panel } from './common';
 import { driverRows, platformRows } from './facts';
 
 const t = text.settings;
@@ -52,12 +53,45 @@ function autostart(ctx: Context): HTMLElement {
   );
 }
 
+/** The running version, and the downloaded one with the button that applies it. */
+function update(ctx: Context): HTMLElement {
+  const state = ctx.view.update;
+  const children: Child[] = [];
+  if (!ctx.shell.native) {
+    children.push(h('p', { class: 'hint' }, t.updateUnavailable));
+  } else if (state === null) {
+    children.push(h('p', { class: 'hint' }, t.updateUnknown));
+  } else {
+    children.push(h('p', { class: 'body-text' }, t.updateCurrent(state.current)));
+    if (state.ready === null) {
+      children.push(h('p', { class: 'hint' }, t.updateNone));
+    } else {
+      children.push(h('p', { class: 'body-text' }, t.updateReady(state.ready)));
+      children.push(
+        h(
+          'div',
+          { class: 'actions' },
+          button(
+            t.updateApply,
+            () => {
+              ctx.shell.applyUpdate().catch((reason: unknown) => ctx.report(toUserError(reason)));
+            },
+            { key: 'update-apply', variant: 'primary', disabled: ctx.busy },
+          ),
+        ),
+      );
+    }
+  }
+  return h('div', { class: 'update' }, ...children);
+}
+
 export function settings(ctx: Context): Drawn {
   const { platform, driver } = ctx.snapshot;
   const element = h(
     'div',
     { class: 'settings' },
     panel(t.startup, [autostart(ctx)]),
+    panel(t.update, [update(ctx)]),
     panel(t.diagnostics, [
       h('p', { class: 'body-text' }, t.recordHint),
       h(

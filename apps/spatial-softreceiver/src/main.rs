@@ -8,6 +8,13 @@
 use spatial_softreceiver::paths::Args;
 
 fn main() {
+    // Velopack's hooks and AUMID come before anything else (its process
+    // may end here, for a hook); a pending update is applied only on a
+    // plain launch, below.
+    #[cfg(windows)]
+    spatial_softreceiver::update::startup(&spatial_softreceiver::paths::state_dir(
+        std::env::var_os("LOCALAPPDATA"),
+    ));
     let args = match Args::parse(std::env::args_os().skip(1)) {
         Ok(args) => args,
         Err(message) => {
@@ -17,6 +24,7 @@ fn main() {
     };
     #[cfg(windows)]
     if args.smoke.is_none() && !args.guarded {
+        spatial_softreceiver::update::apply_pending();
         match start_guard(args) {
             Ok(()) => return,
             Err(message) => {

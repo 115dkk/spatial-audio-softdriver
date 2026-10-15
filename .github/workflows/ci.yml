@@ -157,6 +157,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       PROFILE_FLAG: ${{ matrix.profile == 'release' && '--release' || '' }}
+      UPDATER_FLAG: ${{ startsWith(matrix.os, 'windows') && '--features spatial-softreceiver/updater' || '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -170,7 +171,9 @@ jobs:
       # many of which (ssr-sys, ssr-live platform) run only on Windows.
       - name: cargo test --workspace
         shell: bash
-        run: cargo test --workspace --all-targets --locked --no-fail-fast $PROFILE_FLAG
+        # The app's updater (Velopack) is built only on the Windows runners:
+        # its TLS stack does not cross-compile from Linux (ADR 0001 addendum).
+        run: cargo test --workspace --all-targets --locked --no-fail-fast $PROFILE_FLAG $UPDATER_FLAG
 
       - name: cargo test --doc
         if: matrix.profile == 'debug'
@@ -184,7 +187,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         timeout-minutes: 10
-        run: cargo run --locked -p spatial-softreceiver $PROFILE_FLAG -- --smoke 90
+        run: cargo run --locked -p spatial-softreceiver $PROFILE_FLAG $UPDATER_FLAG -- --smoke 90
 
       - name: Driver header compiles as C89, C11 and C++17 (MSVC)
         if: runner.os == 'Windows' && runner.arch == 'X64' && matrix.profile == 'debug'
