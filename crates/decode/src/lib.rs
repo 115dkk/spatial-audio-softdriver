@@ -12,6 +12,13 @@
 //! need, and switches between them on a format change without allocating.
 //! Each adapter lends its own buffers to the scene it emits; the scene is valid
 //! until the callback returns.
+//!
+//! The E-AC-3 adapter's upstream decoder allocates per frame, so it runs in two
+//! halves (ADR 0031): [`FrontDecoders`] decodes on the decode thread into a
+//! [`Decoded`], and [`Decoders::place_deferred`] writes the scenes on the
+//! capture thread. [`Decoders::deferred`] tells the caller which codecs take
+//! that route; [`ddp::DdpDecoder`] keeps both halves in one place for offline
+//! callers.
 
 pub mod ddp;
 pub mod direct;
@@ -73,6 +80,17 @@ pub enum DecodeError {
     /// or the reverse).
     #[error("{0}")]
     WrongRoute(&'static str),
+    /// The decode thread has not returned the deliveries queued before this
+    /// burst, so the burst was dropped.
+    #[error("the decode thread is behind; the burst was dropped")]
+    DecoderBehind,
+}
+
+/// Codecs whose adapter decodes on the decode thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeferredCodec {
+    /// E-AC-3 (DD+), with JOC objects when present.
+    Ddp,
 }
 
 /// How the engine feeds the selected adapter.
@@ -81,7 +99,9 @@ pub enum Route {
     /// Data records go straight to [`Decoders::push_pcm`].
     Pcm,
     /// Data records go through `bitstream::Deframer`, bursts to
-    /// [`Decoders::push_burst`].
+    /// [`Decoders::push_burst`], or, while [`Decoders::deferred`] names a
+    /// codec, to the decode thread and back through
+    /// [`Decoders::place_deferred`].
     Bitstream,
 }
 
@@ -93,12 +113,13 @@ enum Active {
     Ddp,
 }
 
-/// Every adapter, preallocated; one is active at a time.
+/// Every adapter, preallocated; one is active at a time. For codecs that
+/// decode on the decode thread this holds the capture-thread half only.
 #[derive(Debug)]
 pub struct Decoders {
     pcm: pcm::PcmDecoder,
     mat: mat::MatDecoder,
-    ddp: ddp::DdpDecoder,
+    ddp: ddp::DdpBack,
     active: Active,
     epoch: u32,
 }
@@ -108,7 +129,7 @@ impl Decoders {
         Self {
             pcm: pcm::PcmDecoder::new(config),
             mat: mat::MatDecoder::new(config),
-            ddp: ddp::DdpDecoder::new(config),
+            ddp: ddp::DdpBack::new(config),
             active: Active::None,
             epoch: 0,
         }
@@ -161,7 +182,8 @@ impl Decoders {
     /// Decodes a complete burst. `qpc` is the source-clock time of its first
     /// carrier byte (the IEC 61937 Pa preamble at [`Burst::start`]), not the
     /// payload completion time or the enclosing ABI record's end timestamp.
-    /// The adapter carries this timestamp into the emitted scene.
+    /// The adapter carries this timestamp into the emitted scene. A burst of a
+    /// codec that decodes on the decode thread ([`Self::deferred`]) is refused.
     pub fn push_burst(
         &mut self,
         burst: &Burst<'_>,
@@ -170,9 +192,40 @@ impl Decoders {
     ) -> Result<(), DecodeError> {
         match self.active {
             Active::Mat => self.mat.push(burst, qpc, self.epoch, out),
-            Active::Ddp => self.ddp.push(burst, qpc, self.epoch, out),
+            Active::Ddp => Err(DecodeError::WrongRoute(
+                "an E-AC-3 burst decodes on the decode thread",
+            )),
             Active::None => Err(DecodeError::NoFormat),
             Active::Pcm => Err(DecodeError::WrongRoute("a burst in a PCM epoch")),
+        }
+    }
+
+    /// `Some` while the active adapter decodes on the decode thread. The chain
+    /// then copies the burst into a job instead of calling [`Self::push_burst`].
+    pub fn deferred(&self) -> Option<DeferredCodec> {
+        match self.active {
+            Active::Ddp => Some(DeferredCodec::Ddp),
+            Active::None | Active::Pcm | Active::Mat => None,
+        }
+    }
+
+    /// Places one decoded delivery into scenes, with the same `qpc` meaning as
+    /// [`Self::push_burst`]. `Err(WrongRoute)` unless the active adapter is the
+    /// one that decoded it. Errors reset the active adapter's capture-thread
+    /// half; the caller resets the decode-thread half. Does not allocate.
+    pub fn place_deferred(
+        &mut self,
+        decoded: &Decoded,
+        qpc: u64,
+        out: &mut dyn FnMut(&SceneBlock<'_>),
+    ) -> Result<(), DecodeError> {
+        match (self.active, decoded.codec) {
+            (Active::Ddp, Some(DeferredCodec::Ddp)) => {
+                self.ddp.place(&decoded.ddp, qpc, self.epoch, out)
+            }
+            _ => Err(DecodeError::WrongRoute(
+                "a decoded delivery for a codec the active adapter does not decode",
+            )),
         }
     }
 
@@ -195,12 +248,85 @@ impl Decoders {
     }
 
     /// Drops buffered state of the active adapter (overrun, discontinuity).
+    /// For a deferred codec this is the capture-thread half only.
     pub fn reset(&mut self) {
         match self.active {
             Active::Pcm => self.pcm.reset(),
             Active::Mat => self.mat.reset(),
             Active::Ddp => self.ddp.reset(),
             Active::None => {}
+        }
+    }
+}
+
+/// One lane's decode-thread halves. Lives on the decode thread and may
+/// allocate.
+#[derive(Debug, Default)]
+pub struct FrontDecoders {
+    ddp: ddp::DdpFront,
+}
+
+impl FrontDecoders {
+    pub fn new() -> Self {
+        Self {
+            ddp: ddp::DdpFront::new(),
+        }
+    }
+
+    /// Forgets the cross-frame state of every decode-thread half.
+    pub fn reset(&mut self) {
+        self.ddp.reset();
+    }
+
+    /// Decodes one burst payload of `codec` into `into`. On error the codec's
+    /// half is reset and `into` is left empty.
+    pub fn decode(
+        &mut self,
+        codec: DeferredCodec,
+        payload: &[u8],
+        into: &mut Decoded,
+    ) -> Result<(), DecodeError> {
+        into.clear();
+        match codec {
+            DeferredCodec::Ddp => self.ddp.decode(payload, &mut into.ddp)?,
+        }
+        into.codec = Some(codec);
+        Ok(())
+    }
+}
+
+/// One delivery's decoded frames, by codec. Created, filled and dropped on the
+/// decode thread only; the capture thread borrows it.
+#[derive(Debug, Default)]
+pub struct Decoded {
+    codec: Option<DeferredCodec>,
+    ddp: ddp::DdpDecoded,
+}
+
+impl Decoded {
+    pub fn new() -> Self {
+        Self {
+            codec: None,
+            ddp: ddp::DdpDecoded::new(),
+        }
+    }
+
+    /// Drops the frames held (this frees them; call it on the decode thread).
+    pub fn clear(&mut self) {
+        self.codec = None;
+        self.ddp.clear();
+    }
+
+    /// The codec that filled this delivery, `None` while it is empty.
+    pub fn codec(&self) -> Option<DeferredCodec> {
+        self.codec
+    }
+
+    /// Source frames this delivery holds (at the codec's rate); 0 when empty.
+    pub fn frames(&self) -> usize {
+        match self.codec {
+            Some(DeferredCodec::Ddp) => self.ddp.frames(),
+            None => 0,
         }
     }
 }

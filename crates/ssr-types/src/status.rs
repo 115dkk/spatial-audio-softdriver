@@ -25,6 +25,8 @@ pub enum ChainErrorKind {
     BadFormatRecord,
     BadVolumeRecord,
     MissingDirectLayout,
+    /// The decode thread was behind and a burst was dropped (ADR 0031).
+    DecoderBehind,
 }
 
 /// Why an entrance's current source format cannot be decoded.
@@ -72,7 +74,7 @@ impl core::fmt::Display for UnsupportedReason {
 }
 
 impl ChainErrorKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::UnsupportedCodec,
         Self::UnsupportedFormat,
         Self::CorruptPayload,
@@ -84,6 +86,7 @@ impl ChainErrorKind {
         Self::BadFormatRecord,
         Self::BadVolumeRecord,
         Self::MissingDirectLayout,
+        Self::DecoderBehind,
     ];
     pub const COUNT: usize = Self::ALL.len();
 
@@ -100,6 +103,7 @@ impl ChainErrorKind {
             Self::BadFormatRecord => "bad_format_record",
             Self::BadVolumeRecord => "bad_volume_record",
             Self::MissingDirectLayout => "missing_direct_layout",
+            Self::DecoderBehind => "decoder_behind",
         }
     }
 
@@ -118,7 +122,8 @@ impl ChainErrorKind {
             | Self::TruncatedRecord
             | Self::BadRecordLength
             | Self::BadFormatRecord
-            | Self::BadVolumeRecord => None,
+            | Self::BadVolumeRecord
+            | Self::DecoderBehind => None,
         }
     }
 }
@@ -255,6 +260,9 @@ pub struct EngineStatus {
     pub lane_underrun_frames: u64,
     /// Source frames discarded because an entrance outran its bounded queue.
     pub dropped_frames: u64,
+    /// E-AC-3 bursts dropped because the decode thread had not returned the
+    /// deliveries queued before them (ADR 0031).
+    pub decode_refused: u64,
     /// Volume transitions coalesced after an entrance's bounded queue filled.
     pub volume_transitions_coalesced: u64,
     /// Rendered frames that could not enter the crossing ring.

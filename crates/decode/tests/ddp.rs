@@ -1,8 +1,11 @@
 #![forbid(unsafe_code)]
 
 use bitstream::{Burst, DataType};
-use decode::{DecodeConfig, ddp::DdpDecoder};
-use ssr_types::Position;
+use decode::{
+    DecodeConfig, DecodeError,
+    ddp::{DdpBack, DdpDecoded, DdpDecoder, DdpFront},
+};
+use ssr_types::{Position, SceneBlock};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ddp/tones-5.1.eac3");
 
@@ -161,6 +164,128 @@ fn ddp_rejects_bad_access_units_without_emitting_and_recovers() {
             .push(&burst(first), 0, 0, &mut |_| panic!("too small"))
             .is_err()
     );
+}
+
+/// An emitted scene, owned, with every sample kept as its bits.
+#[derive(Debug, PartialEq)]
+struct OwnedScene {
+    epoch: u32,
+    frames: usize,
+    rate: u32,
+    source_qpc: u64,
+    objects: Vec<(u32, u32, u32, u32, u32, Vec<u32>)>,
+    lfe: Option<Vec<u32>>,
+}
+
+impl OwnedScene {
+    fn new(scene: &SceneBlock<'_>) -> Self {
+        let bits = |signal: &[f32]| signal.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        Self {
+            epoch: scene.epoch,
+            frames: scene.frames,
+            rate: scene.rate,
+            source_qpc: scene.source_qpc,
+            objects: scene
+                .objects
+                .iter()
+                .map(|o| {
+                    (
+                        o.position.x.to_bits(),
+                        o.position.y.to_bits(),
+                        o.position.z.to_bits(),
+                        o.gain.to_bits(),
+                        o.spread.to_bits(),
+                        bits(o.signal),
+                    )
+                })
+                .collect(),
+            lfe: scene.lfe.map(bits),
+        }
+    }
+}
+
+/// Every access unit of the fixture, with a corrupt one after the tenth and an
+/// epoch change at the twentieth: what the engine sees across errors.
+fn access_units() -> Vec<(Vec<u8>, u32)> {
+    let mut units = Vec::new();
+    let mut bytes = FIXTURE;
+    while !bytes.is_empty() {
+        let size = eac3::parse_header(bytes).unwrap().frame_size;
+        let (frame, rest) = bytes.split_at(size);
+        bytes = rest;
+        let epoch = if units.len() < 21 { 3 } else { 4 };
+        units.push((frame.to_vec(), epoch));
+        if units.len() == 10 {
+            units.push((frame[..size - 1].to_vec(), 3));
+        }
+    }
+    units
+}
+
+#[test]
+fn ddp_front_and_back_match_the_one_piece_decoder() {
+    let units = access_units();
+    let mut decoder = DdpDecoder::new(DecodeConfig::default());
+    let mut whole = Vec::new();
+    for (index, (payload, epoch)) in units.iter().enumerate() {
+        let mut scenes = Vec::new();
+        let result = decoder.push(
+            &burst(payload),
+            1_000 + index as u64,
+            *epoch,
+            &mut |scene| scenes.push(OwnedScene::new(scene)),
+        );
+        whole.push((result, scenes));
+    }
+
+    // The halves as the engine runs them: the front decodes every access unit
+    // ahead of the back, as the decode thread may; a new epoch resets the
+    // front (the chain queues a reset job on a format change) and a failed
+    // decode resets the back too (the chain does that when the job comes back).
+    let mut front = DdpFront::new();
+    let mut front_epoch = None;
+    let decoded = units
+        .iter()
+        .map(|(payload, epoch)| {
+            if front_epoch.replace(*epoch) != Some(*epoch) {
+                front.reset();
+            }
+            let mut into = DdpDecoded::new();
+            let result = front.decode(payload, &mut into);
+            assert_eq!(result.is_err(), into.is_empty());
+            (result, into)
+        })
+        .collect::<Vec<_>>();
+    let mut back = DdpBack::new(DecodeConfig::default());
+    let mut halves = Vec::new();
+    for (index, ((result, into), (_, epoch))) in decoded.iter().zip(&units).enumerate() {
+        let mut scenes = Vec::new();
+        let result = result.and_then(|()| {
+            back.place(into, 1_000 + index as u64, *epoch, &mut |scene| {
+                scenes.push(OwnedScene::new(scene))
+            })
+        });
+        if result.is_err() {
+            back.reset();
+        }
+        halves.push((result, scenes));
+    }
+
+    assert_eq!(whole.len(), 33);
+    assert!(matches!(whole[10].0, Err(DecodeError::Corrupt { .. })));
+    assert_eq!(
+        whole.iter().filter(|(result, _)| result.is_err()).count(),
+        1
+    );
+    assert!(
+        whole
+            .iter()
+            .all(|(result, scenes)| scenes.len() == usize::from(result.is_ok()))
+    );
+    assert_eq!(whole[25].1[0].epoch, 4);
+    for (index, (one, two)) in whole.iter().zip(&halves).enumerate() {
+        assert_eq!(one, two, "access unit {index}");
+    }
 }
 
 /// Private raw E-AC-3 stream, not an IEC 61937 or media-container file.

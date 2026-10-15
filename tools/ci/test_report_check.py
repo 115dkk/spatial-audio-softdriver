@@ -13,7 +13,7 @@ def report():
         "output_reconnects": 0, "output_cadence_ratio": 1.0, "faults": [],
         "latency_p50_ms": 20.0, "latency_p99_ms": 30.0,
         "underruns": 0, "underruns_while_streaming": 0, "output_restarts": 0,
-        "output_cadence_faults": 0, "dropped_frames": 0,
+        "output_cadence_faults": 0, "dropped_frames": 0, "decode_refused": 0,
         "lane_underrun_frames": 0, "output_overflow_frames": 0,
         "dropped_events": 0,
         "endpoints": [{"endpoint": n, "format": None, "epoch": 0,

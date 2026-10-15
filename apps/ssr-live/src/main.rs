@@ -363,7 +363,7 @@ mod platform {
     use std::time::{Duration, Instant};
 
     use engine::adapters::DumpCapture;
-    use engine::{ClockPreference, EngineConfig, RealtimeThread};
+    use engine::{ClockPreference, EngineConfig, EngineThread};
     #[cfg(test)]
     use ssr_abi::dump_header_bytes;
     use ssr_abi::{Record, records};
@@ -531,12 +531,18 @@ mod platform {
     }
 
     thread_local! {
-        // Keeps each real-time thread registered with MMCSS until it exits.
+        // Keeps each engine thread registered with MMCSS until it exits.
         static MMCSS: RefCell<Option<MmcssGuard>> = const { RefCell::new(None) };
     }
 
-    fn promote_thread(thread: RealtimeThread) {
-        match mmcss::promote("Pro Audio") {
+    fn promote_thread(thread: EngineThread) {
+        // The real-time threads take "Pro Audio"; the decode thread, which
+        // allocates and may wait, takes the standard task one class below.
+        let task = match thread {
+            EngineThread::Capture | EngineThread::Output => "Pro Audio",
+            EngineThread::Decode => "Audio",
+        };
+        match mmcss::promote(task) {
             Ok(guard) => MMCSS.with(|slot| *slot.borrow_mut() = Some(guard)),
             Err(e) => eprintln!("MMCSS registration failed for {thread:?}: {e}"),
         }

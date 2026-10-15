@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use brir::PreparedBrir;
 use convolver::FilterBank;
 use engine::{
-    ClockPreference, EngineConfig, EngineEvent, LiveChange, Prepared, StartError, StartOptions,
-    start_with, start_with_clock,
+    ClockPreference, EngineConfig, EngineEvent, EngineThread, LiveChange, Prepared, StartError,
+    StartOptions, start_with, start_with_clock,
 };
 use speakers::{PreparedSpeaker, PreparedSpeakers};
 use ssr_abi::{ENDPOINT_PRIMARY, RecordWriter, wave_format_bytes};
@@ -911,6 +911,52 @@ fn output_open_failure_is_returned_from_start() {
 }
 
 #[test]
+fn the_decode_thread_is_promoted_as_its_own_kind() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hook_seen = Arc::clone(&seen);
+    let capture = RecordsCapture {
+        records: Vec::new(),
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: None,
+        stay_open: true,
+    };
+    let engine = start_with_clock(
+        EngineConfig {
+            thread_hook: Some(Arc::new(move |thread| {
+                hook_seen.lock().unwrap().push(thread);
+            })),
+            ..config(ClockPreference::Asrc)
+        },
+        capture,
+        opener(SinkState::new(0), RATE),
+        QPC_FREQUENCY,
+    )
+    .unwrap();
+    let start = Instant::now();
+    while seen.lock().unwrap().len() < 3 && start.elapsed() < Duration::from_secs(5) {
+        std::thread::yield_now();
+    }
+    drop(engine.stop());
+    let seen = seen.lock().unwrap();
+    for kind in [
+        EngineThread::Capture,
+        EngineThread::Output,
+        EngineThread::Decode,
+    ] {
+        assert_eq!(
+            seen.iter().filter(|thread| **thread == kind).count(),
+            1,
+            "{kind:?} in {seen:?}"
+        );
+    }
+    assert_eq!(seen.len(), 3);
+}
+
+#[test]
 fn default_start_options_use_the_default_qpc_frequency() {
     let state = SinkState::new(0);
     let capture = RecordsCapture {
@@ -1434,6 +1480,20 @@ fn corrupt_payload_is_counted_without_marking_the_endpoint_unsupported() {
     .unwrap();
 
     lockstep.step_read(3);
+    // The burst decodes on the decode thread (ADR 0031), which the lockstep
+    // clock does not drive; its error counts at the first capture step after
+    // it comes back. Step empty reads until then, bounded on wall time.
+    let counted = || {
+        engine.status().endpoints[0]
+            .chain_errors
+            .get(ssr_types::ChainErrorKind::CorruptPayload)
+            != 0
+    };
+    let start = Instant::now();
+    while !counted() && start.elapsed() < Duration::from_secs(5) {
+        lockstep.step_read(1);
+        std::thread::yield_now();
+    }
     let status = engine.status();
     assert_eq!(
         status.endpoints[0]

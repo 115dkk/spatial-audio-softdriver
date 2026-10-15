@@ -16,7 +16,8 @@ ENDPOINT_COUNT = MAX_ENDPOINTS
 
 COMMON_LOSS_COUNTERS = (
     "underruns_while_streaming", "output_cadence_faults", "dropped_frames",
-    "lane_underrun_frames", "output_overflow_frames", "dropped_events",
+    "decode_refused", "lane_underrun_frames", "output_overflow_frames",
+    "dropped_events",
 )
 
 

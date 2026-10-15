@@ -9,9 +9,12 @@
 //!   strategies (ASRC and trim, one PI controller) and latency statistics (M2).
 //! * [`adapters`]: port adapters that need no Windows: dump capture, WAV and
 //!   null output.
+//! * [`decode_thread`]: the job queue that moves allocating codec decoders
+//!   (E-AC-3) off the capture thread onto `ssr-decode` (ADR 0031).
 
 pub mod adapters;
 pub mod chain;
+pub mod decode_thread;
 mod limiter;
 pub mod mixer;
 pub mod runtime;
@@ -29,11 +32,12 @@ pub use decode::direct::{
     DirectLayout, DirectLayoutOverride, DirectLayouts, parse_speaker,
     preset as direct_layout_preset, speaker_name,
 };
+pub use decode_thread::DecodeWorker;
 pub use mixer::{
     BedBlock, MAX_ARRIVAL_SLACK_FRAMES, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer,
 };
 pub use runtime::{
-    ClockPreference, Engine, EngineConfig, EngineEvent, LiveChange, RealtimeThread, Rejected,
+    ClockPreference, Engine, EngineConfig, EngineEvent, EngineThread, LiveChange, Rejected,
     RtEventHook, RtLoopEvent, RtScope, RtSection, StartError, StartOptions, StopReport, ThreadHook,
     start, start_with, start_with_clock,
 };

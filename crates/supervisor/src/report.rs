@@ -125,6 +125,7 @@ impl SessionReport {
             "lost_bytes": self.engine.lost_bytes,
             "lane_underrun_frames": self.engine.lane_underrun_frames,
             "dropped_frames": self.engine.dropped_frames,
+            "decode_refused": self.engine.decode_refused,
             "volume_transitions_coalesced": status.volume_transitions_coalesced,
             "output_overflow_frames": self.engine.output_overflow_frames,
             "idle_blocks": self.engine.idle_blocks,

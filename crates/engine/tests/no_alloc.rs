@@ -236,6 +236,8 @@ fn format_change_and_bitstream_decode_error_do_not_allocate() {
     let mut burst = Vec::new();
     bitstream::frame_burst(bitstream::DataType::Eac3, &[0_u8; 7], 32, &mut burst);
     let mut chain = Chain::new(ChainConfig::default());
+    // As the runtime does: the E-AC-3 decode runs on the decode thread.
+    let mut worker = chain.take_decode_worker().unwrap();
 
     assert_no_alloc(|| {
         chain.push_record(
@@ -248,6 +250,7 @@ fn format_change_and_bitstream_decode_error_do_not_allocate() {
             },
             &mut |event| assert!(matches!(event, ChainEvent::FormatChanged { .. })),
         );
+        // The burst is copied into a job; its result is not back yet.
         chain.push_record(
             Record::Data {
                 endpoint: 0,
@@ -258,9 +261,20 @@ fn format_change_and_bitstream_decode_error_do_not_allocate() {
                 qpc_written: 0,
                 bytes: &burst,
             },
-            &mut |event| assert!(matches!(event, ChainEvent::Error { .. })),
+            &mut |event| panic!("unexpected event {event:?}"),
         );
     });
+    assert!(chain.decode_in_flight() > 0);
+    while worker.run_one() {}
+    let mut errors = 0;
+    assert_no_alloc(|| {
+        chain.idle(0, &mut |event| {
+            assert!(matches!(event, ChainEvent::Error { .. }));
+            errors += 1;
+        });
+    });
+    assert_eq!(errors, 1);
+    assert_eq!(chain.decode_in_flight(), 0);
 }
 
 #[test]

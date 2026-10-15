@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use brir::{AnglePreset, BrirSource, DirectionFile, LfePolicy, Profile};
 use engine::{
-    Chain, ChainConfig, ChainEvent, EndpointFilter, MAX_ARRIVAL_SLACK_FRAMES, MIX_FRAMES,
-    OutputProfile, Prepared,
+    Chain, ChainConfig, ChainError, ChainEvent, EndpointFilter, MAX_ARRIVAL_SLACK_FRAMES,
+    MIX_FRAMES, OutputProfile, Prepared,
 };
 use speakers::{PreparedSpeaker, PreparedSpeakers};
 use ssr_abi::{
@@ -3831,4 +3831,444 @@ fn ddp_restarts_beside_an_active_lane_keep_every_burst() {
     assert_eq!(mixed.errors, 0);
     assert_eq!(mixed.drops, 0);
     assert_eq!(mixed.underruns, 0);
+}
+
+// --- E-AC-3 on the decode thread (ADR 0031) ---
+
+/// The fixture's access units, each in its own 32 ms IEC 61937 burst.
+fn ddp_bursts() -> Vec<Vec<u8>> {
+    let fixture = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../decode/tests/fixtures/ddp/tones-5.1.eac3"),
+    )
+    .unwrap();
+    fixture
+        .chunks(2560)
+        .map(|access_unit| {
+            let mut burst = Vec::new();
+            bitstream::frame_burst(bitstream::DataType::Eac3, access_unit, 24_576, &mut burst);
+            burst
+        })
+        .collect()
+}
+
+fn ddp_format_change() -> Record<'static> {
+    Record::FormatChange {
+        endpoint: ENDPOINT_PRIMARY,
+        epoch: 1,
+        repeat: false,
+        qpc: 1,
+        format: bitstream_format(BitstreamCodec::Eac3, 48_000),
+    }
+}
+
+/// One whole burst ends `index + 1` burst periods (32 ms at 10 MHz) in.
+fn ddp_data(bytes: &[u8], index: u64, flags: u16) -> Record<'_> {
+    Record::Data {
+        endpoint: ENDPOINT_PRIMARY,
+        epoch: 1,
+        flags,
+        pos: index * 24_576,
+        qpc: (index + 1) * 320_000,
+        qpc_written: 0,
+        bytes,
+    }
+}
+
+/// Output blocks as (source QPC, left, right), and the errors, of one chain.
+#[derive(Default)]
+struct Rendered {
+    blocks: Vec<(u64, Vec<f32>, Vec<f32>)>,
+    errors: Vec<(ChainError, bool)>,
+}
+
+impl Rendered {
+    fn event(&mut self, event: ChainEvent<'_>) {
+        match event {
+            ChainEvent::Block(block) => self.blocks.push((
+                block.source_qpc,
+                block.channel(0).to_vec(),
+                block.channel(1).to_vec(),
+            )),
+            ChainEvent::Error { error, repeat, .. } => self.errors.push((error, repeat)),
+            _ => {}
+        }
+    }
+
+    fn audible(&self) -> usize {
+        self.blocks
+            .iter()
+            .filter(|(_, left, right)| left.iter().chain(right).any(|sample| *sample != 0.0))
+            .count()
+    }
+
+    fn left(&self) -> Vec<f32> {
+        self.blocks
+            .iter()
+            .flat_map(|(_, left, _)| left.iter().copied())
+            .collect()
+    }
+}
+
+/// An inline chain (the worker runs where a burst is submitted) fed `bursts`
+/// one record each, then finished.
+fn render_inline_ddp(bursts: &[&[u8]], prepared: Box<Prepared>) -> Rendered {
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(prepared);
+    let mut rendered = Rendered::default();
+    chain.push_record(ddp_format_change(), &mut |event| rendered.event(event));
+    for (index, burst) in bursts.iter().enumerate() {
+        chain.push_record(ddp_data(burst, index as u64, 0), &mut |event| {
+            rendered.event(event)
+        });
+        chain.idle(1, &mut |event| rendered.event(event));
+    }
+    chain.finish(&mut |event| rendered.event(event));
+    assert_eq!(chain.decode_in_flight(), 0);
+    rendered
+}
+
+fn bits(samples: &[f32]) -> Vec<u32> {
+    samples.iter().map(|sample| sample.to_bits()).collect()
+}
+
+/// Where `needle` first occurs in `haystack`, bit for bit.
+fn find_samples(haystack: &[f32], needle: &[f32]) -> Option<usize> {
+    let (haystack, needle) = (bits(haystack), bits(needle));
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle.as_slice())
+}
+
+#[test]
+fn deferred_ddp_places_scenes_only_after_the_worker_runs() {
+    let bursts = ddp_bursts();
+    let bursts = bursts.iter().take(6).map(Vec::as_slice).collect::<Vec<_>>();
+    let inline = render_inline_ddp(&bursts, identity_prepared("ddp-inline"));
+    assert!(inline.errors.is_empty());
+    assert!(inline.audible() >= 19);
+
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared("ddp-deferred"));
+    let mut worker = chain
+        .take_decode_worker()
+        .expect("a new chain owns its worker");
+    assert!(chain.take_decode_worker().is_none());
+    let mut rendered = Rendered::default();
+    chain.push_record(ddp_format_change(), &mut |event| rendered.event(event));
+    chain.push_record(ddp_data(bursts[0], 0, 0), &mut |event| {
+        rendered.event(event)
+    });
+    // The burst is queued (behind the format change's and the start's
+    // resets); its byte clock moved the timeline, but nothing of it sounds.
+    assert_eq!(chain.decode_in_flight(), 3);
+    assert_eq!(rendered.audible(), 0);
+    let mut jobs = 0;
+    while worker.run_one() {
+        jobs += 1;
+    }
+    assert_eq!(jobs, 3);
+    // The decoded delivery waits until the chain next runs.
+    assert_eq!(chain.decode_in_flight(), 3);
+    chain.idle(1, &mut |event| rendered.event(event));
+    assert_eq!(chain.decode_in_flight(), 0);
+    let lead = rendered.blocks.len();
+    assert_eq!(rendered.audible(), 0);
+    for (index, burst) in bursts.iter().enumerate().skip(1) {
+        chain.push_record(ddp_data(burst, index as u64, 0), &mut |event| {
+            rendered.event(event)
+        });
+        assert!(worker.run_one());
+        chain.idle(1, &mut |event| rendered.event(event));
+    }
+    chain.finish(&mut |event| rendered.event(event));
+    assert!(rendered.errors.is_empty());
+    assert_eq!(chain.decode_refused(), 0);
+    assert_eq!(chain.dropped_frames(), 0);
+
+    // One capture step later on the timeline, then the very same blocks: the
+    // delay is whole mix blocks, so every block is bit for bit the inline one.
+    assert_eq!(lead, 3);
+    assert!(
+        rendered.blocks[..lead]
+            .iter()
+            .all(|(_, left, right)| left.iter().chain(right).all(|sample| *sample == 0.0))
+    );
+    assert_eq!(rendered.blocks.len(), lead + inline.blocks.len());
+    for (index, (deferred, inline)) in rendered.blocks[lead..]
+        .iter()
+        .zip(&inline.blocks)
+        .enumerate()
+    {
+        assert_eq!(deferred.0, inline.0, "block {index} source QPC");
+        assert_eq!(bits(&deferred.1), bits(&inline.1), "block {index} left");
+        assert_eq!(bits(&deferred.2), bits(&inline.2), "block {index} right");
+    }
+}
+
+#[test]
+fn a_decode_thread_that_falls_behind_refuses_bursts_and_the_lane_recovers() {
+    let bursts = ddp_bursts();
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared("ddp-behind"));
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+    chain.push_record(ddp_format_change(), &mut |event| rendered.event(event));
+    chain.push_record(
+        Record::StreamStart {
+            endpoint: ENDPOINT_PRIMARY,
+            epoch: 1,
+            repeat: false,
+            qpc: 1,
+        },
+        &mut |event| rendered.event(event),
+    );
+    while worker.run_one() {}
+    chain.idle(1, &mut |event| rendered.event(event));
+    assert_eq!(chain.decode_in_flight(), 0);
+
+    // The decode thread stalls: sixteen bursts fill every job.
+    for (index, burst) in bursts.iter().enumerate().take(16) {
+        chain.push_record(ddp_data(burst, index as u64, 0), &mut |event| {
+            rendered.event(event)
+        });
+    }
+    assert!(rendered.errors.is_empty());
+    assert_eq!(chain.decode_in_flight(), 16);
+    assert_eq!(chain.decode_refused(), 0);
+    // The seventeenth is refused at once; the capture thread never waits.
+    chain.push_record(ddp_data(&bursts[16], 16, 0), &mut |event| {
+        rendered.event(event)
+    });
+    assert_eq!(chain.decode_refused(), 1);
+    assert_eq!(
+        rendered.errors,
+        [(
+            ChainError::Decode(decode::DecodeError::DecoderBehind),
+            false
+        )]
+    );
+
+    // The decode thread catches up; what it decoded is placed and the lane
+    // takes bursts again (behind the reset the refusal left pending).
+    while worker.run_one() {}
+    let audible_before = rendered.audible();
+    for (index, burst) in bursts.iter().enumerate().skip(17).take(8) {
+        chain.push_record(ddp_data(burst, index as u64, 0), &mut |event| {
+            rendered.event(event)
+        });
+        while worker.run_one() {}
+        chain.idle(1, &mut |event| rendered.event(event));
+        assert_eq!(chain.decode_in_flight(), 0);
+    }
+    chain.finish(&mut |event| rendered.event(event));
+    assert_eq!(rendered.errors.len(), 1);
+    assert_eq!(chain.decode_refused(), 1);
+    // What was queued before the refusal is discarded, not piled into the
+    // restarted lane (sixteen scenes for one burst of bytes would make it a
+    // fast lane the mixer cuts), and counted: sixteen access units of 1536
+    // frames, and not one frame more.
+    assert_eq!(chain.dropped_frames(), 16 * 1536);
+    // Eight bursts after the refusal are 8 * 1536 frames, 25.6 mix blocks.
+    assert!(
+        rendered.audible() >= audible_before + 25,
+        "audible blocks {} after {audible_before}",
+        rendered.audible()
+    );
+}
+
+#[test]
+fn a_reset_job_follows_the_bursts_queued_before_it() {
+    let bursts = ddp_bursts();
+    let (prime, first, second) = (&bursts[0], &bursts[1], &bursts[2]);
+    // The speaker path has no convolution, so every output frame is a function
+    // of the same scene frame alone and a scene can be found anywhere in the
+    // output. The fixture's tones repeat every 256 frames, so a decode differs
+    // only by its start: a cold one (right after a reset) carries the
+    // decoder's start-up transient, a warm one does not. References from
+    // inline chains: `first` decoded after `prime` (warm) and alone (cold),
+    // `second` alone (cold) and after both (warm).
+    let render = |bursts: &[&[u8]]| render_inline_ddp(bursts, identity_speaker_prepared()).left();
+    let warm_first = render(&[prime, first]);
+    let cold_first = render(&[first]);
+    let cold_second = render(&[second]);
+    let warm_second = render(&[prime, first, second]);
+    let warm_first = &warm_first[1536..3072];
+    let cold_first = &cold_first[..1536];
+    let cold_second = &cold_second[..1536];
+    let warm_second = &warm_second[3072..4608];
+    assert_ne!(bits(&warm_first[..256]), bits(&cold_first[..256]));
+    assert_ne!(bits(&warm_second[..256]), bits(&cold_second[..256]));
+
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_speaker_prepared());
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+    chain.push_record(ddp_format_change(), &mut |event| rendered.event(event));
+    chain.push_record(ddp_data(prime, 0, 0), &mut |event| rendered.event(event));
+    while worker.run_one() {}
+    // Queued with no worker run in between: a burst, a discontinuity (its
+    // reset job), and a burst.
+    chain.push_record(ddp_data(first, 1, 0), &mut |event| rendered.event(event));
+    chain.push_record(ddp_data(&[], 2, RECORD_FLAG_DISCONTINUITY), &mut |event| {
+        rendered.event(event)
+    });
+    chain.push_record(ddp_data(second, 2, 0), &mut |event| rendered.event(event));
+    assert_eq!(chain.decode_in_flight(), 3);
+    let mut jobs = 0;
+    while worker.run_one() {
+        jobs += 1;
+    }
+    assert_eq!(jobs, 3);
+    chain.idle(1, &mut |event| rendered.event(event));
+    assert_eq!(chain.decode_in_flight(), 0);
+    chain.finish(&mut |event| rendered.event(event));
+    assert!(rendered.errors.is_empty());
+    let output = rendered.left();
+
+    // The burst queued before the discontinuity was decoded with the state
+    // before it (warm, not a cold start), and its scenes arrived in the
+    // restarted lane.
+    let at = find_samples(&output, warm_first).expect("the first burst's scenes arrived");
+    assert_ne!(bits(&output[at..at + 1536]), bits(cold_first));
+    // The burst after it was decoded from the reset state (a cold start, not
+    // the warm continuation) and follows the first one directly: the lane
+    // restarted once, at the discontinuity, and not again when the
+    // deliveries came back.
+    let second_at = &output[at + 1536..at + 3072];
+    assert_eq!(bits(second_at), bits(cold_second));
+    assert_ne!(bits(second_at), bits(warm_second));
+    // Dropped: only the prime's last 32 frames, cut by the discontinuity's
+    // fade. Both deliveries reached the restarted lane at once and were kept
+    // whole (the lead follows the lane's delay); a second restart would have
+    // cut placed frames again.
+    assert_eq!(chain.dropped_frames(), 32);
+}
+
+#[test]
+fn in_flight_deliveries_are_waited_for_at_finish() {
+    let bursts = ddp_bursts();
+    let bursts = bursts.iter().take(4).map(Vec::as_slice).collect::<Vec<_>>();
+    let inline = render_inline_ddp(&bursts, identity_prepared("ddp-finish-inline"));
+
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared("ddp-finish-deferred"));
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+    chain.push_record(ddp_format_change(), &mut |event| rendered.event(event));
+    for (index, burst) in bursts.iter().enumerate() {
+        chain.push_record(ddp_data(burst, index as u64, 0), &mut |event| {
+            rendered.event(event)
+        });
+        if index + 1 < bursts.len() {
+            while worker.run_one() {}
+        }
+        chain.idle(1, &mut |event| rendered.event(event));
+    }
+    // The last burst is still on the decode thread when the stream ends.
+    assert_eq!(chain.decode_in_flight(), 1);
+    chain.begin_finish();
+    let blocks = rendered.blocks.len();
+    assert!(!chain.finish_step(0, &mut |event| rendered.event(event)));
+    for _ in 0..3 {
+        assert!(!chain.finish_step(usize::MAX, &mut |event| rendered.event(event)));
+    }
+    assert_eq!(
+        rendered.blocks.len(),
+        blocks,
+        "fronts flushed before the delivery"
+    );
+    assert!(worker.run_one());
+    while !chain.finish_step(4, &mut |event| rendered.event(event)) {}
+    assert_eq!(chain.decode_in_flight(), 0);
+    assert!(rendered.errors.is_empty());
+
+    // Every burst, the last one included, sounds as the inline chain's did.
+    let lead = rendered.blocks.len() - inline.blocks.len();
+    assert_eq!(lead, 3);
+    for (index, (deferred, inline)) in rendered.blocks[lead..]
+        .iter()
+        .zip(&inline.blocks)
+        .enumerate()
+    {
+        assert_eq!(bits(&deferred.1), bits(&inline.1), "block {index} left");
+        assert_eq!(bits(&deferred.2), bits(&inline.2), "block {index} right");
+    }
+}
+
+/// One READ: the records of `bursts` (the fixture's access units from
+/// `first` on), each a whole burst, after a format change when `format`.
+fn ddp_read(bursts: &[Vec<u8>], first: usize, count: usize, format: bool) -> Vec<u8> {
+    let mut stream = vec![0; 256 + count * ssr_abi::record_size(24_576)];
+    let mut writer = RecordWriter::new(&mut stream);
+    if format {
+        assert!(writer.format_change(
+            1,
+            1,
+            &wave_format_bytes(&bitstream_format(BitstreamCodec::Eac3, 48_000))
+        ));
+    }
+    for (index, burst) in bursts.iter().enumerate().skip(first).take(count) {
+        assert!(writer.data(
+            1,
+            index as u64 * 24_576,
+            (index as u64 + 1) * 320_000,
+            burst
+        ));
+    }
+    let len = writer.len();
+    stream.truncate(len);
+    stream
+}
+
+#[test]
+fn a_delivery_batch_after_a_capture_backlog_does_not_cut_later_bursts() {
+    const BATCH: usize = 3;
+    const AFTER: usize = 30;
+    let bursts = ddp_bursts();
+    let bursts = (0..BATCH + AFTER)
+        .map(|index| bursts[index % bursts.len()].clone())
+        .collect::<Vec<_>>();
+
+    let mut inline = Chain::new(ChainConfig::default());
+    inline.set_prepared(identity_prepared("ddp-batch-inline"));
+    let mut expected = Rendered::default();
+    inline.push_records(&ddp_read(&bursts, 0, BATCH, true), &mut |event| {
+        expected.event(event)
+    });
+    for index in BATCH..BATCH + AFTER {
+        inline.push_records(&ddp_read(&bursts, index, 1, false), &mut |event| {
+            expected.event(event)
+        });
+    }
+    inline.finish(&mut |event| expected.event(event));
+    assert!(expected.errors.is_empty());
+    assert_eq!(inline.dropped_frames(), 0);
+
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared("ddp-batch-deferred"));
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+    // A capture backlog: three bursts in one READ while the decode thread is
+    // idle; their deliveries all come back at the next step.
+    chain.push_records(&ddp_read(&bursts, 0, BATCH, true), &mut |event| {
+        rendered.event(event)
+    });
+    assert_eq!(rendered.audible(), 0);
+    while worker.run_one() {}
+    chain.idle(1, &mut |event| rendered.event(event));
+    assert_eq!(chain.decode_in_flight(), 0);
+    assert_eq!(chain.dropped_frames(), 0);
+    for index in BATCH..BATCH + AFTER {
+        chain.push_records(&ddp_read(&bursts, index, 1, false), &mut |event| {
+            rendered.event(event)
+        });
+        while worker.run_one() {}
+        assert_eq!(chain.dropped_frames(), 0, "burst {index}");
+    }
+    chain.finish(&mut |event| rendered.event(event));
+    assert!(rendered.errors.is_empty());
+    assert_eq!(chain.dropped_frames(), 0);
+    // Every burst is heard: the batch only moves where the sound starts.
+    assert_eq!(rendered.audible(), expected.audible());
+    assert!(rendered.blocks.len() > expected.blocks.len());
 }
