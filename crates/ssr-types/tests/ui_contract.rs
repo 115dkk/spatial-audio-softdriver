@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use specta::TypeCollection;
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use ssr_types::app::{
-    Intent, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep, Snapshot,
-    UserError,
+    Intent, Language, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep,
+    Snapshot, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::status::{
@@ -177,6 +177,8 @@ fn headphone_profile() -> ProfileView {
 
 fn blank(phase: Phase) -> Snapshot {
     Snapshot {
+        language: Language::Ko,
+        language_choice: None,
         phase,
         profile: stereo_profile(),
         engine: None,
@@ -485,6 +487,9 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
 /// Every intent, as the screen must send it.
 fn intents() -> Vec<Intent> {
     vec![
+        Intent::SetLanguage(None),
+        Intent::SetLanguage(Some(Language::Ko)),
+        Intent::SetLanguage(Some(Language::En)),
         Intent::BeginSetup,
         Intent::InstallDriver,
         Intent::Recheck,

@@ -8,8 +8,6 @@ import { h, liveText, setAttr, svg } from '../dom';
 import { text } from '../text';
 import { panel } from './common';
 
-const p = text.profile;
-
 /**
  * Circles made up front: every lane the scene can name (the contract's four
  * endpoint slots) times the objects a lane carries (`ssr_types::MAX_OBJECTS`),
@@ -82,6 +80,7 @@ function sameDirections(a: readonly DirectionView[], b: readonly DirectionView[]
 
 /** A direction's point and its name; the live objects draw over both. */
 function directionMark(direction: DirectionView): { point: SVGGElement; name: SVGTextElement } {
+  const p = text.profile;
   const [x, y, z] = directionVector(direction);
   const [cx, cy] = toPlane(x, y);
   const up = z >= UP_Z;
@@ -128,6 +127,7 @@ function listener(): SVGGElement {
 
 /** Colour by entrance on one line, outline by height on the next. */
 function legend(): HTMLElement {
+  const p = text.profile;
   const item = (swatch: string, label: string) =>
     h('li', null, h('span', { class: `map-swatch ${swatch}`, 'aria-hidden': 'true' }), label);
   return h(
@@ -154,6 +154,7 @@ export interface ObjectMap {
  * strength, the height the outline). Without it only the directions show.
  */
 export function objectMap(directions: readonly DirectionView[], running: boolean): ObjectMap {
+  const p = text.profile;
   const pointLayer = svg('g', { class: 'map-directions' });
   const nameLayer = svg('g', { class: 'map-labels' });
   let drawnDirections: readonly DirectionView[] = [];

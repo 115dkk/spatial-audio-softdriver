@@ -10,6 +10,7 @@ use crate::driver_stats::{
 };
 use crate::recorder::{Recorder, RecorderConfig, TeeCapture};
 use crate::report::{RunFigures, SessionReport};
+use crate::text::Message;
 
 pub struct SessionConfig {
     pub engine: engine::EngineConfig,
@@ -317,6 +318,8 @@ impl Session {
             None => (Phase::Running, None),
         };
         Snapshot {
+            language: ssr_types::app::Language::Ko,
+            language_choice: None,
             phase,
             profile: crate::machine::default_profile_view(),
             engine: Some(status),
@@ -451,7 +454,10 @@ fn sample(source: &SharedStatsSource) -> Result<(u64, ssr_abi::DriverStats), Str
 /// The error the screen shows for a session that faulted on its own.
 fn fault_error(fault: &EngineFault) -> UserError {
     UserError {
-        message: format!("엔진이 멈췄습니다: {fault:?}"),
+        message: Message::EngineStopped {
+            detail: format!("{fault:?}"),
+        }
+        .render(ssr_types::app::Language::Ko),
         next: NextAction::Retry,
     }
 }

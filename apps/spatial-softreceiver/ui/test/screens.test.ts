@@ -380,6 +380,41 @@ describe('the profile screen', () => {
     expect(tones().every((tone) => !tone.disabled)).toBe(true);
   });
 
+  it('the settings screen sends the chosen language, null for automatic', async () => {
+    const start = fixture('ready');
+    const sent: Intent[] = [];
+    const api: Api = { ...createMockApi(start), dispatch: async (intent) => void sent.push(intent) };
+    const app = mountApp(root, api, { tab: 'settings' });
+    app.draw(start);
+    const select = () => root.querySelector<HTMLSelectElement>('[data-key="language"]');
+    // happy-dom's `select.value` misreports a selected last option; the
+    // attribute the screen sets is what a browser selects.
+    const chosen = () => select()?.querySelector('option[selected]')?.getAttribute('value') ?? null;
+    const choose = async (value: string) => {
+      const element = select();
+      if (element === null) throw new Error('no language select');
+      element.value = value;
+      element.dispatchEvent(new Event('change'));
+      // The intent's reply lands and the screen is drawn again.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      app.draw(start);
+    };
+    // The fixture follows the Windows language: the selector says so, not 'ko'.
+    expect(start.language_choice).toBeNull();
+    expect(chosen()).toBe('auto');
+    await choose('en');
+    await choose('auto');
+    expect(sent).toEqual([
+      { kind: 'set_language', value: 'en' },
+      { kind: 'set_language', value: null },
+    ]);
+    // A saved choice equal to the resolved language still shows as that choice.
+    app.draw({ ...start, language_choice: 'ko' });
+    expect(chosen()).toBe('ko');
+    app.draw({ ...start, language: 'en', language_choice: 'en' });
+    expect(chosen()).toBe('en');
+  });
+
   it('sends the direction id of the tone pressed', () => {
     const start = fixture('running');
     const sent: Intent[] = [];

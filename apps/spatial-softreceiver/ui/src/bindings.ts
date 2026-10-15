@@ -207,13 +207,15 @@ dropped_events: number; clock: ClockStatus;
  */
 clock_ppm: number; fault: EngineFault | null }
 
-export type Intent = { kind: "begin_setup" } | { kind: "install_driver" } |
+export type Intent = { kind: "set_language"; value: Language | null } | { kind: "begin_setup" } | { kind: "install_driver" } |
 /**
  * Looks at the PC again after the user did something outside the app
  * (a reboot, test signing, a repair, a device plugged in at the output
  * step), or leaves the faulted state.
  */
 { kind: "recheck" } | { kind: "choose_output"; value: DeviceId } | { kind: "import_brir"; value: string } | { kind: "import_headphone_fir"; value: string } | { kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
+
+export type Language = "ko" | "en"
 
 /**
  * Latency of the whole chain, from the driver's record QPC to the output
@@ -343,7 +345,17 @@ export type SetupStep = "welcome" |
  */
 "driver" | "reboot_required" | "choose_output"
 
-export type Snapshot = { phase: Phase; profile: ProfileView; engine: EngineStatus | null;
+export type Snapshot = {
+/**
+ * The resolved language. An OS-following setting is resolved before the
+ * snapshot crosses the UI contract.
+ */
+language: Language;
+/**
+ * The saved choice behind `language`: `None` follows the Windows display
+ * language. The settings screen's selector shows this, not the result.
+ */
+language_choice: Language | null; phase: Phase; profile: ProfileView; engine: EngineStatus | null;
 /**
  * Outputs the user may choose: active, and never our own endpoints.
  */

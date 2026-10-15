@@ -29,15 +29,53 @@
 use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use ssr_types::app::{Heartbeat, Intent, NextAction, Phase, Snapshot, UserError};
+use ssr_guard::marker::{self, Marker};
+use ssr_types::app::{Heartbeat, Intent, Language, NextAction, Phase, Snapshot, UserError};
 use ssr_types::{EngineStatus, Host};
 use supervisor::machine::Config;
 use supervisor::{Launcher, Settings, Supervisor};
 
 use crate::log;
+
+// The first shell note owns the startup notices' lifetime under the supervisor's
+// clearing rules. External text is retained separately, never parsed as a token.
+const STARTUP_NOTES: &str = "\0ssr-shell-startup-notes";
+
+/// A startup fact, retained until the supervisor clears its shell notes.
+#[derive(Clone, Debug)]
+pub enum Note {
+    External(String),
+    RestoreReadFailed { detail: String },
+    RestoreFailed,
+    Supervisor(supervisor::text::Message),
+}
+
+impl Note {
+    pub fn render(&self, language: Language) -> String {
+        match self {
+            Self::External(detail) => detail.clone(),
+            Self::RestoreReadFailed { detail } => match language {
+                Language::Ko => format!("복원점을 읽지 못했습니다: {detail}"),
+                Language::En => format!("Could not read the restore point: {detail}"),
+            },
+            Self::RestoreFailed => match language {
+                Language::Ko => "지난 실행의 기본 장치를 되돌리지 못했습니다.",
+                Language::En => {
+                    "Could not restore the default audio devices from the previous run."
+                }
+            }
+            .to_owned(),
+            Self::Supervisor(message) => message.render(language),
+        }
+    }
+}
 
 /// What the shell asks the control thread for.
 #[derive(Debug)]
@@ -75,17 +113,29 @@ pub trait SettingsStore: Send + 'static {
 #[derive(Clone, Debug)]
 pub struct Bridge {
     tx: Sender<Request>,
+    korean: Arc<AtomicBool>,
 }
 
 impl Bridge {
+    /// The language of the last snapshot the control thread sent.
+    pub fn language(&self) -> Language {
+        if self.korean.load(Ordering::Relaxed) {
+            Language::Ko
+        } else {
+            Language::En
+        }
+    }
+
     /// Sends `intent` and waits for its result. Once the control thread has
     /// ended this is an error that says the app is quitting.
     pub fn dispatch(&self, intent: Intent) -> Result<(), UserError> {
         let (reply, result) = mpsc::channel();
         self.tx
             .send(Request::Intent { intent, reply })
-            .map_err(|_| quitting())?;
-        result.recv().unwrap_or_else(|_| Err(quitting()))
+            .map_err(|_| quitting(self.language()))?;
+        result
+            .recv()
+            .unwrap_or_else(|_| Err(quitting(self.language())))
     }
 
     /// The supervisor's snapshot now. Once the control thread has ended, an
@@ -93,9 +143,11 @@ impl Bridge {
     pub fn snapshot(&self) -> Snapshot {
         let (reply, snapshot) = mpsc::channel();
         if self.tx.send(Request::Snapshot { reply }).is_err() {
-            return quit_snapshot();
+            return quit_snapshot(self.language());
         }
-        snapshot.recv().unwrap_or_else(|_| quit_snapshot())
+        snapshot
+            .recv()
+            .unwrap_or_else(|_| quit_snapshot(self.language()))
     }
 }
 
@@ -146,14 +198,75 @@ where
     E: Emitter,
     S: SettingsStore,
 {
+    spawn_with_marker(
+        host,
+        launcher,
+        config,
+        control,
+        store,
+        emitter,
+        (initial_notes, None),
+    )
+}
+
+/// Like [`spawn`], retaining a structured guard marker so each snapshot can
+/// render its reason in the current language rather than the startup language.
+pub fn spawn_with_marker<H, L, E, S>(
+    host: H,
+    launcher: L,
+    config: Config,
+    control: ControlConfig,
+    store: S,
+    emitter: E,
+    initial: (Vec<String>, Option<Marker>),
+) -> (Bridge, JoinHandle<()>)
+where
+    H: Host + Send + 'static,
+    L: Launcher + Send + 'static,
+    E: Emitter,
+    S: SettingsStore,
+{
+    let (notes, marker) = initial;
+    spawn_with_startup(
+        host,
+        launcher,
+        config,
+        control,
+        store,
+        emitter,
+        (notes.into_iter().map(Note::External).collect(), marker),
+    )
+}
+
+/// Like [`spawn_with_marker`], retaining startup diagnostics for rendering in
+/// each snapshot's language without repeating the restoration itself.
+pub fn spawn_with_startup<H, L, E, S>(
+    host: H,
+    launcher: L,
+    config: Config,
+    control: ControlConfig,
+    store: S,
+    emitter: E,
+    initial: (Vec<Note>, Option<Marker>),
+) -> (Bridge, JoinHandle<()>)
+where
+    H: Host + Send + 'static,
+    L: Launcher + Send + 'static,
+    E: Emitter,
+    S: SettingsStore,
+{
+    let (initial_notes, marker) = initial;
+    let korean = Arc::new(AtomicBool::new(config.default_language == Language::Ko));
+    let thread_korean = Arc::clone(&korean);
     let (tx, rx) = mpsc::channel();
     let thread = thread::Builder::new()
         .name("ssr-control".to_owned())
         .spawn(move || {
             let mut supervisor = Supervisor::new(host, launcher, config, store.load());
-            for note in initial_notes {
-                supervisor.note(note);
+            if !initial_notes.is_empty() || marker.is_some() {
+                supervisor.note(STARTUP_NOTES.to_owned());
             }
+            thread_korean.store(supervisor.language() == Language::Ko, Ordering::Relaxed);
             store.save(supervisor.settings());
             let mut thread = ControlThread {
                 supervisor,
@@ -161,13 +274,16 @@ where
                 emitter,
                 control,
                 last: None,
+                initial_notes,
+                marker,
+                korean: thread_korean,
             };
             if let Err(panic) = panic::catch_unwind(AssertUnwindSafe(|| thread.run(&rx))) {
                 thread.after_panic(panic.as_ref());
             }
         })
         .expect("the operating system starts the control thread");
-    (Bridge { tx }, thread)
+    (Bridge { tx, korean }, thread)
 }
 
 struct ControlThread<H: Host, L: Launcher, E: Emitter, S: SettingsStore> {
@@ -177,6 +293,9 @@ struct ControlThread<H: Host, L: Launcher, E: Emitter, S: SettingsStore> {
     control: ControlConfig,
     /// The last snapshot sent, without its engine status.
     last: Option<Snapshot>,
+    initial_notes: Vec<Note>,
+    marker: Option<Marker>,
+    korean: Arc<AtomicBool>,
 }
 
 impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, S> {
@@ -206,7 +325,7 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
                     }
                 }
                 Ok(Request::Snapshot { reply }) => {
-                    let _ = reply.send(self.supervisor.snapshot());
+                    let _ = reply.send(self.snapshot());
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
@@ -269,6 +388,10 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
             self.idle_heartbeat();
         }
         let result = self.supervisor.handle(intent);
+        self.korean.store(
+            self.supervisor.language() == Language::Ko,
+            Ordering::Relaxed,
+        );
         match &result {
             Ok(()) => {
                 self.store.save(self.supervisor.settings());
@@ -343,7 +466,7 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
     /// status aside.
     fn refresh(&mut self) {
         self.supervisor.watch_profile_file();
-        let snapshot = self.supervisor.snapshot();
+        let snapshot = self.snapshot();
         self.emitter
             .heartbeat(&heartbeat_of(&snapshot.phase, snapshot.engine.as_ref()));
         if self.last.as_ref() != Some(&without_engine(&snapshot)) {
@@ -351,8 +474,35 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
         }
     }
 
+    fn snapshot(&mut self) -> Snapshot {
+        let mut snapshot = self.supervisor.snapshot();
+        if snapshot
+            .notes
+            .first()
+            .is_some_and(|note| note == STARTUP_NOTES)
+            && (!self.initial_notes.is_empty() || self.marker.is_some())
+        {
+            let mut notes: Vec<_> = self
+                .initial_notes
+                .iter()
+                .map(|note| note.render(snapshot.language))
+                .collect();
+            if let Some(marker) = &self.marker {
+                notes.push(marker::sentence(marker, snapshot.language).to_owned());
+                notes.extend(marker.notes.iter().cloned());
+            }
+            snapshot.notes.splice(..1, notes);
+        } else {
+            // Once cleared, a later external diagnostic cannot revive startup
+            // facts, even if its contents happen to equal our sentinel.
+            self.initial_notes.clear();
+            self.marker = None;
+        }
+        snapshot
+    }
+
     fn publish(&mut self) {
-        let snapshot = self.supervisor.snapshot();
+        let snapshot = self.snapshot();
         self.send(snapshot);
     }
 
@@ -396,17 +546,23 @@ fn without_engine(snapshot: &Snapshot) -> Snapshot {
     }
 }
 
-fn quitting() -> UserError {
+fn quitting(language: Language) -> UserError {
     UserError {
-        message: "앱이 종료되는 중입니다.".to_owned(),
+        message: match language {
+            Language::Ko => "앱이 종료되는 중입니다.",
+            Language::En => "The app is shutting down.",
+        }
+        .to_owned(),
         next: NextAction::None,
     }
 }
 
-fn quit_snapshot() -> Snapshot {
+fn quit_snapshot(language: Language) -> Snapshot {
     Snapshot {
+        language,
+        language_choice: None,
         phase: Phase::Quit,
-        profile: supervisor::default_profile_view(),
+        profile: supervisor::machine::default_profile_view_for(language),
         engine: None,
         outputs: Vec::new(),
         chosen_output: None,

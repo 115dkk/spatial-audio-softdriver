@@ -1,15 +1,16 @@
-// The settings screen: login autostart, the app's update, diagnostic
-// recording, and what the supervisor knows about the PC and the driver.
+// The settings screen: login autostart, the language, the app's update,
+// diagnostic recording, and what the supervisor knows about the PC and
+// the driver.
 
 import { toUserError } from '../api';
+import type { Language } from '../bindings';
 import { type Child, facts, h } from '../dom';
 import { text } from '../text';
 import { type Context, type Drawn, button, intentButton, panel } from './common';
 import { driverRows, platformRows } from './facts';
 
-const t = text.settings;
-
 function autostart(ctx: Context): HTMLElement {
+  const t = text.settings;
   const native = ctx.shell.native;
   // A change in flight lives in view state, not in this checkbox: a redraw
   // (a snapshot, a tab switch) builds a new checkbox that must stay locked.
@@ -55,6 +56,7 @@ function autostart(ctx: Context): HTMLElement {
 
 /** The running version, and the downloaded one with the button that applies it. */
 function update(ctx: Context): HTMLElement {
+  const t = text.settings;
   const state = ctx.view.update;
   const children: Child[] = [];
   if (!ctx.shell.native) {
@@ -85,12 +87,45 @@ function update(ctx: Context): HTMLElement {
   return h('div', { class: 'update' }, ...children);
 }
 
+/** The language: automatic (the Windows display language) or one of the two. */
+function language(ctx: Context): HTMLElement {
+  const t = text.settings;
+  const current = ctx.snapshot.language_choice ?? 'auto';
+  const options: Array<[value: 'auto' | Language, label: string]> = [
+    ['auto', t.languageAuto],
+    ['ko', t.languageKo],
+    ['en', t.languageEn],
+  ];
+  const select = h('select', {
+    id: 'language',
+    'data-key': 'language',
+    disabled: ctx.busy,
+    'aria-describedby': 'language-hint',
+  });
+  for (const [value, label] of options) {
+    select.append(h('option', { value, selected: value === current }, label));
+  }
+  select.addEventListener('change', () => {
+    const value = select.value;
+    ctx.send({ kind: 'set_language', value: value === 'auto' ? null : (value as Language) });
+  });
+  return h(
+    'div',
+    { class: 'field' },
+    h('label', { for: 'language' }, t.language),
+    select,
+    h('p', { id: 'language-hint', class: 'hint' }, t.languageHint),
+  );
+}
+
 export function settings(ctx: Context): Drawn {
+  const t = text.settings;
   const { platform, driver } = ctx.snapshot;
   const element = h(
     'div',
     { class: 'settings' },
     panel(t.startup, [autostart(ctx)]),
+    panel(t.language, [language(ctx)]),
     panel(t.update, [update(ctx)]),
     panel(t.diagnostics, [
       h('p', { class: 'body-text' }, t.recordHint),

@@ -10,8 +10,6 @@ import { text } from '../text';
 import { type Context, type Drawn, button, intentButton, panel } from './common';
 import { objectMap } from './objectmap';
 
-const p = text.profile;
-
 export const GAIN_MIN = -20;
 export const GAIN_MAX = 10;
 
@@ -45,18 +43,18 @@ function current(ctx: Context): HTMLElement {
   const kind = h(
     'span',
     { class: 'profile-kind' },
-    p.kindNames[profile.kind],
-    profile.from_file ? h('span', { class: 'tag' }, p.fromFileTag) : null,
+    text.profile.kindNames[profile.kind],
+    profile.from_file ? h('span', { class: 'tag' }, text.profile.fromFileTag) : null,
   );
-  const path = (value: string | null) => h('span', { class: value === null ? 'muted' : 'path' }, value ?? p.none);
-  return panel(p.currentTitle, [
+  const path = (value: string | null) => h('span', { class: value === null ? 'muted' : 'path' }, value ?? text.profile.none);
+  return panel(text.profile.currentTitle, [
     facts([
-      [p.kind, kind],
-      [p.name, profile.name],
-      [p.brir, path(profile.brir)],
-      [p.fir, path(profile.headphone_fir)],
+      [text.profile.kind, kind],
+      [text.profile.name, profile.name],
+      [text.profile.brir, path(profile.brir)],
+      [text.profile.fir, path(profile.headphone_fir)],
     ]),
-    profile.kind === 'stereo' && !profile.from_file ? h('p', { class: 'hint panel-note' }, p.stereoNote) : null,
+    profile.kind === 'stereo' && !profile.from_file ? h('p', { class: 'hint panel-note' }, text.profile.stereoNote) : null,
   ]);
 }
 
@@ -68,16 +66,16 @@ function imports(ctx: Context): HTMLElement {
   const brirHint = fromFile
     ? null
     : ctx.pending === 'import_brir'
-      ? p.importing
+      ? text.profile.importing
       : phase.kind === 'running'
-        ? p.importRunning
+        ? text.profile.importRunning
         : null;
   const firHint = fromFile
     ? null
     : profile.brir === null
-      ? p.firNeedsBrir
+      ? text.profile.firNeedsBrir
       : ctx.pending === 'import_headphone_fir'
-        ? p.importing
+        ? text.profile.importing
         : null;
   const brirDescribed = fromFile ? 'import-file-hint' : brirHint === null ? null : 'brir-hint';
   const firDescribed = fromFile ? 'import-file-hint' : firHint === null ? null : 'fir-hint';
@@ -85,27 +83,27 @@ function imports(ctx: Context): HTMLElement {
   const brir = h(
     'div',
     { class: 'import' },
-    h('h3', { class: 'import-title' }, p.brir),
-    h('p', { class: 'body-text' }, p.brirBody),
+    h('h3', { class: 'import-title' }, text.profile.brir),
+    h('p', { class: 'body-text' }, text.profile.brirBody),
     h(
       'div',
       { class: 'actions' },
       picker(
         ctx,
-        p.brirFolder,
+        text.profile.brirFolder,
         'brir-folder',
         fromFile,
         brirDescribed,
-        () => shell.pickFolder(p.brirFolderDialog),
+        () => shell.pickFolder(text.profile.brirFolderDialog),
         (path) => ctx.send({ kind: 'import_brir', value: path }),
       ),
       picker(
         ctx,
-        p.brirFile,
+        text.profile.brirFile,
         'brir-file',
         fromFile,
         brirDescribed,
-        () => shell.pickFile(p.brirFileDialog, { name: p.brirFilter, extensions: ['wav'] }),
+        () => shell.pickFile(text.profile.brirFileDialog, { name: text.profile.brirFilter, extensions: ['wav'] }),
         (path) => ctx.send({ kind: 'import_brir', value: path }),
       ),
     ),
@@ -114,26 +112,26 @@ function imports(ctx: Context): HTMLElement {
   const fir = h(
     'div',
     { class: 'import' },
-    h('h3', { class: 'import-title' }, p.fir),
-    h('p', { class: 'body-text' }, p.firBody),
+    h('h3', { class: 'import-title' }, text.profile.fir),
+    h('p', { class: 'body-text' }, text.profile.firBody),
     h(
       'div',
       { class: 'actions' },
       picker(
         ctx,
-        p.firImport,
+        text.profile.firImport,
         'fir',
         fromFile || profile.brir === null,
         firDescribed,
-        () => shell.pickFile(p.firDialog, { name: p.firFilter, extensions: ['wav'] }),
+        () => shell.pickFile(text.profile.firDialog, { name: text.profile.firFilter, extensions: ['wav'] }),
         (path) => ctx.send({ kind: 'import_headphone_fir', value: path }),
       ),
     ),
     firHint === null ? null : h('p', { id: 'fir-hint', class: 'hint import-hint' }, firHint),
   );
   return panel(
-    p.importTitle,
-    [fromFile ? h('p', { id: 'import-file-hint', class: 'file-note' }, p.fromFile) : null, brir, fir],
+    text.profile.importTitle,
+    [fromFile ? h('p', { id: 'import-file-hint', class: 'file-note' }, text.profile.fromFile) : null, brir, fir],
     'imports',
   );
 }
@@ -143,7 +141,7 @@ function gain(ctx: Context): HTMLElement {
   // value being sent, so the slider does not jump back until Rust answers.
   const value =
     ctx.pending === 'set_gain' && ctx.view.gainSending !== null ? ctx.view.gainSending : ctx.snapshot.profile.gain_db;
-  const readout = h('output', { class: 'num gain-readout', for: 'gain' }, `${oneDecimal(value)} ${p.gainUnit}`);
+  const readout = h('output', { class: 'num gain-readout', for: 'gain' }, `${oneDecimal(value)} ${text.profile.gainUnit}`);
   const slider = h('input', {
     id: 'gain',
     type: 'range',
@@ -157,7 +155,7 @@ function gain(ctx: Context): HTMLElement {
   });
   slider.addEventListener('input', () => {
     const moved = Number(slider.value);
-    readout.textContent = `${oneDecimal(moved)} ${p.gainUnit}`;
+    readout.textContent = `${oneDecimal(moved)} ${text.profile.gainUnit}`;
     slider.setAttribute('aria-valuetext', `${oneDecimal(moved)} dB`);
   });
   // `change` fires when the slider is let go (or a key step ends).
@@ -166,12 +164,12 @@ function gain(ctx: Context): HTMLElement {
     ctx.setView({ gainSending: wanted });
     ctx.send({ kind: 'set_gain', value: wanted });
   });
-  return panel(p.gainTitle, [
-    h('p', { class: 'body-text' }, p.gainBody),
+  return panel(text.profile.gainTitle, [
+    h('p', { class: 'body-text' }, text.profile.gainBody),
     h(
       'div',
       { class: 'gain' },
-      h('label', { for: 'gain', class: 'visually-hidden' }, p.gainLabel),
+      h('label', { for: 'gain', class: 'visually-hidden' }, text.profile.gainLabel),
       h('span', { class: 'gain-scale muted small' }, `${GAIN_MIN}`),
       slider,
       h('span', { class: 'gain-scale muted small' }, `+${GAIN_MAX}`),
@@ -183,7 +181,7 @@ function gain(ctx: Context): HTMLElement {
 function tones(ctx: Context): HTMLElement {
   const { profile, phase } = ctx.snapshot;
   const running = phase.kind === 'running';
-  const grid = h('div', { class: 'direction-grid', role: 'group', 'aria-label': p.testLabel });
+  const grid = h('div', { class: 'direction-grid', role: 'group', 'aria-label': text.profile.testLabel });
   for (const direction of profile.directions) {
     const tone = intentButton(
       ctx,
@@ -191,7 +189,7 @@ function tones(ctx: Context): HTMLElement {
       { kind: 'test_direction', value: direction.id },
       { key: `direction-${direction.id}` },
     );
-    tone.title = p.angles(direction.azimuth_deg, direction.elevation_deg);
+    tone.title = text.profile.angles(direction.azimuth_deg, direction.elevation_deg);
     if (!running) {
       tone.disabled = true;
       tone.setAttribute('aria-describedby', 'test-hint');
@@ -199,10 +197,10 @@ function tones(ctx: Context): HTMLElement {
     grid.append(tone);
   }
   const empty = profile.directions.length === 0;
-  return panel(p.testTitle, [
-    h('p', { class: 'body-text' }, p.testBody),
-    empty ? h('p', { class: 'hint import-hint' }, p.noDirections) : grid,
-    running || empty ? null : h('p', { id: 'test-hint', class: 'hint import-hint' }, p.testOff),
+  return panel(text.profile.testTitle, [
+    h('p', { class: 'body-text' }, text.profile.testBody),
+    empty ? h('p', { class: 'hint import-hint' }, text.profile.noDirections) : grid,
+    running || empty ? null : h('p', { id: 'test-hint', class: 'hint import-hint' }, text.profile.testOff),
   ]);
 }
 

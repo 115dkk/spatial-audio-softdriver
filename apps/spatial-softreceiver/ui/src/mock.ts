@@ -318,6 +318,11 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
     // The profile can change whenever the wizard is done.
     const profileOpen = phase.kind === 'ready' || phase.kind === 'running' || phase.kind === 'faulted';
     switch (intent.kind) {
+      case 'set_language':
+        // The browser stand-in has a fixed Korean system-language baseline.
+        state.language_choice = intent.value;
+        state.language = intent.value ?? 'ko';
+        return done;
       case 'import_brir':
         return profileOpen ? importBrir(intent.value) : refused();
       case 'import_headphone_fir':

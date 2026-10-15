@@ -49,6 +49,33 @@ fn chosen() -> Settings {
 }
 
 #[test]
+fn guard_rereads_the_apps_language_settings_for_each_notification() {
+    use ssr_types::app::Language::{En, Ko};
+    let scratch = Scratch::new("guard-language");
+    let file = JsonSettingsFile::in_dir(scratch.path());
+    assert_eq!(ssr_guard::language::resolve_in(scratch.path(), En), En);
+    for (saved, os, expected) in [
+        (Some(Ko), En, Ko),
+        (Some(En), Ko, En),
+        (None, Ko, Ko),
+        (None, En, En),
+    ] {
+        file.write(&Settings {
+            language: saved,
+            ..Settings::default()
+        })
+        .expect("settings saved");
+        assert_eq!(file.load().language, saved);
+        assert_eq!(
+            ssr_guard::language::resolve_in(scratch.path(), os),
+            expected
+        );
+    }
+    fs::write(&file.path, "broken").expect("broken settings written");
+    assert_eq!(ssr_guard::language::resolve_in(scratch.path(), En), En);
+}
+
+#[test]
 fn settings_round_trip() {
     let scratch = Scratch::new("round-trip");
     // The directory does not exist yet: the first save makes it.

@@ -35,6 +35,165 @@ fn start(
 }
 
 #[test]
+fn language_changes_repaint_marker_and_preserve_note_lifetime() {
+    use ssr_guard::marker::{self, Marker, MarkerReason};
+    use ssr_types::app::Language::{En, Ko};
+    let (host, store, recorder) = (FakeHost::new(), MemoryStore::default(), Recorder::default());
+    let marker = Marker::new(
+        MarkerReason::AppExited,
+        1,
+        vec!["diagnostic detail".to_owned()],
+    );
+    let (bridge, thread) = control::spawn_with_marker(
+        host,
+        FakeLauncher,
+        supervisor::machine::Config {
+            default_language: En,
+            ..common::config()
+        },
+        ControlConfig::default(),
+        store.clone(),
+        recorder.clone(),
+        (Vec::new(), Some(marker.clone())),
+    );
+    let first = bridge.snapshot();
+    assert_eq!(first.language, En);
+    assert!(
+        first
+            .notes
+            .contains(&marker::sentence(&marker, En).to_owned())
+    );
+    bridge
+        .dispatch(Intent::SetLanguage(Some(Ko)))
+        .expect("Korean selected");
+    let korean = bridge.snapshot();
+    assert_eq!(korean.language, Ko);
+    assert!(
+        korean
+            .notes
+            .contains(&marker::sentence(&marker, Ko).to_owned())
+    );
+    assert!(
+        !korean
+            .notes
+            .contains(&marker::sentence(&marker, En).to_owned())
+    );
+    assert!(korean.notes.contains(&"diagnostic detail".to_owned()));
+    assert!(recorder.wait_for_snapshots(PATIENCE, |snapshots| {
+        snapshots.last().is_some_and(|s| s.language == Ko)
+    }));
+    assert!(
+        recorder
+            .snapshots()
+            .iter()
+            .flat_map(|s| &s.notes)
+            .all(|note| !note.contains('\0'))
+    );
+    assert_eq!(store.settings().language, Some(Ko));
+    bridge
+        .dispatch(Intent::SetLanguage(None))
+        .expect("system language selected");
+    assert_eq!(bridge.snapshot().language, En);
+    assert_eq!(store.settings().language, None);
+    bridge.dispatch(Intent::BeginSetup).expect("wizard begins");
+    assert!(
+        !bridge
+            .snapshot()
+            .notes
+            .contains(&marker::sentence(&marker, En).to_owned())
+    );
+    bridge.dispatch(Intent::Quit).expect("quit succeeds");
+    thread.join().expect("control ends");
+    assert_eq!(bridge.snapshot().language, En);
+    assert_eq!(
+        bridge
+            .dispatch(Intent::Enable)
+            .expect_err("bridge is closed")
+            .message,
+        "The app is shutting down."
+    );
+}
+
+#[test]
+fn startup_restore_notices_follow_language_without_losing_external_details() {
+    use control::Note;
+    use ssr_types::Role;
+    use ssr_types::app::Language::{En, Ko};
+    use supervisor::text::Message;
+
+    let (host, store, recorder) = (FakeHost::new(), MemoryStore::default(), Recorder::default());
+    let detail = "C:\\사용자\\restore.json: OS error 5 / 사용자 detail";
+    // Even token-shaped external text is opaque, not a second placeholder.
+    let external = "\0ssr-shell-startup-notes";
+    let diagnostic = Message::RestoreRoleFailed {
+        role: Role::Console,
+        detail: detail.to_owned(),
+    };
+    let (bridge, thread) = control::spawn_with_startup(
+        host.clone(),
+        FakeLauncher,
+        common::config(),
+        ControlConfig::default(),
+        store,
+        recorder.clone(),
+        (
+            vec![
+                Note::RestoreReadFailed {
+                    detail: detail.to_owned(),
+                },
+                Note::RestoreFailed,
+                Note::Supervisor(diagnostic.clone()),
+                Note::External(external.to_owned()),
+            ],
+            None,
+        ),
+    );
+    let initial = bridge.snapshot();
+    assert_eq!(initial.language, Ko);
+    let korean_notes = vec![
+        format!("복원점을 읽지 못했습니다: {detail}"),
+        "지난 실행의 기본 장치를 되돌리지 못했습니다.".to_owned(),
+        diagnostic.render(Ko),
+        external.to_owned(),
+    ];
+    assert_eq!(initial.notes, korean_notes);
+    let calls = host.world().calls.clone();
+
+    bridge.dispatch(Intent::SetLanguage(Some(En))).unwrap();
+    let english_notes = vec![
+        format!("Could not read the restore point: {detail}"),
+        "Could not restore the default audio devices from the previous run.".to_owned(),
+        diagnostic.render(En),
+        external.to_owned(),
+    ];
+    assert_eq!(bridge.snapshot().notes, english_notes);
+    assert!(recorder.wait_for_snapshots(PATIENCE, |snapshots| {
+        snapshots.last().is_some_and(|s| s.notes == english_notes)
+    }));
+    bridge.dispatch(Intent::SetLanguage(Some(Ko))).unwrap();
+    assert_eq!(bridge.snapshot().notes, korean_notes);
+    assert_eq!(
+        host.world().calls,
+        calls,
+        "translation must not restore again"
+    );
+
+    bridge.dispatch(Intent::BeginSetup).unwrap();
+    assert!(bridge.snapshot().notes.is_empty());
+    bridge.dispatch(Intent::SetLanguage(Some(En))).unwrap();
+    assert!(
+        bridge.snapshot().notes.is_empty(),
+        "cleared notes must stay cleared"
+    );
+    bridge.dispatch(Intent::Quit).unwrap();
+    thread.join().unwrap();
+    assert_eq!(
+        bridge.snapshot().profile,
+        supervisor::machine::default_profile_view_for(En)
+    );
+}
+
+#[test]
 fn the_first_snapshot_is_emitted_before_any_intent() {
     let (host, store, recorder) = (FakeHost::new(), MemoryStore::default(), Recorder::default());
     let (_bridge, _thread) = start(&host, &store, &recorder);

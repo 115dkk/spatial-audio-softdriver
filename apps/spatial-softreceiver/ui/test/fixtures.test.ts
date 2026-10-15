@@ -18,6 +18,7 @@ describe('fixtures match bindings.ts', () => {
     const kinds = intents.map((intent) => assertIntent(intent).kind);
     expect(new Set(kinds)).toEqual(
       new Set([
+        'set_language',
         'begin_setup',
         'install_driver',
         'recheck',
