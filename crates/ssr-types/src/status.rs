@@ -4,7 +4,18 @@
 //! and computes latency percentiles on its caller without blocking the
 //! real-time threads.
 
-use crate::{format::SourceFormat, ports::OutputMode};
+use crate::{format::SourceFormat, layout::DirectionView, ports::OutputMode};
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct SceneObject {
+    pub lane: u8,
+    pub index: u8,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub level_dbfs: f32,
+}
 
 /// Status slots mirror the driver's fixed endpoint range without making this
 /// foundational crate depend on `ssr-abi`.
@@ -262,6 +273,11 @@ pub struct UnderrunSnapshot {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct EngineStatus {
+    /// Directions in the current output layout (BRIR directions for headphones,
+    /// physical speakers for speaker output).
+    pub directions: Vec<DirectionView>,
+    /// Active objects with finite, nonzero signal in the last mixed block.
+    pub scene: Vec<SceneObject>,
     pub endpoints: [EndpointStatus; ENGINE_ENDPOINTS],
     /// Chain errors whose malformed record did not identify an entrance.
     #[cfg_attr(feature = "ts", specta(type = ChainErrorMap))]

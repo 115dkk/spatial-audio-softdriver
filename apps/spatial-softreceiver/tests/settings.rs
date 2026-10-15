@@ -44,6 +44,7 @@ fn chosen() -> Settings {
             id: DeviceId("{0.0.0.00000000}.{a1b2}".to_owned()),
             name: "스피커 (USB DAC)".to_owned(),
         }),
+        ..Settings::default()
     }
 }
 
@@ -120,6 +121,10 @@ fn state_dir_falls_back_to_the_temp_dir_without_local_app_data() {
     assert_eq!(
         paths::guard_exe(Path::new("app")),
         Path::new("app").join("ssr-guard.exe")
+    );
+    assert_eq!(
+        paths::profile_file(&fallback),
+        fallback.join("profile.toml")
     );
 }
 

@@ -41,8 +41,8 @@ describe('the mock bridge', () => {
 
   it('rejects a refused intent with its UserError and keeps it out of the snapshot', async () => {
     const api = createMockApi(fixture('ready'));
-    await expect(api.dispatch({ kind: 'set_gain', value: -3 })).rejects.toEqual({
-      message: '아직 지원하지 않는 동작입니다.',
+    await expect(api.dispatch({ kind: 'test_direction', value: 0 })).rejects.toEqual({
+      message: '켠 뒤에 시험음을 낼 수 있습니다.',
       next: 'none',
     });
     await expect(api.dispatch({ kind: 'begin_setup' })).rejects.toMatchObject({ next: 'none' });

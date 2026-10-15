@@ -13,8 +13,12 @@ export interface ViewState {
   outputsOpen: boolean;
   /** The error sentence the user closed; shown again once it changes. */
   dismissed: string | null;
-  /** The last gain Rust accepted, so a redraw does not move the slider. */
-  gain: number;
+  /**
+   * The gain a `set_gain` in flight carries, so the slider holds it until
+   * the snapshot that follows lands. The slider otherwise shows the
+   * snapshot's `profile.gain_db`.
+   */
+  gainSending: number | null;
   /** Login autostart as last read from the OS; null until read. */
   autostart: boolean | null;
   /** The autostart value being set; null when no change is in flight. */
@@ -41,7 +45,7 @@ export interface Context {
   offer(kind: Intent['kind']): void;
 }
 
-/** The status screen's live part, updated by the 30 Hz meters. */
+/** A screen's live part, updated in place by the 30 Hz meters. */
 export interface Live {
   update(engine: EngineStatus): void;
 }

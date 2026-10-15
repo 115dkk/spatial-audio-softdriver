@@ -4141,6 +4141,7 @@ dependencies = [
  "assert_no_alloc",
  "brir",
  "engine",
+ "hound",
  "rtrb",
  "serde",
  "serde_json",

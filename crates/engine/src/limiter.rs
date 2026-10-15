@@ -15,6 +15,9 @@ pub(crate) struct Limiter {
     detector_gain: f32,
     attack: f32,
     release: f32,
+    gain_from: f32,
+    gain_target: f32,
+    gain_ramp_frames: usize,
 }
 
 impl Limiter {
@@ -25,11 +28,17 @@ impl Limiter {
             detector_gain: 1.0,
             attack: 0.0,
             release: 0.0,
+            gain_from: 1.0,
+            gain_target: 1.0,
+            gain_ramp_frames: 0,
         }
     }
 
     pub(crate) fn reset(&mut self, rate: u32, gain: f32, ceiling: f32) {
         self.gain = if gain.is_finite() { gain } else { 0.0 };
+        self.gain_from = self.gain;
+        self.gain_target = self.gain;
+        self.gain_ramp_frames = 0;
         self.ceiling = if ceiling.is_finite() {
             ceiling.max(0.0)
         } else {
@@ -40,13 +49,42 @@ impl Limiter {
         self.release = coefficient(rate, 0.050);
     }
 
+    pub(crate) fn set_gain(&mut self, gain: f32, ramp_frames: usize) {
+        self.gain_from = self.gain;
+        self.gain_target = gain;
+        self.gain_ramp_frames = ramp_frames;
+    }
+
+    /// Like [`Limiter::reset`], but a gain ramp that has not played yet
+    /// survives: it still starts from where it would have and ends at
+    /// `gain`, over the frames it had left.
+    pub(crate) fn reset_keeping_ramp(&mut self, rate: u32, gain: f32, ceiling: f32) {
+        let pending =
+            (self.gain_ramp_frames != 0).then_some((self.gain_from, self.gain_ramp_frames));
+        self.reset(rate, gain, ceiling);
+        if let Some((from, frames)) = pending
+            && from.is_finite()
+        {
+            self.gain = from;
+            self.gain_from = from;
+            self.gain_ramp_frames = frames;
+        }
+    }
+
     pub(crate) fn process(&mut self, samples: &mut [f32], channels: usize, frames: usize) {
         debug_assert_eq!(samples.len(), channels * frames);
         for frame in 0..frames {
+            let output_gain = if self.gain_ramp_frames == 0 {
+                self.gain
+            } else {
+                self.gain_from
+                    + (self.gain_target - self.gain_from)
+                        * (frame.min(self.gain_ramp_frames) as f32 / self.gain_ramp_frames as f32)
+            };
             let mut peak = 0.0_f32;
             for channel in 0..channels {
                 let index = channel * frames + frame;
-                let gained = finite_or_zero(samples[index] * self.gain);
+                let gained = finite_or_zero(samples[index] * output_gain);
                 samples[index] = gained;
                 peak = peak.max(gained.abs());
             }
@@ -77,6 +115,11 @@ impl Limiter {
                     samples[index] = (samples[index] * applied).clamp(-self.ceiling, self.ceiling);
                 }
             }
+        }
+        if self.gain_ramp_frames != 0 {
+            self.gain = self.gain_target;
+            self.gain_from = self.gain_target;
+            self.gain_ramp_frames = 0;
         }
     }
 }

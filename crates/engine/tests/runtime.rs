@@ -244,7 +244,6 @@ fn prepared_with_ir(rate: u32, ir: &[f32]) -> Box<Prepared> {
         gain: 1.0,
         limiter_ceiling: 1.0,
         ir_frames: ir.len(),
-        omitted_silent_directions: Vec::new(),
         trimmed_leading_frames: 0,
     });
     Box::new(Prepared::new(brir, BLOCK).unwrap())
@@ -3541,4 +3540,106 @@ fn stop_and_drop_join_threads_promptly() {
         assert!(start.elapsed() < Duration::from_millis(200));
         assert!(state.stopped.load(Ordering::Acquire));
     }
+}
+
+#[test]
+fn status_reports_current_directions_and_latest_scene() {
+    let state = SinkState::new(0);
+    let mut records = vec![format_record(RATE), stream_start_record(ENDPOINT_PRIMARY)];
+    for block in 1..=12 {
+        records.push(data_record_for(
+            ENDPOINT_PRIMARY,
+            block * BLOCK as u64,
+            0.5,
+            -0.25,
+            BLOCK,
+        ));
+    }
+    let capture = RecordsCapture {
+        records,
+        next: 0,
+        trim_supported: false,
+        trims: None,
+        gate: None,
+        paced_by: None,
+        lockstep: None,
+        stay_open: true,
+    };
+    let engine = start_with(
+        config(ClockPreference::Asrc),
+        capture,
+        opener(state, RATE),
+        StartOptions {
+            qpc_frequency: QPC_FREQUENCY,
+            prepared: Some(speaker_prepared(2, 0x3)),
+        },
+    )
+    .unwrap();
+
+    let names = |status: &ssr_types::EngineStatus| {
+        status
+            .directions
+            .iter()
+            .map(|direction| {
+                (
+                    direction.id.0,
+                    direction.name.clone(),
+                    direction.azimuth_deg,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    // The layout is the one the engine started with.
+    let first = engine.status();
+    assert_eq!(
+        names(&first),
+        [(0, "ch0".to_owned(), 0.0), (1, "ch1".to_owned(), 10.0)]
+    );
+
+    // Stereo PCM: FL carries 0.5 (-6.02 dBFS), FR 0.25 (-12.04 dBFS). Wait for
+    // a whole block of it to have been mixed.
+    let level = |value: f32| 20.0 * value.log10();
+    let start = Instant::now();
+    let status = loop {
+        let status = engine.status();
+        if status.scene.len() == 2
+            && (status.scene[0].level_dbfs - level(0.5)).abs() < 0.01
+            && (status.scene[1].level_dbfs - level(0.25)).abs() < 0.01
+        {
+            break status;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "no full block of the stereo scene: {:?}",
+            status.scene
+        );
+        std::thread::yield_now();
+    };
+    let [left, right] = [status.scene[0], status.scene[1]];
+    assert_eq!((left.lane, left.index), (0, 0));
+    assert_eq!((right.lane, right.index), (0, 1));
+    // Direction vectors: x right, y front, z up; FL and FR sit at ±30°.
+    for (object, x) in [(left, -0.5_f32), (right, 0.5)] {
+        assert!((object.x - x).abs() < 1.0e-4, "{object:?}");
+        assert!((object.y - 0.75_f32.sqrt()).abs() < 1.0e-4, "{object:?}");
+        assert!(object.z.abs() < 1.0e-6, "{object:?}");
+    }
+
+    // A replacement set shows once the capture thread has installed it.
+    engine.apply(LiveChange::Prepared(prepared(RATE))).unwrap();
+    let start = Instant::now();
+    let replaced = loop {
+        let status = engine.status();
+        if names(&status) != names(&first) {
+            break status;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the replacement layout never showed"
+        );
+        std::thread::yield_now();
+    };
+    assert_eq!(names(&replaced), [(0, "front".to_owned(), 0.0)]);
+    let report = engine.stop();
+    assert_eq!(names(&report.final_status), [(0, "front".to_owned(), 0.0)]);
 }

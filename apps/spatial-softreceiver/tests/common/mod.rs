@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use engine::{LiveChange, OutputProfile};
 use spatial_softreceiver::control::{Emitter, SettingsStore};
 use ssr_types::app::{Heartbeat, OutputChoice, Snapshot};
 use ssr_types::ports::PolicyState;
@@ -136,7 +137,11 @@ impl Host for FakeHost {
 pub struct FakeLauncher;
 
 impl Launcher for FakeLauncher {
-    fn launch(&mut self, _output: &OutputDevice) -> Result<Box<dyn EngineHandle>, SessionError> {
+    fn launch(
+        &mut self,
+        _output: &OutputDevice,
+        _profile: &OutputProfile,
+    ) -> Result<Box<dyn EngineHandle>, SessionError> {
         Ok(Box::new(QuietEngine))
     }
 }
@@ -146,7 +151,11 @@ impl Launcher for FakeLauncher {
 pub struct PanickingLauncher;
 
 impl Launcher for PanickingLauncher {
-    fn launch(&mut self, _output: &OutputDevice) -> Result<Box<dyn EngineHandle>, SessionError> {
+    fn launch(
+        &mut self,
+        _output: &OutputDevice,
+        _profile: &OutputProfile,
+    ) -> Result<Box<dyn EngineHandle>, SessionError> {
         panic!("a scripted panic in the launcher");
     }
 }
@@ -160,6 +169,101 @@ impl EngineHandle for QuietEngine {
 
     fn status(&self) -> EngineStatus {
         EngineStatus::default()
+    }
+
+    fn apply(&mut self, _change: LiveChange) -> Result<(), SessionError> {
+        Ok(())
+    }
+
+    fn apply_retaining(&mut self, _change: LiveChange) -> Result<(), (SessionError, LiveChange)> {
+        Ok(())
+    }
+
+    fn stop(self: Box<Self>) -> Result<(), SessionError> {
+        Ok(())
+    }
+}
+
+/// Starts an engine whose first poll asks for its output again
+/// (`NeedsPrepared`, as after a reconnect to a new layout), and records the
+/// outputs it is handed as their channel counts.
+#[derive(Debug, Default)]
+struct ReprepareState {
+    prepared: Vec<usize>,
+    rejects: usize,
+    attempts: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ReprepareLauncher(Arc<Mutex<ReprepareState>>);
+
+impl ReprepareLauncher {
+    pub fn rejecting(rejects: usize) -> Self {
+        Self(Arc::new(Mutex::new(ReprepareState {
+            rejects,
+            ..ReprepareState::default()
+        })))
+    }
+
+    pub fn prepared(&self) -> Vec<usize> {
+        self.0
+            .lock()
+            .expect("the prepared outputs")
+            .prepared
+            .clone()
+    }
+
+    pub fn attempts(&self) -> usize {
+        self.0.lock().expect("the prepared outputs").attempts
+    }
+}
+
+impl Launcher for ReprepareLauncher {
+    fn launch(
+        &mut self,
+        _output: &OutputDevice,
+        _profile: &OutputProfile,
+    ) -> Result<Box<dyn EngineHandle>, SessionError> {
+        Ok(Box::new(ReprepareEngine {
+            asked: false,
+            prepared: Arc::clone(&self.0),
+        }))
+    }
+}
+
+struct ReprepareEngine {
+    asked: bool,
+    prepared: Arc<Mutex<ReprepareState>>,
+}
+
+impl EngineHandle for ReprepareEngine {
+    fn poll(&mut self) -> Result<Vec<SessionNotice>, SessionError> {
+        if std::mem::replace(&mut self.asked, true) {
+            Ok(Vec::new())
+        } else {
+            Ok(vec![SessionNotice::NeedsPrepared])
+        }
+    }
+
+    fn status(&self) -> EngineStatus {
+        EngineStatus::default()
+    }
+
+    fn apply(&mut self, change: LiveChange) -> Result<(), SessionError> {
+        self.apply_retaining(change).map_err(|(error, _)| error)
+    }
+
+    fn apply_retaining(&mut self, change: LiveChange) -> Result<(), (SessionError, LiveChange)> {
+        let mut state = self.prepared.lock().expect("the prepared outputs");
+        state.attempts += 1;
+        if state.rejects != 0 {
+            state.rejects -= 1;
+            return Err((SessionError::Rejected, change));
+        }
+        if let LiveChange::Prepared(prepared) = change {
+            state.prepared.push(prepared.channels());
+        }
+        Ok(())
     }
 
     fn stop(self: Box<Self>) -> Result<(), SessionError> {
@@ -261,6 +365,7 @@ impl MemoryStore {
                 id: id(id_text),
                 name: name.to_owned(),
             }),
+            ..Settings::default()
         };
         store
     }

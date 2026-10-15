@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Api } from '../src/api';
 import { mountApp } from '../src/app';
-import type { Intent, Snapshot } from '../src/bindings';
+import type { EngineStatus, Intent, Snapshot } from '../src/bindings';
 import { fixture, fixtureNames } from '../src/fixtures';
 import { createMockApi } from '../src/mock';
 import type { Tab } from '../src/screens/common';
+import { MAP_POOL } from '../src/screens/objectmap';
 
 let root: HTMLElement;
 
@@ -125,9 +126,12 @@ describe('what each state says', () => {
 
   it('the profile screen offers every profile intent', () => {
     draw('ready', 'profile');
+    expect(textOf()).toContain('스테레오 기본');
     expect(textOf()).toContain('BRIR 세트를 가져오기 전에는 스테레오 스피커 패닝으로 냅니다.');
     expect(textOf()).toContain('객체 지도');
-    expect(root.querySelectorAll('[data-intent="test_direction"]')).toHaveLength(8);
+    expect(textOf()).not.toContain('다음 조각');
+    expect(buttons()).toEqual(expect.arrayContaining(['폴더 고르기', 'hesuvi.wav / hrir.wav 고르기', 'FIR 파일 고르기']));
+    expect(root.querySelectorAll('[data-intent="test_direction"]')).toHaveLength(2);
     const slider = root.querySelector<HTMLInputElement>('input[type="range"]');
     expect(slider?.min).toBe('-20');
     expect(slider?.max).toBe('10');
@@ -305,9 +309,9 @@ describe('sending intents', () => {
   it('shows a refusal in the band until the state moves on', async () => {
     const start = fixture('ready');
     const held = heldApi(start, 'reject');
-    const app = mountApp(root, held.api, { tab: 'profile' });
+    const app = mountApp(root, held.api, { tab: 'settings' });
     app.draw(start);
-    root.querySelector<HTMLButtonElement>('[data-intent="test_direction"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-intent="start_diagnostic_recording"]')?.click();
     held.release();
     await tick();
     expect(root.querySelector('.banner')?.textContent).toContain('아직 지원하지 않는 동작입니다.');
@@ -316,9 +320,314 @@ describe('sending intents', () => {
     app.draw(fixture('ready'));
     await tick();
     expect(root.querySelector('.banner')?.textContent).toContain('아직 지원하지 않는 동작입니다.');
-    expect(root.querySelector<HTMLButtonElement>('[data-intent="test_direction"]')?.disabled).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>('[data-intent="start_diagnostic_recording"]')?.disabled).toBe(false);
 
     app.draw(fixture('running'));
     expect(root.querySelector('.banner')).toBeNull();
+  });
+
+  it('holds the gain being sent until the snapshot after it lands', async () => {
+    const start = fixture('ready');
+    const held = heldApi(start, 'resolve');
+    const app = mountApp(root, held.api, { tab: 'profile' });
+    app.draw(start);
+    const slider = () => root.querySelector<HTMLInputElement>('#gain');
+    const first = slider();
+    if (first === null) throw new Error('no gain slider');
+    first.value = '2';
+    first.dispatchEvent(new Event('change'));
+    expect(held.sent).toEqual([{ kind: 'set_gain', value: 2 }]);
+    expect(slider()?.value).toBe('2');
+    expect(slider()?.disabled).toBe(true);
+
+    held.release();
+    await tick();
+    expect(slider()?.value).toBe('2');
+
+    const after = fixture('ready');
+    after.profile.gain_db = 2;
+    app.draw(after);
+    await tick();
+    expect(slider()?.disabled).toBe(false);
+    expect(slider()?.value).toBe('2');
+    expect(root.querySelector('.gain-readout')?.textContent).toBe('2.0 dB');
+  });
+});
+
+describe('the profile screen', () => {
+  const pickers = () => ({
+    folder: root.querySelector<HTMLButtonElement>('[data-key="brir-folder"]'),
+    file: root.querySelector<HTMLButtonElement>('[data-key="brir-file"]'),
+    fir: root.querySelector<HTMLButtonElement>('[data-key="fir"]'),
+  });
+  const tones = () => [...root.querySelectorAll<HTMLButtonElement>('[data-intent="test_direction"]')];
+
+  it('names the profile the supervisor resolved', () => {
+    draw('running', 'profile');
+    const { profile } = fixture('running');
+    expect(textOf()).toContain('헤드폰');
+    expect(textOf()).toContain(profile.name);
+    expect(textOf()).toContain(profile.brir ?? 'no BRIR in fixture');
+    expect(textOf()).toContain(profile.headphone_fir ?? 'no FIR in fixture');
+    expect(textOf()).not.toContain('BRIR 세트를 가져오기 전에는');
+  });
+
+  it('offers one test tone per direction of the profile, by name', () => {
+    draw('running', 'profile');
+    const { directions } = fixture('running').profile;
+    expect(directions.length).toBeGreaterThan(2);
+    expect(tones().map((tone) => tone.textContent)).toEqual(directions.map((direction) => direction.name));
+    expect(tones().every((tone) => !tone.disabled)).toBe(true);
+  });
+
+  it('sends the direction id of the tone pressed', () => {
+    const start = fixture('running');
+    const sent: Intent[] = [];
+    const api: Api = { ...createMockApi(start), dispatch: async (intent) => void sent.push(intent) };
+    mountApp(root, api, { tab: 'profile' }).draw(start);
+    const tfr = start.profile.directions.find((direction) => direction.name === 'TFR');
+    tones()
+      .find((tone) => tone.textContent === 'TFR')
+      ?.click();
+    expect(sent).toEqual([{ kind: 'test_direction', value: tfr?.id }]);
+  });
+
+  it('locks the test tones until the engine runs', () => {
+    draw('ready', 'profile');
+    expect(tones().map((tone) => tone.textContent)).toEqual(['FL', 'FR']);
+    expect(tones().every((tone) => tone.disabled)).toBe(true);
+    expect(root.querySelector('#test-hint')?.textContent).toBe('켠 뒤에 시험음을 낼 수 있습니다.');
+    draw('running', 'profile');
+    expect(root.querySelector('#test-hint')).toBeNull();
+  });
+
+  it('locks every import while profile.toml wins', () => {
+    const snapshot = fixture('running');
+    snapshot.profile.from_file = true;
+    mountApp(root, createMockApi(snapshot), { tab: 'profile' }).draw(snapshot);
+    for (const picker of Object.values(pickers())) {
+      expect(picker?.disabled).toBe(true);
+      expect(picker?.getAttribute('aria-describedby')).toBe('import-file-hint');
+    }
+    expect(root.querySelector('#import-file-hint')?.textContent).toBe(
+      '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.',
+    );
+    // Without the file the same profile imports freely.
+    draw('running', 'profile');
+    for (const picker of Object.values(pickers())) expect(picker?.disabled).toBe(false);
+    expect(root.querySelector('#import-file-hint')).toBeNull();
+  });
+
+  it('locks the FIR import until a BRIR set is in', () => {
+    draw('ready', 'profile');
+    expect(pickers().folder?.disabled).toBe(false);
+    expect(pickers().file?.disabled).toBe(false);
+    expect(pickers().fir?.disabled).toBe(true);
+    expect(root.querySelector('#fir-hint')?.textContent).toBe('먼저 BRIR 세트를 가져오십시오.');
+  });
+
+  it('imports a BRIR set from a folder or from hesuvi.wav, then a FIR', async () => {
+    const start = fixture('ready');
+    const api = createMockApi(start);
+    const picked: string[] = [];
+    const shell = {
+      ...api.shell,
+      pickFolder: async (title: string) => {
+        picked.push(title);
+        return 'C:\\BRIR\\living-room';
+      },
+      pickFile: async (title: string, filter: { name: string; extensions: string[] }) => {
+        picked.push(`${title} (${filter.extensions.join(',')})`);
+        return filter.name === 'BRIR WAV' ? 'C:\\BRIR\\studio\\hesuvi.wav' : 'C:\\EQ\\hd650.wav';
+      },
+    };
+    const app = mountApp(root, { ...api, shell }, { tab: 'profile' });
+    app.draw(start);
+    await api.onSnapshot(app.draw);
+
+    pickers().folder?.click();
+    await vi.waitFor(() => expect(textOf()).toContain('C:\\BRIR\\living-room'));
+    await vi.waitFor(() => expect(pickers().file?.disabled).toBe(false));
+    pickers().file?.click();
+    await vi.waitFor(() => expect(textOf()).toContain('C:\\BRIR\\studio\\hesuvi.wav'));
+    expect(textOf()).toContain('studio');
+    await vi.waitFor(() => expect(pickers().fir?.disabled).toBe(false));
+    pickers().fir?.click();
+    await vi.waitFor(() => expect(textOf()).toContain('C:\\EQ\\hd650.wav'));
+    expect(picked).toEqual(['BRIR 세트 폴더', 'hesuvi.wav 또는 hrir.wav (wav)', '헤드폰 FIR 파일 (wav)']);
+    expect(tones()).toHaveLength(fixture('running').profile.directions.length);
+  });
+
+  it('the gain slider shows the snapshot gain', () => {
+    const app = draw('running', 'profile');
+    const slider = () => root.querySelector<HTMLInputElement>('#gain');
+    expect(slider()?.value).toBe('-3.5');
+    expect(root.querySelector('.gain-readout')?.textContent).toBe('-3.5 dB');
+    const next = fixture('running');
+    next.profile.gain_db = 4;
+    app.draw(next);
+    expect(slider()?.value).toBe('4');
+    expect(root.querySelector('.gain-readout')?.textContent).toBe('4.0 dB');
+  });
+});
+
+describe('the object map', () => {
+  const pool = () => [...root.querySelectorAll<SVGCircleElement>('.map-object')];
+  const shown = () => pool().filter((circle) => circle.getAttribute('display') !== 'none');
+  const at = (circle: Element | undefined, name: string) => Number(circle?.getAttribute(name));
+  const runningEngine = (): EngineStatus => {
+    const engine = fixture('running').engine;
+    if (engine === null) throw new Error('running has an engine');
+    return engine;
+  };
+
+  it('draws one circle per scene object while running', () => {
+    draw('running', 'profile');
+    const { scene } = runningEngine();
+    expect(scene.length).toBeGreaterThan(0);
+    expect(pool()).toHaveLength(MAP_POOL);
+    expect(shown()).toHaveLength(scene.length);
+    // Lane picks the colour; the fixture's lanes are 0, 1 and 2 (main, music, PASS).
+    const lanes = shown().map((circle) => [...circle.classList].find((name) => name.startsWith('lane-')));
+    expect(lanes).toEqual(scene.map((object) => `lane-${object.lane}`));
+    // Height picks the outline: the fixture's objects are level or well above.
+    expect(shown().map((circle) => circle.classList.contains('is-up'))).toEqual(scene.map((object) => object.z > 0.5));
+    expect(textOf()).toContain(`소리 객체 ${scene.length}개`);
+  });
+
+  it('puts x to the right and the front at the top', () => {
+    draw('running', 'profile');
+    // The fixture's first object is front left (x -0.5, y 0.866).
+    const [frontLeft] = shown();
+    expect(at(frontLeft, 'cx')).toBeLessThan(150);
+    expect(at(frontLeft, 'cy')).toBeLessThan(150);
+  });
+
+  it('draws louder objects larger and stronger', () => {
+    draw('running', 'profile');
+    const { scene } = runningEngine();
+    const loud = scene.findIndex((object) => object.level_dbfs === -12);
+    const quiet = scene.findIndex((object) => object.level_dbfs === -24);
+    expect(at(shown()[loud], 'r')).toBeGreaterThan(at(shown()[quiet], 'r'));
+    expect(at(shown()[loud], 'opacity')).toBeGreaterThan(at(shown()[quiet], 'opacity'));
+  });
+
+  it('names the directions of the layout the engine runs', () => {
+    draw('running', 'profile');
+    const names = [...root.querySelectorAll('.map-label')].map((label) => label.textContent);
+    expect(names).toEqual(runningEngine().directions.map((direction) => direction.name));
+  });
+
+  it('moves the circles in place with the meters', () => {
+    const app = draw('running', 'profile');
+    const before = shown();
+    const engine = runningEngine();
+    const first = engine.scene[0];
+    if (first === undefined) throw new Error('fixture scene is empty');
+    first.x = 0.5;
+    first.y = -0.866;
+    engine.scene.pop();
+    app.updateMeters(engine);
+
+    const after = shown();
+    expect(after).toHaveLength(before.length - 1);
+    expect(after[0]).toBe(before[0]);
+    expect(at(after[0], 'cx')).toBeGreaterThan(150);
+    expect(at(after[0], 'cy')).toBeGreaterThan(150);
+    expect(before.at(-1)?.getAttribute('display')).toBe('none');
+    expect(pool()).toHaveLength(MAP_POOL);
+    expect(textOf()).toContain(`소리 객체 ${engine.scene.length}개`);
+  });
+
+  it('follows a layout the engine changed', () => {
+    const app = draw('running', 'profile');
+    const engine = runningEngine();
+    engine.directions = engine.directions.slice(0, 2);
+    app.updateMeters(engine);
+    const names = [...root.querySelectorAll('.map-label')].map((label) => label.textContent);
+    expect(names).toEqual(['FL', 'FR']);
+  });
+
+  it('shows only the profile directions while off', () => {
+    const app = draw('ready', 'profile');
+    expect(shown()).toHaveLength(0);
+    const names = [...root.querySelectorAll('.map-label')].map((label) => label.textContent);
+    expect(names).toEqual(['FL', 'FR']);
+    expect(textOf()).toContain('켜면 소리 객체가 보입니다.');
+    app.updateMeters(runningEngine());
+    expect(shown()).toHaveLength(0);
+  });
+});
+
+describe('the mock supervisor follows the profile rules', () => {
+  const runningScene = () => fixture('running').engine?.scene ?? [];
+
+  it('needs a BRIR set before a headphone FIR', async () => {
+    const api = createMockApi(fixture('ready'));
+    await expect(api.dispatch({ kind: 'import_headphone_fir', value: 'C:\\hd650.wav' })).rejects.toMatchObject({
+      message: '먼저 BRIR 세트를 가져오십시오.',
+    });
+    await api.dispatch({ kind: 'import_brir', value: 'C:\\BRIR\\living-room' });
+    await api.dispatch({ kind: 'import_headphone_fir', value: 'C:\\hd650.wav' });
+    const { profile } = await api.snapshot();
+    expect(profile).toMatchObject({
+      kind: 'headphones',
+      name: 'living-room',
+      brir: 'C:\\BRIR\\living-room',
+      headphone_fir: 'C:\\hd650.wav',
+      from_file: false,
+    });
+  });
+
+  it('refuses imports while profile.toml wins', async () => {
+    const start = fixture('ready');
+    start.profile.from_file = true;
+    const api = createMockApi(start);
+    await expect(api.dispatch({ kind: 'import_brir', value: 'C:\\BRIR\\living-room' })).rejects.toMatchObject({
+      message: '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.',
+    });
+    expect((await api.snapshot()).profile.brir).toBeNull();
+  });
+
+  it('keeps the gain in range and in the snapshot', async () => {
+    const api = createMockApi(fixture('ready'));
+    await api.dispatch({ kind: 'set_gain', value: -6 });
+    expect((await api.snapshot()).profile.gain_db).toBe(-6);
+    await expect(api.dispatch({ kind: 'set_gain', value: 12 })).rejects.toMatchObject({
+      message: '게인은 -20 dB에서 +10 dB 사이입니다.',
+    });
+    expect((await api.snapshot()).profile.gain_db).toBe(-6);
+  });
+
+  it('plays a test tone only while running', async () => {
+    const api = createMockApi(fixture('running'));
+    await api.dispatch({ kind: 'test_direction', value: 3 });
+    await expect(api.dispatch({ kind: 'test_direction', value: 99 })).rejects.toMatchObject({
+      message: '그 방향이 없습니다.',
+    });
+    await api.dispatch({ kind: 'disable' });
+    await expect(api.dispatch({ kind: 'test_direction', value: 0 })).rejects.toEqual({
+      message: '켠 뒤에 시험음을 낼 수 있습니다.',
+      next: 'none',
+    });
+  });
+
+  it('turns the scene slowly while running, for the gallery and npm run dev', async () => {
+    const api = createMockApi(fixture('running'), { meters: true });
+    const frames: EngineStatus[] = [];
+    const stop = await api.onMeters((engine) => frames.push(engine));
+    await vi.waitFor(() => expect(frames.length).toBeGreaterThan(2));
+    stop();
+    const first = frames[0]?.scene[0];
+    const last = frames.at(-1)?.scene[0];
+    expect(frames.at(-1)?.scene).toHaveLength(runningScene().length);
+    expect(last?.x).not.toBe(first?.x);
+  });
+
+  it('runs the layout of the profile it enables', async () => {
+    const api = createMockApi(fixture('ready'));
+    await api.dispatch({ kind: 'enable' });
+    const { engine, profile } = await api.snapshot();
+    expect(engine?.directions).toEqual(profile.directions);
   });
 });

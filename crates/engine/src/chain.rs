@@ -23,7 +23,10 @@ use ssr_abi::{
     AbiError, MAX_ENDPOINTS, RECORD_FLAG_DISCONTINUITY, RawRecords, Record, VolumePayload,
     raw_records, records, volume_gain,
 };
-use ssr_types::{BitstreamCodec, Feeds, OutputLayout, SceneBlock, SourceFormat};
+use ssr_types::{
+    BitstreamCodec, DirectionId, DirectionView, Feeds, Layout, OutputLayout, SceneBlock,
+    SceneObject, SourceFormat,
+};
 
 use crate::MAX_OUTPUT_CHANNELS;
 use crate::decode_thread::{self, DECODE_SLOTS, DecodeJob, DecodeQueue, DecodeWorker};
@@ -32,6 +35,7 @@ use crate::mixer::{
     BedBlock, MAX_ARRIVAL_SLACK_FRAMES, MAX_DELAY_FRAMES, MIX_FRAMES, MIX_RATE, MixerConfig,
     SceneMixer,
 };
+use crate::test_tone::TestTonePlayer;
 
 const DEFAULT_LFE_GAIN: f32 = 1.0;
 const SPEAKER_TAIL_LIMIT_FRAMES: usize = 6 * MIX_RATE as usize;
@@ -289,6 +293,30 @@ impl Prepared {
             feeds,
             samples,
         })
+    }
+
+    /// The output profile's directions, in feed order.
+    pub fn direction_layout(&self) -> &Layout {
+        match &self.output {
+            PreparedOutput::Headphones { brir, .. } => &brir.layout,
+            PreparedOutput::Speakers { speakers, .. } => &speakers.layout,
+        }
+    }
+
+    /// The directions as the application shows them. Allocates; call off the
+    /// real-time threads.
+    pub fn direction_views(&self) -> Vec<DirectionView> {
+        self.direction_layout()
+            .directions()
+            .iter()
+            .enumerate()
+            .map(|(index, direction)| DirectionView {
+                id: DirectionId(index as u16),
+                name: direction.name.clone(),
+                azimuth_deg: direction.azimuth_deg,
+                elevation_deg: direction.elevation_deg,
+            })
+            .collect()
     }
 
     /// Panning geometry built from the output profile's layout.
@@ -1135,6 +1163,8 @@ struct Back {
     lfe_from: f32,
     lfe_target: f32,
     lfe_ramp_frames: usize,
+    live_gain: Option<f32>,
+    tone: TestTonePlayer,
     last_needs_brir: bool,
     #[cfg(test)]
     disable_quiet_fast_path: bool,
@@ -1149,6 +1179,8 @@ impl Back {
             lfe_from: DEFAULT_LFE_GAIN,
             lfe_target: DEFAULT_LFE_GAIN,
             lfe_ramp_frames: 0,
+            live_gain: None,
+            tone: TestTonePlayer::new(),
             last_needs_brir: false,
             #[cfg(test)]
             disable_quiet_fast_path: false,
@@ -1159,6 +1191,11 @@ impl Back {
         self.lfe_from = self.lfe_gain;
         self.lfe_target = gain;
         self.lfe_ramp_frames = MIX_FRAMES;
+    }
+
+    fn set_gain(&mut self, gain: f32) {
+        self.live_gain = Some(gain);
+        self.limiter.set_gain(gain, MIX_FRAMES);
     }
 
     fn is_quiet(&self) -> bool {
@@ -1200,6 +1237,10 @@ impl Back {
                 .channel_mut(direction)
                 .copy_from_slice(&bed.channels[start..start + bed.frames]);
         }
+        // The test signal joins the panned bed as one more source on its
+        // direction, ahead of the BRIR or the speaker stage.
+        let tone = self.tone.mix_into(&mut prepared.feeds, bed.frames);
+        let silent_input = bed.silent && !tone;
 
         let channels = prepared.channels();
         let channel_mask = prepared.channel_mask();
@@ -1233,15 +1274,15 @@ impl Back {
                 #[cfg(not(test))]
                 let use_quiet_fast_path = true;
                 let (left, right) = samples.split_at_mut(bed.frames);
-                if bed.silent && use_quiet_fast_path && binauralizer.is_quiet() {
+                if silent_input && use_quiet_fast_path && binauralizer.is_quiet() {
                     left.fill(0.0);
                     right.fill(0.0);
                 } else {
-                    if !bed.silent {
+                    if !silent_input {
                         binauralizer.note_active_input();
                     }
                     binauralizer.process(&prepared.feeds, left, right);
-                    if bed.silent {
+                    if silent_input {
                         binauralizer.note_silent_input(bed.frames);
                     }
                 }
@@ -1488,6 +1529,46 @@ impl Chain {
         self.back.set_lfe_gain(gain);
     }
 
+    /// Overrides the profile's output gain until the chain is dropped (the
+    /// engine stops). The next mix block ramps linearly to `gain`; later
+    /// [`Chain::set_prepared`] calls keep it instead of the new profile's gain.
+    pub fn set_gain(&mut self, gain: f32) {
+        self.back.set_gain(gain);
+    }
+
+    /// Plays the test signal from its start on `direction` of the installed
+    /// output layout, after panning and before the BRIR or speaker stage.
+    /// Returns false, and changes nothing, without an installed set or when
+    /// the layout lacks the direction. Never allocates.
+    pub fn start_test_tone(&mut self, direction: DirectionId) -> bool {
+        let fits = self
+            .back
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| direction.index() < prepared.feeds.directions());
+        if fits {
+            self.back.tone.start(direction.index());
+        }
+        fits
+    }
+
+    /// The active objects (finite, nonzero signal) of the most recently
+    /// mixed block; see [`SceneMixer::scene`](crate::SceneMixer::scene).
+    pub fn scene(&self) -> &[SceneObject] {
+        self.mixer.scene()
+    }
+
+    /// Counts mixed blocks; changes whenever [`Chain::scene`] may have.
+    pub fn scene_generation(&self) -> u64 {
+        self.mixer.scene_generation()
+    }
+
+    /// Runs one bed block through the back end, as the mixer would.
+    #[cfg(test)]
+    pub(crate) fn process_bed(&mut self, bed: &BedBlock<'_>, out: &mut dyn FnMut(ChainEvent<'_>)) {
+        self.back.process(bed, out);
+    }
+
     pub fn set_prepared_with(
         &mut self,
         mut prepared: Box<Prepared>,
@@ -1499,10 +1580,17 @@ impl Chain {
             .change_layout(self.geometry.as_deref(), &prepared.geometry);
         self.geometry = Some(Arc::clone(&prepared.geometry));
         prepared.reset();
-        let (gain, ceiling) = prepared.gain_and_ceiling();
-        self.back.limiter.reset(MIX_RATE, gain, ceiling);
+        let (profile_gain, ceiling) = prepared.gain_and_ceiling();
+        let gain = self.back.live_gain.unwrap_or(profile_gain);
+        // A live gain change drained with this set (Gain, then Prepared, before
+        // the next block) still ramps over that block instead of jumping.
+        self.back
+            .limiter
+            .reset_keeping_ramp(MIX_RATE, gain, ceiling);
         prepared.samples.fill(0.0);
         self.back.last_needs_brir = false;
+        // A direction index names another speaker in another layout.
+        self.back.tone.stop();
         let previous = self.back.prepared.replace(prepared);
         if previous_channels != Some(channels) {
             out(ChainEvent::OutputChannels { channels });
@@ -2615,7 +2703,6 @@ mod tests {
             gain: 1.0,
             limiter_ceiling: 1.0,
             ir_frames,
-            omitted_silent_directions: Vec::new(),
             trimmed_leading_frames: 0,
         });
         Box::new(Prepared::new(brir, MIX_FRAMES).unwrap())
@@ -3273,7 +3360,6 @@ mod tests {
                 gain: 1.0,
                 limiter_ceiling: 1.0,
                 ir_frames: 1,
-                omitted_silent_directions: Vec::new(),
                 trimmed_leading_frames: 0,
             })
         };

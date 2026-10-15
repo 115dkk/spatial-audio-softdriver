@@ -24,7 +24,6 @@ describe('fixtures match bindings.ts', () => {
         'choose_output',
         'import_brir',
         'import_headphone_fir',
-        'switch_profile',
         'set_gain',
         'test_direction',
         'enable',
