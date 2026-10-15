@@ -446,7 +446,7 @@ tests = [
   "engine::status_publishes_skipped_out_of_range_records",
   "engine::corrupt_payload_is_counted_without_marking_the_endpoint_unsupported",
   "engine::only_errors_without_an_endpoint_use_unattributed_counters",
-  "ssr-live::chain_error_report_uses_all_stable_snake_case_names",
+  "supervisor::chain_error_report_uses_all_stable_snake_case_names",
   "engine::a_supported_format_clears_only_its_endpoints_unsupported_state",
   "engine::first_sound_after_start_is_not_dropped",
   "engine::default_start_options_use_the_default_qpc_frequency",
@@ -643,9 +643,13 @@ tests = [
   "ssr-live::a_dump_that_ends_on_data_keeps_looping",
   "ssr-live::looping_needs_two_data_records",
   "ssr-live::format_two_loop_span_uses_whole_recorded_reads",
-  "ssr-live::tee_capture_preserves_reads_and_records_dropped_bytes",
-  "ssr-live::tee_capture_stop_idle_restart_replays_like_the_live_chain",
-  "ssr-live::tee_capture_read_does_not_allocate",
+  "supervisor::recorder_writes_every_read_with_its_end_marker",
+  "supervisor::a_recorder_dropped_on_a_capture_error_keeps_what_was_read",
+  "ssr-live::report_request_fields_cover_sources_clocks_and_output_modes",
+  "supervisor::tee_capture_records_empty_successful_reads",
+  "supervisor::tee_capture_preserves_reads_and_records_dropped_bytes",
+  "supervisor::tee_capture_stop_idle_restart_replays_like_the_live_chain",
+  "supervisor::tee_read_does_not_allocate",
   "ssr-live::endpoint_parser_accepts_arbitrary_subsets_and_rejects_bad_masks",
 ]
 note = "ssr-live record, play and devices (ADR 0018). devices --formats reports each render endpoint's shared mix format and exact standard-layout exclusive support, with JSON for CI. play accepts headphone and physical-speaker profiles and reports output kind, channel count and mask; it accepts arbitrary endpoint subsets, installs its initial Prepared before capture starts, and reports the actual startup clock strategy plus four endpoint-local states and explicit idle/overflow/event-loss counters. play --from-dump replays a dump at its recorded pace (--loop repeats it: whole recorded READs, or only the data records when the recorder did not close a READ after the last one, as in the tool-written CI fixtures, so format and stream records play once (unrecorded_reads_loop_the_data_records); --report writes the run's figures), so the whole live path runs through a virtual cable on Windows CI (ADR 0026); record and play --record preserve READ boundaries and report recorder_lost_bytes. Game/MAT and Apple Music/JOC source and listening checks remain"
@@ -690,6 +694,23 @@ kind = "app"
 milestone = "M4"
 status = "planned"
 tests = []
+
+[[feature]]
+id = "supervisor.live_session"
+kind = "app"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "supervisor::dump_session_report_keeps_the_live_cli_key_contract",
+  "supervisor::needs_prepared_is_reprepared",
+  "supervisor::prepared_change_retries_after_a_full_queue",
+  "supervisor::snapshot_is_running_without_a_fault",
+  "supervisor::snapshot_is_faulted_after_permanent_output_failure",
+  "supervisor::totals_span_generations_and_ignore_stale_samples",
+  "supervisor::driver_stats_json_keeps_stable_keys",
+  "supervisor::the_driver_baseline_is_taken_before_the_output_is_prepared",
+]
+note = "supervisor::Session runs one live session for ssr-live today and the M4 shell later: it starts the engine with the prepared output, re-prepares when the engine asks (retrying while the change queue is full; a profile that no longer prepares is an error), keeps the run figures, tees capture reads into the diagnostic recorder, totals driver statistics across reconnects from a baseline taken before the output is prepared to a last sample taken while the engine still reads, and stops the engine and then the recorder, which also writes out what it holds when dropped on an error. SessionReport::to_json is the ssr-live --report contract CI reads; the test pins its key set"
 
 [[feature]]
 id = "setup.tasks"
