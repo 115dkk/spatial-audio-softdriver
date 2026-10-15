@@ -188,9 +188,91 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  app-installer:
+    name: App installer (x64, Velopack)
+    needs: [gate, driver-kit]
+    if: needs.gate.outputs.should_release == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.release_sha }}
+
+      - uses: ./.github/actions/rust-toolchain
+
+      - uses: ./.github/actions/ui-dist
+
+      # The test-signed driver package the app's wizard installs, and its
+      # certificate, come from the kit this same release ships.
+      - uses: actions/download-artifact@v8
+        with:
+          name: driver-kit
+          path: kit
+
+      - name: Build the app, the guard and the setup tool
+        run: cargo build --release --locked -p spatial-softreceiver --features spatial-softreceiver/updater -p ssr-guard -p ssr-setup
+
+      - name: Stage the app folder
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Get-ChildItem kit -Filter '*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'no driver kit zip' }
+          Expand-Archive $zip.FullName -DestinationPath kit/expanded
+          $package = Get-ChildItem kit/expanded -Directory | Select-Object -First 1
+          New-Item -ItemType Directory -Force stage/profiles | Out-Null
+          # ssr-setup reads the INF and the certificate from the app's folder
+          # (ssr_abi::setup_contract); the guard and the setup tool sit beside
+          # the app (apps/spatial-softreceiver/src/paths.rs).
+          foreach ($name in 'spatialsoftreceiver.sys', 'spatialsoftreceiver.inf', 'spatialsoftreceiver.cat', 'spatialsoftreceiver-test.cer', 'kit.json') {
+            Copy-Item (Join-Path $package.FullName $name) stage/
+          }
+          Rename-Item stage/kit.json driver-kit.json
+          Copy-Item target/release/spatial-softreceiver.exe, target/release/ssr-guard.exe, target/release/ssr-setup.exe, LICENSE stage/
+          # The toasts' icon (ssr_sys::toast::register reads it beside the app).
+          Copy-Item apps/spatial-softreceiver/icons/icon.ico stage/spatial-softreceiver.ico
+          Copy-Item docs/profiles/*.toml stage/profiles/
+          $reported = & stage/ssr-setup.exe --version
+          if ($reported -ne "ssr-setup $env:VERSION") { throw "ssr-setup reports '$reported'" }
+          Get-ChildItem -Recurse stage | Format-Table FullName, Length
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk
+
+      # Velopack: Setup.exe installs under %LOCALAPPDATA%\SpatialSoftReceiver
+      # with a Start Menu shortcut carrying the app's AUMID (the toasts use
+      # it), and the app updates itself from these release assets
+      # (releases.win.json and the nupkg; apps/spatial-softreceiver/src/update.rs).
+      - name: Pack the installer (Velopack)
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          vpk pack --packId SpatialSoftReceiver --packVersion $env:VERSION --packDir stage `
+            --mainExe spatial-softreceiver.exe --packTitle 'Spatial SoftReceiver' --packAuthors 115dkk `
+            --icon apps/spatial-softreceiver/icons/icon.ico --shortcuts StartMenuRoot `
+            --aumid io.github.115dkk.spatial-softreceiver --noPortable --outputDir dist
+          if ($LASTEXITCODE -ne 0) { throw "vpk pack failed ($LASTEXITCODE)" }
+          $setup = Get-ChildItem dist -Filter '*Setup.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'vpk pack wrote no Setup.exe' }
+          # A versioned name for people; the feed and the packages keep theirs.
+          Rename-Item $setup.FullName "spatial-softreceiver-setup-$env:VERSION-x64.exe"
+          if (-not (Test-Path dist/releases.win.json)) { throw 'vpk pack wrote no releases.win.json' }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Publish the release
-    needs: [gate, build-windows, build-linux, driver-kit]
+    needs: [gate, build-windows, build-linux, driver-kit, app-installer]
     if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -220,7 +302,7 @@ jobs:
           range="$RELEASE_SHA"
           if [ -n "$PREVIOUS" ]; then range="$PREVIOUS..$RELEASE_SHA"; fi
           {
-            echo "Built from ${RELEASE_SHA}. Developer tools only; the app arrives in M4."
+            echo "Built from ${RELEASE_SHA}."
             echo
             # The tester's summary: what to download, in which order, how to
             # send results. The guide link is pinned to this release's commit.

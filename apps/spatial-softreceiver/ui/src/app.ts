@@ -51,6 +51,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
     gain: 0,
     autostart: null,
     autostartWanted: null,
+    update: null,
   };
   let snapshot: Snapshot | null = null;
   let lastKey = '';
@@ -219,6 +220,11 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
   }
 
   if (api.shell.native) {
+    api.shell.updateState().then(
+      (update) => setView({ update }),
+      () => setView({ update: null }),
+    );
+    void api.shell.onUpdate((update) => setView({ update }));
     api.shell.autostartEnabled().then(
       (enabled) => setView({ autostart: enabled }),
       () => setView({ autostart: null }),

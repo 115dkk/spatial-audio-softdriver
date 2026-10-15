@@ -46,6 +46,9 @@ const mockShell: Shell = {
   pickFile: async () => 'C:\\Users\\me\\hd650.wav',
   autostartEnabled: async () => false,
   setAutostart: async () => {},
+  updateState: async () => ({ current: '0.0.0', ready: null }),
+  applyUpdate: async () => {},
+  onUpdate: async () => () => {},
 };
 
 export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {

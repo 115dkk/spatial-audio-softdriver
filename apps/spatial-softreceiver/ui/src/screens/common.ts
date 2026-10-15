@@ -1,6 +1,6 @@
 // What every screen gets from the app, and the pieces they share.
 
-import type { Shell } from '../api';
+import type { Shell, UpdateState } from '../api';
 import type { EngineStatus, Intent, Snapshot, UserError } from '../bindings';
 import { type Child, h } from '../dom';
 
@@ -19,6 +19,8 @@ export interface ViewState {
   autostart: boolean | null;
   /** The autostart value being set; null when no change is in flight. */
   autostartWanted: boolean | null;
+  /** The shell's updater state; null until read. */
+  update: UpdateState | null;
 }
 
 export interface Context {

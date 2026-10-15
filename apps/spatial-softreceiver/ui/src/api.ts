@@ -15,13 +15,26 @@ import { text } from './text';
 export type Unlisten = () => void;
 
 /** What the screen asks of the OS rather than of the supervisor. */
+/** What the shell's updater holds (the `update_state` command and event). */
+export interface UpdateState {
+  /** The running version. */
+  current: string;
+  /** A version downloaded and waiting for a restart. */
+  ready: string | null;
+}
+
 export interface Shell {
-  /** False outside Tauri: the dialogs and autostart are not there. */
+  /** False outside Tauri: the dialogs, autostart and updates are not there. */
   readonly native: boolean;
   pickFolder(title: string): Promise<string | null>;
   pickFile(title: string, filter: { name: string; extensions: string[] }): Promise<string | null>;
   autostartEnabled(): Promise<boolean>;
   setAutostart(enabled: boolean): Promise<void>;
+  updateState(): Promise<UpdateState>;
+  /** Quits the app and applies the downloaded update; rejects with a UserError. */
+  applyUpdate(): Promise<void>;
+  /** The shell says an update was downloaded. */
+  onUpdate(update: (state: UpdateState) => void): Promise<Unlisten>;
 }
 
 export interface Api {
@@ -69,6 +82,15 @@ const tauriShell: Shell = {
   },
   autostartEnabled: () => autostart.isEnabled(),
   setAutostart: (enabled) => (enabled ? autostart.enable() : autostart.disable()),
+  updateState: () => invoke<UpdateState>('update_state'),
+  async applyUpdate() {
+    try {
+      await invoke<null>('apply_update');
+    } catch (reason) {
+      throw toUserError(reason);
+    }
+  },
+  onUpdate: (update) => listen<UpdateState>('update', (event) => update(event.payload)),
 };
 
 /** The Tauri shell's commands and events. */

@@ -12,6 +12,7 @@
 //! * [`log`]: `app.log` in the state directory.
 //! * `launcher` (Windows): starts the engine on the driver ring and WASAPI.
 //! * `shell` (Windows): the Tauri wiring: commands, events, tray, window.
+//! * `update` (Windows): Velopack's install hooks and the update check.
 
 pub mod control;
 pub mod log;
@@ -22,3 +23,5 @@ pub mod settings;
 pub mod launcher;
 #[cfg(windows)]
 pub mod shell;
+#[cfg(windows)]
+pub mod update;
