@@ -23,13 +23,11 @@ import { type Context, type Drawn, type Live, button, intentButton } from './com
 import { powerState } from './nav';
 import { outputList } from './wizard';
 
-const s = text.status;
-const m = text.meters;
-
 /** Endpoints the screen shows: 0, 1 and 2. Slot 3 is reserved in the contract. */
 const SHOWN_ENDPOINTS = 3;
 
 function header(ctx: Context): HTMLElement {
+  const s = text.status;
   const { snapshot } = ctx;
   const running = snapshot.phase.kind === 'running';
   const toggle = intentButton(
@@ -93,6 +91,7 @@ interface Card {
 }
 
 function endpointCard(index: number): Card {
+  const s = text.status;
   const names = text.endpoints[index] ?? { name: `${index}`, purpose: '' };
   const format = liveText();
   const carrier = liveText();
@@ -170,22 +169,26 @@ function endpointCard(index: number): Card {
 
 type MeterRow = [label: string, unit: string, read: (engine: EngineStatus) => string];
 
-const METER_ROWS: MeterRow[] = [
-  [m.latencyP50, m.ms, (e) => (e.latency.samples === 0 ? '-' : oneDecimal(e.latency.p50_ms))],
-  [m.latencyP99, m.ms, (e) => (e.latency.samples === 0 ? '-' : oneDecimal(e.latency.p99_ms))],
-  [m.ringLevel, m.ms, (e) => oneDecimal(e.ring_level_ms)],
-  [m.underruns, m.times, (e) => count(e.underruns)],
-  [m.outputRestarts, m.times, (e) => count(e.output_restarts)],
-  [m.outputMode, '', describeOutputMode],
-  [m.output, '', describeOutputFormat],
-  [m.clock, '', describeClock],
-  [m.decodeRefused, m.times, (e) => count(e.decode_refused)],
-  [m.lostBytes, m.bytes, (e) => count(e.lost_bytes)],
-];
+function meterRows(): MeterRow[] {
+  const m = text.meters;
+  return [
+    [m.latencyP50, m.ms, (e) => (e.latency.samples === 0 ? '-' : oneDecimal(e.latency.p50_ms))],
+    [m.latencyP99, m.ms, (e) => (e.latency.samples === 0 ? '-' : oneDecimal(e.latency.p99_ms))],
+    [m.ringLevel, m.ms, (e) => oneDecimal(e.ring_level_ms)],
+    [m.underruns, m.times, (e) => count(e.underruns)],
+    [m.outputRestarts, m.times, (e) => count(e.output_restarts)],
+    [m.outputMode, '', describeOutputMode],
+    [m.output, '', describeOutputFormat],
+    [m.clock, '', describeClock],
+    [m.decodeRefused, m.times, (e) => count(e.decode_refused)],
+    [m.lostBytes, m.bytes, (e) => count(e.lost_bytes)],
+  ];
+}
 
 function meterColumn(): { element: HTMLElement; update(engine: EngineStatus): void } {
+  const s = text.status;
   const list = h('dl', { class: 'meters' });
-  const setters = METER_ROWS.map(([label, unit, read]) => {
+  const setters = meterRows().map(([label, unit, read]) => {
     const value = liveText();
     list.append(
       h(
@@ -207,6 +210,7 @@ function meterColumn(): { element: HTMLElement; update(engine: EngineStatus): vo
 }
 
 export function status(ctx: Context, engineNow: EngineStatus | null): Drawn {
+  const s = text.status;
   const running = ctx.snapshot.phase.kind === 'running';
   const cards = Array.from({ length: SHOWN_ENDPOINTS }, (_, index) => endpointCard(index));
   const grid = h(

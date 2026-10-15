@@ -4,9 +4,8 @@ import type { DriverState, Platform } from '../bindings';
 import type { Child } from '../dom';
 import { text } from '../text';
 
-const f = text.facts;
-
 export function platformRows(platform: Platform): [string, Child][] {
+  const f = text.facts;
   return [
     [f.osBuild, String(platform.os_build)],
     [f.arch, f.archNames[platform.arch]],
@@ -16,6 +15,7 @@ export function platformRows(platform: Platform): [string, Child][] {
 }
 
 export function driverRows(driver: DriverState): [string, Child][] {
+  const f = text.facts;
   switch (driver.kind) {
     case 'not_installed':
       return [[f.driverState, f.driverNotInstalled]];

@@ -5,7 +5,7 @@
 import { type Api, toUserError } from './api';
 import type { EngineStatus, Intent, Snapshot, UserError } from './bindings';
 import { h } from './dom';
-import { text } from './text';
+import { setLanguage, text } from './text';
 import { type Band, banners, notes } from './screens/banner';
 import type { Context, Live, Tab, ViewState } from './screens/common';
 import { nav } from './screens/nav';
@@ -121,6 +121,9 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
 
   function render() {
     if (snapshot === null) return;
+    setLanguage(snapshot.language);
+    document.documentElement.lang = snapshot.language;
+    document.title = text.product;
     const active = document.activeElement;
     const activeKey = active instanceof HTMLElement && root.contains(active) ? (active.dataset.key ?? null) : null;
     focusKey = activeKey ?? focusKey;

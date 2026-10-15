@@ -41,15 +41,31 @@ impl Marker {
     }
 }
 
-/// The same explanation is used by the guard's toast and the next app snapshot.
-pub fn sentence(marker: &Marker) -> String {
-    match marker.reason {
-        MarkerReason::AppExited => "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
-        MarkerReason::StallRestarted => "엔진이 멈춰 앱을 다시 시작했습니다.",
-        MarkerReason::RestartFailed => "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다.",
-        MarkerReason::Stuck => "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다.",
+/// The marker stays language-neutral on disk; render it when it is shown.
+pub fn sentence(marker: &Marker, language: ssr_types::app::Language) -> &'static str {
+    use ssr_types::app::Language::{En, Ko};
+    match (marker.reason, language) {
+        (MarkerReason::AppExited, Ko) => "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
+        (MarkerReason::AppExited, En) => {
+            "The app exited unexpectedly. The default audio devices have been restored."
+        }
+        (MarkerReason::StallRestarted, Ko) => "엔진이 멈춰 앱을 다시 시작했습니다.",
+        (MarkerReason::StallRestarted, En) => {
+            "The engine stopped responding, so the app was restarted."
+        }
+        (MarkerReason::RestartFailed, Ko) => {
+            "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다."
+        }
+        (MarkerReason::RestartFailed, En) => {
+            "The engine stopped responding after restarting. The default audio devices have been restored."
+        }
+        (MarkerReason::Stuck, Ko) => {
+            "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다."
+        }
+        (MarkerReason::Stuck, En) => {
+            "The app stopped responding while holding the default audio devices. The defaults have been restored."
+        }
     }
-    .to_owned()
 }
 
 pub fn read(path: &Path) -> io::Result<Marker> {
@@ -83,6 +99,8 @@ pub fn write(path: &Path, marker: &Marker) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use ssr_types::app::Language;
+
     use super::*;
 
     #[test]
@@ -106,9 +124,9 @@ mod tests {
             ),
         ] {
             let marker = Marker::new(reason, 0, Vec::new());
-            assert_eq!(sentence(&marker), expected);
+            assert_eq!(sentence(&marker, Language::Ko), expected);
             let with_notes = Marker::new(reason, 42, vec!["복원 메모".to_owned()]);
-            assert_eq!(sentence(&with_notes), expected);
+            assert_eq!(sentence(&with_notes, Language::Ko), expected);
         }
     }
 }

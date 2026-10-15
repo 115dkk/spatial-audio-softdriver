@@ -16,6 +16,7 @@ pub mod recorder;
 pub mod report;
 pub mod restore_point;
 pub mod session;
+pub mod text;
 
 pub use driver_stats::{DriverStatsSource, DriverStatsTotals};
 pub use machine::{

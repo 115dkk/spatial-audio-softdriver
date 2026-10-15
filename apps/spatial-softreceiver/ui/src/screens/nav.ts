@@ -6,11 +6,7 @@ import { h } from '../dom';
 import { text } from '../text';
 import type { Context, Tab } from './common';
 
-const TABS: [Tab, string][] = [
-  ['status', text.nav.status],
-  ['profile', text.nav.profile],
-  ['settings', text.nav.settings],
-];
+const TABS: Tab[] = ['status', 'profile', 'settings'];
 
 /** The power state in one word, and its tone. */
 export function powerState(snapshot: Snapshot): { label: string; tone: 'off' | 'on' | 'warning' | 'error' } {
@@ -37,7 +33,8 @@ export function brand(): HTMLElement {
 
 export function nav(ctx: Context): HTMLElement {
   const list = h('ul', { class: 'nav-list' });
-  for (const [tab, label] of TABS) {
+  for (const tab of TABS) {
+    const label = text.nav[tab];
     const current = ctx.view.tab === tab;
     list.append(
       h(

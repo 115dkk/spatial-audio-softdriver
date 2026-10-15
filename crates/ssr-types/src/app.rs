@@ -11,6 +11,14 @@ use crate::layout::{DirectionId, DirectionView};
 use crate::ports::{DeviceId, DriverState, Platform};
 use crate::status::EngineStatus;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    Ko,
+    En,
+}
+
 /// One line on the pipe from a guarded app (ADR 0033).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Heartbeat {
@@ -23,6 +31,7 @@ pub struct Heartbeat {
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Intent {
+    SetLanguage(Option<Language>),
     BeginSetup,
     InstallDriver,
     /// Looks at the PC again after the user did something outside the app
@@ -103,6 +112,12 @@ pub struct OutputChoice {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct Snapshot {
+    /// The resolved language. An OS-following setting is resolved before the
+    /// snapshot crosses the UI contract.
+    pub language: Language,
+    /// The saved choice behind `language`: `None` follows the Windows display
+    /// language. The settings screen's selector shows this, not the result.
+    pub language_choice: Option<Language>,
     pub phase: Phase,
     pub profile: ProfileView,
     pub engine: Option<EngineStatus>,

@@ -1,4 +1,6 @@
 {
+  "language": "ko",
+  "language_choice": null,
   "phase": {
     "kind": "setup",
     "value": "reboot_required"

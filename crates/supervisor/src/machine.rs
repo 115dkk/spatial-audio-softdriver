@@ -25,17 +25,18 @@ use std::time::{Duration, Instant};
 use engine::{LiveChange, OutputProfile, Prepared};
 use speakers::{SpeakerConfig, SpeakerProfile, SpeakerRange};
 use ssr_types::app::{
-    Intent, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep, Snapshot,
-    UserError,
+    Intent, Language, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep,
+    Snapshot, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DeviceId, DeviceState, DirectionId, DirectionView, DriverState, EngineFault,
-    EngineStatus, Host, HostError, Layout, OutputDevice, Platform, Role, SecureBoot, SetupTask,
+    EngineStatus, Host, HostError, Layout, OutputDevice, Platform, Role, SetupTask,
 };
 
 use crate::restore_point::{self, RestorePoint};
 use crate::session::{Session, SessionError, SessionNotice};
+use crate::text::Message;
 
 /// A running engine as the state machine sees it.
 pub trait EngineHandle {
@@ -94,6 +95,21 @@ pub trait Launcher {
 }
 
 /// The running engine and the profile it plays.
+#[derive(Clone, Debug)]
+struct LocalizedError {
+    message: Message,
+    next: NextAction,
+}
+
+impl LocalizedError {
+    fn render(&self, language: Language) -> UserError {
+        UserError {
+            message: self.message.render(language),
+            next: self.next,
+        }
+    }
+}
+
 struct Running {
     handle: Box<dyn EngineHandle>,
     /// The profile launched, then each one a profile intent handed over and
@@ -136,6 +152,9 @@ pub struct ProfileSettings {
 /// succeeds, so a failed import or gain never reaches the file.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
+    /// `None` follows the language resolved by the shell from the OS.
+    #[serde(default)]
+    pub language: Option<Language>,
     /// The chosen output, remembered by id and name: the id can change across
     /// reboots, the name is the fallback.
     pub output: Option<OutputChoice>,
@@ -146,6 +165,9 @@ pub struct Settings {
 /// What this build needs from the PC.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// Language resolved from the OS by the shell. Korean is the portable
+    /// default and keeps legacy behavior.
+    pub default_language: Language,
     /// The driver package is test signed (until the attestation-signed driver
     /// of M5).
     pub requires_test_signing: bool,
@@ -183,6 +205,7 @@ impl Default for Config {
     /// compiled architecture.
     fn default() -> Self {
         Self {
+            default_language: Language::Ko,
             requires_test_signing: true,
             min_os_build: Self::MIN_OS_BUILD,
             arch: Self::BUILD_ARCH,
@@ -210,7 +233,8 @@ pub struct Supervisor<H: Host, L: Launcher> {
     driver: Option<DriverState>,
     platform: Option<Platform>,
     error: Option<UserError>,
-    notes: Vec<String>,
+    error_message: Option<LocalizedError>,
+    notes: Vec<Message>,
     shell_notes: Vec<String>,
     /// The resolved profile as the screen sees it, cached: it changes only
     /// when a profile intent succeeds or the engine starts, so a snapshot
@@ -237,6 +261,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// name an output that is present, else in Setup(Welcome). Never takes the
     /// roles here.
     pub fn new(host: H, launcher: L, config: Config, settings: Settings) -> Self {
+        let language = settings.language.unwrap_or(config.default_language);
         let mut supervisor = Self {
             host: RefCell::new(host),
             launcher,
@@ -249,9 +274,10 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             driver: None,
             platform: None,
             error: None,
+            error_message: None,
             notes: Vec::new(),
             shell_notes: Vec::new(),
-            profile: default_profile_view(),
+            profile: default_profile_view_for(language),
         };
         supervisor.refresh_profile();
         let driver = supervisor.host.get_mut().driver();
@@ -269,16 +295,29 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// Applies one intent. A failure's `Err` is also kept in the snapshot
     /// until an intent succeeds; a refusal's is only returned.
     pub fn handle(&mut self, intent: Intent) -> Result<(), UserError> {
+        let language_change = matches!(&intent, Intent::SetLanguage(_));
+        let previous_message = self.error_message.clone();
         match self.dispatch(intent) {
             Outcome::Done => {
-                self.error = None;
+                if language_change {
+                    self.error = self
+                        .error_message
+                        .as_ref()
+                        .map(|error| error.render(self.language()));
+                } else {
+                    self.error = None;
+                    self.error_message = None;
+                }
                 Ok(())
             }
             Outcome::Failed(error) => {
                 self.error = Some(error.clone());
                 Err(error)
             }
-            Outcome::Refused(error) => Err(error),
+            Outcome::Refused(error) => {
+                self.error_message = previous_message;
+                Err(error)
+            }
         }
     }
 
@@ -304,17 +343,21 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         let notices = match running.handle.poll() {
             Ok(notices) => notices,
             Err(error) => {
-                self.fault(user_error(
-                    format!("엔진이 멈췄습니다: {error}"),
+                let error = self.message_error(
+                    Message::EngineStopped {
+                        detail: error.to_string(),
+                    },
                     NextAction::Retry,
-                ));
+                );
+                self.fault(error);
                 return Vec::new();
             }
         };
         for notice in &notices {
             match notice {
                 SessionNotice::Fault(fault) => {
-                    self.error = Some(reconnecting_error(fault));
+                    self.error =
+                        Some(self.message_error(reconnecting_message(fault), NextAction::None));
                     if self.reconnecting.is_none() {
                         self.reconnecting = Some(Reconnecting {
                             since: now,
@@ -334,19 +377,16 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         if let Some(reconnecting) = &self.reconnecting
             && now.saturating_duration_since(reconnecting.since) >= self.config.fault_grace
         {
-            let what = match &reconnecting.fault {
-                EngineFault::OutputLost(detail) => {
-                    format!("출력 장치와의 연결이 끊어졌습니다: {detail}")
-                }
-                EngineFault::CaptureLost(_) => "캡처 장치와의 연결이 끊어졌습니다.".to_owned(),
+            let message = match &reconnecting.fault {
+                EngineFault::OutputLost(detail) => Message::ReconnectTimedOutOutput {
+                    seconds: self.config.fault_grace.as_secs(),
+                    detail: detail.clone(),
+                },
+                EngineFault::CaptureLost(_) => Message::ReconnectTimedOutCapture {
+                    seconds: self.config.fault_grace.as_secs(),
+                },
             };
-            let error = user_error(
-                format!(
-                    "엔진이 {}초 동안 다시 연결하지 못했습니다. {what}",
-                    self.config.fault_grace.as_secs()
-                ),
-                NextAction::Retry,
-            );
+            let error = self.message_error(message, NextAction::Retry);
             self.fault(error);
         }
         notices
@@ -390,10 +430,13 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             match running.profile.prepare() {
                 Ok(prepared) => running.pending = Some(Box::new(prepared)),
                 Err(error) => {
-                    self.fault(user_error(
-                        format!("엔진이 멈췄습니다: {}", SessionError::from(error)),
+                    let error = self.message_error(
+                        Message::EngineStopped {
+                            detail: SessionError::from(error).to_string(),
+                        },
                         NextAction::Retry,
-                    ));
+                    );
+                    self.fault(error);
                     return Vec::new();
                 }
             }
@@ -424,10 +467,13 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 vec![SessionNotice::PrepareRetry]
             }
             Err((error, _)) => {
-                self.fault(user_error(
-                    format!("엔진이 멈췄습니다: {error}"),
+                let error = self.message_error(
+                    Message::EngineStopped {
+                        detail: error.to_string(),
+                    },
                     NextAction::Retry,
-                ));
+                );
+                self.fault(error);
                 Vec::new()
             }
         }
@@ -445,7 +491,10 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 name: output.name,
             })
             .collect();
+        let language = self.language();
         Snapshot {
+            language,
+            language_choice: self.settings.language,
             phase: self.phase.clone(),
             profile: self.profile.clone(),
             engine: self.engine_status(),
@@ -458,14 +507,34 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             notes: self
                 .shell_notes
                 .iter()
-                .chain(&self.notes)
                 .cloned()
+                .chain(self.notes.iter().map(|message| self.say(message.clone())))
                 .collect(),
         }
     }
 
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    pub fn language(&self) -> Language {
+        self.settings
+            .language
+            .unwrap_or(self.config.default_language)
+    }
+
+    fn say(&self, message: Message) -> String {
+        message.render(self.language())
+    }
+
+    fn message_error(&mut self, message: Message, next: NextAction) -> UserError {
+        self.localized_error(LocalizedError { message, next })
+    }
+
+    fn localized_error(&mut self, error: LocalizedError) -> UserError {
+        let rendered = error.render(self.language());
+        self.error_message = Some(error);
+        rendered
     }
 
     /// Adds a fact supplied by the shell. Setup begins by clearing old facts.
@@ -485,38 +554,43 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
 
     fn dispatch(&mut self, intent: Intent) -> Outcome {
         if self.phase == Phase::Quit {
-            return refused();
+            return self.refused();
         }
         let result = match intent {
+            Intent::SetLanguage(language) => {
+                self.settings.language = language;
+                if self.profile.kind == ProfileKind::Stereo && !self.profile.from_file {
+                    self.profile.name = self.say(Message::DefaultProfileName);
+                }
+                Ok(())
+            }
             // The profile can change whenever the wizard is done; a running
             // engine takes the change live, all or nothing.
             Intent::ImportBrir(path) => match self.phase {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.import_brir(path),
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::ImportHeadphoneFir(path) => match self.phase {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.import_headphone_fir(path),
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::SetGain(db) => match self.phase {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.set_gain(db),
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::TestDirection(id) => match self.phase {
                 Phase::Running => self.test_direction(id),
                 Phase::Ready | Phase::Faulted => {
-                    return Outcome::Refused(user_error(
-                        "켠 뒤에 시험음을 낼 수 있습니다.",
-                        NextAction::None,
-                    ));
+                    return Outcome::Refused(
+                        self.message_error(Message::TestAfterEnable, NextAction::None),
+                    );
                 }
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::StartDiagnosticRecording => {
-                return Outcome::Refused(user_error(
-                    "진단 녹음은 다음 조각에서 옵니다.",
-                    NextAction::None,
-                ));
+                return Outcome::Refused(
+                    self.message_error(Message::DiagnosticRecordingUnavailable, NextAction::None),
+                );
             }
             Intent::BeginSetup => match self.phase {
                 Phase::Setup(SetupStep::Welcome) => {
@@ -524,7 +598,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                     self.shell_notes.clear();
                     self.evaluate()
                 }
-                _ => return refused(),
+                _ => return self.refused(),
             },
             // At the output step a recheck lists the outputs again (a device
             // plugged in meanwhile) and resumes when the settings name one.
@@ -540,23 +614,22 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                     self.phase = Phase::Ready;
                     Ok(())
                 }
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::InstallDriver => match self.phase {
                 Phase::Setup(SetupStep::Driver) => self.install_driver(),
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::ChooseOutput(id) => match self.phase {
                 Phase::Setup(SetupStep::ChooseOutput) | Phase::Ready => self.choose_output(&id),
-                Phase::Running => Err(user_error(
-                    "먼저 끈 뒤 출력을 바꾸십시오.",
-                    NextAction::None,
-                )),
-                _ => return refused(),
+                Phase::Running => {
+                    Err(self.message_error(Message::DisableBeforeChangingOutput, NextAction::None))
+                }
+                _ => return self.refused(),
             },
             Intent::Enable => match self.phase {
                 Phase::Ready | Phase::Faulted => self.enable(),
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::Disable => match self.phase {
                 Phase::Running => {
@@ -565,7 +638,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                     self.phase = Phase::Ready;
                     Ok(())
                 }
-                _ => return refused(),
+                _ => return self.refused(),
             },
             Intent::Quit => {
                 self.stop_engine();
@@ -586,31 +659,31 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         self.platform = Some(platform.clone());
         if platform.os_build < self.config.min_os_build {
             self.phase = Phase::Setup(SetupStep::Unsupported);
-            return Err(user_error(
-                os_requirement(self.config.min_os_build),
+            return Err(self.message_error(
+                Message::OsRequirement {
+                    min_build: self.config.min_os_build,
+                },
                 NextAction::None,
             ));
         }
         if platform.arch != self.config.arch {
             self.phase = Phase::Setup(SetupStep::Unsupported);
-            return Err(user_error(
-                format!(
-                    "이 빌드는 {}용이지만 이 PC는 {}입니다.",
-                    arch_name(self.config.arch),
-                    arch_name(platform.arch)
-                ),
+            return Err(self.message_error(
+                Message::ArchitectureMismatch {
+                    build: self.config.arch,
+                    pc: platform.arch,
+                },
                 NextAction::None,
             ));
         }
         if self.config.requires_test_signing && !platform.test_signing {
-            let mut message = "시험서명 모드가 꺼져 있습니다. Secure Boot를 끈 뒤 관리자 명령으로 \
-                               bcdedit /set testsigning on을 실행하고 다시 시작하십시오."
-                .to_owned();
-            if platform.secure_boot == SecureBoot::Enabled {
-                message.push_str(" Secure Boot가 켜져 있어 먼저 꺼야 합니다.");
-            }
             self.phase = Phase::Setup(SetupStep::NotTestSigning);
-            return Err(user_error(message, NextAction::Reboot));
+            return Err(self.message_error(
+                Message::TestSigningDisabled {
+                    secure_boot: platform.secure_boot,
+                },
+                NextAction::Reboot,
+            ));
         }
         self.evaluate_driver()
     }
@@ -626,17 +699,13 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             }
             DriverState::RebootRequired => {
                 self.phase = Phase::Setup(SetupStep::RebootRequired);
-                Err(reboot_required())
+                Err(self.message_error(Message::RebootRequired, NextAction::Reboot))
             }
             DriverState::Installed {
                 problem_code: 52, ..
             } => {
                 self.phase = Phase::Setup(SetupStep::Driver);
-                Err(user_error(
-                    "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). \
-                     시험서명 모드를 확인한 뒤 다시 설치하십시오.",
-                    NextAction::Retry,
-                ))
+                Err(self.message_error(Message::DriverSignatureRejected, NextAction::Retry))
             }
             DriverState::Installed {
                 problem_code: 0,
@@ -644,10 +713,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 ..
             } => {
                 self.phase = Phase::Setup(SetupStep::Driver);
-                Err(user_error(
-                    "드라이버 서비스가 돌고 있지 않습니다. 복구를 실행하십시오.",
-                    NextAction::Retry,
-                ))
+                Err(self.message_error(Message::DriverServiceStopped, NextAction::Retry))
             }
             DriverState::Installed {
                 problem_code: 0,
@@ -655,10 +721,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 exclusive_policy: PolicyState::Missing,
             } => {
                 self.phase = Phase::Setup(SetupStep::Driver);
-                Err(user_error(
-                    "드라이버는 있지만 독점 정책이 적용되지 않았습니다. 복구를 실행하십시오.",
-                    NextAction::Retry,
-                ))
+                Err(self.message_error(Message::ExclusivePolicyMissing, NextAction::Retry))
             }
             // An unknown policy (no endpoint active yet, or unreadable) is
             // not held against the driver.
@@ -672,11 +735,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             }
             DriverState::Installed { problem_code, .. } => {
                 self.phase = Phase::Setup(SetupStep::Driver);
-                Err(user_error(
-                    format!(
-                        "드라이버가 올바르게 설치되지 않았습니다(문제 코드 {problem_code}). \
-                         복구를 실행하십시오."
-                    ),
+                Err(self.message_error(
+                    Message::DriverProblem { code: problem_code },
                     NextAction::Retry,
                 ))
             }
@@ -708,24 +768,28 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         self.driver = Some(driver);
         match self.host.get_mut().run_setup(&task) {
             Err(HostError::Declined) => {
-                Err(user_error("관리자 승인을 취소했습니다.", NextAction::Retry))
+                Err(self.message_error(Message::AdminApprovalCancelled, NextAction::Retry))
             }
-            Err(HostError::Setup(message)) => Err(user_error(
-                format!("드라이버 설치에 실패했습니다: {message}"),
+            Err(HostError::Setup(message)) => Err(self.message_error(
+                Message::DriverInstallFailed { detail: message },
                 NextAction::Retry,
             )),
-            Err(error) => Err(user_error(
-                format!("드라이버 설치에 실패했습니다: {error}"),
+            Err(error) => Err(self.message_error(
+                Message::DriverInstallFailed {
+                    detail: error.to_string(),
+                },
                 NextAction::Retry,
             )),
             Ok(outcome) => {
                 let message = outcome.message.trim();
                 if !message.is_empty() {
-                    self.notes.push(format!("설치 도우미: {message}"));
+                    self.notes.push(Message::SetupHelper {
+                        detail: message.to_owned(),
+                    });
                 }
                 if outcome.reboot_required {
                     self.phase = Phase::Setup(SetupStep::RebootRequired);
-                    Err(reboot_required())
+                    Err(self.message_error(Message::RebootRequired, NextAction::Reboot))
                 } else {
                     self.evaluate_driver()
                 }
@@ -736,22 +800,13 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     fn choose_output(&mut self, id: &DeviceId) -> Result<(), UserError> {
         let outputs = self.host.get_mut().outputs();
         let Some(output) = outputs.iter().find(|output| output.id == *id) else {
-            return Err(user_error(
-                "고른 출력 장치를 찾을 수 없습니다.",
-                NextAction::None,
-            ));
+            return Err(self.message_error(Message::ChosenOutputMissing, NextAction::None));
         };
         if output.endpoint.is_some() {
-            return Err(user_error(
-                "Spatial SoftReceiver 자신을 출력으로 고를 수 없습니다.",
-                NextAction::None,
-            ));
+            return Err(self.message_error(Message::OwnOutputChosen, NextAction::None));
         }
         if output.state != DeviceState::Active {
-            return Err(user_error(
-                "고른 출력 장치가 꺼져 있거나 연결되어 있지 않습니다.",
-                NextAction::None,
-            ));
+            return Err(self.message_error(Message::ChosenOutputInactive, NextAction::None));
         }
         self.settings.output = Some(OutputChoice {
             id: output.id.clone(),
@@ -773,10 +828,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             .map(|output| output.id.clone())
         else {
             self.driver = Some(self.host.get_mut().driver());
-            return Err(user_error(
-                "주 엔드포인트가 보이지 않습니다. 드라이버 상태를 확인하십시오.",
-                NextAction::Retry,
-            ));
+            return Err(self.message_error(Message::MainEndpointMissing, NextAction::Retry));
         };
         let Some(output) = self.find_output(&outputs) else {
             self.phase = Phase::Setup(SetupStep::ChooseOutput);
@@ -784,7 +836,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         };
         // The profile is resolved before the roles move, so a broken
         // profile.toml or a BRIR set that went missing changes nothing.
-        let resolved = resolve(&self.config, &self.settings.profile)?;
+        let resolved = resolve(&self.config, &self.settings.profile)
+            .map_err(|error| self.localized_error(error))?;
         self.profile = resolved.view;
         self.take_roles(ours, output.id.clone())?;
         match self.launcher.launch(&output, &resolved.profile) {
@@ -800,8 +853,10 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             }
             Err(error) => {
                 self.restore();
-                Err(user_error(
-                    format!("엔진을 시작하지 못했습니다: {error}"),
+                Err(self.message_error(
+                    Message::EngineStartFailed {
+                        detail: error.to_string(),
+                    },
                     NextAction::Retry,
                 ))
             }
@@ -819,13 +874,24 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             fallback: Some(fallback),
             app_pid: std::process::id(),
         };
-        host.write_restore_point(Some(&point.to_json()))
-            .map_err(|error| role_change_failed(&error))?;
+        if let Err(error) = host.write_restore_point(Some(&point.to_json())) {
+            return Err(self.message_error(
+                Message::RoleChangeFailed {
+                    detail: error.to_string(),
+                },
+                NextAction::Retry,
+            ));
+        }
         for role in Role::ALL {
             if let Err(error) = host.set_default_role(role, &point.ours) {
-                let notes = restore_point::restore(&point, host);
+                let notes = restore_point::restore_messages(&point, host);
                 self.notes.extend(notes);
-                return Err(role_change_failed(&error));
+                return Err(self.message_error(
+                    Message::RoleChangeFailed {
+                        detail: error.to_string(),
+                    },
+                    NextAction::Retry,
+                ));
             }
         }
         self.taken = Some(point);
@@ -836,7 +902,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// restore point.
     fn restore(&mut self) {
         if let Some(point) = self.taken.take() {
-            let notes = restore_point::restore(&point, self.host.get_mut());
+            let notes = restore_point::restore_messages(&point, self.host.get_mut());
             self.notes.extend(notes);
         }
     }
@@ -845,7 +911,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     fn reconnected(&mut self) {
         if self.reconnecting.take().is_some() {
             self.error = None;
-            self.notes.push("다시 연결했습니다.".to_owned());
+            self.error_message = None;
+            self.notes.push(Message::Reconnected);
         }
     }
 
@@ -864,8 +931,9 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         if let Some(running) = self.engine.take()
             && let Err(error) = running.handle.stop()
         {
-            self.notes
-                .push(format!("엔진을 멈추다가 오류가 났습니다: {error}"));
+            self.notes.push(Message::EngineStopFailed {
+                detail: error.to_string(),
+            });
         }
     }
 
@@ -889,10 +957,9 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             return None;
         };
         choice.id = found.id.clone();
-        self.notes.push(format!(
-            "출력 장치의 식별자가 바뀌어 이름으로 다시 찾았습니다: {}",
-            found.name
-        ));
+        self.notes.push(Message::OutputIdChanged {
+            name: found.name.clone(),
+        });
         Some(found.clone())
     }
 
@@ -901,7 +968,9 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// from the imported BRIR set, else [`default_profile`] (with the saved
     /// gain). Reads the disk; the snapshot uses the cached view instead.
     pub fn output_profile(&self) -> Result<OutputProfile, UserError> {
-        resolve(&self.config, &self.settings.profile).map(|resolved| resolved.profile)
+        resolve(&self.config, &self.settings.profile)
+            .map(|resolved| resolved.profile)
+            .map_err(|error| error.render(self.language()))
     }
 
     fn profile_file_active(&self) -> bool {
@@ -922,7 +991,12 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// becomes a note; enabling then fails with the same sentence.
     fn refresh_profile(&mut self) {
         match resolve(&self.config, &self.settings.profile) {
-            Ok(resolved) => self.profile = resolved.view,
+            Ok(resolved) => {
+                self.profile = resolved.view;
+                if self.profile.kind == ProfileKind::Stereo {
+                    self.profile.name = self.say(Message::DefaultProfileName);
+                }
+            }
             Err(error) => {
                 self.profile = unresolved_view(&self.config, &self.settings.profile);
                 self.notes.push(error.message);
@@ -932,10 +1006,10 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
 
     fn import_brir(&mut self, path: PathBuf) -> Result<(), UserError> {
         if self.profile_file_active() {
-            return Err(profile_file_error());
+            return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
         }
         if brir_source(&path).is_none() {
-            return Err(invalid_brir_error());
+            return Err(self.message_error(Message::InvalidBrirSource, NextAction::None));
         }
         let mut settings = self.settings.profile.clone();
         settings.brir = Some(path);
@@ -944,20 +1018,19 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
 
     fn import_headphone_fir(&mut self, path: PathBuf) -> Result<(), UserError> {
         if self.profile_file_active() {
-            return Err(profile_file_error());
+            return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
         }
         if self.settings.profile.brir.is_none() {
-            return Err(user_error(
-                "먼저 BRIR 세트를 가져오십시오.",
+            return Err(self.message_error(Message::ImportBrirFirst, NextAction::None));
+        }
+        if let Err(error) = brir::check_headphone_fir(&path) {
+            return Err(self.message_error(
+                Message::HeadphoneFirReadFailed {
+                    detail: error.to_string(),
+                },
                 NextAction::None,
             ));
         }
-        brir::check_headphone_fir(&path).map_err(|error| {
-            user_error(
-                format!("헤드폰 FIR을 읽지 못했습니다: {error}"),
-                NextAction::None,
-            )
-        })?;
         let mut settings = self.settings.profile.clone();
         settings.headphone_fir = Some(path);
         self.change_profile(settings)
@@ -969,16 +1042,25 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// and the profile a re-prepare builds from kept: any failure leaves
     /// them and the running output as they were.
     fn change_profile(&mut self, settings: ProfileSettings) -> Result<(), UserError> {
-        let resolved = resolve(&self.config, &settings)?;
-        if let Some(running) = self.engine.as_mut() {
-            let prepared = resolved
-                .profile
-                .prepare()
-                .map_err(|error| live_error(SessionError::Prepare(error)))?;
-            running
+        let resolved =
+            resolve(&self.config, &settings).map_err(|error| self.localized_error(error))?;
+        if self.engine.is_some() {
+            let prepared = match resolved.profile.prepare() {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    return Err(self.localized_error(live_error(SessionError::Prepare(error))));
+                }
+            };
+            let applied = self
+                .engine
+                .as_mut()
+                .expect("checked above")
                 .handle
-                .apply(LiveChange::Prepared(Box::new(prepared)))
-                .map_err(live_error)?;
+                .apply(LiveChange::Prepared(Box::new(prepared)));
+            if let Err(error) = applied {
+                return Err(self.localized_error(live_error(error)));
+            }
+            let running = self.engine.as_mut().expect("checked above");
             running.profile = resolved.profile;
             running.needs_prepared = false;
             running.pending = None;
@@ -990,17 +1072,22 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
 
     fn set_gain(&mut self, db: f32) -> Result<(), UserError> {
         if !db.is_finite() || !(GAIN_MIN_DB..=GAIN_MAX_DB).contains(&db) {
-            return Err(user_error(
-                "게인은 -20 dB에서 +10 dB 사이입니다.",
-                NextAction::None,
-            ));
+            return Err(self.message_error(Message::GainOutOfRange, NextAction::None));
         }
-        if let Some(running) = self.engine.as_mut() {
-            running
+        if self.engine.is_some() {
+            let applied = self
+                .engine
+                .as_mut()
+                .expect("checked above")
                 .handle
-                .apply(LiveChange::Gain(db))
-                .map_err(live_error)?;
-            set_gain_db(&mut running.profile, db);
+                .apply(LiveChange::Gain(db));
+            if let Err(error) = applied {
+                return Err(self.localized_error(live_error(error)));
+            }
+            set_gain_db(
+                &mut self.engine.as_mut().expect("checked above").profile,
+                db,
+            );
         }
         self.settings.profile.gain_db = Some(db);
         self.profile.gain_db = db;
@@ -1015,24 +1102,31 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// engine took the profile.
     fn test_direction(&mut self, id: DirectionId) -> Result<(), UserError> {
         if id.index() >= self.profile.directions.len() {
-            return Err(user_error("그 방향이 없습니다.", NextAction::None));
+            return Err(self.message_error(Message::DirectionMissing, NextAction::None));
         }
-        self.engine
+        let applied = self
+            .engine
             .as_mut()
             .expect("Running has an engine")
             .handle
-            .apply(LiveChange::TestTone(id))
-            .map_err(live_error)
+            .apply(LiveChange::TestTone(id));
+        applied.map_err(|error| self.localized_error(live_error(error)))
     }
 
-    fn output_missing(&self) -> UserError {
+    fn refused(&mut self) -> Outcome {
+        Outcome::Refused(self.message_error(Message::NotAllowed, NextAction::None))
+    }
+
+    fn output_missing(&mut self) -> UserError {
         let name = self
             .settings
             .output
             .as_ref()
             .map_or("", |choice| choice.name.as_str());
-        user_error(
-            format!("저장된 출력 장치를 찾을 수 없습니다: {name}"),
+        self.message_error(
+            Message::StoredOutputMissing {
+                name: name.to_owned(),
+            },
             NextAction::OpenSettings,
         )
     }
@@ -1081,11 +1175,17 @@ fn set_gain_db(profile: &mut OutputProfile, db: f32) {
 
 /// [`default_profile`] as the screen sees it, for snapshots taken without a
 /// supervisor.
-pub fn default_profile_view() -> ProfileView {
+pub fn default_profile_view_for(language: Language) -> ProfileView {
     let OutputProfile::Speakers(profile) = default_profile() else {
         unreachable!("the default profile is a speaker profile");
     };
-    speakers_view(&profile, ProfileKind::Stereo, false)
+    let mut view = speakers_view(&profile, ProfileKind::Stereo, false);
+    view.name = Message::DefaultProfileName.render(language);
+    view
+}
+
+pub fn default_profile_view() -> ProfileView {
+    default_profile_view_for(Language::Ko)
 }
 
 /// A resolved profile and its view.
@@ -1099,13 +1199,13 @@ fn profile_file(config: &Config) -> Option<&Path> {
 }
 
 /// The precedence of [`Supervisor::output_profile`], reading only headers.
-fn resolve(config: &Config, settings: &ProfileSettings) -> Result<Resolved, UserError> {
+fn resolve(config: &Config, settings: &ProfileSettings) -> Result<Resolved, LocalizedError> {
     if let Some(path) = profile_file(config) {
-        let mut profile = engine::load_output_profile(path).map_err(|error| {
-            user_error(
-                format!("profile.toml을 읽지 못했습니다: {error}"),
-                NextAction::None,
-            )
+        let mut profile = engine::load_output_profile(path).map_err(|error| LocalizedError {
+            message: Message::ProfileFileReadFailed {
+                detail: error.to_string(),
+            },
+            next: NextAction::None,
         })?;
         let view = match &mut profile {
             OutputProfile::Headphones(profile) => {
@@ -1164,7 +1264,8 @@ fn resolve(config: &Config, settings: &ProfileSettings) -> Result<Resolved, User
         unreachable!("the default profile is a speaker profile");
     };
     speakers.gain_db = settings.gain_db.unwrap_or(0.0);
-    let view = speakers_view(speakers, ProfileKind::Stereo, false);
+    let mut view = speakers_view(speakers, ProfileKind::Stereo, false);
+    view.name = Message::DefaultProfileName.render(Language::Ko);
     Ok(Resolved { profile, view })
 }
 
@@ -1198,7 +1299,10 @@ fn unresolved_view(config: &Config, settings: &ProfileSettings) -> ProfileView {
     }
 }
 
-fn headphones_view(profile: &brir::Profile, from_file: bool) -> Result<ProfileView, UserError> {
+fn headphones_view(
+    profile: &brir::Profile,
+    from_file: bool,
+) -> Result<ProfileView, LocalizedError> {
     let layout = brir::layout(profile).map_err(brir_error)?;
     let brir = match &profile.brir {
         brir::BrirSource::Hesuvi(path)
@@ -1297,42 +1401,41 @@ fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn profile_file_error() -> UserError {
-    user_error(
-        "상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.",
-        NextAction::None,
-    )
+fn invalid_brir_error() -> LocalizedError {
+    LocalizedError {
+        message: Message::InvalidBrirSource,
+        next: NextAction::None,
+    }
 }
 
-fn invalid_brir_error() -> UserError {
-    user_error(
-        "hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오.",
-        NextAction::None,
-    )
-}
-
-fn brir_error(error: brir::BrirError) -> UserError {
-    user_error(
-        format!("BRIR 세트를 읽지 못했습니다: {error}"),
-        NextAction::None,
-    )
+fn brir_error(error: brir::BrirError) -> LocalizedError {
+    LocalizedError {
+        message: Message::BrirReadFailed {
+            detail: error.to_string(),
+        },
+        next: NextAction::None,
+    }
 }
 
 /// A change the running engine did not take; the output is as it was.
-fn live_error(error: SessionError) -> UserError {
+fn live_error(error: SessionError) -> LocalizedError {
     match error {
-        SessionError::Prepare(error) => user_error(
-            format!("프로필을 준비하지 못했습니다: {error}"),
-            NextAction::None,
-        ),
-        SessionError::Rejected => user_error(
-            "엔진이 변경을 받지 못했습니다. 잠시 뒤 다시 시도하십시오.",
-            NextAction::Retry,
-        ),
-        error => user_error(
-            format!("엔진에 변경을 적용하지 못했습니다: {error}"),
-            NextAction::Retry,
-        ),
+        SessionError::Prepare(error) => LocalizedError {
+            message: Message::ProfilePrepareFailed {
+                detail: error.to_string(),
+            },
+            next: NextAction::None,
+        },
+        SessionError::Rejected => LocalizedError {
+            message: Message::EngineChangeRejected,
+            next: NextAction::Retry,
+        },
+        error => LocalizedError {
+            message: Message::EngineChangeFailed {
+                detail: error.to_string(),
+            },
+            next: NextAction::Retry,
+        },
     }
 }
 
@@ -1351,20 +1454,13 @@ struct Reconnecting {
     fault: EngineFault,
 }
 
-fn refused() -> Outcome {
-    Outcome::Refused(not_allowed())
-}
-
-fn reconnecting_error(fault: &EngineFault) -> UserError {
-    let message = match fault {
-        EngineFault::OutputLost(detail) => {
-            format!("출력 장치와의 연결이 끊어져 다시 연결하는 중입니다: {detail}")
-        }
-        EngineFault::CaptureLost(_) => {
-            "캡처 장치와의 연결이 끊어져 다시 연결하는 중입니다.".to_owned()
-        }
-    };
-    user_error(message, NextAction::None)
+fn reconnecting_message(fault: &EngineFault) -> Message {
+    match fault {
+        EngineFault::OutputLost(detail) => Message::ReconnectingOutput {
+            detail: detail.clone(),
+        },
+        EngineFault::CaptureLost(_) => Message::ReconnectingCapture,
+    }
 }
 
 /// Installed without a problem, running, and not missing the exclusive
@@ -1383,45 +1479,4 @@ fn driver_is_fine(driver: &DriverState) -> bool {
 /// An output the user may choose: active, and not one of ours.
 fn is_choosable(output: &OutputDevice) -> bool {
     output.state == DeviceState::Active && output.endpoint.is_none()
-}
-
-fn user_error(message: impl Into<String>, next: NextAction) -> UserError {
-    UserError {
-        message: message.into(),
-        next,
-    }
-}
-
-fn not_allowed() -> UserError {
-    user_error("지금은 할 수 없는 동작입니다.", NextAction::None)
-}
-
-fn reboot_required() -> UserError {
-    user_error(
-        "드라이버 설치를 마치려면 다시 시작해야 합니다.",
-        NextAction::Reboot,
-    )
-}
-
-fn role_change_failed(error: &HostError) -> UserError {
-    user_error(
-        format!("기본 장치를 바꾸지 못했습니다: {error}"),
-        NextAction::Retry,
-    )
-}
-
-fn os_requirement(min_os_build: u32) -> String {
-    if min_os_build == Config::MIN_OS_BUILD {
-        "Windows 10 2004(빌드 19041) 이상이 필요합니다.".to_owned()
-    } else {
-        format!("Windows 빌드 {min_os_build} 이상이 필요합니다.")
-    }
-}
-
-fn arch_name(arch: Arch) -> &'static str {
-    match arch {
-        Arch::X64 => "x64",
-        Arch::Arm64 => "Arm64",
-        Arch::Other => "다른 아키텍처",
-    }
 }

@@ -1,5 +1,17 @@
 [
   {
+    "kind": "set_language",
+    "value": null
+  },
+  {
+    "kind": "set_language",
+    "value": "ko"
+  },
+  {
+    "kind": "set_language",
+    "value": "en"
+  },
+  {
     "kind": "begin_setup"
   },
   {

@@ -1191,7 +1191,29 @@ tests = [
   "ssr-types::typescript_bindings_match_the_types",
   "ssr-types::snapshot_fixtures_match_the_types",
 ]
-note = "ADR 0001 (2026-10-15 addendum): apps/spatial-softreceiver is the Tauri 2 shell. A control thread (never the UI thread, so the Windows host can join the multithreaded apartment) owns the supervisor: it takes intents over a channel, polls every 33 ms, emits the `snapshot` event when the phase, an intent or a notice changes it (and every second when the output list differs), emits `meters` (EngineStatus) at the tick rate while Running, and persists supervisor::Settings as %LOCALAPPDATA%\\Spatial SoftReceiver\\settings.json after new and every successful intent. Two commands (dispatch, snapshot) and two events are the whole IPC; the TypeScript bindings (ui/src/bindings.ts) and the snapshot fixtures the screens are tested with are generated from ssr-types by tests/ui_contract.rs and compared in CI. The Windows launcher opens the driver ring and WASAPI (exclusive with shared fallback) with the profile resolved by the supervisor. Tray (open, enable/disable, quit), close to tray, single instance, autostart on login, and a --smoke mode the Windows CI runs (WebView2 draws the screens and asks for a snapshot). The screens (ui/, vitest + gallery screenshots) are the wizard, the status screen with 30 Hz meters, a profile screen, and settings. Still planned: the installer and Velopack updates, English text. ADR 0033: an ordinary launch starts ssr-guard and exits; the guard launches the app with --guarded, and that app writes a one-line heartbeat (ssr_types::app::Heartbeat) to stdout every refresh; --resume (after the guard restarted it) enables once from Ready. At startup a restore point left by a previous instance is restored before the supervisor exists, and the guard's marker becomes a note on the first snapshot (Supervisor::note)"
+note = "ADR 0001 (2026-10-15 addendum): apps/spatial-softreceiver is the Tauri 2 shell. A control thread (never the UI thread, so the Windows host can join the multithreaded apartment) owns the supervisor: it takes intents over a channel, polls every 33 ms, emits the `snapshot` event when the phase, an intent or a notice changes it (and every second when the output list differs), emits `meters` (EngineStatus) at the tick rate while Running, and persists supervisor::Settings as %LOCALAPPDATA%\\Spatial SoftReceiver\\settings.json after new and every successful intent. Two commands (dispatch, snapshot) and two events are the whole IPC; the TypeScript bindings (ui/src/bindings.ts) and the snapshot fixtures the screens are tested with are generated from ssr-types by tests/ui_contract.rs and compared in CI. The Windows launcher opens the driver ring and WASAPI (exclusive with shared fallback) with the profile resolved by the supervisor. Tray (open, enable/disable, quit), close to tray, single instance, autostart on login, and a --smoke mode the Windows CI runs (WebView2 draws the screens and asks for a snapshot). The screens (ui/, vitest + gallery screenshots) are the wizard, the status screen with 30 Hz meters, a profile screen, and settings. The installer and Velopack updates are app.installer; the Korean/English catalogues, the language contract and the settings screen's language selector are app.english. ADR 0033: an ordinary launch starts ssr-guard and exits; the guard launches the app with --guarded, and that app writes a one-line heartbeat (ssr_types::app::Heartbeat) to stdout every refresh; --resume (after the guard restarted it) enables once from Ready. At startup a restore point left by a previous instance is restored before the supervisor exists, and the guard's marker becomes a note on the first snapshot (Supervisor::note)"
+
+[[feature]]
+id = "app.english"
+kind = "app"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "supervisor::every_message_renders_nonempty_and_distinct_in_both_languages",
+  "supervisor::language_defaults_overrides_resets_and_rerenders_errors_in_every_phase",
+  "supervisor::default_language_and_failed_profile_errors_follow_language_changes",
+  "ssr-types::typescript_bindings_match_the_types",
+  "ssr-types::snapshot_fixtures_match_the_types",
+  "ssr-guard::every_marker_reason_has_both_languages_without_changing_the_record",
+  "ssr-guard::only_a_supported_envelope_with_explicit_language_overrides_the_os",
+  "spatial-softreceiver::guard_rereads_the_apps_language_settings_for_each_notification",
+  "spatial-softreceiver::language_changes_repaint_marker_and_preserve_note_lifetime",
+  "spatial-softreceiver::startup_restore_notices_follow_language_without_losing_external_details",
+  "spatial-softreceiver::every_label_follows_language_and_actions_stay_the_same",
+  "spatial-softreceiver::apply_errors_render_in_both_languages_and_keep_the_detail",
+  "spatial-softreceiver::an_update_error_speaks_the_language_and_never_quits",
+]
+note = "ADR 0001: Language Ko/En, SetLanguage(Some) override and None OS fallback; resolved Snapshot.language selects matching Korean/English UI catalogues and document language. Supervisor Message renders user sentences in the selected language. Shell tray labels and guard marker sentences follow that choice; sys-locale supplies the OS default. UI vitest test/i18n.test.ts checks recursive catalogue keys/function signatures, every fixture on status/profile/settings/wizard screens without UI-owned Hangul, live language switches, source-data preservation, picker text and bridge validation, and the settings screen's language select (auto/ko/en sends SetLanguage). The guard's toast and the shell's update errors render in the resolved language too."
 
 [[feature]]
 id = "app.profile_intents"

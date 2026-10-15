@@ -36,10 +36,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ssr_guard::language;
 use ssr_sys::WindowsHost;
 use ssr_sys::host::RESTORE_POINT_FILE;
 use ssr_types::EngineStatus;
-use ssr_types::app::{Heartbeat, Intent, NextAction, Phase, Snapshot, UserError};
+use ssr_types::app::{Heartbeat, Intent, Phase, Snapshot, UserError};
 use supervisor::machine::Config;
 use supervisor::restore_point::{self, RestorePoint};
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -47,11 +48,12 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter as _, Manager as _, RunEvent, WindowEvent, Wry};
 use tauri_plugin_autostart::MacosLauncher;
 
-use crate::control::{self, Bridge, ControlConfig};
+use crate::control::{self, Bridge, ControlConfig, Note};
 use crate::launcher::WindowsLauncher;
 use crate::log::{self, Log};
 use crate::paths::{self, Args};
 use crate::settings::JsonSettingsFile;
+use crate::tray::{self, Toggle};
 use crate::update::{UpdateState, Updater};
 
 /// The window `tauri.conf.json` creates.
@@ -181,22 +183,9 @@ fn apply_update(
     updater: tauri::State<'_, Updater>,
     bridge: tauri::State<'_, Bridge>,
 ) -> Result<(), UserError> {
-    let Some(pending) = updater.pending() else {
-        return Err(UserError {
-            message: "받아 둔 업데이트가 없습니다.".to_owned(),
-            next: NextAction::None,
-        });
-    };
-    pending.apply_after_exit().map_err(|message| UserError {
-        message,
-        next: NextAction::None,
-    })?;
-    log::line(&format!(
-        "shell: the updater waits for the exit; quitting to apply {}",
-        pending.version()
-    ));
-    send(bridge.inner(), Intent::Quit);
-    Ok(())
+    crate::update::apply(bridge.language(), updater.pending(), || {
+        send(bridge.inner(), Intent::Quit);
+    })
 }
 
 fn setup(
@@ -214,6 +203,8 @@ fn setup(
         log::line(&format!("shell: toast registration: {error}"));
     }
     let state_dir = ending.state_dir.clone();
+    let default_language = language::from_locale(sys_locale::get_locale().as_deref());
+    let language = language::resolve_in(&state_dir, default_language);
     let mut initial_notes = Vec::new();
     if state_dir.join(RESTORE_POINT_FILE).exists() {
         log::line("지난 실행이 역할을 쥔 채 끝났음");
@@ -222,47 +213,50 @@ fn setup(
             Ok(notes) => initial_notes.extend(notes),
             Err(_) => {
                 log::line("shell: startup restore thread panicked");
-                initial_notes.push("지난 실행의 기본 장치를 되돌리지 못했습니다.".to_owned());
+                initial_notes.push(Note::RestoreFailed);
             }
         }
     }
-    initial_notes.extend(consume_guard_marker(&state_dir));
+    let marker = consume_guard_marker(&state_dir);
     let host = windows_host(&state_dir);
     let launcher = WindowsLauncher;
     let store = JsonSettingsFile::in_dir(&state_dir);
 
-    let open = MenuItem::with_id(app, MENU_OPEN, "열기", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, MENU_OPEN, tray::open(language), true, None::<&str>)?;
     let toggle = MenuItem::with_id(
         app,
         MENU_TOGGLE,
-        Toggle::Unavailable.text(),
+        Toggle::Unavailable.text(language),
         false,
         None::<&str>,
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, MENU_QUIT, "종료", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, MENU_QUIT, tray::quit(language), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &toggle, &separator, &quit])?;
 
     let last = Arc::new(Mutex::new(None));
     let emitter = TauriEmitter {
         handle: app.handle().clone(),
         last: Arc::clone(&last),
+        open,
         toggle,
+        quit,
         ending: ending.clone(),
         heartbeat_enabled: args.guarded,
         heartbeat_broken: AtomicBool::new(false),
     };
-    let (bridge, control) = control::spawn(
+    let (bridge, control) = control::spawn_with_startup(
         host,
         launcher,
         Config {
+            default_language,
             profile_file: Some(paths::profile_file(&state_dir)),
             ..Config::default()
         },
         ControlConfig::default(),
         store,
         emitter,
-        initial_notes,
+        (initial_notes, marker),
     );
     app.manage(bridge.clone());
     let update_handle = app.handle().clone();
@@ -299,7 +293,7 @@ fn setup(
 
     let menu_bridge = bridge.clone();
     let mut tray = TrayIconBuilder::with_id(TRAY)
-        .tooltip("Spatial SoftReceiver")
+        .tooltip(language::title(language))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(move |handle, event| on_menu(handle, &event, &menu_bridge, &last))
@@ -342,7 +336,9 @@ struct TauriEmitter {
     handle: AppHandle,
     /// The last snapshot sent, which the tray's on/off item acts on.
     last: Arc<Mutex<Option<Snapshot>>>,
+    open: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
     ending: Ending,
     heartbeat_enabled: bool,
     heartbeat_broken: AtomicBool,
@@ -359,17 +355,39 @@ impl control::Emitter for TauriEmitter {
             .lock()
             .ok()
             .and_then(|mut last| last.replace(snapshot.clone()))
-            .map(|last| Toggle::of(&last.phase));
-        if previous != Some(toggle) {
+            .map(|last| (Toggle::of(&last.phase), last.language));
+        let language = snapshot.language;
+        if previous != Some((toggle, language)) {
             // Menu items change on the UI thread; posting there keeps this
             // thread from waiting for it.
             let item = self.toggle.clone();
+            let open = self.open.clone();
+            let quit = self.quit.clone();
+            let handle = self.handle.clone();
             let posted = self.handle.run_on_main_thread(move || {
-                if let Err(error) = item
-                    .set_text(toggle.text())
-                    .and_then(|()| item.set_enabled(toggle.intent().is_some()))
+                for result in [
+                    open.set_text(tray::open(language)),
+                    item.set_text(toggle.text(language)),
+                    item.set_enabled(toggle.intent().is_some()),
+                    quit.set_text(tray::quit(language)),
+                ] {
+                    if let Err(error) = result {
+                        log::line(&format!("shell: the tray menu could not change: {error}"));
+                    }
+                }
+                if let Some(tray) = handle.tray_by_id(TRAY)
+                    && let Err(error) = tray.set_tooltip(Some(language::title(language)))
                 {
-                    log::line(&format!("shell: the tray menu could not change: {error}"));
+                    log::line(&format!(
+                        "shell: the tray tooltip could not change: {error}"
+                    ));
+                }
+                if let Some(window) = handle.get_webview_window(MAIN_WINDOW)
+                    && let Err(error) = window.set_title(language::title(language))
+                {
+                    log::line(&format!(
+                        "shell: the window title could not change: {error}"
+                    ));
                 }
             });
             if let Err(error) = posted {
@@ -403,39 +421,6 @@ impl control::Emitter for TauriEmitter {
     fn quit(&self) {
         log::line("shell: the supervisor quit");
         self.ending.supervisor_quit(&self.handle);
-    }
-}
-
-/// The tray's on/off item for a phase.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Toggle {
-    Disable,
-    Enable,
-    Unavailable,
-}
-
-impl Toggle {
-    fn of(phase: &Phase) -> Self {
-        match phase {
-            Phase::Running => Self::Disable,
-            Phase::Ready | Phase::Faulted => Self::Enable,
-            Phase::Setup(_) | Phase::Quit => Self::Unavailable,
-        }
-    }
-
-    fn text(self) -> &'static str {
-        match self {
-            Self::Disable => "끄기",
-            Self::Enable | Self::Unavailable => "켜기",
-        }
-    }
-
-    fn intent(self) -> Option<Intent> {
-        match self {
-            Self::Disable => Some(Intent::Disable),
-            Self::Enable => Some(Intent::Enable),
-            Self::Unavailable => None,
-        }
     }
 }
 
@@ -617,7 +602,16 @@ fn quit_within(bridge: &Bridge, limit: Duration) -> QuitOutcome {
 /// ([`restore_point::restore`]: `restore_roles`, then the file is removed).
 /// Without a restore point the roles are not ours and nothing happens. Makes
 /// the host's COM calls, so never on the UI thread.
-pub(crate) fn last_resort_restore(state_dir: &Path) -> Vec<String> {
+pub(crate) fn last_resort_restore(state_dir: &Path) -> Vec<Note> {
+    let notes = restore_notes(state_dir);
+    let language = language::resolve_in(state_dir, language::system());
+    for note in &notes {
+        log::line(&format!("shell: last resort: {}", note.render(language)));
+    }
+    notes
+}
+
+fn restore_notes(state_dir: &Path) -> Vec<Note> {
     let path = state_dir.join(RESTORE_POINT_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -630,32 +624,33 @@ pub(crate) fn last_resort_restore(state_dir: &Path) -> Vec<String> {
                 "shell: last resort: {} cannot be read: {error}",
                 path.display()
             ));
-            return vec![format!("복원점을 읽지 못했습니다: {error}")];
+            return vec![Note::RestoreReadFailed {
+                detail: error.to_string(),
+            }];
         }
     };
     let point = match RestorePoint::from_json(&text) {
         Ok(point) => point,
         Err(error) => {
             log::line(&format!("shell: last resort: {}: {error}", path.display()));
-            return vec![format!("복원점을 읽지 못했습니다: {error}")];
+            return vec![Note::RestoreReadFailed {
+                detail: error.to_string(),
+            }];
         }
     };
-    let notes = restore_point::restore(&point, &mut windows_host(state_dir));
+    let notes = restore_point::restore_messages(&point, &mut windows_host(state_dir));
     log::line("shell: last resort: gave the roles back from the restore point");
-    for note in &notes {
-        log::line(&format!("shell: last resort: {note}"));
-    }
-    notes
+    notes.into_iter().map(Note::Supervisor).collect()
 }
 
-fn consume_guard_marker(state_dir: &Path) -> Vec<String> {
+fn consume_guard_marker(state_dir: &Path) -> Option<ssr_guard::marker::Marker> {
     let path = state_dir.join(ssr_guard::marker::FILE);
     let marker = match ssr_guard::marker::read(&path) {
         Ok(marker) => marker,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
         Err(error) => {
             log::line(&format!("shell: guard marker: {error}"));
-            return Vec::new();
+            return None;
         }
     };
     if let Err(error) = fs::remove_file(&path) {
@@ -663,9 +658,7 @@ fn consume_guard_marker(state_dir: &Path) -> Vec<String> {
             "shell: guard marker could not be removed: {error}"
         ));
     }
-    std::iter::once(ssr_guard::marker::sentence(&marker))
-        .chain(marker.notes)
-        .collect()
+    Some(marker)
 }
 
 /// The host adapter with `ssr-setup.exe` beside this executable.

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use engine::adapters::NullOpener;
 use engine::{LiveChange, OutputProfile};
-use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep, UserError};
+use ssr_types::app::{Intent, Language, NextAction, OutputChoice, Phase, SetupStep, UserError};
 use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DefaultRoles, DeviceId, DeviceState, DirectionView, DriverState, EngineFault,
@@ -330,6 +330,7 @@ fn describe(profile: &OutputProfile) -> String {
 
 fn this_build() -> Config {
     Config {
+        default_language: Language::Ko,
         requires_test_signing: true,
         min_os_build: 19_041,
         arch: Arch::X64,
@@ -347,6 +348,7 @@ fn dac_choice() -> OutputChoice {
 
 fn dac_settings() -> Settings {
     Settings {
+        language: None,
         output: Some(dac_choice()),
         profile: Default::default(),
     }
@@ -820,6 +822,7 @@ fn a_changed_device_id_is_found_by_name_and_remembered() {
     let (shared, mut supervisor) = start(
         ready_pc(),
         Settings {
+            language: None,
             output: Some(OutputChoice {
                 id: id("{dac-before-reboot}"),
                 name: DAC_NAME.into(),
@@ -1445,6 +1448,7 @@ fn new_starts_ready_when_the_driver_and_the_output_are_present() {
 #[test]
 fn new_starts_at_welcome_otherwise() {
     let gone = Settings {
+        language: None,
         output: Some(OutputChoice {
             id: id("{old-dac}"),
             name: "Old DAC".into(),
@@ -2484,4 +2488,134 @@ fn a_real_session_takes_profile_gain_and_test_tone_live() {
 
     supervisor.handle(Intent::Disable).unwrap();
     assert_eq!(shared.get().roles, previous_roles());
+}
+
+#[test]
+fn language_defaults_overrides_resets_and_rerenders_errors_in_every_phase() {
+    let (shared, mut supervisor) = start(ready_pc(), Settings::default());
+    assert_eq!(supervisor.language(), Language::Ko);
+    assert_eq!(supervisor.snapshot().language, Language::Ko);
+
+    shared.get().platform.os_build = 18_363;
+    supervisor.handle(Intent::BeginSetup).unwrap_err();
+    assert!(
+        supervisor
+            .snapshot()
+            .error
+            .unwrap()
+            .message
+            .starts_with("Windows 10 2004")
+    );
+    supervisor
+        .handle(Intent::SetLanguage(Some(Language::En)))
+        .unwrap();
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.language, Language::En);
+    assert!(
+        snapshot
+            .error
+            .unwrap()
+            .message
+            .starts_with("Windows 10 version 2004")
+    );
+    supervisor.handle(Intent::SetLanguage(None)).unwrap();
+    assert_eq!(supervisor.snapshot().language, Language::Ko);
+
+    let welcome = start(ready_pc(), Settings::default()).1;
+
+    let mut not_test_signing_world = ready_pc();
+    not_test_signing_world.platform.test_signing = false;
+    let mut not_test_signing = start(not_test_signing_world, Settings::default()).1;
+    not_test_signing.handle(Intent::BeginSetup).unwrap_err();
+
+    let mut driver_world = ready_pc();
+    driver_world.driver = DriverState::NotInstalled;
+    let mut driver = start(driver_world, Settings::default()).1;
+    driver.handle(Intent::BeginSetup).unwrap();
+
+    let mut reboot_world = ready_pc();
+    reboot_world.driver = DriverState::RebootRequired;
+    let mut reboot = start(reboot_world, Settings::default()).1;
+    reboot.handle(Intent::BeginSetup).unwrap_err();
+
+    let mut choose_output = start(ready_pc(), Settings::default()).1;
+    choose_output.handle(Intent::BeginSetup).unwrap();
+
+    let ready = start(ready_pc(), dac_settings()).1;
+    let running_machine = running(ready_pc()).1;
+
+    let mut faulted_world = ready_pc();
+    faulted_world
+        .engine_polls
+        .push_back(Err(SessionError::Rejected));
+    let mut faulted = running(faulted_world).1;
+    faulted.tick(Instant::now());
+
+    let mut cases = vec![
+        welcome,
+        supervisor,
+        not_test_signing,
+        driver,
+        reboot,
+        choose_output,
+        ready,
+        running_machine,
+        faulted,
+    ];
+    for supervisor in &mut cases {
+        let phase = supervisor.snapshot().phase;
+        assert_eq!(
+            supervisor.handle(Intent::SetLanguage(Some(Language::En))),
+            Ok(()),
+            "{phase:?}"
+        );
+        assert_eq!(supervisor.snapshot().phase, phase);
+    }
+
+    let mut faulted = running(ready_pc()).1;
+    faulted
+        .handle(Intent::Disable)
+        .expect("disable makes the machine Ready");
+    faulted.handle(Intent::Enable).unwrap();
+    faulted
+        .handle(Intent::SetLanguage(Some(Language::En)))
+        .unwrap();
+    faulted.handle(Intent::Quit).unwrap();
+    assert_eq!(
+        faulted.handle(Intent::SetLanguage(Some(Language::Ko))),
+        Err(error(
+            "That action is not available right now.",
+            NextAction::None
+        ))
+    );
+}
+
+#[test]
+fn default_language_and_failed_profile_errors_follow_language_changes() {
+    let mut config = this_build();
+    config.default_language = Language::En;
+    let shared = Shared::new(ready_pc());
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        FakeLauncher(shared),
+        config,
+        dac_settings(),
+    );
+    assert_eq!(supervisor.language(), Language::En);
+    assert_eq!(supervisor.snapshot().profile.name, "Default stereo");
+
+    let failed = supervisor
+        .handle(Intent::ImportBrir("not-a-brir.txt".into()))
+        .unwrap_err();
+    assert_eq!(
+        failed.message,
+        "Choose hesuvi.wav, hrir.wav, or a folder of per-direction WAV files."
+    );
+    supervisor
+        .handle(Intent::SetLanguage(Some(Language::Ko)))
+        .unwrap();
+    assert_eq!(
+        supervisor.snapshot().error.unwrap().message,
+        "hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오."
+    );
 }

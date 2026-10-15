@@ -18,6 +18,7 @@ pub mod control;
 pub mod log;
 pub mod paths;
 pub mod settings;
+pub mod tray;
 
 #[cfg(windows)]
 pub mod launcher;

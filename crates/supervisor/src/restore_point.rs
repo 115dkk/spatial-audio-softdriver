@@ -7,7 +7,10 @@
 //! the two can never disagree about what "giving back" means.
 
 use serde_json::{Map, Value, json};
+use ssr_types::app::Language;
 use ssr_types::{DefaultRoles, DeviceId, DeviceState, Host, Role};
+
+use crate::text::Message;
 
 /// What the guard needs to give the roles back without the app: our main
 /// endpoint, the device each role pointed at before, the device a role falls
@@ -106,9 +109,27 @@ fn optional_id(
 /// Gives the roles of `point` back and removes the restore point. Returns the
 /// notes for the user (see [`restore_roles`]).
 pub fn restore(point: &RestorePoint, host: &mut impl Host) -> Vec<String> {
-    let mut notes = restore_roles(host, &point.ours, &point.previous, point.fallback.as_ref());
+    restore_with_language(point, host, Language::Ko)
+}
+
+pub fn restore_with_language(
+    point: &RestorePoint,
+    host: &mut impl Host,
+    language: Language,
+) -> Vec<String> {
+    restore_messages(point, host)
+        .into_iter()
+        .map(|message| message.render(language))
+        .collect()
+}
+
+pub fn restore_messages(point: &RestorePoint, host: &mut impl Host) -> Vec<Message> {
+    let mut notes =
+        restore_roles_messages(host, &point.ours, &point.previous, point.fallback.as_ref());
     if let Err(error) = host.write_restore_point(None) {
-        notes.push(format!("복원점을 지우지 못했습니다: {error}"));
+        notes.push(Message::RestorePointRemoveFailed {
+            detail: error.to_string(),
+        });
     }
     notes
 }
@@ -133,6 +154,28 @@ pub fn restore_roles(
     previous: &DefaultRoles,
     fallback: Option<&DeviceId>,
 ) -> Vec<String> {
+    restore_roles_with_language(host, ours, previous, fallback, Language::Ko)
+}
+
+pub fn restore_roles_with_language(
+    host: &mut impl Host,
+    ours: &DeviceId,
+    previous: &DefaultRoles,
+    fallback: Option<&DeviceId>,
+    language: Language,
+) -> Vec<String> {
+    restore_roles_messages(host, ours, previous, fallback)
+        .into_iter()
+        .map(|message| message.render(language))
+        .collect()
+}
+
+pub fn restore_roles_messages(
+    host: &mut impl Host,
+    ours: &DeviceId,
+    previous: &DefaultRoles,
+    fallback: Option<&DeviceId>,
+) -> Vec<Message> {
     let current = host.default_roles();
     let outputs = host.outputs();
     // A device a role may go to: listed, active, and not ours.
@@ -152,27 +195,23 @@ pub fn restore_roles(
             None => match fallback {
                 Some(output) => (
                     output,
-                    Some(format!(
-                        "이전 기본 장치({})를 찾을 수 없어 고른 출력으로 되돌렸습니다: {}",
-                        role_name(role),
-                        output.name
-                    )),
+                    Some(Message::RestoreFallback {
+                        role,
+                        name: output.name.clone(),
+                    }),
                 ),
                 None => {
-                    notes.push(format!(
-                        "이전 기본 장치({})를 찾을 수 없어 Windows가 고르게 둡니다.",
-                        role_name(role)
-                    ));
+                    notes.push(Message::RestoreLeftToWindows { role });
                     continue;
                 }
             },
         };
         match host.set_default_role(role, &target.id) {
             Ok(()) => notes.extend(note),
-            Err(error) => notes.push(format!(
-                "기본 장치({})를 되돌리지 못했습니다: {error}",
-                role_name(role)
-            )),
+            Err(error) => notes.push(Message::RestoreRoleFailed {
+                role,
+                detail: error.to_string(),
+            }),
         }
     }
     notes
@@ -183,14 +222,5 @@ fn role_key(role: Role) -> &'static str {
         Role::Console => "console",
         Role::Multimedia => "multimedia",
         Role::Communications => "communications",
-    }
-}
-
-/// The role as the screen names it.
-fn role_name(role: Role) -> &'static str {
-    match role {
-        Role::Console => "콘솔",
-        Role::Multimedia => "멀티미디어",
-        Role::Communications => "통신",
     }
 }

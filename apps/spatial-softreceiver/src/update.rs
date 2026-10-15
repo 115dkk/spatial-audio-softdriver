@@ -15,7 +15,79 @@
 //! The real module needs the `updater` feature (see Cargo.toml); without it
 //! the same names are stubs.
 
+use std::sync::Arc;
+
+use ssr_types::app::{Language, NextAction, UserError};
+
+use crate::log;
+
 pub use real::*;
+
+/// What the shell's `apply_update` command does once Tauri handed over its
+/// state: without a downloaded update, or when the updater does not start,
+/// the error in `language`; otherwise `quit` runs, since the updater is now
+/// waiting for the exit.
+pub fn apply(
+    language: Language,
+    pending: Option<Arc<Pending>>,
+    quit: impl FnOnce(),
+) -> Result<(), UserError> {
+    let Some(pending) = pending else {
+        return Err(user_error(match language {
+            Language::Ko => "받아 둔 업데이트가 없습니다.",
+            Language::En => "There is no downloaded update.",
+        }));
+    };
+    finish(
+        language,
+        pending.apply_after_exit(),
+        pending.version(),
+        quit,
+    )
+}
+
+fn finish(
+    language: Language,
+    applied: Result<(), ApplyError>,
+    version: &str,
+    quit: impl FnOnce(),
+) -> Result<(), UserError> {
+    applied.map_err(|error| user_error(&error.render(language)))?;
+    log::line(&format!(
+        "update: the updater waits for the exit; quitting to apply {version}"
+    ));
+    quit();
+    Ok(())
+}
+
+fn user_error(message: &str) -> UserError {
+    UserError {
+        message: message.to_owned(),
+        next: NextAction::None,
+    }
+}
+
+/// Why a downloaded update was not applied; rendered in the user's language
+/// by the shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApplyError {
+    /// This build was made without the `updater` feature.
+    NotBuilt,
+    /// Velopack's updater could not be started.
+    Failed(String),
+}
+
+impl ApplyError {
+    pub fn render(&self, language: Language) -> String {
+        use Language::{En, Ko};
+        match (self, language) {
+            (Self::NotBuilt, Ko) => "이 빌드에는 업데이트 기능이 없습니다.".to_owned(),
+            (Self::NotBuilt, En) => "This build has no updater.".to_owned(),
+            (Self::Failed(detail), Ko) => format!("업데이트를 적용하지 못했습니다: {detail}"),
+            (Self::Failed(detail), En) => format!("Could not apply the update: {detail}"),
+        }
+    }
+}
 
 #[cfg(feature = "updater")]
 mod real {
@@ -114,10 +186,10 @@ mod real {
         /// Starts Velopack's updater, which waits for this process to exit (at
         /// most 60 s), applies the update and starts the app again without
         /// arguments. The caller quits the app after this returns.
-        pub fn apply_after_exit(&self) -> Result<(), String> {
+        pub fn apply_after_exit(&self) -> Result<(), super::ApplyError> {
             self.manager
                 .wait_exit_then_apply_updates(&self.asset, false, true, Vec::<String>::new())
-                .map_err(|error| format!("업데이트를 적용하지 못했습니다: {error}"))
+                .map_err(|error| super::ApplyError::Failed(error.to_string()))
         }
     }
 
@@ -240,8 +312,8 @@ mod real {
             ""
         }
 
-        pub fn apply_after_exit(&self) -> Result<(), String> {
-            Err("이 빌드에는 업데이트 기능이 없습니다.".to_owned())
+        pub fn apply_after_exit(&self) -> Result<(), super::ApplyError> {
+            Err(super::ApplyError::NotBuilt)
         }
     }
 
@@ -271,5 +343,54 @@ mod real {
         pub fn pending(&self) -> Option<std::sync::Arc<Pending>> {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_errors_render_in_both_languages_and_keep_the_detail() {
+        assert_eq!(
+            ApplyError::NotBuilt.render(Language::Ko),
+            "이 빌드에는 업데이트 기능이 없습니다."
+        );
+        assert_eq!(
+            ApplyError::NotBuilt.render(Language::En),
+            "This build has no updater."
+        );
+        let failed = ApplyError::Failed("exit code 3".to_owned());
+        assert_eq!(
+            failed.render(Language::Ko),
+            "업데이트를 적용하지 못했습니다: exit code 3"
+        );
+        assert_eq!(
+            failed.render(Language::En),
+            "Could not apply the update: exit code 3"
+        );
+    }
+
+    #[test]
+    fn an_update_error_speaks_the_language_and_never_quits() {
+        let mut quit = false;
+        let error = apply(Language::En, None, || quit = true).unwrap_err();
+        assert_eq!(error.message, "There is no downloaded update.");
+        assert_eq!(error.next, NextAction::None);
+        let error = apply(Language::Ko, None, || quit = true).unwrap_err();
+        assert_eq!(error.message, "받아 둔 업데이트가 없습니다.");
+        let failed = || Err(ApplyError::Failed("exit code 3".to_owned()));
+        let error = finish(Language::En, failed(), "1.2.3", || quit = true).unwrap_err();
+        assert_eq!(error.message, "Could not apply the update: exit code 3");
+        let error = finish(Language::Ko, failed(), "1.2.3", || quit = true).unwrap_err();
+        assert_eq!(error.message, "업데이트를 적용하지 못했습니다: exit code 3");
+        assert!(!quit, "a failed apply must not quit the app");
+    }
+
+    #[test]
+    fn a_started_updater_quits_the_app() {
+        let mut quit = false;
+        finish(Language::Ko, Ok(()), "1.2.3", || quit = true).unwrap();
+        assert!(quit);
     }
 }

@@ -18,6 +18,7 @@ import type {
   EngineStatus,
   Intent,
   LatencyStats,
+  Language,
   NextAction,
   OutputChoice,
   OutputMode,
@@ -136,6 +137,7 @@ function carrying<K extends string, V>(kind: K, inner: Guard<V>): Guard<{ kind: 
 }
 
 // Unit enums: the keys are checked against the bindings' unions.
+export const LANGUAGES: Record<Language, true> = { ko: true, en: true };
 export const ARCHES: Record<Arch, true> = { x64: true, arm64: true, other: true };
 export const SECURE_BOOT: Record<SecureBoot, true> = { enabled: true, disabled: true, unsupported: true };
 export const POLICY_STATES: Record<PolicyState, true> = { applied: true, missing: true, unknown: true };
@@ -173,6 +175,7 @@ export const NAMED_CODECS: Record<Exclude<BitstreamCodec, object>, true> = {
   dts_hd: true,
 };
 
+const language = oneOf(LANGUAGES);
 const arch = oneOf(ARCHES);
 const secureBoot = oneOf(SECURE_BOOT);
 const policyState = oneOf(POLICY_STATES);
@@ -348,6 +351,8 @@ const profileView = object<ProfileView>({
 });
 
 const snapshot = object<Snapshot>({
+  language,
+  language_choice: nullable(language),
   phase,
   profile: profileView,
   engine: nullable(engineStatus),
@@ -361,6 +366,7 @@ const snapshot = object<Snapshot>({
 });
 
 const intent = tagged<Intent>({
+  set_language: carrying('set_language', nullable(language)),
   begin_setup: unit('begin_setup'),
   install_driver: unit('install_driver'),
   recheck: unit('recheck'),

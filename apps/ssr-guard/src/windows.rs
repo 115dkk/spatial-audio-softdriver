@@ -11,6 +11,7 @@ use ssr_sys::host::RESTORE_POINT_FILE;
 use supervisor::guard::Guard;
 use supervisor::restore_point::{self, RestorePoint};
 
+use crate::language;
 use crate::marker::{self, Marker};
 use crate::runner::{self, AppProcess, Exit, Platform, Timeout};
 use crate::show;
@@ -138,15 +139,30 @@ impl Platform for WindowsPlatform {
     }
 
     fn restore(&mut self, app: u32) -> Option<Vec<String>> {
+        let language = language::resolve_in(&self.state_dir, language::system());
         let path = self.state_dir.join(RESTORE_POINT_FILE);
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(error) => return Some(vec![format!("복원점을 읽지 못했습니다: {error}")]),
+            Err(error) => {
+                return Some(vec![match language {
+                    ssr_types::app::Language::Ko => format!("복원점을 읽지 못했습니다: {error}"),
+                    ssr_types::app::Language::En => {
+                        format!("Could not read the restore point: {error}")
+                    }
+                }]);
+            }
         };
         let point = match RestorePoint::from_json(&text) {
             Ok(point) => point,
-            Err(error) => return Some(vec![format!("복원점을 읽지 못했습니다: {error}")]),
+            Err(error) => {
+                return Some(vec![match language {
+                    ssr_types::app::Language::Ko => format!("복원점을 읽지 못했습니다: {error}"),
+                    ssr_types::app::Language::En => {
+                        format!("Could not read the restore point: {error}")
+                    }
+                }]);
+            }
         };
         if !runner::restore_allowed(point.app_pid, app) {
             log(
@@ -162,9 +178,10 @@ impl Platform for WindowsPlatform {
             &self.state_dir,
             &format!("restore: giving the roles back (app pid {})", point.app_pid),
         );
-        Some(restore_point::restore(
+        Some(restore_point::restore_with_language(
             &point,
             &mut windows_host(&self.state_dir),
+            language,
         ))
     }
 
@@ -176,10 +193,23 @@ impl Platform for WindowsPlatform {
     }
 
     fn write_marker(&mut self, value: &Marker) {
+        // The language is resolved now, not at guard startup, so the toast
+        // and the log follow a setting changed since; the marker itself stays
+        // language-neutral and the app renders it with its own language.
+        let language = language::resolve_in(&self.state_dir, language::system());
+        log(
+            &self.state_dir,
+            &format!(
+                "{}: {}",
+                language::title(language),
+                marker::sentence(value, language)
+            ),
+        );
         if let Err(error) = marker::write(&self.state_dir.join(marker::FILE), value) {
             log(&self.state_dir, &format!("marker: {error}"));
         }
-        if let Err(error) = ssr_sys::toast::show("공간 소프트리시버", &marker::sentence(value))
+        if let Err(error) =
+            ssr_sys::toast::show(language::title(language), marker::sentence(value, language))
         {
             log(&self.state_dir, &format!("toast: {error}"));
         }
