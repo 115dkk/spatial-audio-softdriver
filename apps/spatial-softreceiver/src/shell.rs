@@ -163,6 +163,14 @@ fn setup(
     smoke: &SmokeFlag,
     ending: &Ending,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The toasts' header: the installer puts the icon beside the app.
+    let icon = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("spatial-softreceiver.ico")))
+        .filter(|icon| icon.is_file());
+    if let Err(error) = ssr_sys::toast::register("Spatial SoftReceiver", icon.as_deref()) {
+        log::line(&format!("shell: toast registration: {error}"));
+    }
     let state_dir = ending.state_dir.clone();
     let mut initial_notes = Vec::new();
     if state_dir.join(RESTORE_POINT_FILE).exists() {
@@ -606,19 +614,7 @@ fn consume_guard_marker(state_dir: &Path) -> Vec<String> {
             "shell: guard marker could not be removed: {error}"
         ));
     }
-    let sentence = match marker.reason {
-        ssr_guard::marker::MarkerReason::AppExited => {
-            "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다."
-        }
-        ssr_guard::marker::MarkerReason::StallRestarted => "엔진이 멈춰 앱을 다시 시작했습니다.",
-        ssr_guard::marker::MarkerReason::RestartFailed => {
-            "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다."
-        }
-        ssr_guard::marker::MarkerReason::Stuck => {
-            "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다."
-        }
-    };
-    std::iter::once(sentence.to_owned())
+    std::iter::once(ssr_guard::marker::sentence(&marker))
         .chain(marker.notes)
         .collect()
 }

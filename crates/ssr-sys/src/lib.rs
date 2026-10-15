@@ -31,6 +31,11 @@ pub mod driver_ring;
 mod playback_clock;
 pub mod sal_format;
 mod stall_guard;
+#[cfg(any(windows, test))]
+mod toast_xml;
+
+#[cfg(windows)]
+pub mod toast;
 
 #[cfg(windows)]
 mod apartment;

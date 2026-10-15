@@ -179,6 +179,10 @@ impl Platform for WindowsPlatform {
         if let Err(error) = marker::write(&self.state_dir.join(marker::FILE), value) {
             log(&self.state_dir, &format!("marker: {error}"));
         }
+        if let Err(error) = ssr_sys::toast::show("공간 소프트리시버", &marker::sentence(value))
+        {
+            log(&self.state_dir, &format!("toast: {error}"));
+        }
     }
 
     fn now(&self) -> Instant {

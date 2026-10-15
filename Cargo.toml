@@ -40,6 +40,8 @@ ssr-sys = { path = "crates/ssr-sys" }
 ssr-setup-sys = { path = "crates/ssr-setup-sys" }
 
 windows = { version = "0.62", features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
     "Wdk_System_SystemInformation",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_Properties",
