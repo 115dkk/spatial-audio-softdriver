@@ -719,13 +719,30 @@ jobs:
         with:
           category: windows-driver
           output: ${{ runner.temp }}/sarif
+          upload: never
 
-      # The same results as SARIF beside the run (see codeql.yml).
+      # The suites analyse every header a driver includes, so results land in
+      # the NuGet WDK under driver/packages/, which paths-ignore cannot leave
+      # out of a compiled database; reviewed false positives are listed in the
+      # script with their reasons.
+      - name: Keep the results about our code (tools/ci/codeql_filter.py)
+        shell: pwsh
+        run: |
+          python tools/ci/codeql_filter.py (Join-Path $env:RUNNER_TEMP 'sarif') (Join-Path $env:RUNNER_TEMP 'sarif-ours')
+          if ($LASTEXITCODE -ne 0) { throw "codeql_filter.py failed (exit $LASTEXITCODE)" }
+
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ runner.temp }}/sarif-ours
+
+      # Both sets as SARIF beside the run (see codeql.yml).
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: codeql-sarif-windows-driver
-          path: ${{ runner.temp }}/sarif
+          path: |
+            ${{ runner.temp }}/sarif
+            ${{ runner.temp }}/sarif-ours
           if-no-files-found: ignore
           retention-days: 30
 
