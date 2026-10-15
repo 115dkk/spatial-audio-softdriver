@@ -2431,7 +2431,15 @@ fn asrc_layout_reopen_fades_through_the_real_tail_and_stays_silent() {
     for _ in 0..40 {
         lockstep.step_read(1);
         lockstep.step_period(1);
-        if engine.status().output_reopens == 1 {
+        // `OutputEnd` completes the lockstep period before reopen bookkeeping.
+        // Wait for what this test consumes, not the earlier reopen counter.
+        if state
+            .periods_by_layout
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(layout, _)| layout.channels == 12)
+        {
             break;
         }
     }
@@ -2730,7 +2738,15 @@ fn declined_cadence_change_keeps_asrc_live_and_a_later_layout_tail_fresh() {
     for _ in 0..40 {
         lockstep.step_read(1);
         lockstep.step_period(1);
-        if engine.status().output_reopens == 1 {
+        // `OutputEnd` completes the lockstep period before reopen bookkeeping.
+        // Wait for what this test consumes, not the earlier reopen counter.
+        if state
+            .periods_by_layout
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(layout, _)| layout.channels == 12)
+        {
             break;
         }
     }
