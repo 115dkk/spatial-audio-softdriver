@@ -287,6 +287,7 @@ struct Steps {
     output_finished: bool,
     qpc: u64,
     released: bool,
+    decode_jobs: u64,
 }
 
 #[derive(Default)]
@@ -380,6 +381,56 @@ impl Lockstep {
         }
     }
 
+    /// Waits until the decode thread has returned `total` jobs.
+    fn wait_decoded(&self, total: u64) {
+        let mut steps = self.steps.lock().unwrap();
+        while steps.decode_jobs < total {
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(steps, Duration::from_secs(5))
+                .unwrap();
+            steps = next;
+            if timeout.timed_out() {
+                let message = format!("the decode thread did not finish job {total}: {steps:?}");
+                steps.released = true;
+                self.changed.notify_all();
+                drop(steps);
+                panic!("{message}");
+            }
+        }
+    }
+
+    fn complete_decode_job(&self) {
+        let mut steps = self.steps.lock().unwrap();
+        steps.decode_jobs += 1;
+        self.changed.notify_all();
+    }
+
+    /// Waits for permission to take one step on a runtime thread. The test
+    /// thread's own 5 s timeouts cover the other direction; 30 s with no step
+    /// from the test thread only happens when it is gone (a test that panicked
+    /// before `release`). Then the lockstep releases itself so the runtime runs
+    /// free, the engine's drop can join its threads, and the test's own panic
+    /// surfaces instead of a hang.
+    fn wait_for_step<'a>(
+        &self,
+        mut steps: std::sync::MutexGuard<'a, Steps>,
+        blocked: impl Fn(&Steps) -> bool,
+    ) -> std::sync::MutexGuard<'a, Steps> {
+        while !steps.released && blocked(&steps) {
+            let (next, timeout) = self
+                .changed
+                .wait_timeout(steps, Duration::from_secs(30))
+                .unwrap();
+            steps = next;
+            if timeout.timed_out() && !steps.released && blocked(&steps) {
+                steps.released = true;
+                self.changed.notify_all();
+            }
+        }
+        steps
+    }
+
     /// Completes the preceding read at the next `read` entry, after the runtime
     /// has consumed its records, then waits for permission to begin one read.
     fn enter_read(&self) {
@@ -388,9 +439,7 @@ impl Lockstep {
             steps.read_completed += 1;
             self.changed.notify_all();
         }
-        while !steps.released && steps.read_started == steps.read_allowed {
-            steps = self.changed.wait(steps).unwrap();
-        }
+        let mut steps = self.wait_for_step(steps, |steps| steps.read_started == steps.read_allowed);
         steps.read_started += 1;
         self.changed.notify_all();
     }
@@ -400,10 +449,9 @@ impl Lockstep {
     }
 
     fn enter_period(&self, frames: u64) -> u64 {
-        let mut steps = self.steps.lock().unwrap();
-        while !steps.released && steps.period_started == steps.period_allowed {
-            steps = self.changed.wait(steps).unwrap();
-        }
+        let steps = self.steps.lock().unwrap();
+        let mut steps =
+            self.wait_for_step(steps, |steps| steps.period_started == steps.period_allowed);
         let qpc = steps.qpc;
         steps.period_started += 1;
         steps.qpc += frames;
@@ -853,6 +901,7 @@ fn lockstep_config(clock: ClockPreference, lockstep: Arc<Lockstep>) -> EngineCon
             engine::RtLoopEvent::OutputEnd => lockstep.complete_period(),
             engine::RtLoopEvent::CaptureFinished => lockstep.finish_capture(),
             engine::RtLoopEvent::OutputFinished => lockstep.finish_output(),
+            engine::RtLoopEvent::DecodeJobEnd => lockstep.complete_decode_job(),
             _ => {}
         })),
         ..config(clock)
@@ -1984,8 +2033,16 @@ fn ddp_latency_uses_playback_qpc_and_source_qpc() {
     )
     .unwrap();
     lockstep.step_read(1);
-    for _ in 0..12 {
+    for jobs in 1..=12 {
         lockstep.step_read(1);
+        // A delivery that comes back more than `MAX_DELAY_FRAMES` of the
+        // lane's transport after its burst was queued is discarded. Here the
+        // transport moves as fast as this thread steps reads, not in real
+        // time, so the lockstep must not outrun the decode thread: each data
+        // read queues one burst job (the format change's and the lane start's
+        // resets queue none, the front is clean), and it is placed at the next
+        // read.
+        lockstep.wait_decoded(jobs);
         lockstep.step_period(3);
     }
     let status = engine.status();

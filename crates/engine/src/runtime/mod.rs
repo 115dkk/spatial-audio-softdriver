@@ -152,6 +152,9 @@ pub enum RtLoopEvent {
     /// The output thread left because the stream ended, not because the
     /// engine was stopped.
     OutputFinished,
+    /// Emitted by the decode thread after each job (burst or reset) is
+    /// returned to the capture thread.
+    DecodeJobEnd,
 }
 
 pub type RtEventHook = Arc<dyn Fn(RtLoopEvent) + Send + Sync>;
@@ -333,7 +336,8 @@ pub struct Engine {
 /// The capture/DSP thread and the decode thread it hands bursts to.
 struct CaptureThreads {
     capture: JoinHandle<Option<Box<Prepared>>>,
-    /// `ssr-decode` (ADR 0031); joined after the capture thread.
+    /// `ssr-decode` (ADR 0031); joined after the capture thread. It parks for
+    /// up to a second between jobs, so a stop unparks it through this handle.
     decode: Option<JoinHandle<()>>,
 }
 
@@ -523,13 +527,19 @@ where
         Some(worker) => {
             let decode_shared = Arc::clone(&shared);
             let decode_hook = config.thread_hook.clone();
+            let decode_events = config.rt_event.clone();
             match std::thread::Builder::new()
                 .name("ssr-decode".into())
                 .spawn(move || {
                     if let Some(hook) = &decode_hook {
                         hook(EngineThread::Decode);
                     }
-                    worker.run_until(&decode_shared.stop);
+                    match &decode_events {
+                        Some(hook) => worker.run_until(&decode_shared.stop, &mut || {
+                            hook(RtLoopEvent::DecodeJobEnd)
+                        }),
+                        None => worker.run_until(&decode_shared.stop, &mut || {}),
+                    }
                 }) {
                 Ok(thread) => {
                     chain.set_decode_wake(thread.thread().clone());
@@ -565,6 +575,7 @@ where
             shared.stop.store(true, Ordering::Release);
             let _ = output_thread.join();
             if let Some(thread) = decode_thread {
+                thread.thread().unpark();
                 let _ = thread.join();
             }
             return Err(StartError::Thread(error.to_string()));
@@ -625,6 +636,11 @@ impl Engine {
     fn stop_and_join(&mut self) -> StopReport {
         self.shared.stop.store(true, Ordering::Release);
         if let Some(threads) = self.capture_thread.take() {
+            // Wake the decode thread to see the stop. An unpark before its
+            // park makes that park return at once, so the wake is not lost.
+            if let Some(decode) = &threads.decode {
+                decode.thread().unpark();
+            }
             if let Ok(retired) = threads.capture.join() {
                 drop(retired);
             }

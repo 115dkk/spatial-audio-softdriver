@@ -20,15 +20,22 @@ const FADE_FRAMES: usize = 64;
 const VOLUME_RAMP_FRAMES: u64 = 64;
 const VOLUME_TRANSITIONS: usize = 16;
 const CHANNELS: usize = MAX_OBJECTS + 1;
-const MAX_DELAY_FRAMES: u64 = MIX_RATE as u64 / 5;
+/// The one lateness constant, 200 ms at 48 kHz: the cap on a lane's initial
+/// delay, and the chain's bound on how late a decode-thread delivery may come
+/// back and still be placed (later ones are discarded and counted). A lane's
+/// delay itself is not capped: it is bookkeeping (timeline position minus
+/// frames produced), and IEC 61937 zero padding or a pause legitimately
+/// raises it without bound.
+pub const MAX_DELAY_FRAMES: u64 = MIX_RATE as u64 / 5;
 const MAX_SCENE_FRAMES: u64 = 1_536;
 const MAX_OUTPUT_FRAMES: usize = (MAX_SCENE_FRAMES * MIX_RATE as u64).div_ceil(44_100) as usize + 1;
 const CONVERSION_RING: usize = 4;
 const MAX_DIRECTIONS: usize = Layout::MAX_DIRECTIONS;
 const MATRIX_VALUES: usize = MAX_DIRECTIONS * MAX_DIRECTIONS;
 
-/// Timeline frames one lane's slot ring must retain: the largest delay, the
-/// admitted arrival slack, the largest decoded scene and two intervals.
+/// Timeline frames one lane's slot ring must retain ahead of the frontier: the
+/// delivery-lateness bound, the admitted arrival slack, the largest decoded
+/// scene and two intervals.
 fn retained_frames(arrival_slack_frames: u64) -> u64 {
     MAX_DELAY_FRAMES
         .saturating_add(arrival_slack_frames)
@@ -887,14 +894,14 @@ impl SceneMixer {
             arrival_slack_frames: config.arrival_slack_frames.min(MAX_ARRIVAL_SLACK_FRAMES),
             ..config
         };
-        // The delay, admitted arrival slack, largest decoded scene, and two
-        // output intervals are simultaneously retained, measured from the
-        // frontier, which trails `now` by up to an interval plus the slack (an
-        // interval is emitted late once `now` passes its end by the slack). So
-        // a lane at the delay cap whose clock is `now` keeps its whole policy
-        // lead (`ahead_limit`) inside the ring at any slack. The extra slot
-        // keeps a just-emitted interval from aliasing the furthest admissible
-        // write.
+        // The ring holds a lane whose placed audio leads the frontier by up to
+        // the chain's delivery-lateness bound (`MAX_DELAY_FRAMES`) plus the
+        // admitted arrival slack, a scene and two intervals, with the frontier
+        // trailing `now` by up to an interval plus the slack (an interval is
+        // emitted late once `now` passes its end by the slack). A lane that
+        // leads further is held at the ring end by `ahead_limit`. The extra
+        // slot keeps a just-emitted interval from aliasing the furthest
+        // admissible write.
         let slot_capacity = retained_frames(config.arrival_slack_frames)
             .saturating_add(MIX_FRAMES as u64)
             .saturating_add(config.arrival_slack_frames)
@@ -1129,26 +1136,6 @@ impl SceneMixer {
         let can_ramp = geometry.is_some() && self.lanes[lane_index].pan_valid;
         self.prepare_active_directions(lane_index, object_count, directions);
 
-        // A scene whose first intervals were emitted before it arrived starts
-        // late: the delay grows so its next frame lands on the frontier, up to
-        // MAX_DELAY_FRAMES. Frames later than that are skipped here, once, and
-        // counted as dropped. They are not marked: their intervals are behind
-        // the frontier and already emitted, so no slot can hold a placeholder.
-        // Emission counted those positions as lane underrun frames when the
-        // lane already had a delay (silence was heard there; before a lane's
-        // first scene it has none and nothing was counted). The two counters
-        // read one gap from both sides, the output that went silent and the
-        // input that will never be heard, not the same frames twice.
-        let late = self
-            .raise_delay_for_late_head(lane_index)
-            .min(output_frames as u64);
-        if late != 0 {
-            let lane = &mut self.lanes[lane_index];
-            lane.produced = lane.produced.saturating_add(late);
-            numerator = numerator.saturating_add(late.saturating_mul(u64::from(scene.rate)));
-            self.dropped_frames = self.dropped_frames.saturating_add(late);
-        }
-
         // `ahead_limit` is both the retained-ring boundary and the admitted
         // lead policy. Preflight the one contiguous range below it before doing
         // FIR work, so a rejected suffix is counted once and never resampled.
@@ -1208,9 +1195,7 @@ impl SceneMixer {
             placed += chunk;
         }
         debug_assert_eq!(placed, placeable);
-        let remaining = (output_frames as u64)
-            .saturating_sub(late)
-            .saturating_sub(placeable as u64);
+        let remaining = output_frames.saturating_sub(placeable) as u64;
         if remaining != 0 {
             self.drop_tail(lane_index, remaining);
             self.lanes[lane_index].produced =
@@ -1553,44 +1538,18 @@ impl SceneMixer {
 
     fn timeline_target(&mut self, lane_index: usize, produced: u64) -> u64 {
         let lane = &self.lanes[lane_index];
-        let delay = lane.delay.unwrap_or(0);
-        let target = lane.origin.saturating_add(delay).saturating_add(produced);
+        let target = lane
+            .origin
+            .saturating_add(lane.delay.unwrap_or(0))
+            .saturating_add(produced);
         let frontier = self.next_t.unwrap_or(target);
         if target >= frontier {
             return target;
         }
-        // `push_scene` skips a late head before it places anything, so no
-        // placement asks for a frame behind the frontier.
-        debug_assert!(
-            false,
-            "target {target} is behind the frontier {frontier} after the late head"
-        );
-        let bump = (frontier - target).min(MAX_DELAY_FRAMES.saturating_sub(delay));
-        self.lanes[lane_index].delay = Some(delay + bump);
-        target + bump
-    }
-
-    /// Raises a lane's delay so its next frame lands on the frontier when the
-    /// intervals it was due in have already been emitted, up to
-    /// `MAX_DELAY_FRAMES`. Returns how many frames are later than the cap
-    /// allows; the caller skips them.
-    fn raise_delay_for_late_head(&mut self, lane_index: usize) -> u64 {
-        let Some(frontier) = self.next_t else {
-            return 0;
-        };
+        let missed = frontier - target;
         let lane = &mut self.lanes[lane_index];
-        let delay = lane.delay.unwrap_or(0);
-        let first = lane
-            .origin
-            .saturating_add(delay)
-            .saturating_add(lane.produced);
-        if first >= frontier {
-            return 0;
-        }
-        let missed = frontier - first;
-        let bump = missed.min(MAX_DELAY_FRAMES.saturating_sub(delay));
-        lane.delay = Some(delay + bump);
-        missed - bump
+        lane.delay = Some(lane.delay.unwrap_or(0).saturating_add(missed));
+        frontier
     }
 
     /// Exclusive timeline bound for new placements in one lane.
@@ -1600,10 +1559,9 @@ impl SceneMixer {
     /// its bytes, and not a delayed one: a regular lane has produced at most
     /// its transport plus one scene at every placement, so the bound is the
     /// lane's own clock plus its delay, plus the arrival slack, one scene and
-    /// two intervals. A lane whose scenes arrive late (a capture backlog, a
-    /// decode-thread stall) carries that lateness in its delay and keeps its
-    /// full lead. `SceneMixer::new` sizes the ring for a lane at the delay cap
-    /// whose clock is within an interval of the frontier.
+    /// two intervals. A lane whose scenes arrive late carries that lateness in
+    /// its delay and keeps its full lead. The delay is unbounded, so when a
+    /// lane's lead over the frontier reaches the ring end, the ring end binds.
     fn ahead_limit(&self, lane_index: usize) -> u64 {
         let frontier = self.next_t.unwrap_or(self.now);
         let lane = &self.lanes[lane_index];
@@ -1614,20 +1572,6 @@ impl SceneMixer {
             .saturating_add(self.config.arrival_slack_frames)
             .saturating_add(MAX_SCENE_FRAMES)
             .saturating_add(2 * MIX_FRAMES as u64);
-        // The ring holds `retained_frames` plus a spare of at least an
-        // interval and the slack, so a lane at or below the delay cap fits
-        // whenever its clock is no more than that spare past the frontier.
-        // That is as far as the frontier trails `now` between READs; inside a
-        // READ a lane waited for (`set_waiting`) can hold it back further, and
-        // the ring end then binds instead of the policy.
-        let spare = (lane.slots.len() as u64 * MIX_FRAMES as u64)
-            .saturating_sub(retained_frames(self.config.arrival_slack_frames));
-        debug_assert!(
-            ring_end >= policy_end
-                || lane.delay.unwrap_or(0) > MAX_DELAY_FRAMES
-                || lane_clock > frontier.saturating_add(spare),
-            "a lane at or below the delay cap outgrew its slot ring"
-        );
         ring_end.min(policy_end)
     }
 
@@ -3082,81 +3026,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_slot_ring_holds_a_lane_at_the_delay_cap() {
-        // The furthest the frontier trails `now` is an interval plus the
-        // slack (an interval is emitted late once `now` passes its end by the
-        // slack). A lane whose clock is `now`, at the delay cap, must still
-        // have its whole policy lead inside the ring.
-        for slack in [0, 48, 96, 144, 192, 4_800, MAX_ARRIVAL_SLACK_FRAMES] {
-            let mut mixer = SceneMixer::new(MixerConfig {
-                arrival_slack_frames: slack,
-                qpc_frequency: 1_000_000,
-                endpoint_mask: 1,
-            });
-            let frontier = 100 * MIX_FRAMES as u64;
-            let now = frontier + MIX_FRAMES as u64 + slack;
-            mixer.next_t = Some(frontier);
-            mixer.now = now;
-            let lane = &mut mixer.lanes[0];
-            lane.state = LaneState::Active;
-            lane.origin = frontier - 7 * MIX_FRAMES as u64;
-            lane.transport = now - lane.origin;
-            lane.delay = Some(MAX_DELAY_FRAMES);
-            let policy_end =
-                now + MAX_DELAY_FRAMES + slack + MAX_SCENE_FRAMES + 2 * MIX_FRAMES as u64;
-            assert_eq!(mixer.ahead_limit(0), policy_end, "slack {slack}");
-        }
-    }
-
-    #[test]
-    fn a_late_head_beyond_the_cap_holds_the_delay_at_the_cap() {
-        let geometry = geometry();
-        let mut mixer = SceneMixer::new(MixerConfig {
-            arrival_slack_frames: 96,
-            qpc_frequency: 1_000_000,
-            endpoint_mask: 1,
-        });
-        mixer.lane_start(0, 0);
-        let regular = vec![1.0; MIX_FRAMES];
-        for _ in 0..4 {
-            let mut objects = [Object::SILENT; MAX_OBJECTS];
-            mixer
-                .push_scene(0, &scene(&regular, &mut objects), Some(&geometry))
-                .unwrap();
-            mixer.advance(0, MIX_FRAMES as u64, &mut |_| {});
-        }
-        assert_eq!(mixer.lanes[0].delay, Some(0));
-        // Bytes keep coming but scenes do not: the lane falls behind by the
-        // cap and two intervals.
-        for _ in 0..23 {
-            mixer.advance(0, MIX_FRAMES as u64, &mut |_| {});
-        }
-        let lane = &mixer.lanes[0];
-        let behind = mixer.next_t.unwrap() - (lane.origin + lane.produced);
-        assert_eq!(behind, MAX_DELAY_FRAMES + 2 * MIX_FRAMES as u64);
-        let late = vec![1.0; 1536];
-        let mut objects = [Object::SILENT; MAX_OBJECTS];
-        mixer
-            .push_scene(0, &scene(&late, &mut objects), Some(&geometry))
-            .unwrap();
-        assert_eq!(mixer.lanes[0].delay, Some(MAX_DELAY_FRAMES));
-        assert_eq!(mixer.dropped_frames(), 2 * MIX_FRAMES as u64);
-        let frontier = mixer.next_t.unwrap();
-        assert_eq!(
-            mixer.lanes[0].placed_end,
-            frontier + 1536 - 2 * MIX_FRAMES as u64
-        );
-        for _ in 0..4 {
-            mixer.advance(0, MIX_FRAMES as u64, &mut |_| {});
-            let mut objects = [Object::SILENT; MAX_OBJECTS];
-            mixer
-                .push_scene(0, &scene(&regular, &mut objects), Some(&geometry))
-                .unwrap();
-            assert_eq!(mixer.lanes[0].delay, Some(MAX_DELAY_FRAMES));
-        }
-        assert_eq!(mixer.dropped_frames(), 2 * MIX_FRAMES as u64);
     }
 }

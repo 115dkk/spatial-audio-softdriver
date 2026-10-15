@@ -34,7 +34,8 @@ pub use decode::direct::{
 };
 pub use decode_thread::DecodeWorker;
 pub use mixer::{
-    BedBlock, MAX_ARRIVAL_SLACK_FRAMES, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer,
+    BedBlock, MAX_ARRIVAL_SLACK_FRAMES, MAX_DELAY_FRAMES, MIX_FRAMES, MIX_RATE, MixerConfig,
+    SceneMixer,
 };
 pub use runtime::{
     ClockPreference, Engine, EngineConfig, EngineEvent, EngineThread, LiveChange, Rejected,

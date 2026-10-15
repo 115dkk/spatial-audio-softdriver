@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use engine::{BedBlock, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer};
+use engine::{BedBlock, MAX_DELAY_FRAMES, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer};
 use render::PanGeometry;
 use ssr_types::{Direction, Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 
@@ -642,9 +642,6 @@ fn representative_normal_paths_do_not_allocate() {
     });
 }
 
-/// 200 ms at 48 kHz: the largest delay a lane takes (the mixer's
-/// `MAX_DELAY_FRAMES`, private to it).
-const MAX_DELAY_FRAMES: u64 = 9_600;
 const DELIVERY: usize = 1_536;
 
 /// A signal whose samples name their frame in the lane's stream (1-based).
@@ -721,7 +718,7 @@ fn scenes_that_arrive_together_at_a_generation_start_do_not_cut_later_scenes() {
 }
 
 #[test]
-fn a_lane_later_than_the_delay_cap_drops_the_late_head_and_holds_the_cap() {
+fn a_lane_resuming_after_a_long_pause_plays_from_the_frontier() {
     let geometry = geometry();
     let mut mixer = SceneMixer::new(config());
     mixer.lane_start(0, 0);
@@ -735,44 +732,42 @@ fn a_lane_later_than_the_delay_cap_drops_the_late_head_and_holds_the_cap() {
             output.extend_from_slice(direction(bed, 0));
         });
     }
-    // The decoder stalls while bytes keep arriving: intervals are emitted late
-    // without this lane until it is the cap and two intervals behind.
-    for _ in 0..23 {
+    // A paused or seeking player: IEC 61937 zero padding keeps the bytes
+    // coming for 300 ms with no scene, and the intervals are emitted late
+    // without this lane.
+    for _ in 0..30 {
         mixer.advance(0, MIX_FRAMES as u64, &mut |bed| {
             output.extend_from_slice(direction(bed, 0));
         });
     }
-    let frontier = output.len();
-    assert_eq!(
-        (frontier - produced) as u64,
-        MAX_DELAY_FRAMES + 2 * MIX_FRAMES as u64
-    );
     assert_eq!(mixer.dropped_frames(), 0);
 
-    // Its next scene: the delay grows to the cap, the excess is dropped from
-    // the head, and the rest lands on the frontier.
-    push_counted(&mut mixer, &geometry, produced, DELIVERY);
-    let late = 2 * MIX_FRAMES;
-    assert_eq!(mixer.dropped_frames(), late as u64);
-    produced += DELIVERY;
-    // The next cycles place with no further drop.
-    for _ in 0..6 {
-        mixer.advance(0, MIX_FRAMES as u64, &mut |bed| {
+    // Playback resumes, each access unit's scene after its bytes. The first
+    // lands on the frontier (the delay grows by the pause) and every later
+    // one follows it.
+    let mut frontier = None;
+    for _ in 0..20 {
+        mixer.advance(0, DELIVERY as u64, &mut |bed| {
             output.extend_from_slice(direction(bed, 0));
         });
-        push_counted(&mut mixer, &geometry, produced, MIX_FRAMES);
-        produced += MIX_FRAMES;
-        assert_eq!(mixer.dropped_frames(), late as u64);
+        frontier.get_or_insert(output.len());
+        push_counted(&mut mixer, &geometry, produced, DELIVERY);
+        produced += DELIVERY;
+        assert_eq!(mixer.dropped_frames(), 0, "produced {produced}");
     }
     mixer.finish(&mut |bed| output.extend_from_slice(direction(bed, 0)));
-    assert_eq!(mixer.dropped_frames(), late as u64);
+    assert_eq!(mixer.dropped_frames(), 0);
+    let frontier = frontier.unwrap();
+    // The frontier stands past the pause, which is longer than the 200 ms
+    // lateness bound: the lane's delay is bookkeeping and is not capped there.
+    assert!(frontier >= 34 * MIX_FRAMES);
+    assert!((frontier - 4 * MIX_FRAMES) as u64 > MAX_DELAY_FRAMES);
 
-    // Frame `p` of the stream is heard at timeline position `p + delay`: 0
-    // before the stall, the cap after it. The first frame after the stall is
-    // the first one past the dropped head, on the frontier.
+    // Frame `p` of the stream is heard at timeline position `p` before the
+    // pause and `p + frontier - 4 * MIX_FRAMES` after it: silence in between,
+    // then every pushed frame in order from the frontier.
     let gain = output[0];
     assert!(gain > 0.0);
-    let heard = |position: usize| (output[position] / gain).round() as usize;
     for (position, sample) in output.iter().enumerate().take(4 * MIX_FRAMES) {
         assert_eq!(sample.to_bits(), ((position + 1) as f32 * gain).to_bits());
     }
@@ -781,15 +776,15 @@ fn a_lane_later_than_the_delay_cap_drops_the_late_head_and_holds_the_cap() {
             .iter()
             .all(|sample| *sample == 0.0)
     );
-    assert_eq!(heard(frontier) - 1, 4 * MIX_FRAMES + late);
-    let resumed = &output[frontier..frontier + DELIVERY - late + 6 * MIX_FRAMES];
-    for (offset, sample) in resumed.iter().enumerate() {
-        let position = frontier + offset;
-        let frame = position as u64 - MAX_DELAY_FRAMES;
+    let resumed = 20 * DELIVERY;
+    assert!(output.len() >= frontier + resumed);
+    for (offset, sample) in output[frontier..frontier + resumed].iter().enumerate() {
+        let frame = 4 * MIX_FRAMES + offset;
         assert_eq!(
             sample.to_bits(),
             ((frame + 1) as f32 * gain).to_bits(),
-            "position {position}"
+            "position {}",
+            frontier + offset
         );
     }
 }

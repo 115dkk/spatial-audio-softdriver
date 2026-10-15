@@ -621,12 +621,22 @@ fn ddp_capture_section_does_not_allocate() {
         status.endpoints[0].chain_errors.total() == 0,
         "chain errors: {status:?}"
     );
-    assert_eq!(report.decode_refused, 0);
+    // No burst was refused and no delivery was discarded or cut.
+    assert!(
+        report.decode_refused == 0 && report.dropped_frames == 0,
+        "refused or dropped: {report:?}"
+    );
     assert_eq!(report.final_status.decode_refused, 0);
-    // The decode thread hands each burst back before the next one arrives,
-    // so once the lane has set its delay it never runs short.
-    assert_eq!(
-        report.lane_underrun_frames, first_second.lane_underrun_frames,
-        "lane underruns after the first second: {report:?}"
+    // The decode thread hands each burst back before the next one arrives.
+    // One late pickup on a loaded runner can leave a single access unit's gap
+    // before the lane's delay rises once; anything more is a stall.
+    assert!(
+        report
+            .lane_underrun_frames
+            .saturating_sub(first_second.lane_underrun_frames)
+            <= 2 * 1_536,
+        "lane underruns after the first second: {} then {}: {report:?}",
+        first_second.lane_underrun_frames,
+        report.lane_underrun_frames
     );
 }

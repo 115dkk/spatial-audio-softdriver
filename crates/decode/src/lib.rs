@@ -210,18 +210,23 @@ impl Decoders {
     }
 
     /// Places one decoded delivery into scenes, with the same `qpc` meaning as
-    /// [`Self::push_burst`]. `Err(WrongRoute)` unless the active adapter is the
-    /// one that decoded it. Errors reset the active adapter's capture-thread
-    /// half; the caller resets the decode-thread half. Does not allocate.
+    /// [`Self::push_burst`]. `epoch` is the one the burst was queued in (an
+    /// adapter half resets itself when it changes). `Err(WrongRoute)` unless
+    /// the active adapter is the one that decoded it. A delivery that carries
+    /// an upstream error returns it, after the capture-side checks of the
+    /// groups decoded before it. Errors reset the active adapter's
+    /// capture-thread half; the caller resets the decode-thread half. Does not
+    /// allocate.
     pub fn place_deferred(
         &mut self,
         decoded: &Decoded,
         qpc: u64,
+        epoch: u32,
         out: &mut dyn FnMut(&SceneBlock<'_>),
     ) -> Result<(), DecodeError> {
         match (self.active, decoded.codec) {
             (Active::Ddp, Some(DeferredCodec::Ddp)) => {
-                self.ddp.place(&decoded.ddp, qpc, self.epoch, out)
+                self.ddp.place(&decoded.ddp, qpc, epoch, out)
             }
             _ => Err(DecodeError::WrongRoute(
                 "a decoded delivery for a codec the active adapter does not decode",
@@ -279,7 +284,9 @@ impl FrontDecoders {
     }
 
     /// Decodes one burst payload of `codec` into `into`. On error the codec's
-    /// half is reset and `into` is left empty.
+    /// half is reset, and `into` still carries the groups decoded before the
+    /// failure and the error (see [`ddp::DdpFront::decode`]), to be placed
+    /// like any delivery: [`Decoders::place_deferred`] returns the error.
     pub fn decode(
         &mut self,
         codec: DeferredCodec,
@@ -287,11 +294,11 @@ impl FrontDecoders {
         into: &mut Decoded,
     ) -> Result<(), DecodeError> {
         into.clear();
-        match codec {
-            DeferredCodec::Ddp => self.ddp.decode(payload, &mut into.ddp)?,
-        }
+        let result = match codec {
+            DeferredCodec::Ddp => self.ddp.decode(payload, &mut into.ddp),
+        };
         into.codec = Some(codec);
-        Ok(())
+        result
     }
 }
 
@@ -326,6 +333,15 @@ impl Decoded {
     pub fn frames(&self) -> usize {
         match self.codec {
             Some(DeferredCodec::Ddp) => self.ddp.frames(),
+            None => 0,
+        }
+    }
+
+    /// [`Self::frames`] at the 48 kHz mix rate, rounded up: the timeline
+    /// frames the delivery would have filled.
+    pub fn frames_at_mix_rate(&self) -> u64 {
+        match self.codec {
+            Some(DeferredCodec::Ddp) => self.ddp.frames_at_mix_rate(),
             None => 0,
         }
     }

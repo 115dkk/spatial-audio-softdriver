@@ -102,14 +102,18 @@ impl DdpFront {
     /// one entry per independent syncframe with its dependents merged and
     /// JOC objects reconstructed. The payload must contain exactly 1536
     /// independent samples, each followed by its dependents; alternate
-    /// independent presentations are refused. On error the upstream state is
-    /// reset, `into` is left empty and nothing is handed over.
+    /// independent presentations are refused. Groups decode in order and the
+    /// first failure stops: the upstream state is reset, and the groups
+    /// decoded before it stay in `into` with the error, which
+    /// [`DdpBack::place`] returns after checking them. So a capture-side error
+    /// in an earlier group still wins over a later group's upstream error, as
+    /// in the one-piece adapter.
     pub fn decode(&mut self, payload: &[u8], into: &mut DdpDecoded) -> Result<(), DecodeError> {
         into.clear();
         let result = self.decode_groups(payload, into);
-        if result.is_err() {
+        if let Err(error) = result {
             self.reset();
-            into.clear();
+            into.error = Some(error);
         }
         result
     }
@@ -174,26 +178,53 @@ impl DdpFront {
 #[derive(Debug, Default)]
 pub struct DdpDecoded {
     groups: Vec<DecodedGroup>,
+    /// The upstream error that stopped the decode after `groups`.
+    error: Option<DecodeError>,
 }
 
 impl DdpDecoded {
     pub fn new() -> Self {
-        Self { groups: Vec::new() }
+        Self {
+            groups: Vec::new(),
+            error: None,
+        }
     }
 
-    /// Drops the frames held (this frees them; call it on the decode thread).
+    /// Drops the frames held (this frees them; call it on the decode thread)
+    /// and the error.
     pub fn clear(&mut self) {
         self.groups.clear();
+        self.error = None;
     }
 
+    /// Nothing was handed over: no group and no error.
     pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
+        self.groups.is_empty() && self.error.is_none()
     }
 
-    /// Source frames held: the sum of the groups' samples (1536 for a decoded
-    /// access unit, 0 when empty).
+    /// The upstream error that stopped the decode, if any.
+    pub fn error(&self) -> Option<DecodeError> {
+        self.error
+    }
+
+    /// Source frames held: the sum of the samples of the groups present (1536
+    /// for a decoded access unit, 0 when empty).
     pub fn frames(&self) -> usize {
         self.groups.iter().map(|group| group.samples).sum()
+    }
+
+    /// [`Self::frames`] at the 48 kHz mix rate, rounded up (the groups of one
+    /// access unit share a rate).
+    pub fn frames_at_mix_rate(&self) -> u64 {
+        let Some(rate) = self
+            .groups
+            .first()
+            .map(|group| u64::from(group.rate))
+            .filter(|rate| *rate != 0)
+        else {
+            return 0;
+        };
+        (self.frames() as u64 * 48_000).div_ceil(rate)
     }
 }
 
@@ -285,6 +316,8 @@ impl DdpBack {
                 "no decoded E-AC-3 access unit to place",
             ));
         }
+        // With an upstream error the groups before it are still checked and
+        // written in order, so their error comes first; then the upstream one.
         let mut offset = 0;
         let mut shape = None;
         let mut order = [None; MAX_OBJECTS];
@@ -341,6 +374,9 @@ impl DdpBack {
                 }
             }
             offset += samples;
+        }
+        if let Some(error) = decoded.error {
+            return Err(error);
         }
         if shape.is_some_and(|s| s.0) {
             self.timeline.emit(&mut self.buffers, epoch, rate, qpc, out);
@@ -403,7 +439,9 @@ impl DdpDecoder {
         }
         // Refused before any upstream call, as the one-piece adapter did.
         self.back.check_capacity()?;
-        self.front.decode(burst.payload, &mut self.decoded)?;
+        // An upstream error travels in the delivery: the back returns it after
+        // checking the groups decoded before it.
+        let _upstream = self.front.decode(burst.payload, &mut self.decoded);
         self.back.place(&self.decoded, qpc, epoch, out)
     }
 
@@ -1301,6 +1339,7 @@ mod tests {
                 rate: 48_000,
                 kind: DecodedKind::Objects(pcm),
             }],
+            error: None,
         }
     }
 
@@ -1372,6 +1411,120 @@ mod tests {
         assert_eq!(
             place(&mut back, &objects_delivery(8, false), 2),
             Ok(at(2, unknown))
+        );
+    }
+
+    #[test]
+    fn a_capture_side_error_in_an_earlier_group_still_wins() {
+        // What the front hands over when a later group fails upstream: the
+        // groups decoded before it and that group's error.
+        let upstream = unsupported("a later group failed upstream");
+        let known = (room_to_direction(-0.5, 1.0, 0.5), 0.3);
+        let unknown = (Position::default(), 1.0);
+        let mut back = DdpBack::new(DecodeConfig::default());
+
+        // The earlier group places cleanly, so the upstream error is returned;
+        // nothing is emitted and the back resets (the next continuous delivery
+        // without metadata no longer finds the old position).
+        assert_eq!(
+            place(&mut back, &objects_delivery(1, true), 1),
+            Ok(vec![(1, known.0, known.1)])
+        );
+        let mut partial = objects_delivery(2, true);
+        partial.error = Some(upstream);
+        assert_eq!(partial.frames(), FRAMES);
+        assert!(!partial.is_empty());
+        assert_eq!(place(&mut back, &partial, 1), Err(upstream));
+        assert_eq!(
+            place(&mut back, &objects_delivery(3, false), 1),
+            Ok(vec![(1, unknown.0, unknown.1)])
+        );
+
+        // The earlier group fails a capture-side check (an object channel
+        // shorter than its syncframe): that error wins, as it did when the
+        // one-piece adapter wrote each group before decoding the next.
+        let mut short = objects_delivery(4, true);
+        let DecodedKind::Objects(pcm) = &mut short.groups[0].kind else {
+            unreachable!()
+        };
+        pcm.object_channels[0].truncate(FRAMES - 1);
+        short.error = Some(upstream);
+        assert_eq!(place(&mut back, &short, 1), Err(corrupt()));
+
+        // An error with no group before it is still an error, not WrongRoute.
+        let only_error = DdpDecoded {
+            groups: Vec::new(),
+            error: Some(upstream),
+        };
+        assert_eq!(only_error.frames(), 0);
+        assert_eq!(only_error.frames_at_mix_rate(), 0);
+        assert_eq!(place(&mut back, &only_error, 1), Err(upstream));
+
+        // clear() forgets the error with the groups.
+        let mut cleared = partial;
+        cleared.clear();
+        assert!(cleared.is_empty());
+        assert_eq!(cleared.error(), None);
+    }
+
+    #[test]
+    fn ddp_joc_place_does_not_allocate() {
+        let first = objects_delivery(1, true);
+        let second = objects_delivery(2, false);
+        let mut back = DdpBack::new(DecodeConfig::default());
+        let mut scenes = 0usize;
+        let mut frames = 0usize;
+        assert_no_alloc::assert_no_alloc(|| {
+            for delivery in [&first, &second] {
+                back.place(delivery, 9, 1, &mut |scene| {
+                    scenes += 1;
+                    frames += scene.frames;
+                })
+                .unwrap();
+            }
+        });
+        assert!(scenes >= 2);
+        assert_eq!(frames, 2 * FRAMES);
+    }
+
+    #[test]
+    fn place_deferred_uses_the_delivery_epoch() {
+        use crate::{Decoded, Decoders, DeferredCodec};
+        use ssr_types::{BitstreamCodec, BitstreamFormat, SourceFormat};
+
+        let format = SourceFormat::Bitstream(BitstreamFormat {
+            codec: BitstreamCodec::Eac3Joc,
+            container_rate: 192_000,
+            container_channels: 2,
+            encoded_rate: 48_000,
+            encoded_channels: 0,
+        });
+        let delivery = |sequence, metadata| Decoded {
+            codec: Some(DeferredCodec::Ddp),
+            ddp: objects_delivery(sequence, metadata),
+        };
+        let known = (room_to_direction(-0.5, 1.0, 0.5), 0.3);
+        let unknown = (Position::default(), 1.0);
+        let mut decoders = Decoders::new(DecodeConfig::default());
+        decoders.select(&format, 7).unwrap();
+        let mut place = |decoded: &Decoded, epoch| {
+            let mut scenes = Vec::new();
+            decoders
+                .place_deferred(decoded, 9, epoch, &mut |scene| {
+                    let object = scene.objects[0];
+                    scenes.push((scene.epoch, object.position, object.spread));
+                })
+                .unwrap();
+            scenes
+        };
+
+        // The selected epoch is 7 throughout; the deliveries carry their own.
+        assert_eq!(place(&delivery(1, true), 3), vec![(3, known.0, known.1)]);
+        assert_eq!(place(&delivery(2, false), 3), vec![(3, known.0, known.1)]);
+        // A continuous delivery from another epoch resets the back first.
+        assert_eq!(
+            place(&delivery(3, false), 4),
+            vec![(4, unknown.0, unknown.1)]
         );
     }
 
