@@ -1,14 +1,13 @@
 //! Port traits: the seams the engine and the supervisor are wired through.
 //!
 //! The traits live here, not in `engine`, so `ssr-sys` can implement them
-//! without depending on the engine. The first two have more than one adapter;
-//! [`Host`] is a draft with none yet:
+//! without depending on the engine. Each seam has two adapters or more:
 //!
 //! | seam | adapters |
 //! | --- | --- |
 //! | [`CaptureSource`] | driver ring and SAL ring (`ssr-sys`), paced and looping dump file (`engine::adapters`), test fakes |
 //! | [`OutputOpener`] / [`OutputSink`] | WASAPI (`ssr-sys`), WAV file and null (`engine::adapters`), test fakes |
-//! | [`Host`] | none until the supervisor (M4) needs one |
+//! | [`Host`] | Windows (`ssr-sys`, the next M4 slice), the scripted fake in `supervisor`'s tests |
 
 use std::time::Duration;
 
@@ -177,15 +176,159 @@ pub enum OutputError {
     Io(String),
 }
 
-/// What the supervisor asks the operating system for (draft; M4 settles it).
-///
-/// Nothing implements it yet: the Windows adapter and a test fake come with
-/// the supervisor, so the shape follows its needs rather than a guess.
-pub trait Host {
-    type Device: Clone + std::fmt::Debug;
+/// A render endpoint as the operating system lists it. `endpoint` is `Some(n)`
+/// for our driver's endpoint n (found through the KS filter reference, never
+/// through the display name).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputDevice {
+    pub id: DeviceId,
+    pub name: String,
+    pub endpoint: Option<u16>,
+    pub state: DeviceState,
+}
 
-    /// Render endpoints that can play the binaural signal.
-    fn outputs(&self) -> Vec<Self::Device>;
+/// The operating system's identifier of a render endpoint (the `IMMDevice`
+/// id). It can change across reboots; the supervisor keeps the name as a
+/// fallback.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DeviceId(pub String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceState {
+    Active,
+    Disabled,
+    NotPresent,
+    Unplugged,
+}
+
+/// The three roles Windows keeps a default render device for (eConsole,
+/// eMultimedia, eCommunications).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Role {
+    Console,
+    Multimedia,
+    Communications,
+}
+
+impl Role {
+    /// Every role, in the order the supervisor takes them.
+    pub const ALL: [Role; 3] = [Role::Console, Role::Multimedia, Role::Communications];
+}
+
+/// The default device of each role; `None` when Windows has none for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DefaultRoles {
+    pub console: Option<DeviceId>,
+    pub multimedia: Option<DeviceId>,
+    pub communications: Option<DeviceId>,
+}
+
+impl DefaultRoles {
+    pub fn get(&self, role: Role) -> Option<&DeviceId> {
+        match role {
+            Role::Console => self.console.as_ref(),
+            Role::Multimedia => self.multimedia.as_ref(),
+            Role::Communications => self.communications.as_ref(),
+        }
+    }
+
+    pub fn set(&mut self, role: Role, id: Option<DeviceId>) {
+        let slot = match role {
+            Role::Console => &mut self.console,
+            Role::Multimedia => &mut self.multimedia,
+            Role::Communications => &mut self.communications,
+        };
+        *slot = id;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecureBoot {
+    Enabled,
+    Disabled,
+    /// The firmware has no Secure Boot (legacy BIOS).
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arch {
+    X64,
+    Arm64,
+    Other,
+}
+
+/// What the machine learns about the PC once per run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Platform {
+    pub os_build: u32,
+    pub arch: Arch,
+    pub test_signing: bool,
+    pub secure_boot: SecureBoot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DriverState {
+    NotInstalled,
+    /// `problem_code` is DEVPKEY_Device_ProblemCode (0 is fine, 52 is an
+    /// unsigned driver).
+    Installed {
+        problem_code: u32,
+        service_running: bool,
+    },
+    RebootRequired,
+}
+
+/// The one task an elevated `ssr-setup` run performs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupTask {
+    Install,
+    Uninstall,
+    SetFormats { endpoint_mask: u8 },
+    RestartDevice,
+    Repair,
+}
+
+/// The JSON line `ssr-setup` prints when its task succeeded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetupOutcome {
+    pub reboot_required: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HostError {
+    #[error("the administrator prompt was declined")]
+    Declined,
+    #[error("the setup helper failed: {0}")]
+    Setup(String),
+    #[error("the host refused: {0}")]
+    Failed(String),
+    #[error("not supported on this host")]
+    Unsupported,
+}
+
+/// What the supervisor asks the operating system for (ADR 0013). Every call
+/// may block briefly; none is called from a real-time thread. The Windows
+/// adapter and the test fake are the two adapters.
+pub trait Host {
+    fn platform(&mut self) -> Platform;
+
+    fn driver(&mut self) -> DriverState;
+
+    /// Every render endpoint, ours included (with `endpoint` set), in any state.
+    fn outputs(&mut self) -> Vec<OutputDevice>;
+
+    fn default_roles(&mut self) -> DefaultRoles;
+
+    fn set_default_role(&mut self, role: Role, device: &DeviceId) -> Result<(), HostError>;
+
+    /// Runs `ssr-setup` elevated (one UAC prompt) and waits for its one JSON
+    /// line.
+    fn run_setup(&mut self, task: &SetupTask) -> Result<SetupOutcome, HostError>;
+
+    /// Writes (`Some`) or removes (`None`) the restore point `ssr-guard`
+    /// reads (`supervisor::restore_point`).
+    fn write_restore_point(&mut self, json: Option<&str>) -> Result<(), HostError>;
 }
 
 /// The longest a capture read may wait before the engine checks for a stop

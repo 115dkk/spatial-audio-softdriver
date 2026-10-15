@@ -9,8 +9,7 @@
 //! * [`ports`]: the seams the engine is wired through ([`CaptureSource`],
 //!   [`OutputOpener`]/[`OutputSink`]) and the supervisor's [`Host`].
 //! * [`status`]: the engine state the control thread samples.
-//! * [`app`]: the intent/snapshot pair between the screen and the supervisor
-//!   (a draft until M4).
+//! * [`app`]: the intent/snapshot pair between the screen and the supervisor.
 
 pub mod app;
 pub mod feeds;
@@ -25,8 +24,9 @@ pub use feeds::Feeds;
 pub use format::{BitstreamCodec, BitstreamFormat, PcmFormat, SampleType, SourceFormat};
 pub use layout::{Direction, DirectionId, Layout, LayoutError};
 pub use ports::{
-    CaptureError, CaptureSource, Host, OutputError, OutputFormat, OutputLayout, OutputMode,
-    OutputOpener, OutputSink, TrimUnsupported,
+    Arch, CaptureError, CaptureSource, DefaultRoles, DeviceId, DeviceState, DriverState, Host,
+    HostError, OutputDevice, OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener,
+    OutputSink, Platform, Role, SecureBoot, SetupOutcome, SetupTask, TrimUnsupported,
 };
 pub use position::{Speaker, direction_to_room, room_to_direction};
 
