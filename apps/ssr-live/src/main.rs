@@ -42,39 +42,6 @@ enum CaptureKind {
 }
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn chain_errors_json(counts: ssr_types::ChainErrorCounts) -> serde_json::Value {
-    counts
-        .iter()
-        .map(|(kind, count)| (kind.name().to_owned(), count.into()))
-        .collect::<serde_json::Map<_, _>>()
-        .into()
-}
-
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn report_request_fields(
-    source: CaptureKind,
-    from_dump: bool,
-    clock: Clock,
-    shared: bool,
-    status: &ssr_types::EngineStatus,
-) -> serde_json::Value {
-    serde_json::json!({
-        "source": if from_dump { "dump" } else { match source {
-            CaptureKind::Driver => "driver",
-            CaptureKind::Sal => "sal",
-        }},
-        "clock_requested": match clock {
-            Clock::Auto => "auto",
-            Clock::Asrc => "asrc",
-            Clock::Trim => "trim",
-        },
-        "output_mode_requested": if shared { "shared" } else { "exclusive" },
-        "output_sample_rate": status.output_rate,
-        "trim_available": status.trim_available,
-    })
-}
-
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn parse_endpoints(value: Option<&str>) -> Result<engine::EndpointFilter, String> {
     let Some(value) = value else {
         return Ok(engine::EndpointFilter::All);
@@ -119,53 +86,6 @@ mod endpoint_tests {
         assert!(parse_endpoints(Some("4")).is_err());
         assert!(parse_endpoints(Some("2,2")).is_err());
         assert!(parse_endpoints(Some("")).is_err());
-    }
-
-    #[test]
-    fn report_request_fields_cover_sources_clocks_and_output_modes() {
-        let status = ssr_types::EngineStatus {
-            output_rate: 44_100,
-            trim_available: true,
-            ..Default::default()
-        };
-        for (source, from_dump, expected) in [
-            (CaptureKind::Driver, false, "driver"),
-            (CaptureKind::Sal, false, "sal"),
-            (CaptureKind::Driver, true, "dump"),
-        ] {
-            for (clock, clock_name) in [
-                (Clock::Auto, "auto"),
-                (Clock::Asrc, "asrc"),
-                (Clock::Trim, "trim"),
-            ] {
-                for (shared, mode) in [(false, "exclusive"), (true, "shared")] {
-                    let fields = report_request_fields(source, from_dump, clock, shared, &status);
-                    assert_eq!(fields["source"], expected);
-                    assert_eq!(fields["clock_requested"], clock_name);
-                    assert_eq!(fields["output_mode_requested"], mode);
-                    assert_eq!(fields["output_sample_rate"], 44_100);
-                    assert_eq!(fields["trim_available"], true);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn chain_error_report_uses_all_stable_snake_case_names() {
-        let counts = ssr_types::ChainErrorCounts::from_fn(|kind| kind.index() as u64 + 1);
-        let json = chain_errors_json(counts);
-        let errors = json.as_object().unwrap();
-
-        assert_eq!(errors.len(), ssr_types::ChainErrorKind::COUNT);
-        for kind in ssr_types::ChainErrorKind::ALL {
-            let name = kind.name();
-            assert!(
-                name.bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
-                "{name} is not snake_case"
-            );
-            assert_eq!(errors[name], serde_json::json!(kind.index() as u64 + 1));
-        }
     }
 
     #[test]
@@ -351,417 +271,29 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(any(windows, test))]
-mod capture_tap {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
-
-    use ssr_abi::RecordWriter;
-    use ssr_types::{CaptureError, CaptureSource, TrimUnsupported};
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) const READ_END_BYTES: usize = ssr_abi::READ_END_RECORD_BYTES;
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    fn marker(
-        write: impl FnOnce(&mut RecordWriter<'_>) -> bool,
-    ) -> [u8; ssr_abi::RECORDER_GAP_RECORD_BYTES] {
-        let mut bytes = [0; ssr_abi::RECORDER_GAP_RECORD_BYTES];
-        let mut writer = RecordWriter::new(&mut bytes);
-        assert!(write(&mut writer));
-        bytes
-    }
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) fn read_end_marker(qpc: u64) -> [u8; ssr_abi::RECORDER_GAP_RECORD_BYTES] {
-        marker(|writer| writer.read_end(qpc))
-    }
-
-    #[cfg_attr(not(windows), allow(dead_code))]
-    fn recorder_gap_marker(qpc: u64, lost_bytes: u64) -> [u8; ssr_abi::RECORDER_GAP_RECORD_BYTES] {
-        marker(|writer| writer.recorder_gap(qpc, lost_bytes))
-    }
-
-    /// Copies every chunk the capture thread reads into a byte ring that a
-    /// writer thread drains to the dump file, so the real-time thread never
-    /// touches the file. A chunk that does not fit is dropped whole (records
-    /// stay intact) and counted.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub(super) struct TeeCapture<C> {
-        pub(super) inner: C,
-        pub(super) tap: Option<rtrb::Producer<u8>>,
-        pub(super) dropped: Arc<AtomicU64>,
-        pub(super) pending_gap: u64,
-        pub(super) now: fn() -> u64,
-    }
-
-    impl<C: CaptureSource> CaptureSource for TeeCapture<C> {
-        fn read(&mut self, buf: &mut [u8], wait: Duration) -> Result<usize, CaptureError> {
-            let n = self.inner.read(buf, wait)?;
-            if let Some(tap) = self.tap.as_mut() {
-                let now = self.inner.now_qpc().unwrap_or_else(self.now);
-                let end = read_end_marker(now);
-                let gap = recorder_gap_marker(now, self.pending_gap);
-                let gap_len = usize::from(self.pending_gap != 0) * gap.len();
-                let total = gap_len + n + READ_END_BYTES;
-                match tap.write_chunk_uninit(total) {
-                    Ok(chunk) => {
-                        chunk.fill_from_iter(
-                            gap[..gap_len]
-                                .iter()
-                                .chain(&buf[..n])
-                                .chain(&end[..READ_END_BYTES])
-                                .copied(),
-                        );
-                        self.pending_gap = 0;
-                    }
-                    Err(_) => {
-                        self.pending_gap = self.pending_gap.saturating_add(n as u64);
-                        self.dropped.fetch_add(n as u64, Ordering::Relaxed);
-                    }
-                }
-            }
-            Ok(n)
-        }
-
-        fn now_qpc(&self) -> Option<u64> {
-            self.inner.now_qpc()
-        }
-
-        fn set_rate_trim(&mut self, ppm: f64) -> Result<(), TrimUnsupported> {
-            self.inner.set_rate_trim(ppm)
-        }
-
-        fn reconnect(&mut self) -> Result<(), CaptureError> {
-            self.inner.reconnect()
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-        use engine::{Chain, ChainConfig, ChainEvent, Prepared};
-        use speakers::{PreparedSpeaker, PreparedSpeakers};
-        use ssr_abi::{dump_header, reads, wave_format_bytes};
-        use ssr_types::{Direction, Layout, PcmFormat, SampleType, SourceFormat};
-
-        use super::*;
-
-        #[global_allocator]
-        static ALLOCATOR: AllocDisabler = AllocDisabler;
-
-        struct FixedCapture {
-            next: u8,
-        }
-
-        struct ScriptedCapture {
-            reads: Vec<Vec<u8>>,
-            next: usize,
-            qpc: u64,
-        }
-
-        impl CaptureSource for ScriptedCapture {
-            fn read(&mut self, buf: &mut [u8], _wait: Duration) -> Result<usize, CaptureError> {
-                let Some(read) = self.reads.get(self.next) else {
-                    return Err(CaptureError::Ended);
-                };
-                buf[..read.len()].copy_from_slice(read);
-                self.next += 1;
-                self.qpc += 10_000;
-                Ok(read.len())
-            }
-
-            fn now_qpc(&self) -> Option<u64> {
-                Some(self.qpc)
-            }
-
-            fn set_rate_trim(&mut self, _ppm: f64) -> Result<(), TrimUnsupported> {
-                Err(TrimUnsupported)
-            }
-        }
-
-        impl CaptureSource for FixedCapture {
-            fn read(&mut self, buf: &mut [u8], _wait: Duration) -> Result<usize, CaptureError> {
-                if self.next == 0 {
-                    self.next = 1;
-                    return Ok(0);
-                }
-                let mut writer = RecordWriter::new(buf);
-                assert!(writer.data(1, u64::from(self.next) * 8, 1, &[self.next; 8]));
-                self.next += 1;
-                Ok(writer.len())
-            }
-
-            fn now_qpc(&self) -> Option<u64> {
-                Some(456)
-            }
-
-            fn set_rate_trim(&mut self, _ppm: f64) -> Result<(), TrimUnsupported> {
-                Err(TrimUnsupported)
-            }
-        }
-
-        fn fixed_now() -> u64 {
-            123
-        }
-
-        fn drain(consumer: &mut rtrb::Consumer<u8>, out: &mut Vec<u8>) {
-            let available = consumer.slots();
-            let chunk = consumer.read_chunk(available).unwrap();
-            let (a, b) = chunk.as_slices();
-            out.extend_from_slice(a);
-            out.extend_from_slice(b);
-            chunk.commit_all();
-        }
-
-        fn tee_from(
-            capacity: usize,
-            next: u8,
-        ) -> (TeeCapture<FixedCapture>, rtrb::Consumer<u8>, Arc<AtomicU64>) {
-            let (producer, consumer) = rtrb::RingBuffer::new(capacity);
-            let dropped = Arc::new(AtomicU64::new(0));
-            (
-                TeeCapture {
-                    inner: FixedCapture { next },
-                    tap: Some(producer),
-                    dropped: dropped.clone(),
-                    pending_gap: 0,
-                    now: fixed_now,
-                },
-                consumer,
-                dropped,
-            )
-        }
-
-        fn tee(capacity: usize) -> (TeeCapture<FixedCapture>, rtrb::Consumer<u8>, Arc<AtomicU64>) {
-            tee_from(capacity, 1)
-        }
-
-        #[test]
-        fn tee_capture_records_empty_successful_reads() {
-            let (mut tee, mut consumer, dropped) = tee_from(READ_END_BYTES, 0);
-            let mut buf = [0; 64];
-            assert_eq!(tee.read(&mut buf, Duration::ZERO).unwrap(), 0);
-            let mut recorded = Vec::new();
-            drain(&mut consumer, &mut recorded);
-            let chunks: Vec<_> = reads(&dump_header(1), &recorded).collect();
-            assert_eq!(chunks.len(), 1);
-            assert!(chunks[0].bytes.is_empty());
-            assert_eq!(chunks[0].end_qpc, Some(456));
-            assert_eq!(dropped.load(Ordering::Relaxed), 0);
-        }
-
-        #[test]
-        fn tee_capture_preserves_reads_and_records_dropped_bytes() {
-            let one_read = ssr_abi::record_size(8) + READ_END_BYTES;
-            let (mut tee, mut consumer, dropped) = tee(one_read * 2);
-            let mut buf = [0; 64];
-            tee.read(&mut buf, Duration::ZERO).unwrap();
-            tee.read(&mut buf, Duration::ZERO).unwrap();
-            tee.read(&mut buf, Duration::ZERO).unwrap();
-            assert_eq!(
-                dropped.load(Ordering::Relaxed),
-                ssr_abi::record_size(8) as u64
-            );
-
-            let mut recorded = Vec::new();
-            drain(&mut consumer, &mut recorded);
-            tee.read(&mut buf, Duration::ZERO).unwrap();
-            drain(&mut consumer, &mut recorded);
-
-            let chunks: Vec<_> = reads(&dump_header(1), &recorded).collect();
-            assert_eq!(chunks.len(), 3);
-            for (chunk, payload) in chunks.iter().zip([1, 2, 4]) {
-                assert!(matches!(
-                    ssr_abi::records(chunk.bytes).next(),
-                    Some(Ok(ssr_abi::Record::Data { bytes, .. })) if bytes == [payload; 8]
-                ));
-            }
-            assert_eq!(chunks[0].end_qpc, Some(456));
-            assert_eq!(chunks[1].end_qpc, Some(456));
-            assert_eq!(chunks[2].end_qpc, Some(456));
-            assert_eq!(chunks[2].lost_bytes, ssr_abi::record_size(8) as u64);
-        }
-
-        #[test]
-        fn tee_capture_stop_idle_restart_replays_like_the_live_chain() {
-            let format = SourceFormat::Pcm(PcmFormat {
-                channels: 2,
-                sample_rate: 48_000,
-                bits_per_sample: 32,
-                valid_bits: 32,
-                sample_type: SampleType::Float,
-                channel_mask: 3,
-            });
-            let record = |write: &dyn Fn(&mut RecordWriter<'_>) -> bool| {
-                let mut bytes = vec![0; 4_096];
-                let mut writer = RecordWriter::new(&mut bytes);
-                assert!(write(&mut writer));
-                let len = writer.len();
-                bytes.truncate(len);
-                bytes
-            };
-            let first = 0.125_f32.to_le_bytes().repeat(480 * 2);
-            let second = 0.25_f32.to_le_bytes().repeat(480 * 2);
-            let scripted = vec![
-                record(&|writer| writer.format_change(1, 0, &wave_format_bytes(&format))),
-                record(&|writer| writer.data(1, 0, 10_000, &first)),
-                record(&|writer| writer.stream_stop(1, 20_000)),
-                Vec::new(),
-                Vec::new(),
-                record(&|writer| writer.stream_start(2, 50_000)),
-                record(&|writer| writer.data(2, 0, 60_000, &second)),
-            ];
-            let capacity =
-                scripted.iter().map(Vec::len).sum::<usize>() + scripted.len() * READ_END_BYTES;
-            let (producer, mut consumer) = rtrb::RingBuffer::new(capacity);
-            let dropped = Arc::new(AtomicU64::new(0));
-            let mut tee = TeeCapture {
-                inner: ScriptedCapture {
-                    reads: scripted,
-                    next: 0,
-                    qpc: 0,
-                },
-                tap: Some(producer),
-                dropped: Arc::clone(&dropped),
-                pending_gap: 0,
-                now: fixed_now,
-            };
-            let mut buf = vec![0; 4_096];
-            let mut live_reads = Vec::new();
-            for _ in 0..7 {
-                let n = tee.read(&mut buf, Duration::ZERO).unwrap();
-                live_reads.push((buf[..n].to_vec(), tee.now_qpc().unwrap()));
-            }
-            let mut marked = Vec::new();
-            drain(&mut consumer, &mut marked);
-            assert_eq!(dropped.load(Ordering::Relaxed), 0);
-
-            let prepared = || {
-                Box::new(
-                    Prepared::speakers(
-                        Arc::new(PreparedSpeakers {
-                            layout: Layout::new(vec![
-                                Direction::new("FL", 30.0, 0.0),
-                                Direction::new("FR", -30.0, 0.0),
-                            ])
-                            .unwrap(),
-                            rate: 48_000,
-                            partition: 480,
-                            device_channels: 2,
-                            channel_mask: 3,
-                            speakers: vec![
-                                PreparedSpeaker {
-                                    name: "FL".into(),
-                                    device_channel: 0,
-                                    small: false,
-                                    crossover: None,
-                                    delay_frames: 0,
-                                    gain: 1.0,
-                                    fir: None,
-                                },
-                                PreparedSpeaker {
-                                    name: "FR".into(),
-                                    device_channel: 1,
-                                    small: false,
-                                    crossover: None,
-                                    delay_frames: 0,
-                                    gain: 1.0,
-                                    fir: None,
-                                },
-                            ],
-                            subwoofers: Vec::new(),
-                            bass_to: Vec::new(),
-                            lfe_gain: 10.0_f32.sqrt(),
-                            gain: 1.0,
-                            limiter_ceiling: 1.0,
-                        }),
-                        480,
-                    )
-                    .unwrap(),
-                )
-            };
-            let render = |input: Vec<(Vec<u8>, u64)>| {
-                let mut chain = Chain::with_qpc_frequency(
-                    ChainConfig {
-                        arrival_slack_frames: 0,
-                        ..ChainConfig::default()
-                    },
-                    1_000_000,
-                );
-                chain.set_prepared(prepared());
-                let mut output = Vec::new();
-                let mut collect = |event: ChainEvent<'_>| {
-                    if let ChainEvent::Block(block) = event {
-                        output.extend_from_slice(block.samples);
-                    }
-                };
-                for (bytes, end_qpc) in input {
-                    chain.push_records(&bytes, &mut collect);
-                    chain.idle(end_qpc, &mut collect);
-                }
-                chain.finish(&mut collect);
-                output
-            };
-            let live = render(live_reads);
-            let header = dump_header(1_000_000);
-            let replay = render(
-                reads(&header, &marked)
-                    .map(|chunk| (chunk.bytes.to_vec(), chunk.end_qpc.unwrap()))
-                    .collect(),
-            );
-            let first_audible = |samples: &[f32]| {
-                samples
-                    .iter()
-                    .position(|sample| sample.abs() > 1.0e-6)
-                    .expect("render contains audible output")
-            };
-            let live_start = first_audible(&live);
-            let replay_start = first_audible(&replay);
-            assert_eq!(live[live_start..], replay[replay_start..]);
-        }
-
-        #[test]
-        fn tee_capture_read_does_not_allocate() {
-            let (mut tee, _consumer, _dropped) = tee(256);
-            let mut buf = [0; 64];
-            assert_no_alloc(|| {});
-            assert_no_alloc(|| {
-                tee.read(&mut buf, Duration::ZERO).unwrap();
-            });
-        }
-    }
-}
-
 #[cfg(windows)]
 mod platform {
     use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::fs::File;
-    use std::io::{BufRead, BufWriter, Write};
-    #[cfg(test)]
-    use std::mem::size_of;
+    use std::io::BufRead;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
     use engine::adapters::DumpCapture;
-    use engine::{
-        ClockPreference, EngineConfig, EngineEvent, LiveChange, OutputProfile, Prepared,
-        RealtimeThread, StartOptions,
-    };
-    use ssr_abi::{Record, dump_header_bytes, records};
-    use ssr_sys::driver_ring::{DriverRing, DriverStatsSample};
+    use engine::{ClockPreference, EngineConfig, RealtimeThread};
+    #[cfg(test)]
+    use ssr_abi::dump_header_bytes;
+    use ssr_abi::{Record, records};
+    use ssr_sys::driver_ring::{DriverRing, DriverRingObserver};
     use ssr_sys::mmcss::{self, MmcssGuard};
     use ssr_sys::output::WasapiOpener;
     use ssr_sys::{devices, qpc, sal::SalRing};
     use ssr_types::{CaptureError, CaptureSource, TrimUnsupported};
 
-    use super::capture_tap::{READ_END_BYTES, TeeCapture, read_end_marker};
-    use super::{CaptureKind, Clock, chain_errors_json, parse_endpoints, report_request_fields};
+    use super::{CaptureKind, Clock, parse_endpoints};
 
     pub struct PlayOptions {
         pub source: CaptureKind,
@@ -803,33 +335,24 @@ mod platform {
         }
     }
 
-    fn create_dump(path: &Path, qpc_frequency: u64) -> Result<BufWriter<File>, String> {
-        let file = File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut writer = BufWriter::with_capacity(1 << 20, file);
-        writer
-            .write_all(&dump_header_bytes(qpc_frequency))
-            .map_err(|e| e.to_string())?;
-        Ok(writer)
-    }
-
     pub fn record(source: CaptureKind, out: &Path, seconds: f64) -> Result<(), String> {
-        let (mut ring, qpc_frequency, source_name) = match source {
+        let (ring, qpc_frequency, source_name) = match source {
             CaptureKind::Driver => {
                 let ring = open_driver()?;
                 let frequency = ring.info().qpc_frequency;
-                let initial = ring.stats_sample().map_err(|e| e.to_string())?;
-                (
-                    Source::Driver {
-                        ring,
-                        stats: Arc::new(std::sync::Mutex::new(DriverStatsTotals::new(initial))),
-                    },
-                    frequency,
-                    "Spatial SoftReceiver",
-                )
+                (Source::Driver(ring), frequency, "Spatial SoftReceiver")
             }
             CaptureKind::Sal => (Source::Sal(open_sal()?), qpc::frequency(), "SAL"),
         };
-        let mut writer = create_dump(out, qpc_frequency)?;
+        let tee = supervisor::TeeCapture::new(ring, qpc::now);
+        let (mut ring, recorder) = supervisor::Recorder::start(
+            supervisor::RecorderConfig {
+                path: out.to_owned(),
+                now: qpc::now,
+            },
+            qpc_frequency,
+            tee,
+        )?;
         let mut buf = vec![0_u8; 1 << 20];
         let mut bytes = 0_u64;
         let mut endpoints = BTreeMap::<u16, (u64, u64, u64)>::new();
@@ -842,11 +365,6 @@ mod platform {
         while started.elapsed().as_secs_f64() < seconds {
             let n = ring
                 .read(&mut buf, Duration::from_millis(100))
-                .map_err(|e| e.to_string())?;
-            let read_qpc = ring.now_qpc().unwrap_or_else(qpc::now);
-            writer.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-            writer
-                .write_all(&read_end_marker(read_qpc)[..READ_END_BYTES])
                 .map_err(|e| e.to_string())?;
             if n > 0 {
                 bytes += n as u64;
@@ -874,10 +392,12 @@ mod platform {
                 next_report += Duration::from_secs(1);
             }
         }
-        writer.flush().map_err(|e| e.to_string())?;
+        drop(ring);
+        let recorder_lost = recorder.dropped_bytes();
+        recorder.stop()?;
         let data = endpoints.values().map(|counts| counts.0).sum::<u64>();
         eprintln!(
-            "wrote {bytes} bytes of records ({data} payload bytes) to {}",
+            "wrote {bytes} bytes of records ({data} payload bytes, {recorder_lost} recorder bytes lost) to {}",
             out.display()
         );
         if data == 0 {
@@ -890,65 +410,8 @@ mod platform {
         Ok(())
     }
 
-    #[derive(Clone, Copy)]
-    struct DriverStatsTotals {
-        generation: u64,
-        first: ssr_abi::DriverStats,
-        last: ssr_abi::DriverStats,
-        streamed_bytes: [u64; ssr_abi::MAX_ENDPOINTS],
-        overruns: [u64; ssr_abi::MAX_ENDPOINTS],
-        lost_bytes: [u64; ssr_abi::MAX_ENDPOINTS],
-        max_timer_lateness_us: u32,
-    }
-
-    impl DriverStatsTotals {
-        fn new(sample: DriverStatsSample) -> Self {
-            let stats = sample.stats;
-            Self {
-                generation: sample.generation,
-                first: stats,
-                last: stats,
-                streamed_bytes: [0; ssr_abi::MAX_ENDPOINTS],
-                overruns: [0; ssr_abi::MAX_ENDPOINTS],
-                lost_bytes: [0; ssr_abi::MAX_ENDPOINTS],
-                max_timer_lateness_us: stats.max_timer_lateness_us,
-            }
-        }
-
-        fn observe(&mut self, sample: DriverStatsSample) {
-            if sample.generation != self.generation {
-                return;
-            }
-            let stats = sample.stats;
-            for endpoint in 0..ssr_abi::MAX_ENDPOINTS {
-                let before = self.last.endpoints[endpoint];
-                let after = stats.endpoints[endpoint];
-                self.streamed_bytes[endpoint] = self.streamed_bytes[endpoint]
-                    .saturating_add(after.total_bytes.saturating_sub(before.total_bytes));
-                self.overruns[endpoint] = self.overruns[endpoint]
-                    .saturating_add(after.overruns.saturating_sub(before.overruns));
-                self.lost_bytes[endpoint] = self.lost_bytes[endpoint]
-                    .saturating_add(after.lost_bytes.saturating_sub(before.lost_bytes));
-            }
-            self.max_timer_lateness_us =
-                self.max_timer_lateness_us.max(stats.max_timer_lateness_us);
-            self.last = stats;
-        }
-
-        fn begin_generation(&mut self, sample: DriverStatsSample) {
-            self.generation = sample.generation;
-            self.last = sample.stats;
-            self.max_timer_lateness_us = self
-                .max_timer_lateness_us
-                .max(sample.stats.max_timer_lateness_us);
-        }
-    }
-
     enum Source {
-        Driver {
-            ring: DriverRing,
-            stats: Arc<std::sync::Mutex<DriverStatsTotals>>,
-        },
+        Driver(DriverRing),
         Sal(SalRing),
         Dump(DumpCapture),
     }
@@ -956,7 +419,7 @@ mod platform {
     impl CaptureSource for Source {
         fn read(&mut self, buf: &mut [u8], wait: Duration) -> Result<usize, CaptureError> {
             match self {
-                Self::Driver { ring, .. } => ring.read(buf, wait),
+                Self::Driver(ring) => ring.read(buf, wait),
                 Self::Sal(ring) => ring.read(buf, wait),
                 Self::Dump(dump) => dump.read(buf, wait),
             }
@@ -964,7 +427,7 @@ mod platform {
 
         fn now_qpc(&self) -> Option<u64> {
             match self {
-                Self::Driver { ring, .. } => ring.now_qpc(),
+                Self::Driver(ring) => ring.now_qpc(),
                 Self::Sal(ring) => ring.now_qpc(),
                 Self::Dump(dump) => dump.now_qpc(),
             }
@@ -972,7 +435,7 @@ mod platform {
 
         fn set_rate_trim(&mut self, ppm: f64) -> Result<(), TrimUnsupported> {
             match self {
-                Self::Driver { ring, .. } => ring.set_rate_trim(ppm),
+                Self::Driver(ring) => ring.set_rate_trim(ppm),
                 Self::Sal(ring) => ring.set_rate_trim(ppm),
                 Self::Dump(dump) => dump.set_rate_trim(ppm),
             }
@@ -980,28 +443,7 @@ mod platform {
 
         fn reconnect(&mut self) -> Result<(), CaptureError> {
             match self {
-                Self::Driver { ring, stats } => {
-                    // The failed read may mean the old control handle can no longer
-                    // answer GET_STATS. Preserve a final snapshot when possible, but
-                    // never let statistics prevent the reconnect itself.
-                    if let Ok(before) = ring.stats_sample() {
-                        stats
-                            .lock()
-                            .map_err(|_| {
-                                CaptureError::Io("driver statistics lock was poisoned".into())
-                            })?
-                            .observe(before);
-                    }
-                    ring.reconnect()?;
-                    let after = ring.stats_sample()?;
-                    stats
-                        .lock()
-                        .map_err(|_| {
-                            CaptureError::Io("driver statistics lock was poisoned".into())
-                        })?
-                        .begin_generation(after);
-                    Ok(())
-                }
+                Self::Driver(ring) => ring.reconnect(),
                 Self::Sal(ring) => ring.reconnect(),
                 Self::Dump(dump) => dump.reconnect(),
             }
@@ -1020,89 +462,50 @@ mod platform {
         }
     }
 
-    fn prepare_output(profile: &OutputProfile) -> Result<Prepared, String> {
-        profile.prepare().map_err(|error| error.to_string())
+    struct StatsObserver(DriverRingObserver);
+
+    impl supervisor::DriverStatsSource for StatsObserver {
+        fn sample(&self) -> Result<(u64, ssr_abi::DriverStats), String> {
+            self.0
+                .stats_sample()
+                .map(|sample| (sample.generation, sample.stats))
+                .map_err(|error| error.to_string())
+        }
     }
 
-    pub fn play(options: PlayOptions) -> Result<(), String> {
-        let profile = engine::load_output_profile(&options.profile).map_err(|e| e.to_string())?;
-        let endpoint = devices::find(options.output.as_deref()).map_err(|e| e.to_string())?;
-        eprintln!("output: {}", endpoint.name);
-        let ended = Arc::new(AtomicBool::new(false));
-        let (source, source_qpc, driver_stats) = match &options.from_dump {
-            Some(path) => {
-                let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                (
-                    Source::Dump(DumpCapture::from_dump(
-                        &bytes,
-                        qpc::frequency(),
-                        qpc::now,
-                        Some(ended.clone()),
-                        options.repeat,
-                    )?),
+    type OpenedSource = (Source, u64, Option<Box<dyn supervisor::DriverStatsSource>>);
+
+    fn open_source(options: &PlayOptions, ended: Arc<AtomicBool>) -> Result<OpenedSource, String> {
+        if let Some(path) = &options.from_dump {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            return Ok((
+                Source::Dump(DumpCapture::from_dump(
+                    &bytes,
                     qpc::frequency(),
-                    None,
-                )
+                    qpc::now,
+                    Some(ended),
+                    options.repeat,
+                )?),
+                qpc::frequency(),
+                None,
+            ));
+        }
+        match options.source {
+            CaptureKind::Driver => {
+                let ring = open_driver()?;
+                let frequency = ring.info().qpc_frequency;
+                let observer = ring.observer();
+                Ok((
+                    Source::Driver(ring),
+                    frequency,
+                    Some(Box::new(StatsObserver(observer))),
+                ))
             }
-            None => match options.source {
-                CaptureKind::Driver => {
-                    let ring = open_driver()?;
-                    let frequency = ring.info().qpc_frequency;
-                    let start = ring.stats_sample().map_err(|e| e.to_string())?;
-                    let observer = ring.observer();
-                    let stats = Arc::new(std::sync::Mutex::new(DriverStatsTotals::new(start)));
-                    (
-                        Source::Driver {
-                            ring,
-                            stats: Arc::clone(&stats),
-                        },
-                        frequency,
-                        Some((observer, stats)),
-                    )
-                }
-                CaptureKind::Sal => (Source::Sal(open_sal()?), qpc::frequency(), None),
-            },
-        };
+            CaptureKind::Sal => Ok((Source::Sal(open_sal()?), qpc::frequency(), None)),
+        }
+    }
 
-        let dropped = Arc::new(AtomicU64::new(0));
-        let stop_writer = Arc::new(AtomicBool::new(false));
-        let (tap, writer_thread) = match &options.record {
-            Some(path) => {
-                let mut writer = create_dump(path, source_qpc)?;
-                // About 2.7 s of MAT at 3 MB/s.
-                let (producer, mut consumer) = rtrb::RingBuffer::<u8>::new(8 << 20);
-                let stop = stop_writer.clone();
-                let handle = thread::spawn(move || -> Result<(), String> {
-                    loop {
-                        let available = consumer.slots();
-                        if available > 0 {
-                            let chunk = consumer
-                                .read_chunk(available)
-                                .map_err(|e| format!("{e:?}"))?;
-                            let (a, b) = chunk.as_slices();
-                            writer.write_all(a).map_err(|e| e.to_string())?;
-                            writer.write_all(b).map_err(|e| e.to_string())?;
-                            chunk.commit_all();
-                        } else if stop.load(Ordering::Acquire) {
-                            break;
-                        } else {
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                    }
-                    writer.flush().map_err(|e| e.to_string())
-                });
-                (Some(producer), Some(handle))
-            }
-            None => (None, None),
-        };
-        let capture = TeeCapture {
-            inner: source,
-            tap,
-            dropped: dropped.clone(),
-            pending_gap: 0,
-            now: qpc::now,
-        };
-
+    fn engine_config(options: &PlayOptions) -> Result<EngineConfig, String> {
         let endpoints = parse_endpoints(options.endpoints.as_deref())?;
         let mut direct = engine::DirectLayouts::default();
         for value in &options.direct_layouts {
@@ -1110,7 +513,7 @@ mod platform {
                 .set(value.channels, value.layout)
                 .map_err(str::to_owned)?;
         }
-        let config = EngineConfig {
+        Ok(EngineConfig {
             chain: engine::ChainConfig {
                 direct,
                 endpoints,
@@ -1124,7 +527,57 @@ mod platform {
             },
             thread_hook: Some(Arc::new(promote_thread)),
             ..EngineConfig::default()
-        };
+        })
+    }
+
+    fn report_request(options: &PlayOptions) -> supervisor::RequestFields {
+        supervisor::RequestFields {
+            source: if options.from_dump.is_some() {
+                "dump"
+            } else {
+                match options.source {
+                    CaptureKind::Driver => "driver",
+                    CaptureKind::Sal => "sal",
+                }
+            }
+            .to_owned(),
+            clock_requested: match options.clock {
+                Clock::Auto => "auto",
+                Clock::Asrc => "asrc",
+                Clock::Trim => "trim",
+            }
+            .to_owned(),
+            output_mode_requested: if options.shared {
+                "shared"
+            } else {
+                "exclusive"
+            }
+            .to_owned(),
+            direct_layouts: options
+                .direct_layouts
+                .iter()
+                .map(|value| supervisor::DirectLayoutField {
+                    channels: value.channels,
+                    speakers: value
+                        .layout
+                        .speakers()
+                        .iter()
+                        .copied()
+                        .map(engine::speaker_name)
+                        .map(str::to_owned)
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn play(options: PlayOptions) -> Result<(), String> {
+        let profile = engine::load_output_profile(&options.profile).map_err(|e| e.to_string())?;
+        let endpoint = devices::find(options.output.as_deref()).map_err(|e| e.to_string())?;
+        eprintln!("output: {}", endpoint.name);
+        let ended = Arc::new(AtomicBool::new(false));
+        let (source, source_qpc, driver_stats) = open_source(&options, ended.clone())?;
+        let config = engine_config(&options)?;
         let output = WasapiOpener {
             endpoint: Some(endpoint.id.clone()),
             rate: options.rate,
@@ -1135,32 +588,32 @@ mod platform {
                 .filter(|ms| ms.is_finite() && *ms > 0.0)
                 .map(|ms| Duration::from_secs_f64(ms / 1000.0)),
         };
-        let initial_prepared = Box::new(prepare_output(&profile)?);
-        let output_kind = initial_prepared.kind().as_str();
-        let output_channels = initial_prepared.channels();
-        let output_channel_mask = initial_prepared.channel_mask();
-        let mut engine = engine::start_with(
-            config,
-            capture,
-            output,
-            StartOptions {
+        let recorder = options
+            .record
+            .as_ref()
+            .map(|path| supervisor::RecorderConfig {
+                path: path.clone(),
+                now: qpc::now,
+            });
+        let mut session = supervisor::Session::start(
+            supervisor::SessionConfig {
+                engine: config,
+                profile,
                 qpc_frequency: source_qpc,
-                prepared: Some(initial_prepared),
+                mute: options.mute,
+                recorder,
             },
+            source,
+            output,
+            driver_stats,
         )
-        .map_err(|e| e.to_string())?;
-        if options.mute {
-            engine
-                .apply(LiveChange::Mute(true))
-                .map_err(|e| e.to_string())?;
-        }
+        .map_err(|error| error.to_string())?;
 
         let stop = Arc::new(AtomicBool::new(false));
         if options.seconds.is_none() {
             let stop = stop.clone();
             thread::spawn(move || {
                 let mut line = String::new();
-                // End of input (no console) is not a request to stop.
                 if std::io::stdin()
                     .lock()
                     .read_line(&mut line)
@@ -1172,332 +625,153 @@ mod platform {
             eprintln!("playing; press Enter to stop");
         }
 
-        let mut needs_prepared = false;
         let started = Instant::now();
         let mut next_report = Duration::from_secs(1);
         let mut ended_at: Option<Instant> = None;
-        let mut figures = RunFigures::default();
         let mut reported_underruns = 0;
         while !stop.load(Ordering::Acquire)
             && options
                 .seconds
                 .is_none_or(|s| started.elapsed().as_secs_f64() < s)
-            // A replayed dump stops once the crossing ring has drained.
             && ended_at.is_none_or(|t| t.elapsed() < Duration::from_millis(500))
         {
             if ended_at.is_none() && ended.load(Ordering::Acquire) {
                 eprintln!("the dump has ended");
                 ended_at = Some(Instant::now());
-                // What follows is the ring draining, not the source failing.
-                figures.underruns_while_streaming = Some(engine.status().underruns);
+                session.source_ended();
             }
-            for event in engine.poll() {
-                match event {
-                    EngineEvent::FormatChanged {
-                        endpoint,
-                        epoch,
-                        format,
-                        unsupported,
-                    } => {
-                        if let Some(reason) = unsupported {
-                            eprintln!("endpoint {endpoint} epoch {epoch}: {format:?} ({reason})");
-                        } else {
-                            eprintln!("endpoint {endpoint} epoch {epoch}: {format:?}");
-                        }
-                    }
-                    EngineEvent::NeedsPrepared => needs_prepared = true,
-                    EngineEvent::Overrun { lost_bytes } => {
-                        eprintln!("overrun: {lost_bytes} bytes lost");
-                        figures.overruns += 1;
-                    }
-                    EngineEvent::OutputOverflow { frames } => {
-                        eprintln!("output overflow: {frames} rendered frames lost");
-                    }
-                    EngineEvent::OutputLayoutChanged {
-                        channels,
-                        channel_mask,
-                    } => {
-                        eprintln!("output reopened: {channels} channels, mask {channel_mask:#x}");
-                    }
-                    EngineEvent::OutputReconnected => eprintln!("output reconnected"),
-                    EngineEvent::FaultCleared => eprintln!("fault cleared"),
-                    EngineEvent::OutputCadenceFault { ratio } => {
-                        eprintln!("output cadence fault: {ratio:.3}");
-                        figures.faults.push("OutputCadence".to_owned());
-                    }
-                    EngineEvent::OutputCadenceReopen { period_ms } => {
-                        eprintln!("output cadence reopen: {period_ms:.1} ms");
-                    }
-                    EngineEvent::Fault(fault) => {
-                        eprintln!("fault: {fault:?}");
-                        figures.faults.push(format!("{fault:?}"));
-                    }
-                }
-            }
-            // Losing the prepared output is exceptional. Rebuild the fixed-shape
-            // state until the capture thread accepts it.
-            if needs_prepared {
-                let t = Instant::now();
-                let next = Box::new(prepare_output(&profile)?);
-                eprintln!(
-                    "prepared {} {} output channels at {} Hz in {:.0} ms",
-                    next.kind().as_str(),
-                    next.channels(),
-                    engine::MIX_RATE,
-                    t.elapsed().as_secs_f64() * 1000.0
-                );
-                match engine.apply(LiveChange::Prepared(next)) {
-                    Ok(()) => needs_prepared = false,
-                    Err(engine::Rejected) => eprintln!("change queue full; retrying"),
-                }
+            for notice in session.poll().map_err(|error| error.to_string())? {
+                print_notice(notice);
             }
             if started.elapsed() >= next_report {
-                let s = engine.status();
-                figures.observe(&s, next_report);
-                let chain_errors = s.unattributed_chain_errors.total()
-                    + s.endpoints
-                        .iter()
-                        .map(|endpoint| endpoint.chain_errors.total())
-                        .sum::<u64>();
-                let chain_error_suffix = if chain_errors == 0 {
-                    String::new()
-                } else {
-                    format!("  chain errors {chain_errors}")
-                };
-                eprintln!(
-                    "{:>4} s  latency p50 {:.1} ms p99 {:.1} ms  ring trough {:.1} ms  underruns {}  device restarts {}  clock {:+.0} ppm  lost {} B  tee-dropped {} B{}{}",
+                let status = session.status();
+                session.observe(next_report.as_secs());
+                print_status(
                     next_report.as_secs(),
-                    s.latency.p50_ms,
-                    s.latency.p99_ms,
-                    s.ring_level_ms,
-                    s.underruns,
-                    s.output_restarts,
-                    s.clock_ppm,
-                    s.lost_bytes,
-                    dropped.load(Ordering::Relaxed),
-                    chain_error_suffix,
-                    s.fault
-                        .as_ref()
-                        .map(|f| format!("  FAULT {f:?}"))
-                        .unwrap_or_default()
+                    &status,
+                    session.recorder_dropped_bytes(),
+                    &mut reported_underruns,
                 );
-                if s.underruns > reported_underruns
-                    && let Some(u) = s.last_underrun
-                {
-                    eprintln!(
-                        "      underrun: ring {} frames, markers {}, layout {}, needed {}, produced {}, last block {:.1} ms ago",
-                        u.ring_frames,
-                        u.marker_frames,
-                        u.layout_frames,
-                        u.needed_frames,
-                        u.produced_frames,
-                        u.since_block_ms
-                    );
-                }
-                reported_underruns = s.underruns;
                 next_report += Duration::from_secs(1);
             }
             thread::sleep(Duration::from_millis(33));
         }
 
-        let seconds = started.elapsed().as_secs_f64();
-        let (driver_stats, driver_stats_error) = match driver_stats {
-            Some((observer, totals)) => {
-                let end = observer.stats_sample().map_err(|error| error.to_string());
-                let mut totals = totals
-                    .lock()
-                    .map_err(|_| "driver statistics lock was poisoned".to_owned())?;
-                let error = match end {
-                    Ok(sample) => {
-                        totals.observe(sample);
-                        None
-                    }
-                    Err(error) => Some(error),
-                };
-                (Some(*totals), error)
-            }
-            None => (None, None),
-        };
-        let underruns_while_streaming = figures
-            .underruns_while_streaming
-            .unwrap_or_else(|| engine.status().underruns);
-        let report = engine.stop();
-        stop_writer.store(true, Ordering::Release);
-        if let Some(handle) = writer_thread {
-            handle
-                .join()
-                .map_err(|_| "the dump writer panicked".to_owned())??;
-        }
+        let report = session.stop().map_err(|error| error.to_string())?;
         eprintln!(
             "stopped: {} blocks, {} underruns, {} device restarts, {} bytes lost, {} recorder bytes lost, latency p50 {:.1} ms p99 {:.1} ms",
-            report.blocks,
-            report.underruns,
-            report.final_status.output_restarts,
-            report.lost_bytes,
-            dropped.load(Ordering::Relaxed),
-            report.final_status.latency.p50_ms,
-            report.final_status.latency.p99_ms
+            report.engine.blocks,
+            report.engine.underruns,
+            report.engine.final_status.output_restarts,
+            report.engine.lost_bytes,
+            report.recorder_lost_bytes,
+            report.engine.final_status.latency.p50_ms,
+            report.engine.final_status.latency.p99_ms
         );
         if let Some(path) = &options.report {
-            let mut faults = figures.faults;
-            if let Some(fault) = &report.final_status.fault {
-                faults.push(format!("{fault:?}"));
-            }
-            let driver = driver_stats.as_ref().map(driver_stats_json);
-            let clock_strategy = match report.final_status.clock {
-                ssr_types::ClockStatus::Trim => "trim",
-                ssr_types::ClockStatus::Asrc => "asrc",
-            };
-            let output_mode = match report.final_status.output_mode {
-                ssr_types::OutputMode::Exclusive => "exclusive",
-                ssr_types::OutputMode::Shared => "shared",
-            };
-            let endpoints = report
-                .final_status
-                .endpoints
-                .iter()
-                .enumerate()
-                .map(|(endpoint, status)| {
-                    serde_json::json!({
-                        "endpoint": endpoint,
-                        "format": status.format.map(|format| format!("{format:?}")),
-                        "epoch": status.epoch,
-                        "unsupported": status.unsupported.map(|reason| reason.to_string()),
-                        "unsupported_reason": status.unsupported.map(ssr_types::UnsupportedReason::name),
-                        "chain_errors": chain_errors_json(status.chain_errors),
-                    })
-                })
-                .collect::<Vec<_>>();
-            let request_fields = report_request_fields(
-                options.source,
-                options.from_dump.is_some(),
-                options.clock,
-                options.shared,
-                &report.final_status,
-            );
-            let mut json = serde_json::json!({
-                "output_mode": output_mode,
-                "output_fell_back": report.final_status.output_fell_back,
-                "output_kind": output_kind,
-                "output_channels": output_channels,
-                "output_channel_mask": output_channel_mask,
-                "direct_layouts": options.direct_layouts.iter().map(|value| serde_json::json!({
-                    "channels": value.channels,
-                    "speakers": value.layout.speakers().iter().copied().map(engine::speaker_name).collect::<Vec<_>>(),
-                })).collect::<Vec<_>>(),
-                "clock_strategy": clock_strategy,
-                "seconds": seconds,
-                "blocks": report.blocks,
-                "underruns": report.underruns,
-                "underruns_while_streaming": underruns_while_streaming,
-                "last_underrun": report.final_status.last_underrun.map(|u| serde_json::json!({
-                    "ring_frames": u.ring_frames,
-                    "marker_frames": u.marker_frames,
-                    "layout_frames": u.layout_frames,
-                    "needed_frames": u.needed_frames,
-                    "produced_frames": u.produced_frames,
-                    "since_block_ms": u.since_block_ms,
-                })),
-                "output_restarts": report.final_status.output_restarts,
-                "output_reopens": report.final_status.output_reopens,
-                "output_reconnects": report.final_status.output_reconnects,
-                "output_reconnect_attempts": report.final_status.output_reconnect_attempts,
-                "output_mix_channels": report.final_status.output_mix_channels,
-                "output_cadence_ratio": report.final_status.output_cadence_ratio,
-                "output_cadence_faults": report.final_status.output_cadence_faults,
-                "lost_bytes": report.lost_bytes,
-                "lane_underrun_frames": report.lane_underrun_frames,
-                "dropped_frames": report.dropped_frames,
-                "volume_transitions_coalesced": report.final_status.volume_transitions_coalesced,
-                "output_overflow_frames": report.output_overflow_frames,
-                "idle_blocks": report.idle_blocks,
-                "dropped_events": report.dropped_events,
-                "skipped_records": report.final_status.skipped_records,
-                "endpoints": endpoints,
-                "chain_errors": {
-                    "unattributed": chain_errors_json(report.final_status.unattributed_chain_errors),
-                },
-                "overruns": figures.overruns,
-                "faults": faults,
-                "latency_p50_ms": report.final_status.latency.p50_ms,
-                "latency_p99_ms": report.final_status.latency.p99_ms,
-                "ring_trough_min_ms": figures.ring_trough_min_ms,
-                "clock_ppm": report.final_status.clock_ppm,
-                "clock_ppm_max_abs": figures.clock_ppm_max_abs,
-                "tee_dropped_bytes": dropped.load(Ordering::Relaxed),
-                "recorder_lost_bytes": dropped.load(Ordering::Relaxed),
-                "driver": driver,
-                "driver_stats_error": driver_stats_error,
-            });
-            json.as_object_mut().expect("report is an object").extend(
-                request_fields
-                    .as_object()
-                    .expect("request fields are an object")
-                    .clone(),
-            );
-            let text = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-            std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+            let text = serde_json::to_string_pretty(&report.to_json(&report_request(&options)))
+                .map_err(|error| error.to_string())?;
+            std::fs::write(path, text).map_err(|error| format!("{}: {error}", path.display()))?;
         }
         Ok(())
     }
 
-    fn driver_stats_json(totals: &DriverStatsTotals) -> serde_json::Value {
-        let endpoints = totals
-            .first
-            .endpoints
-            .iter()
-            .zip(totals.last.endpoints.iter())
-            .enumerate()
-            .map(|(endpoint, (before, after))| {
-                serde_json::json!({
-                    "endpoint": endpoint,
-                    "start_total_bytes": before.total_bytes,
-                    "end_total_bytes": after.total_bytes,
-                    "streamed_bytes": totals.streamed_bytes[endpoint],
-                    "start_overruns": before.overruns,
-                    "end_overruns": after.overruns,
-                    "overruns": totals.overruns[endpoint],
-                    "start_lost_bytes": before.lost_bytes,
-                    "end_lost_bytes": after.lost_bytes,
-                    "lost_bytes": totals.lost_bytes[endpoint],
-                    "epoch": after.epoch,
-                    "state": after.state,
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "start_open_count": totals.first.open_count,
-            "end_open_count": totals.last.open_count,
-            "max_timer_lateness_us": totals.max_timer_lateness_us,
-            "endpoints": endpoints,
-        })
-    }
-
-    /// What `--report` writes besides the engine's own stop report.
-    #[derive(Default)]
-    struct RunFigures {
-        overruns: u64,
-        faults: Vec<String>,
-        /// Underruns counted when the dump ended. Runtime idle reads now keep
-        /// source time advancing while the stream is open, so this snapshot
-        /// excludes only the deliberate post-EOF crossing-ring drain.
-        underruns_while_streaming: Option<u64>,
-        /// Lowest per-second ring trough after the first seconds of priming.
-        ring_trough_min_ms: Option<f32>,
-        clock_ppm_max_abs: f64,
-    }
-
-    impl RunFigures {
-        const SETTLE: Duration = Duration::from_secs(5);
-
-        fn observe(&mut self, status: &ssr_types::EngineStatus, at: Duration) {
-            if at < Self::SETTLE || self.underruns_while_streaming.is_some() {
-                return;
+    fn print_notice(notice: supervisor::SessionNotice) {
+        match notice {
+            supervisor::SessionNotice::FormatChanged {
+                endpoint,
+                epoch,
+                format,
+                unsupported,
+            } => match unsupported {
+                Some(reason) => {
+                    eprintln!("endpoint {endpoint} epoch {epoch}: {format:?} ({reason})")
+                }
+                None => eprintln!("endpoint {endpoint} epoch {epoch}: {format:?}"),
+            },
+            supervisor::SessionNotice::NeedsPrepared => {}
+            supervisor::SessionNotice::Prepared {
+                kind,
+                channels,
+                millis,
+            } => eprintln!(
+                "prepared {} {channels} output channels at {} Hz in {millis:.0} ms",
+                kind.as_str(),
+                engine::MIX_RATE
+            ),
+            supervisor::SessionNotice::PrepareRetry => {
+                eprintln!("change queue full; retrying")
             }
-            let trough = self.ring_trough_min_ms.get_or_insert(status.ring_level_ms);
-            *trough = trough.min(status.ring_level_ms);
-            self.clock_ppm_max_abs = self.clock_ppm_max_abs.max(status.clock_ppm.abs());
+            supervisor::SessionNotice::Overrun { lost_bytes } => {
+                eprintln!("overrun: {lost_bytes} bytes lost")
+            }
+            supervisor::SessionNotice::OutputOverflow { frames } => {
+                eprintln!("output overflow: {frames} rendered frames lost")
+            }
+            supervisor::SessionNotice::OutputLayoutChanged {
+                channels,
+                channel_mask,
+            } => eprintln!("output reopened: {channels} channels, mask {channel_mask:#x}"),
+            supervisor::SessionNotice::OutputReconnected => eprintln!("output reconnected"),
+            supervisor::SessionNotice::FaultCleared => eprintln!("fault cleared"),
+            supervisor::SessionNotice::OutputCadenceFault { ratio } => {
+                eprintln!("output cadence fault: {ratio:.3}")
+            }
+            supervisor::SessionNotice::OutputCadenceReopen { period_ms } => {
+                eprintln!("output cadence reopen: {period_ms:.1} ms")
+            }
+            supervisor::SessionNotice::Fault(fault) => eprintln!("fault: {fault:?}"),
         }
+    }
+
+    fn print_status(
+        second: u64,
+        status: &ssr_types::EngineStatus,
+        recorder_dropped: u64,
+        reported_underruns: &mut u64,
+    ) {
+        let chain_errors = status.unattributed_chain_errors.total()
+            + status
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.chain_errors.total())
+                .sum::<u64>();
+        let suffix = if chain_errors != 0 {
+            format!("  chain errors {chain_errors}")
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "{second:>4} s  latency p50 {:.1} ms p99 {:.1} ms  ring trough {:.1} ms  underruns {}  device restarts {}  clock {:+.0} ppm  lost {} B  tee-dropped {} B{}{}",
+            status.latency.p50_ms,
+            status.latency.p99_ms,
+            status.ring_level_ms,
+            status.underruns,
+            status.output_restarts,
+            status.clock_ppm,
+            status.lost_bytes,
+            recorder_dropped,
+            suffix,
+            status
+                .fault
+                .as_ref()
+                .map(|fault| format!("  FAULT {fault:?}"))
+                .unwrap_or_default()
+        );
+        if status.underruns > *reported_underruns
+            && let Some(value) = status.last_underrun
+        {
+            eprintln!(
+                "      underrun: ring {} frames, markers {}, layout {}, needed {}, produced {}, last block {:.1} ms ago",
+                value.ring_frames,
+                value.marker_frames,
+                value.layout_frames,
+                value.needed_frames,
+                value.produced_frames,
+                value.since_block_ms
+            );
+        }
+        *reported_underruns = status.underruns;
     }
 
     pub fn devices(formats: bool, json: bool) -> Result<(), String> {
@@ -1648,46 +922,7 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use ssr_abi::{DriverStats, EndpointStats, RecordWriter};
-
-        fn stats(total_bytes: u64) -> DriverStats {
-            DriverStats {
-                struct_size: size_of::<DriverStats>() as u32,
-                open_count: 1,
-                max_timer_lateness_us: 0,
-                reserved: 0,
-                endpoints: [EndpointStats {
-                    total_bytes,
-                    overruns: total_bytes / 10,
-                    lost_bytes: total_bytes / 5,
-                    epoch: 1,
-                    state: 1,
-                }; ssr_abi::MAX_ENDPOINTS],
-            }
-        }
-
-        #[test]
-        fn stale_driver_stats_sample_cannot_enter_a_new_generation() {
-            let mut totals = DriverStatsTotals::new(DriverStatsSample {
-                generation: 0,
-                stats: stats(100),
-            });
-            let stale = DriverStatsSample {
-                generation: 0,
-                stats: stats(150),
-            };
-            totals.begin_generation(DriverStatsSample {
-                generation: 1,
-                stats: stats(20),
-            });
-            totals.observe(stale);
-
-            assert_eq!(totals.generation, 1);
-            assert_eq!(totals.last, stats(20));
-            assert_eq!(totals.streamed_bytes, [0; ssr_abi::MAX_ENDPOINTS]);
-            assert_eq!(totals.overruns, [0; ssr_abi::MAX_ENDPOINTS]);
-            assert_eq!(totals.lost_bytes, [0; ssr_abi::MAX_ENDPOINTS]);
-        }
+        use ssr_abi::RecordWriter;
 
         fn record_qpc(bytes: &[u8]) -> u64 {
             ssr_abi::raw_records(bytes)
