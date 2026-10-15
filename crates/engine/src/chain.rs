@@ -9,7 +9,7 @@ use std::sync::Arc;
 use brir::PreparedBrir;
 use convolver::{Binauralizer, MonoConvolver};
 use decode::{DecodeConfig, DecodeError, Decoders, MAX_SCENE_FRAMES, Route};
-use render::PanGeometry;
+use render::{PanGeometry, Ramp};
 use speakers::{BiquadCoefficients, CrossoverCoefficients, PreparedSpeakers};
 use ssr_abi::{
     AbiError, MAX_ENDPOINTS, RECORD_FLAG_DISCONTINUITY, RawRecords, Record, VolumePayload,
@@ -1008,11 +1008,20 @@ impl Back {
         let lfe_from = self.lfe_from;
         let lfe_target = self.lfe_target;
         let lfe_ramp_frames = self.lfe_ramp_frames;
+        let lfe_ramp = Ramp {
+            from: lfe_from,
+            to: lfe_target,
+            frames: lfe_ramp_frames,
+        };
+        // The LFE ramp starts at `from` on frame 0 and reaches `to` at
+        // `frames`: ramp index `frame - 1` in between.
         let lfe_gain_at = |frame: usize| {
             if lfe_ramp_frames == 0 || frame >= lfe_ramp_frames {
                 lfe_target
+            } else if frame == 0 {
+                lfe_from
             } else {
-                lfe_from + (lfe_target - lfe_from) * frame as f32 / lfe_ramp_frames as f32
+                lfe_ramp.gain(frame - 1)
             }
         };
         match &mut prepared.output {

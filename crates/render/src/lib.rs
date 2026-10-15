@@ -21,14 +21,25 @@ const GAIN_EPSILON: f32 = 1.0e-6;
 const HULL_SIDE_EPSILON: f32 = 2.0e-5;
 const HULL_VOLUME_EPSILON: f32 = 1.0e-6;
 
-/// Returns the linear gain at `frame` for a ramp whose first sample is one
-/// step past `old`. Frames at or beyond `ramp_frames` use `target`.
-#[inline]
-pub fn ramped_gain(old: f32, target: f32, frame: usize, ramp_frames: usize) -> f32 {
-    if frame < ramp_frames {
-        old + (target - old) / ramp_frames as f32 * (frame + 1) as f32
-    } else {
-        target
+/// A linear gain ramp whose first sample is one step past `from`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ramp {
+    pub from: f32,
+    pub to: f32,
+    pub frames: usize,
+}
+
+impl Ramp {
+    /// Gain at ramp frame `index` (0-based): `from + (to - from) * (index + 1) / frames`
+    /// while `index < frames`, then `to`. A zero-length ramp is `to` everywhere.
+    /// Operations are evaluated left to right as written.
+    #[inline]
+    pub fn gain(&self, index: usize) -> f32 {
+        if index < self.frames {
+            self.from + (self.to - self.from) * (index + 1) as f32 / self.frames as f32
+        } else {
+            self.to
+        }
     }
 }
 
