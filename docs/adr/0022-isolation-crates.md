@@ -29,3 +29,7 @@ ADR 0002는 손으로 쓰는 unsafe를 `ssr-sys` 하나에 모았습니다. ADR 
 - unsafe를 검토할 크레이트가 하나에서 최대 넷으로 늘지만, 크레이트마다 다루는 대상(장치와 드라이버, 플러그인 ABI, ASIO 드라이버, 업믹서 가속)이 하나씩이라 검토 범위가 섞이지 않습니다.
 - `CLAUDE.md`와 `CONTEXT.md`의 'unsafe는 `ssr-sys`에만'을 '격리 크레이트에만'으로 바꿉니다.
 - HostVST를 떼어 낼 때 unsafe와 Windows 의존성이 `hostvst-sys` 한 곳에 있으므로 `streamring`과 hostvst 크레이트 셋을 그대로 옮기면 됩니다.
+
+## 2026-10-15 덧붙임
+
+ADR 0032가 격리 크레이트 `ssr-setup-sys`(관리자 작업, `apps/ssr-setup`만 링크)를 더하고 `ssr-sys`의 예산을 40까지 올렸습니다. 실제 숫자는 `unsafe-budget.toml`에 있습니다.

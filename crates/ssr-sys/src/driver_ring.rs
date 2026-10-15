@@ -24,7 +24,7 @@ use ssr_types::{CaptureSource, TrimUnsupported};
 use zerocopy::{FromBytes, IntoBytes};
 
 #[cfg(windows)]
-use crate::device::Device;
+use crate::device::{Device, DeviceError};
 #[cfg(windows)]
 use crate::sal::capture_error;
 
@@ -103,6 +103,18 @@ impl DriverRing {
             device: Some(device),
             info,
         })
+    }
+
+    /// Opens the control device and closes it again: `Ok` when the driver's
+    /// service is running. `Busy` (another handle, usually the engine's, holds
+    /// the ring) and `AccessDenied` also prove the device exists, so they are
+    /// `Ok` too; a missing device is [`CaptureError::NotPresent`].
+    pub fn probe() -> Result<(), CaptureError> {
+        match Device::open(CONTROL_DEVICE_PATH) {
+            Ok(_device) => Ok(()),
+            Err(DeviceError::Busy | DeviceError::AccessDenied) => Ok(()),
+            Err(error) => Err(capture_error(error)),
+        }
     }
 
     pub fn observer(&self) -> DriverRingObserver {

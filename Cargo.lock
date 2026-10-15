@@ -830,7 +830,19 @@ dependencies = [
 name = "ssr-setup"
 version = "0.8.0"
 dependencies = [
- "ssr-sys",
+ "clap",
+ "ssr-abi",
+ "ssr-setup-sys",
+ "ssr-types",
+]
+
+[[package]]
+name = "ssr-setup-sys"
+version = "0.8.0"
+dependencies = [
+ "ssr-abi",
+ "thiserror",
+ "windows",
 ]
 
 [[package]]

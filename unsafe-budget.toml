@@ -4,5 +4,15 @@
 # A listed crate carries `#![deny(unsafe_code)]` and its own `[lints.rust]`
 # table instead. Raising a number requires an ADR (docs/adr) first.
 [budget]
-# Capture device IOCTLs, MMCSS and QPC through the `windows` crate (ADR 0002).
-ssr-sys = 32
+# Capture device IOCTLs, MMCSS and QPC through the `windows` crate (ADR 0002),
+# and the Windows Host adapter: registry, code integrity, cfgmgr32 device
+# nodes, endpoint topology, the exclusive-mode policy read from the endpoint
+# property stores, IPolicyConfig and the elevated ssr-setup launch (ADR 0032,
+# which allows up to 40).
+ssr-sys = 40
+# The administrator tasks of ssr-setup (ADR 0032): COM endpoint enumeration
+# and the exclusive-mode property store, cfgmgr32 device nodes, SetupAPI root
+# device install and removal, the local machine certificate stores, and the
+# registry (driver parameter, service keys, endpoint entries), each call in
+# one wrapper in `win.rs`.
+ssr-setup-sys = 52

@@ -274,8 +274,27 @@ pub enum DriverState {
     Installed {
         problem_code: u32,
         service_running: bool,
+        exclusive_policy: PolicyState,
     },
     RebootRequired,
+}
+
+/// Whether our endpoints carry the exclusive-mode policy of ADR 0028: two
+/// private endpoint property keys (`ssr_abi::exclusive_policy`) that keep
+/// other apps from opening the primary and music endpoints exclusively and
+/// let them open the passthrough endpoint so. The host reads them; only
+/// `ssr-setup` writes them (install, repair, set-formats).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyState {
+    /// Every active endpoint of ours that the policy covers has the values
+    /// `ssr-setup` writes.
+    Applied,
+    /// One of them lacks them, as after an install that finished with a
+    /// reboot: a repair applies them.
+    Missing,
+    /// No endpoint of ours is active yet, or a read failed. The supervisor
+    /// treats it as fine.
+    Unknown,
 }
 
 /// The one task an elevated `ssr-setup` run performs.

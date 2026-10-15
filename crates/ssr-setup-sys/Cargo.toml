@@ -1,0 +1,31 @@
+[package]
+name = "ssr-setup-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The isolation crate for the administrator tasks (ADR 0022, ADR 0032):
+# SetupAPI, cfgmgr32, the certificate stores, the driver's registry parameters
+# and the endpoints' exclusive-mode policy. Only apps/ssr-setup depends on it,
+# so the app itself never links administrator code. Same lint table as
+# ssr-sys: `deny` at the root, and only the `win` module opts out.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+dbg_macro = "deny"
+
+[dependencies]
+ssr-abi.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

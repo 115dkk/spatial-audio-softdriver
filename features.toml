@@ -722,6 +722,8 @@ tests = [
   "supervisor::unlisted_and_unwired_intents_leave_the_state_alone",
   "supervisor::a_refused_intent_keeps_the_step_explanation",
   "supervisor::a_hidden_main_endpoint_refuses_to_enable",
+  "supervisor::a_missing_exclusive_policy_asks_for_a_repair",
+  "supervisor::an_unknown_exclusive_policy_counts_as_fine",
   "supervisor::new_starts_ready_when_the_driver_and_the_output_are_present",
   "supervisor::new_starts_at_welcome_otherwise",
   "supervisor::a_real_session_runs_behind_the_engine_handle",
@@ -750,8 +752,36 @@ note = "supervisor::Session runs one live session for ssr-live today and the M4 
 id = "setup.tasks"
 kind = "app"
 milestone = "M4"
-status = "planned"
-tests = []
+status = "partial"
+tests = [
+  "ssr-abi::task_line_arguments_for_each_task",
+  "ssr-abi::task_result_round_trips_through_one_json_line",
+  "ssr-abi::from_json_rejects_a_missing_ok",
+  "ssr-abi::task_results_become_the_hosts_outcome",
+  "ssr-setup-sys::identities_match_the_powershell_table",
+  "ssr-setup-sys::enum_drivers_lists_every_package_with_its_original_inf",
+  "ssr-setup-sys::only_the_passthrough_endpoint_allows_exclusive_mode",
+  "ssr-setup-sys::endpoint_entries_are_matched_by_their_saved_owner",
+  "ssr-setup-sys::remaining_counts_print_like_the_script_and_service_keys_do_not_fail",
+  "ssr-setup::every_subcommand_parses_to_its_task_line",
+  "ssr-setup::subcommands_are_the_contracts_task_names",
+]
+note = "ADR 0013 and 0032: ssr-setup is the administrator one-shot (install, uninstall, set-formats, restart-device, repair), elevated once by the host, answering one JSON line on stdout and in the --result file (ssr_abi::setup_contract). The tasks live in the isolation crate ssr-setup-sys, which only apps/ssr-setup links (policy gate): the RootDevice.cs SetupAPI sequence, SetupCopyOEMInf, the test certificate in Root and TrustedPublisher, the ADR 0028 exclusive policy on our endpoints, pnputil for driver packages, cfgmgr32 for device restart, the EndpointMask registry parameter. Package identities are checked against tools/ci/package-identities.ps1. Still to verify on Windows: the real install and uninstall through the test-signed CI stage and the test-signed PC"
+
+[[feature]]
+id = "supervisor.windows_host"
+kind = "app"
+milestone = "M4"
+status = "partial"
+tests = [
+  "ssr-abi::map_filter_reads_the_endpoint_from_a_prefixed_topology_id",
+  "ssr-abi::map_filter_refuses_another_vendors_filter_with_our_reference_string",
+  "ssr-abi::map_filter_refuses_endpoint_three_and_trailing_text",
+  "ssr-abi::map_filter_ignores_case_everywhere",
+  "ssr-abi::the_policy_is_applied_when_every_covered_active_endpoint_has_it",
+  "ssr-abi::an_endpoint_without_the_values_makes_the_policy_missing",
+]
+note = "ADR 0032: ssr-sys::host::WindowsHost implements the ssr-types Host port: platform facts (registry build number, architecture from the environment, NtQuerySystemInformation code integrity for test signing, the Secure Boot registry state), the driver state through cfgmgr32 and the control device probe plus the ADR 0028 exclusive policy read from our endpoints' property stores (ssr_abi::exclusive_policy::policy_state: Applied, Missing or Unknown, so the supervisor asks for a repair after a reboot-required install), render endpoints of every state with our endpoint numbers found through the KS filter reference (ssr_abi::ks_path::map_filter, the rule of tools/ci/endpoints.ps1), the three default roles, IPolicyConfig::SetDefaultEndpoint through a hand-declared vtable slot, the elevated ssr-setup launch with a result file, and the restore point file. Windows code is type-checked by the Windows-target clippy; the pure parts are tested on Linux. Still to verify on Windows: the undocumented IPolicyConfig layout and the UAC launch, on the Windows runners and the test-signed PC"
 
 # ---- Upmix and plugin hosting (ADR 0020, 0021, 0022) ----
 # Not bound to the driver freeze. Milestone M4 marks the app they ship in.

@@ -31,7 +31,10 @@
 //! * structure sizes and offsets are asserted at compile time on both sides.
 
 pub mod dump;
+pub mod exclusive_policy;
+pub mod ks_path;
 pub mod record;
+pub mod setup_contract;
 pub mod wave;
 pub mod wire;
 
