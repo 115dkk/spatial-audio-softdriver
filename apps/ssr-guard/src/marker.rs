@@ -41,6 +41,17 @@ impl Marker {
     }
 }
 
+/// The same explanation is used by the guard's toast and the next app snapshot.
+pub fn sentence(marker: &Marker) -> String {
+    match marker.reason {
+        MarkerReason::AppExited => "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
+        MarkerReason::StallRestarted => "엔진이 멈춰 앱을 다시 시작했습니다.",
+        MarkerReason::RestartFailed => "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다.",
+        MarkerReason::Stuck => "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다.",
+    }
+    .to_owned()
+}
+
 pub fn read(path: &Path) -> io::Result<Marker> {
     let text = fs::read_to_string(path)?;
     let marker: Marker = serde_json::from_str(&text).map_err(io::Error::other)?;
@@ -68,4 +79,36 @@ pub fn write(path: &Path, marker: &Marker) -> io::Result<()> {
         fs::rename(temporary, path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_sentences_cover_every_reason_without_restoration_notes() {
+        for (reason, expected) in [
+            (
+                MarkerReason::AppExited,
+                "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
+            ),
+            (
+                MarkerReason::StallRestarted,
+                "엔진이 멈춰 앱을 다시 시작했습니다.",
+            ),
+            (
+                MarkerReason::RestartFailed,
+                "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다.",
+            ),
+            (
+                MarkerReason::Stuck,
+                "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다.",
+            ),
+        ] {
+            let marker = Marker::new(reason, 0, Vec::new());
+            assert_eq!(sentence(&marker), expected);
+            let with_notes = Marker::new(reason, 42, vec!["복원 메모".to_owned()]);
+            assert_eq!(sentence(&with_notes), expected);
+        }
+    }
 }
