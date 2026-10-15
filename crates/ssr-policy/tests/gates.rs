@@ -974,21 +974,36 @@ fn check_dependency_table(
     violations: &mut Vec<String>,
 ) {
     const WINDOWS_PACKAGES: [&str; 4] = ["windows", "windows-sys", "windows-core", "wasapi"];
+    const WINDOWS_CRATES: [&str; 2] = ["ssr-sys", "ssr-setup-sys"];
 
     for (alias, specification) in dependencies {
         let package = dependency_package(alias, specification, workspace_packages);
-        if WINDOWS_PACKAGES.contains(&package.as_str()) && krate.name != "ssr-sys" {
+        if WINDOWS_PACKAGES.contains(&package.as_str())
+            && !WINDOWS_CRATES.contains(&krate.name.as_str())
+        {
             violations.push(format!(
-                "{} (crate {}, [{section}] dependency '{}'): package '{}' may only be used by ssr-sys",
+                "{} (crate {}, [{section}] dependency '{}'): package '{}' may only be used by an isolation crate (ssr-sys, ssr-setup-sys)",
                 relative_path(&krate.manifest),
                 krate.name,
                 alias,
                 package
             ));
         }
-        if package == "ssr-sys" && (!krate.is_app || krate.name == "ssr-replay") {
+        if package == "ssr-setup-sys" && krate.name != "ssr-setup" {
+            violations.push(format!(
+                "{} (crate {}, [{section}] dependency '{}'): only apps/ssr-setup may depend on ssr-setup-sys (ADR 0032)",
+                relative_path(&krate.manifest),
+                krate.name,
+                alias
+            ));
+        }
+        if package == "ssr-sys"
+            && (!krate.is_app || krate.name == "ssr-replay" || krate.name == "ssr-setup")
+        {
             let expectation = if krate.name == "ssr-replay" {
                 "ssr-replay must run in Linux CI and may not depend on ssr-sys"
+            } else if krate.name == "ssr-setup" {
+                "ssr-setup links ssr-setup-sys and may not depend on ssr-sys (ADR 0032)"
             } else {
                 "only crates under apps/ may depend on ssr-sys"
             };

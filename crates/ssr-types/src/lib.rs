@@ -26,7 +26,7 @@ pub use layout::{Direction, DirectionId, Layout, LayoutError};
 pub use ports::{
     Arch, CaptureError, CaptureSource, DefaultRoles, DeviceId, DeviceState, DriverState, Host,
     HostError, OutputDevice, OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener,
-    OutputSink, Platform, Role, SecureBoot, SetupOutcome, SetupTask, TrimUnsupported,
+    OutputSink, Platform, PolicyState, Role, SecureBoot, SetupOutcome, SetupTask, TrimUnsupported,
 };
 pub use position::{Speaker, direction_to_room, room_to_direction};
 

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use engine::adapters::NullOpener;
 use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep, UserError};
+use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DefaultRoles, DeviceId, DeviceState, DriverState, EngineFault, EngineStatus, Host,
     HostError, OutputDevice, Platform, Role, SecureBoot, SetupOutcome, SetupTask,
@@ -186,6 +187,7 @@ fn fine_driver() -> DriverState {
     DriverState::Installed {
         problem_code: 0,
         service_running: true,
+        exclusive_policy: PolicyState::Applied,
     }
 }
 
@@ -505,6 +507,7 @@ fn problem_code_52_names_test_signing() {
     world.driver = DriverState::Installed {
         problem_code: 52,
         service_running: false,
+        exclusive_policy: PolicyState::Applied,
     };
     let (shared, mut supervisor) = start(world, dac_settings());
     assert_eq!(
@@ -534,6 +537,7 @@ fn a_driver_problem_asks_for_a_repair() {
     world.driver = DriverState::Installed {
         problem_code: 10,
         service_running: true,
+        exclusive_policy: PolicyState::Applied,
     };
     let (shared, mut supervisor) = start(world, Settings::default());
     assert_eq!(
@@ -548,6 +552,7 @@ fn a_driver_problem_asks_for_a_repair() {
     shared.get().driver = DriverState::Installed {
         problem_code: 0,
         service_running: false,
+        exclusive_policy: PolicyState::Applied,
     };
     assert_eq!(
         supervisor.handle(Intent::Recheck),
@@ -557,6 +562,87 @@ fn a_driver_problem_asks_for_a_repair() {
         ))
     );
     assert_eq!(supervisor.snapshot().phase, Phase::Setup(SetupStep::Driver));
+}
+
+#[test]
+fn a_missing_exclusive_policy_asks_for_a_repair() {
+    // The install finished with a reboot, before ssr-setup could reach the
+    // endpoints to apply their exclusive policy.
+    let mut world = ready_pc();
+    world.driver = DriverState::RebootRequired;
+    let (shared, mut supervisor) = start(world, Settings::default());
+    assert_eq!(
+        supervisor.handle(Intent::BeginSetup),
+        Err(error(
+            "드라이버 설치를 마치려면 다시 시작해야 합니다.",
+            NextAction::Reboot
+        ))
+    );
+    assert_eq!(
+        supervisor.snapshot().phase,
+        Phase::Setup(SetupStep::RebootRequired)
+    );
+
+    // After the reboot the driver runs, but its endpoints lack the policy.
+    let missing = DriverState::Installed {
+        problem_code: 0,
+        service_running: true,
+        exclusive_policy: PolicyState::Missing,
+    };
+    shared.get().driver = missing.clone();
+    let refused = supervisor.handle(Intent::Recheck).unwrap_err();
+    assert_eq!(
+        refused,
+        error(
+            "드라이버는 있지만 독점 정책이 적용되지 않았습니다. 복구를 실행하십시오.",
+            NextAction::Retry
+        )
+    );
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Setup(SetupStep::Driver));
+    assert_eq!(snapshot.driver, Some(missing));
+    assert_eq!(snapshot.error, Some(refused));
+
+    // The driver step repairs an installed driver; the fake's repair applies
+    // the policy, and the wizard goes on to the output.
+    supervisor.handle(Intent::InstallDriver).unwrap();
+    assert_eq!(shared.take_calls(), calls(&["setup Repair"]));
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Setup(SetupStep::ChooseOutput));
+    assert_eq!(snapshot.driver, Some(fine_driver()));
+    assert_eq!(snapshot.error, None);
+}
+
+#[test]
+fn an_unknown_exclusive_policy_counts_as_fine() {
+    // No endpoint active yet, or a store that could not be read.
+    let unknown = DriverState::Installed {
+        problem_code: 0,
+        service_running: true,
+        exclusive_policy: PolicyState::Unknown,
+    };
+    let (_, supervisor) = start(
+        World {
+            driver: unknown.clone(),
+            ..ready_pc()
+        },
+        dac_settings(),
+    );
+    assert_eq!(supervisor.snapshot().phase, Phase::Ready);
+
+    let (shared, mut supervisor) = start(
+        World {
+            driver: unknown.clone(),
+            ..ready_pc()
+        },
+        Settings::default(),
+    );
+    supervisor.handle(Intent::BeginSetup).unwrap();
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Setup(SetupStep::ChooseOutput));
+    assert_eq!(snapshot.error, None);
+    assert_eq!(snapshot.driver, Some(unknown));
+    assert!(shared.take_calls().is_empty());
 }
 
 #[test]
@@ -1166,6 +1252,7 @@ fn a_hidden_main_endpoint_refuses_to_enable() {
         world.driver = DriverState::Installed {
             problem_code: 10,
             service_running: false,
+            exclusive_policy: PolicyState::Applied,
         };
     }
     shared.output(OURS).state = DeviceState::Disabled;
@@ -1183,6 +1270,7 @@ fn a_hidden_main_endpoint_refuses_to_enable() {
         Some(DriverState::Installed {
             problem_code: 10,
             service_running: false,
+            exclusive_policy: PolicyState::Applied,
         })
     );
     assert!(shared.take_calls().is_empty());
@@ -1231,6 +1319,7 @@ fn new_starts_at_welcome_otherwise() {
             with_driver(DriverState::Installed {
                 problem_code: 52,
                 service_running: false,
+                exclusive_policy: PolicyState::Applied,
             }),
             dac_settings(),
         ),
@@ -1238,6 +1327,15 @@ fn new_starts_at_welcome_otherwise() {
             with_driver(DriverState::Installed {
                 problem_code: 0,
                 service_running: false,
+                exclusive_policy: PolicyState::Applied,
+            }),
+            dac_settings(),
+        ),
+        (
+            with_driver(DriverState::Installed {
+                problem_code: 0,
+                service_running: true,
+                exclusive_policy: PolicyState::Missing,
             }),
             dac_settings(),
         ),

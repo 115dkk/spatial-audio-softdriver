@@ -12,12 +12,17 @@
 //! snapshot keeps the step's explanation. Wizard steps that need the user to
 //! act outside the app (a newer Windows, test signing, a reboot) are entered
 //! with an error that says what to do.
+//!
+//! The shell drives the supervisor from a thread of its own, never the UI
+//! thread: the Windows host joins the multithreaded apartment for its COM
+//! calls, which a UI thread's single-threaded apartment cannot.
 
 use std::cell::RefCell;
 use std::fmt;
 use std::time::{Duration, Instant};
 
 use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep, Snapshot, UserError};
+use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DeviceId, DeviceState, DriverState, EngineFault, EngineStatus, Host, HostError,
     OutputDevice, Platform, Role, SecureBoot, SetupTask,
@@ -148,8 +153,9 @@ impl<H: Host, L: Launcher> fmt::Debug for Supervisor<H, L> {
 
 impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// Looks at the host once and starts in Ready when the driver is installed
-    /// without a problem and the settings name an output that is present, else
-    /// in Setup(Welcome). Never takes the roles here.
+    /// without a problem (its exclusive policy not missing) and the settings
+    /// name an output that is present, else in Setup(Welcome). Never takes the
+    /// roles here.
     pub fn new(host: H, launcher: L, config: Config, settings: Settings) -> Self {
         let mut supervisor = Self {
             host: RefCell::new(host),
@@ -411,6 +417,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             DriverState::Installed {
                 problem_code: 0,
                 service_running: false,
+                ..
             } => {
                 self.phase = Phase::Setup(SetupStep::Driver);
                 Err(user_error(
@@ -421,6 +428,20 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             DriverState::Installed {
                 problem_code: 0,
                 service_running: true,
+                exclusive_policy: PolicyState::Missing,
+            } => {
+                self.phase = Phase::Setup(SetupStep::Driver);
+                Err(user_error(
+                    "드라이버는 있지만 독점 정책이 적용되지 않았습니다. 복구를 실행하십시오.",
+                    NextAction::Retry,
+                ))
+            }
+            // An unknown policy (no endpoint active yet, or unreadable) is
+            // not held against the driver.
+            DriverState::Installed {
+                problem_code: 0,
+                service_running: true,
+                ..
             } => {
                 self.phase = Phase::Setup(SetupStep::ChooseOutput);
                 self.resume_output()
@@ -686,12 +707,17 @@ fn reconnecting_error(fault: &EngineFault) -> UserError {
     user_error(message, NextAction::None)
 }
 
+/// Installed without a problem, running, and not missing the exclusive
+/// policy (an unknown policy counts as fine, as in `evaluate_driver`).
 fn driver_is_fine(driver: &DriverState) -> bool {
-    *driver
-        == DriverState::Installed {
+    matches!(
+        driver,
+        DriverState::Installed {
             problem_code: 0,
             service_running: true,
-        }
+            exclusive_policy,
+        } if *exclusive_policy != PolicyState::Missing
+    )
 }
 
 /// An output the user may choose: active, and not one of ours.

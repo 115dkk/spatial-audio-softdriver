@@ -7,8 +7,17 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The administrator one-shot helper (ADR 0013, ADR 0032). The app runs it
+# elevated; it links ssr-setup-sys and never ssr-sys (ssr-policy checks both).
 [lints]
 workspace = true
 
 [dependencies]
-ssr-sys.workspace = true
+ssr-abi.workspace = true
+clap.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ssr-setup-sys.workspace = true
+
+[dev-dependencies]
+ssr-types.workspace = true

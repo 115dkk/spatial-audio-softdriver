@@ -59,8 +59,8 @@ Spatial SoftReceiver(공간 소프트리시버)가 쓰는 낱말의 목록입니
 
 ## 지키는 불변식
 
-- unsafe는 격리 크레이트와 커널 드라이버에만 있습니다. 지금 격리 크레이트는 `ssr-sys` 하나이고, ADR 0022가 `hostvst-sys`, `asio-sys`, `upmix-sys`를 허용합니다. 나머지 크레이트 루트는 모두 `#![forbid(unsafe_code)]`이고, `ssr-policy`의 게이트가 이를 검사합니다.
-- `engine` 이하의 크레이트는 Windows 없이 빌드되고 테스트됩니다. Windows API를 부르는 코드는 `ssr-sys`(생기면 `hostvst-sys`와 `asio-sys`도)에만 있고, `ssr-sys`를 링크하는 것은 `apps/` 아래의 앱뿐입니다(`ssr-replay`는 제외).
+- unsafe는 격리 크레이트와 커널 드라이버에만 있습니다. 지금 격리 크레이트는 `ssr-sys`(장치, 드라이버, 호스트)와 `ssr-setup-sys`(관리자 작업, ADR 0032) 둘이고, ADR 0022가 `hostvst-sys`, `asio-sys`, `upmix-sys`를 허용합니다. 나머지 크레이트 루트는 모두 `#![forbid(unsafe_code)]`이고, `ssr-policy`의 게이트가 이를 검사합니다.
+- `engine` 이하의 크레이트는 Windows 없이 빌드되고 테스트됩니다. Windows API를 부르는 코드는 `ssr-sys`와 `ssr-setup-sys`(생기면 `hostvst-sys`와 `asio-sys`도)에만 있고, `ssr-sys`를 링크하는 것은 `apps/` 아래의 앱뿐이며(`ssr-replay`와 `ssr-setup`은 제외), `ssr-setup-sys`를 링크하는 것은 `ssr-setup`뿐입니다.
 - 외부 플러그인은 엔진 프로세스에서 돌리지 않습니다. 플러그인 호스트가 죽거나 멈춰도 엔진은 기다리지 않고 대체 신호로 이어 갑니다(ADR 0021).
 - 커널 드라이버는 형식을 받아 바이트와 시각만 넘깁니다. 해석과 정책은 모두 사용자 모드에 있습니다.
 - 어떤 소리도 씹지 않습니다. 입구에 들어온 소리는 다른 소리와 함께 들리고, 한 입구의 시작, 정지, 형식 변경, 디코드 오류, 넘침, 끊김, 클럭 흔들림은 다른 입구가 믹서에 낸 장면을 한 표본도 바꾸지 않습니다. 독점과 공유는 한 엔드포인트에서 만나지 않습니다(ADR 0028).
