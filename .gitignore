@@ -12,3 +12,9 @@
 **/fuzz/Cargo.lock
 __pycache__/
 driver/packages/
+# The screen's build output, packages, fetched fonts (tools/ui-fonts.mjs) and
+# review screenshots (npm run shots).
+apps/spatial-softreceiver/ui/dist/
+apps/spatial-softreceiver/ui/node_modules/
+apps/spatial-softreceiver/ui/public/fonts/
+apps/spatial-softreceiver/ui/shots/

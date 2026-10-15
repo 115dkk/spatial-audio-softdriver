@@ -44,6 +44,10 @@ pub enum SessionError {
     Recorder(String),
     #[error("driver statistics failed: {0}")]
     DriverStats(String),
+    #[error("the capture source could not be opened: {0}")]
+    Capture(#[from] CaptureError),
+    #[error("the output profile could not be loaded: {0}")]
+    Profile(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -651,7 +651,6 @@ fn main() -> ExitCode {
 
 #[cfg(windows)]
 mod platform {
-    use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::io::BufRead;
     use std::path::{Path, PathBuf};
@@ -661,12 +660,12 @@ mod platform {
     use std::time::{Duration, Instant};
 
     use engine::adapters::DumpCapture;
-    use engine::{ClockPreference, EngineConfig, EngineThread};
+    use engine::{ClockPreference, EngineConfig};
     #[cfg(test)]
     use ssr_abi::dump_header_bytes;
     use ssr_abi::{Record, records};
-    use ssr_sys::driver_ring::{DriverRing, DriverRingObserver};
-    use ssr_sys::mmcss::{self, MmcssGuard};
+    use ssr_sys::driver_ring::DriverRing;
+    use ssr_sys::mmcss;
     use ssr_sys::output::WasapiOpener;
     use ssr_sys::{WindowsHost, devices, qpc, sal::SalRing};
     use ssr_types::{
@@ -833,35 +832,6 @@ mod platform {
         }
     }
 
-    thread_local! {
-        // Keeps each engine thread registered with MMCSS until it exits.
-        static MMCSS: RefCell<Option<MmcssGuard>> = const { RefCell::new(None) };
-    }
-
-    fn promote_thread(thread: EngineThread) {
-        // The real-time threads take "Pro Audio"; the decode thread, which
-        // allocates and may wait, takes the standard task one class below.
-        let task = match thread {
-            EngineThread::Capture | EngineThread::Output => "Pro Audio",
-            EngineThread::Decode => "Audio",
-        };
-        match mmcss::promote(task) {
-            Ok(guard) => MMCSS.with(|slot| *slot.borrow_mut() = Some(guard)),
-            Err(e) => eprintln!("MMCSS registration failed for {thread:?}: {e}"),
-        }
-    }
-
-    struct StatsObserver(DriverRingObserver);
-
-    impl supervisor::DriverStatsSource for StatsObserver {
-        fn sample(&self) -> Result<(u64, ssr_abi::DriverStats), String> {
-            self.0
-                .stats_sample()
-                .map(|sample| (sample.generation, sample.stats))
-                .map_err(|error| error.to_string())
-        }
-    }
-
     type OpenedSource = (Source, u64, Option<Box<dyn supervisor::DriverStatsSource>>);
 
     fn open_source(options: &PlayOptions, ended: Arc<AtomicBool>) -> Result<OpenedSource, String> {
@@ -884,11 +854,7 @@ mod platform {
                 let ring = open_driver()?;
                 let frequency = ring.info().qpc_frequency;
                 let observer = ring.observer();
-                Ok((
-                    Source::Driver(ring),
-                    frequency,
-                    Some(Box::new(StatsObserver(observer))),
-                ))
+                Ok((Source::Driver(ring), frequency, Some(Box::new(observer))))
             }
             CaptureKind::Sal => Ok((Source::Sal(open_sal()?), qpc::frequency(), None)),
         }
@@ -914,7 +880,7 @@ mod platform {
                 Clock::Asrc => ClockPreference::Asrc,
                 Clock::Trim => ClockPreference::Trim,
             },
-            thread_hook: Some(Arc::new(promote_thread)),
+            thread_hook: Some(Arc::new(mmcss::promote_engine_thread)),
             ..EngineConfig::default()
         })
     }

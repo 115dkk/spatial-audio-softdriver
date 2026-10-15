@@ -1,0 +1,32 @@
+name: Windows cross-check tools
+description: >-
+  What a Linux host needs to type-check and document the Windows targets:
+  llvm-rc, the resource compiler tauri-build runs for the app's icon and
+  version block (embed-resource picks `llvm-rc` for an msvc target on a
+  non-Windows host and fails when it is missing). The hosted Ubuntu image
+  ships LLVM with versioned binaries only, so the newest llvm-rc-N is linked
+  as llvm-rc; without any, the llvm package is installed.
+runs:
+  using: composite
+  steps:
+    - name: llvm-rc on PATH
+      shell: bash
+      run: |
+        if command -v llvm-rc >/dev/null 2>&1; then
+          echo "llvm-rc: $(command -v llvm-rc)"
+          exit 0
+        fi
+        rc="$(ls /usr/bin/llvm-rc-* 2>/dev/null | sort -V | tail -n 1 || true)"
+        if [ -z "$rc" ]; then
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends llvm
+          rc="$(ls /usr/bin/llvm-rc-* 2>/dev/null | sort -V | tail -n 1 || true)"
+        fi
+        if [ -z "$rc" ] && ! command -v llvm-rc >/dev/null 2>&1; then
+          echo "no llvm-rc found after installing llvm" >&2
+          exit 1
+        fi
+        if [ -n "$rc" ]; then
+          sudo ln -sf "$rc" /usr/local/bin/llvm-rc
+        fi
+        echo "llvm-rc: $(command -v llvm-rc)"

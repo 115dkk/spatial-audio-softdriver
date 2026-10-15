@@ -1,0 +1,22 @@
+name: Build the screens
+description: >-
+  Installs Node 22, fetches the fonts pinned by SHA-256 (tools/ui-fonts.mjs),
+  installs the screens' dependencies from the lockfile and builds
+  apps/spatial-softreceiver/ui/dist, which the app embeds at compile time
+  (tauri::generate_context!), so every Windows-target cargo step needs it
+  first.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: "22"
+        cache: npm
+        cache-dependency-path: apps/spatial-softreceiver/ui/package-lock.json
+
+    - name: npm ci and build (apps/spatial-softreceiver/ui)
+      shell: bash
+      working-directory: apps/spatial-softreceiver/ui
+      run: |
+        npm ci
+        npm run build

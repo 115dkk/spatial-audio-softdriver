@@ -111,16 +111,9 @@ const FAULT_NONE: u32 = 0;
 const FAULT_CAPTURE: u32 = 1;
 const FAULT_OUTPUT: u32 = 2;
 
-/// Which engine thread a [`ThreadHook`] runs on. `Capture` and `Output` are
-/// the real-time threads: they never allocate, lock or block. `Decode`
-/// (`ssr-decode`, ADR 0031) is not real-time: it runs the allocating upstream
-/// decoders for the capture thread, which never waits for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EngineThread {
-    Capture,
-    Output,
-    Decode,
-}
+/// Which engine thread a [`ThreadHook`] runs on; defined in `ssr-types` so
+/// `ssr-sys` can provide the MMCSS hook without depending on the engine.
+pub use ssr_types::EngineThread;
 
 /// Called first thing on each engine thread, e.g. to register it with MMCSS
 /// ("Pro Audio" for the real-time threads, "Audio" for the decode thread;

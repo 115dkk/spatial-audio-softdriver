@@ -1,0 +1,35 @@
+{
+  "name": "spatial-softreceiver-ui",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Spatial SoftReceiver 화면: Intent를 보내고 Snapshot을 그립니다(ADR 0001).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "fonts": "node ../../../tools/ui-fonts.mjs",
+    "dev": "vite --port 5173 --strictPort",
+    "prebuild": "npm run fonts",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "shots": "npm run fonts && playwright test"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4",
+    "@tauri-apps/plugin-autostart": "2.7.0",
+    "@tauri-apps/plugin-dialog": "2.8.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "happy-dom": "20.14.5",
+    "typescript": "7.0.2",
+    "vite": "8.3.1",
+    "vitest": "5.0.3"
+  },
+  "overrides": {
+    "vitest": "5.0.3"
+  }
+}

@@ -10,5 +10,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Derives `specta::Type` on the screen contract so tests/ui_contract.rs can
+# write the TypeScript bindings and the fixtures the screen is tested with.
+ts = ["dep:specta"]
+
 [dependencies]
+serde.workspace = true
+specta = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+specta-typescript.workspace = true

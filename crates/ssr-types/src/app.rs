@@ -11,12 +11,15 @@ use crate::layout::DirectionId;
 use crate::ports::{DeviceId, DriverState, Platform};
 use crate::status::EngineStatus;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Intent {
     BeginSetup,
     InstallDriver,
     /// Looks at the PC again after the user did something outside the app
-    /// (a reboot, test signing, a repair), or leaves the faulted state.
+    /// (a reboot, test signing, a repair, a device plugged in at the output
+    /// step), or leaves the faulted state.
     Recheck,
     ChooseOutput(DeviceId),
     ImportBrir(PathBuf),
@@ -31,7 +34,9 @@ pub enum Intent {
 }
 
 /// The first-run wizard's steps, in the order the checks run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum SetupStep {
     Welcome,
     /// The PC cannot run this build: an unsupported OS build or architecture
@@ -46,7 +51,9 @@ pub enum SetupStep {
     ChooseOutput,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Phase {
     Setup(SetupStep),
     Ready,
@@ -56,13 +63,15 @@ pub enum Phase {
 }
 
 /// An output the user may choose, or has chosen.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct OutputChoice {
     pub id: DeviceId,
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct Snapshot {
     pub phase: Phase,
     pub engine: Option<EngineStatus>,
@@ -81,14 +90,17 @@ pub struct Snapshot {
 }
 
 /// An error the screen shows as is: the sentence and the next action.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
 #[error("{message}")]
 pub struct UserError {
     pub message: String,
     pub next: NextAction,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
 pub enum NextAction {
     Retry,
     OpenSettings,

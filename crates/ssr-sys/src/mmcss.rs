@@ -2,7 +2,9 @@
 
 //! Thread-local MMCSS registration. Keep the guard on the promoted thread.
 
-use std::{io, marker::PhantomData, rc::Rc};
+use std::{cell::RefCell, io, marker::PhantomData, rc::Rc};
+
+use ssr_types::EngineThread;
 use windows::{
     Win32::{
         Foundation::HANDLE,
@@ -39,5 +41,25 @@ impl Drop for MmcssGuard {
     fn drop(&mut self) {
         // SAFETY: this guard owns the registration and cannot move to another thread.
         let _ = unsafe { AvRevertMmThreadCharacteristics(self.handle) };
+    }
+}
+
+thread_local! {
+    // Keeps each engine thread registered with MMCSS until it exits.
+    static ENGINE_THREAD: RefCell<Option<MmcssGuard>> = const { RefCell::new(None) };
+}
+
+/// The engine's thread hook (`engine::EngineConfig::thread_hook`), shared by
+/// `ssr-live` and the app: the real-time threads take "Pro Audio", the decode
+/// thread, which allocates and may wait, takes "Audio", one class below. The
+/// registration lasts until the thread exits. A refused registration leaves
+/// the thread at its normal priority and is not reported.
+pub fn promote_engine_thread(thread: EngineThread) {
+    let task = match thread {
+        EngineThread::Capture | EngineThread::Output => "Pro Audio",
+        EngineThread::Decode => "Audio",
+    };
+    if let Ok(guard) = promote(task) {
+        ENGINE_THREAD.with(|slot| *slot.borrow_mut() = Some(guard));
     }
 }

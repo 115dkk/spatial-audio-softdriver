@@ -19,7 +19,7 @@ Dolby, Dolby Atmos는 Dolby Laboratories의 상표입니다. 이 프로젝트는
 | M1 리플레이 | `bitstream`, `decode`(PCM·MAT·DD+), `render`, `brir`, `convolver`, `ssr-replay render` | v0.2.0. MAT 디코더와 블랙박스 골든만 남음(링 덤프 대기) |
 | M2 실시간 | `engine`, `speakers`, `ssr-sys`(SAL 개발용 링, WASAPI 출력), `ssr-live` | 헤드폰과 스피커(2~32채널, ADR 0030) 출력의 실시간 경로를 개발 PC와 러너의 가상 케이블에서 확인. SAL의 12채널 PCM도 러너에서 확인. SAL PC에서 게임과 음악을 듣는 시험, 지연 비교, 실제 스피커 청취가 남음 |
 | M3 드라이버 | `spatialsoftreceiver.sys`, ABI v1 동결 | 진행 중. 호스트 러너에서 세 엔드포인트(주, 음악, 패스스루) 재생, 링 읽기, 볼륨, 독점 정책, Driver Verifier와 IOCTL 퍼저, 엔진까지의 종단 듣기를 확인. 시험서명 PC의 확인과 동결이 남음 |
-| M4 앱 | `supervisor`, Tauri 화면, `ssr-setup`, Velopack | 예정 |
+| M4 앱 | `supervisor`, `ssr-setup`, `spatial-softreceiver`(Tauri 셸과 화면), `ssr-guard`, Velopack | 진행 중. 감독자 상태기계(ADR 0013), Windows 호스트 어댑터와 `ssr-setup`(ADR 0032), Tauri 셸과 화면 골격(ADR 0001)이 들어옴. 프로필 의도, `ssr-guard` 프로세스, 설치본과 Velopack 업데이트가 남음 |
 | M5 서명·출시 | EV 인증서, 증명 서명 | 예정 |
 
 기능별 상태는 [`features.toml`](features.toml)이 정본입니다.
@@ -37,12 +37,14 @@ crates/
   brir        프로필 → PreparedBrir
   engine      실시간 스레드, 교차 링, 클럭 전략, 지연 계측
   supervisor  상태기계 (M4)
-  ssr-sys     unsafe와 Windows 전용 코드 전부
+  ssr-sys     unsafe와 Windows 전용 코드 (링, 출력, 호스트 어댑터)
+  ssr-setup-sys  관리자 작업(설치, 삭제, 형식, 복구)만 담는 격리 크레이트, ssr-setup만 링크 (ADR 0032)
   ssr-policy  워크스페이스 게이트
 apps/
   ssr-replay  덤프 리더 (inspect, M1부터 render)
   ssr-live    드라이버 링(또는 SAL 개발 링)의 녹화와 실시간 재생 (시험용, 앱은 M4)
   ssr-setup   관리자 단발 도우미 (M4)
+  spatial-softreceiver  Tauri 2 셸과 TypeScript 화면 (M4, ADR 0001)
 ```
 
 ## 빌드와 검사
@@ -55,6 +57,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p ssr-policy          # unsafe, 기능 등록부, Windows 의존성 게이트
 cargo deny check                  # 라이선스, 권고, 소스
+cargo test -p ssr-types --features ts --test ui_contract   # 화면 계약 파일(bindings.ts, fixtures)이 타입과 같은지
+cd apps/spatial-softreceiver/ui; npm ci; npm run check; npm test; npm run build   # 화면 (Node 22)
 ./tools/check-c-header.ps1        # 드라이버 헤더를 MSVC로 C89, C11, C++17 컴파일 (Windows)
 ```
 

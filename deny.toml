@@ -17,6 +17,12 @@ allow = [
     "ISC",
     "MIT",
     "MIT-0",
+    # The app's Tauri shell: cssparser, cssparser-macros, dtoa-short and
+    # selectors (through dom_query, which tauri-utils and wry use) and
+    # option-ext (through dirs-sys, which tauri uses). MPL-2.0's copyleft
+    # covers only those crates' own files, which ship unmodified, so the
+    # binaries can still go out under MIT.
+    "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",

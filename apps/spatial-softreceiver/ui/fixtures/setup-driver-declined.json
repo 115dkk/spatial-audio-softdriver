@@ -1,0 +1,24 @@
+{
+  "phase": {
+    "kind": "setup",
+    "value": "driver"
+  },
+  "engine": null,
+  "outputs": [],
+  "chosen_output": null,
+  "driver": {
+    "kind": "not_installed"
+  },
+  "platform": {
+    "os_build": 26100,
+    "arch": "x64",
+    "test_signing": true,
+    "secure_boot": "disabled"
+  },
+  "roles_taken": false,
+  "error": {
+    "message": "관리자 승인을 취소했습니다.",
+    "next": "retry"
+  },
+  "notes": []
+}

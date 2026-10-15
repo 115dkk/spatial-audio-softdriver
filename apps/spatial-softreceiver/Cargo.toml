@@ -1,0 +1,44 @@
+[package]
+name = "spatial-softreceiver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The app (ADR 0001): a Tauri 2 shell around the supervisor. Windows only at
+# run time; it builds everywhere so the workspace checks stay uniform, and the
+# control thread that drives the supervisor, the settings file and the paths
+# are tested on Linux. The tauri crates are Windows-only dependencies, so the
+# shell itself compiles only for Windows targets (clippy and doc check it from
+# Linux with --target x86_64-pc-windows-msvc).
+
+[lints]
+workspace = true
+
+# As in Tauri's app template: `custom-protocol` makes tauri serve the embedded
+# `frontendDist` (ui/dist). Without it tauri is built for `tauri dev` and opens
+# `devUrl`, which a plain `cargo build` or `cargo run` (CI's smoke test, the
+# release) must not do. `tauri dev` turns the default off.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+ssr-types.workspace = true
+supervisor.workspace = true
+engine.workspace = true
+speakers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ssr-sys.workspace = true
+tauri = { workspace = true, features = ["tray-icon"] }
+tauri-plugin-single-instance.workspace = true
+tauri-plugin-dialog.workspace = true
+tauri-plugin-autostart.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true

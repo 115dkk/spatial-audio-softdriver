@@ -1,0 +1,29 @@
+{
+  "phase": {
+    "kind": "setup",
+    "value": "driver"
+  },
+  "engine": null,
+  "outputs": [],
+  "chosen_output": null,
+  "driver": {
+    "kind": "installed",
+    "value": {
+      "problem_code": 52,
+      "service_running": false,
+      "exclusive_policy": "unknown"
+    }
+  },
+  "platform": {
+    "os_build": 26100,
+    "arch": "x64",
+    "test_signing": true,
+    "secure_boot": "disabled"
+  },
+  "roles_taken": false,
+  "error": {
+    "message": "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오.",
+    "next": "retry"
+  },
+  "notes": []
+}

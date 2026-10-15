@@ -167,6 +167,17 @@ impl DriverRingObserver {
     }
 }
 
+/// What `supervisor::Session` totals across reconnects: each sample tagged
+/// with the generation of the handle it was read through.
+#[cfg(windows)]
+impl ssr_abi::DriverStatsSource for DriverRingObserver {
+    fn sample(&self) -> Result<(u64, DriverStats), String> {
+        self.stats_sample()
+            .map(|sample| (sample.generation, sample.stats))
+            .map_err(|error| error.to_string())
+    }
+}
+
 #[cfg(windows)]
 fn read_stats(device: &Device) -> Result<DriverStats, CaptureError> {
     let mut output = [0; size_of::<DriverStats>()];
