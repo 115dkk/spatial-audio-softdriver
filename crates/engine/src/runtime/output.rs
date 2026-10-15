@@ -128,12 +128,7 @@ pub(super) fn apply_fade_in(
         if offset >= *remaining {
             break;
         }
-        let index = used + offset;
-        let gain = if index == 0 {
-            0.0
-        } else {
-            ramp.gain(index - 1)
-        };
+        let gain = ramp.gain_with_start(used + offset);
         for sample in frame {
             *sample *= gain;
         }

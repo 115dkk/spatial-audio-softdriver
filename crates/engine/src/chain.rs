@@ -1005,25 +1005,12 @@ impl Back {
         let channel_mask = prepared.channel_mask();
         let active = channels * bed.frames;
         let samples = &mut prepared.samples[..active];
-        let lfe_from = self.lfe_from;
-        let lfe_target = self.lfe_target;
-        let lfe_ramp_frames = self.lfe_ramp_frames;
         let lfe_ramp = Ramp {
-            from: lfe_from,
-            to: lfe_target,
-            frames: lfe_ramp_frames,
+            from: self.lfe_from,
+            to: self.lfe_target,
+            frames: self.lfe_ramp_frames,
         };
-        // The LFE ramp starts at `from` on frame 0 and reaches `to` at
-        // `frames`: ramp index `frame - 1` in between.
-        let lfe_gain_at = |frame: usize| {
-            if lfe_ramp_frames == 0 || frame >= lfe_ramp_frames {
-                lfe_target
-            } else if frame == 0 {
-                lfe_from
-            } else {
-                lfe_ramp.gain(frame - 1)
-            }
-        };
+        let lfe_gain_at = |frame: usize| lfe_ramp.gain_with_start(frame);
         match &mut prepared.output {
             PreparedOutput::Headphones {
                 lfe_route,

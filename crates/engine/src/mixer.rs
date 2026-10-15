@@ -2223,6 +2223,82 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct Tagged {
+        interval: u64,
+        valid: bool,
+    }
+
+    impl Interval for Tagged {
+        fn interval_valid(&self, interval: u64) -> bool {
+            self.valid && self.interval == interval
+        }
+    }
+
+    #[test]
+    fn slot_ring_finds_an_interval_only_in_its_own_valid_slot() {
+        let mut empty = SlotRing::<Tagged>::new(Vec::new());
+        assert!(empty.is_empty());
+        assert!(empty.entry(3).is_none());
+        assert!(empty.entry_ref(3).is_none());
+        assert!(empty.get(3).is_none());
+
+        let mut ring = SlotRing::new((0..4).map(|_| Tagged::default()).collect());
+        assert_eq!(ring.len(), 4);
+        *ring.entry(6).expect("a ring with slots has an entry") = Tagged {
+            interval: 6,
+            valid: true,
+        };
+        assert_eq!(ring.iter().position(|slot| slot.valid), Some(2));
+        assert!(ring.get(6).is_some());
+        assert!(
+            ring.get(2).is_none(),
+            "the same slot holds another interval"
+        );
+        assert!(
+            ring.get(10).is_none(),
+            "the same slot holds another interval"
+        );
+        assert!(ring.get(7).is_none(), "another slot");
+        ring.entry(6).expect("entry").valid = false;
+        assert!(ring.get(6).is_none());
+        assert!(ring.get_mut(6).is_none());
+    }
+
+    #[test]
+    fn a_colliding_interval_takes_a_slot_only_once_the_old_interval_is_emitted() {
+        let mut mixer = SceneMixer::new(MixerConfig::default());
+        let epoch = mixer.layout_epoch;
+        let lane = &mut mixer.lanes[0];
+        let capacity = lane.slots.len() as u64;
+        assert!(capacity > 1);
+        lane.slot_mut(0, 0, 2, epoch)
+            .expect("an empty ring takes interval 0");
+        let previous_end = MIX_FRAMES as u64;
+
+        // Interval `capacity` maps to the slot that holds interval 0.
+        assert!(
+            lane.slot_mut(capacity, previous_end - 1, 2, epoch)
+                .is_none()
+        );
+        assert!(
+            lane.slots.get(0).is_some(),
+            "a busy slot keeps its interval"
+        );
+        assert!(lane.slots.get(capacity).is_none());
+
+        let slot = lane
+            .slot_mut(capacity, previous_end, 2, epoch)
+            .expect("an emitted slot is reused");
+        assert_eq!(slot.interval, capacity);
+        assert!(lane.slots.get(0).is_none());
+        assert!(lane.slots.get(capacity).is_some());
+        assert!(
+            lane.slot_mut(1, 0, 2, epoch).is_some(),
+            "a neighbour has its own slot"
+        );
+    }
+
     fn clear_frames(mixer: &mut SceneMixer, endpoint: usize, start: usize, end: usize) {
         let slot = mixer.lanes[endpoint]
             .slot_mut(0, 0, 2, mixer.layout_epoch)
