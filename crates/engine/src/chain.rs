@@ -9,7 +9,7 @@ use std::sync::Arc;
 use brir::PreparedBrir;
 use convolver::{Binauralizer, MonoConvolver};
 use decode::{DecodeConfig, DecodeError, Decoders, MAX_SCENE_FRAMES, Route};
-use render::PanGeometry;
+use render::{PanGeometry, Ramp};
 use speakers::{BiquadCoefficients, CrossoverCoefficients, PreparedSpeakers};
 use ssr_abi::{
     AbiError, MAX_ENDPOINTS, RECORD_FLAG_DISCONTINUITY, RawRecords, Record, VolumePayload,
@@ -1005,16 +1005,12 @@ impl Back {
         let channel_mask = prepared.channel_mask();
         let active = channels * bed.frames;
         let samples = &mut prepared.samples[..active];
-        let lfe_from = self.lfe_from;
-        let lfe_target = self.lfe_target;
-        let lfe_ramp_frames = self.lfe_ramp_frames;
-        let lfe_gain_at = |frame: usize| {
-            if lfe_ramp_frames == 0 || frame >= lfe_ramp_frames {
-                lfe_target
-            } else {
-                lfe_from + (lfe_target - lfe_from) * frame as f32 / lfe_ramp_frames as f32
-            }
+        let lfe_ramp = Ramp {
+            from: self.lfe_from,
+            to: self.lfe_target,
+            frames: self.lfe_ramp_frames,
         };
+        let lfe_gain_at = |frame: usize| lfe_ramp.gain_with_start(frame);
         match &mut prepared.output {
             PreparedOutput::Headphones {
                 lfe_route,

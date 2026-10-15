@@ -4,7 +4,7 @@
 //! into the current speaker bed before the common timeline adds lanes together.
 //! No lane drives, resets, or changes the panning state of another.
 
-use render::{PanGeometry, ramped_gain};
+use render::{PanGeometry, Ramp};
 use ssr_abi::MAX_ENDPOINTS;
 use ssr_types::{Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 
@@ -26,6 +26,20 @@ const MAX_OUTPUT_FRAMES: usize = (MAX_SCENE_FRAMES * MIX_RATE as u64).div_ceil(4
 const CONVERSION_RING: usize = 4;
 const MAX_DIRECTIONS: usize = Layout::MAX_DIRECTIONS;
 const MATRIX_VALUES: usize = MAX_DIRECTIONS * MAX_DIRECTIONS;
+
+#[inline]
+fn renderer_pan_ramp_gain(from: f32, to: f32, index: usize, frames: usize) -> f32 {
+    if index < frames {
+        from + (to - from) / frames as f32 * (index + 1) as f32
+    } else {
+        to
+    }
+}
+
+#[inline]
+fn discontinuity_fade_out_gain(index: usize, frames: usize) -> f32 {
+    (frames - index - 1) as f32 / frames as f32
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct FrameRange {
@@ -146,6 +160,78 @@ impl Slot {
 
     fn has_frames(&self) -> bool {
         self.filled_start < self.filled_end
+    }
+}
+
+trait Interval {
+    fn interval_valid(&self, interval: u64) -> bool;
+}
+
+impl Interval for Slot {
+    fn interval_valid(&self, interval: u64) -> bool {
+        self.contains(interval)
+    }
+}
+
+#[derive(Debug)]
+struct SlotRing<T> {
+    slots: Vec<T>,
+}
+
+impl<T: Interval> SlotRing<T> {
+    fn new(slots: Vec<T>) -> Self {
+        Self { slots }
+    }
+
+    fn get(&self, interval: u64) -> Option<&T> {
+        let slot = self.entry_ref(interval)?;
+        slot.interval_valid(interval).then_some(slot)
+    }
+
+    fn get_mut(&mut self, interval: u64) -> Option<&mut T> {
+        let slot = self.entry(interval)?;
+        slot.interval_valid(interval).then_some(slot)
+    }
+
+    fn entry(&mut self, interval: u64) -> Option<&mut T> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let index = interval as usize % self.slots.len();
+        self.slots.get_mut(index)
+    }
+
+    fn entry_ref(&self, interval: u64) -> Option<&T> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let index = interval as usize % self.slots.len();
+        self.slots.get(index)
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.slots.iter()
+    }
+
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.slots.iter_mut()
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut SlotRing<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.slots.iter_mut()
     }
 }
 
@@ -299,8 +385,8 @@ struct Lane {
     last_epoch: u32,
     last_source_qpc: u64,
     pending_drop: FrameRange,
-    slots: Vec<Slot>,
-    tail_slots: Vec<Slot>,
+    slots: SlotRing<Slot>,
+    tail_slots: SlotRing<Slot>,
     tail_end: u64,
     volume_gain: f32,
     volume_from: f32,
@@ -346,8 +432,8 @@ impl Lane {
             last_epoch: 0,
             last_source_qpc: 0,
             pending_drop: FrameRange::default(),
-            slots: (0..slot_capacity).map(|_| Slot::new()).collect(),
-            tail_slots: (0..slot_capacity).map(|_| Slot::new()).collect(),
+            slots: SlotRing::new((0..slot_capacity).map(|_| Slot::new()).collect()),
+            tail_slots: SlotRing::new((0..slot_capacity).map(|_| Slot::new()).collect()),
             tail_end: 0,
             volume_gain: 1.0,
             volume_from: 1.0,
@@ -359,7 +445,7 @@ impl Lane {
         }
     }
 
-    fn ramp_gain(from: f32, target: f32, start: u64, frame: u64) -> f32 {
+    fn volume_ramp_gain(from: f32, target: f32, start: u64, frame: u64) -> f32 {
         if from == target || frame <= start {
             return if frame <= start { from } else { target };
         }
@@ -367,7 +453,12 @@ impl Lane {
         if elapsed == VOLUME_RAMP_FRAMES {
             target
         } else {
-            from + (target - from) * elapsed as f32 / VOLUME_RAMP_FRAMES as f32
+            Ramp {
+                from,
+                to: target,
+                frames: VOLUME_RAMP_FRAMES as usize,
+            }
+            .gain(elapsed as usize - 1)
         }
     }
 
@@ -379,11 +470,11 @@ impl Lane {
             if transition.frame > frame {
                 break;
             }
-            from = Self::ramp_gain(from, target, start, transition.frame);
+            from = Self::volume_ramp_gain(from, target, start, transition.frame);
             target = transition.gain;
             start = transition.frame;
         }
-        Self::ramp_gain(from, target, start, frame)
+        Self::volume_ramp_gain(from, target, start, frame)
     }
 
     fn set_volume(&mut self, gain: f32, frame: u64) {
@@ -426,7 +517,7 @@ impl Lane {
             && self.volume_transitions[consumed].frame <= frame
         {
             let transition = self.volume_transitions[consumed];
-            self.volume_from = Self::ramp_gain(
+            self.volume_from = Self::volume_ramp_gain(
                 self.volume_from,
                 self.volume_target,
                 self.volume_start,
@@ -500,8 +591,10 @@ impl Lane {
                 if !source.valid {
                     continue;
                 }
-                let index = source.interval as usize % self.tail_slots.len();
-                let target = &mut self.tail_slots[index];
+                let target = self
+                    .tail_slots
+                    .entry(source.interval)
+                    .expect("an enabled lane has tail slots");
                 if !target.contains(source.interval) {
                     target.reset_for(source.interval, source.directions, source.layout_epoch);
                 }
@@ -593,10 +686,13 @@ impl Lane {
         let overlap_start = self.pending_drop.start.max(slot_start);
         let overlap_end = self.pending_drop.end.min(slot_end);
         if overlap_start < overlap_end {
-            let index = interval as usize % self.slots.len();
             let first = (overlap_start - slot_start) as usize;
             let last = (overlap_end - slot_start) as usize;
-            for state in &mut self.slots[index].occupancy[first..last] {
+            let slot = self
+                .slots
+                .entry(interval)
+                .expect("an enabled lane has current slots");
+            for state in &mut slot.occupancy[first..last] {
                 if *state == Occupancy::Empty {
                     *state = Occupancy::Dropped;
                 }
@@ -612,13 +708,7 @@ impl Lane {
     }
 
     fn slot(&self, interval: u64) -> Option<&Slot> {
-        if self.slots.is_empty() {
-            return None;
-        }
-        let index = interval as usize % self.slots.len();
-        self.slots[index]
-            .contains(interval)
-            .then_some(&self.slots[index])
+        self.slots.get(interval)
     }
 
     fn slot_mut(
@@ -628,52 +718,35 @@ impl Lane {
         directions: usize,
         layout_epoch: u32,
     ) -> Option<&mut Slot> {
-        if self.slots.is_empty() {
-            return None;
-        }
-        let index = interval as usize % self.slots.len();
-        if !self.slots[index].contains(interval) {
-            let previous_end = self.slots[index]
+        if self.slots.get(interval).is_none() {
+            let slot = self.slots.entry(interval)?;
+            let previous_end = slot
                 .interval
                 .saturating_add(1)
                 .saturating_mul(MIX_FRAMES as u64);
-            let reusable = !self.slots[index].valid || previous_end <= emitted_frontier;
+            let reusable = !slot.valid || previous_end <= emitted_frontier;
             if !reusable {
                 return None;
             }
-            self.slots[index].reset_for(interval, directions, layout_epoch);
+            slot.reset_for(interval, directions, layout_epoch);
             self.apply_pending_drop(interval);
         }
-        Some(&mut self.slots[index])
+        self.slots.get_mut(interval)
     }
 
     fn tail_slot(&self, interval: u64) -> Option<&Slot> {
-        if self.tail_slots.is_empty() {
-            return None;
-        }
-        let index = interval as usize % self.tail_slots.len();
-        self.tail_slots[index]
-            .contains(interval)
-            .then_some(&self.tail_slots[index])
+        self.tail_slots.get(interval)
     }
 
     fn clear_interval(&mut self, interval: u64) {
-        if self.slots.is_empty() {
-            return;
-        }
-        let index = interval as usize % self.slots.len();
-        if self.slots[index].contains(interval) {
-            self.slots[index].clear();
+        if let Some(slot) = self.slots.get_mut(interval) {
+            slot.clear();
         }
     }
 
     fn clear_tail_interval(&mut self, interval: u64) {
-        if self.tail_slots.is_empty() {
-            return;
-        }
-        let index = interval as usize % self.tail_slots.len();
-        if self.tail_slots[index].contains(interval) {
-            self.tail_slots[index].clear();
+        if let Some(slot) = self.tail_slots.get_mut(interval) {
+            slot.clear();
         }
     }
 
@@ -714,14 +787,10 @@ impl Lane {
         for frame in start..end {
             let interval = frame / MIX_FRAMES as u64;
             let offset = (frame % MIX_FRAMES as u64) as usize;
-            let scale = (end - frame - 1) as f32 / length as f32;
-            let index = interval as usize % self.slots.len();
-            let Some(slot) = self.slots.get_mut(index) else {
+            let scale = discontinuity_fade_out_gain((frame - start) as usize, length as usize);
+            let Some(slot) = self.slots.get_mut(interval) else {
                 continue;
             };
-            if !slot.contains(interval) {
-                continue;
-            }
             for direction in 0..slot.directions {
                 slot.bed[direction * MIX_FRAMES + offset] *= scale;
             }
@@ -1576,7 +1645,12 @@ impl SceneMixer {
         } else {
             let remaining = self.lanes[lane_index].fade_in_remaining;
             self.lanes[lane_index].fade_in_remaining -= 1;
-            (FADE_FRAMES + 1 - remaining) as f32 / FADE_FRAMES as f32
+            Ramp {
+                from: 0.0,
+                to: 1.0,
+                frames: FADE_FRAMES,
+            }
+            .gain(FADE_FRAMES - remaining)
         };
 
         if !self.ensure_slot_current(lane_index, interval, frontier) {
@@ -1597,7 +1671,7 @@ impl SceneMixer {
                     self.frame_gains[row + direction] = if is_new {
                         target_gain
                     } else {
-                        ramped_gain(old_gain, target_gain, output_frame, ramp_frames)
+                        renderer_pan_ramp_gain(old_gain, target_gain, output_frame, ramp_frames)
                     };
                     #[cfg(test)]
                     {
@@ -1685,12 +1759,10 @@ impl SceneMixer {
         let directions = self.directions;
         let epoch = self.layout_epoch;
         let lane = &mut self.lanes[lane_index];
-        if lane.tail_slots.is_empty() {
+        let Some(slot) = lane.tail_slots.get_mut(interval) else {
             return;
-        }
-        let index = interval as usize % lane.tail_slots.len();
-        let slot = &mut lane.tail_slots[index];
-        if !slot.contains(interval) || slot.layout_epoch == epoch {
+        };
+        if slot.layout_epoch == epoch {
             return;
         }
         let Some(conversion) = self.conversions[..self.conversion_count]
@@ -2151,6 +2223,82 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct Tagged {
+        interval: u64,
+        valid: bool,
+    }
+
+    impl Interval for Tagged {
+        fn interval_valid(&self, interval: u64) -> bool {
+            self.valid && self.interval == interval
+        }
+    }
+
+    #[test]
+    fn slot_ring_finds_an_interval_only_in_its_own_valid_slot() {
+        let mut empty = SlotRing::<Tagged>::new(Vec::new());
+        assert!(empty.is_empty());
+        assert!(empty.entry(3).is_none());
+        assert!(empty.entry_ref(3).is_none());
+        assert!(empty.get(3).is_none());
+
+        let mut ring = SlotRing::new((0..4).map(|_| Tagged::default()).collect());
+        assert_eq!(ring.len(), 4);
+        *ring.entry(6).expect("a ring with slots has an entry") = Tagged {
+            interval: 6,
+            valid: true,
+        };
+        assert_eq!(ring.iter().position(|slot| slot.valid), Some(2));
+        assert!(ring.get(6).is_some());
+        assert!(
+            ring.get(2).is_none(),
+            "the same slot holds another interval"
+        );
+        assert!(
+            ring.get(10).is_none(),
+            "the same slot holds another interval"
+        );
+        assert!(ring.get(7).is_none(), "another slot");
+        ring.entry(6).expect("entry").valid = false;
+        assert!(ring.get(6).is_none());
+        assert!(ring.get_mut(6).is_none());
+    }
+
+    #[test]
+    fn a_colliding_interval_takes_a_slot_only_once_the_old_interval_is_emitted() {
+        let mut mixer = SceneMixer::new(MixerConfig::default());
+        let epoch = mixer.layout_epoch;
+        let lane = &mut mixer.lanes[0];
+        let capacity = lane.slots.len() as u64;
+        assert!(capacity > 1);
+        lane.slot_mut(0, 0, 2, epoch)
+            .expect("an empty ring takes interval 0");
+        let previous_end = MIX_FRAMES as u64;
+
+        // Interval `capacity` maps to the slot that holds interval 0.
+        assert!(
+            lane.slot_mut(capacity, previous_end - 1, 2, epoch)
+                .is_none()
+        );
+        assert!(
+            lane.slots.get(0).is_some(),
+            "a busy slot keeps its interval"
+        );
+        assert!(lane.slots.get(capacity).is_none());
+
+        let slot = lane
+            .slot_mut(capacity, previous_end, 2, epoch)
+            .expect("an emitted slot is reused");
+        assert_eq!(slot.interval, capacity);
+        assert!(lane.slots.get(0).is_none());
+        assert!(lane.slots.get(capacity).is_some());
+        assert!(
+            lane.slot_mut(1, 0, 2, epoch).is_some(),
+            "a neighbour has its own slot"
+        );
+    }
+
     fn clear_frames(mixer: &mut SceneMixer, endpoint: usize, start: usize, end: usize) {
         let slot = mixer.lanes[endpoint]
             .slot_mut(0, 0, 2, mixer.layout_epoch)
@@ -2254,7 +2402,10 @@ mod tests {
         lane.begin(0);
         lane.delay = Some(0);
         lane.tail_end = 1;
-        let tail = &mut lane.tail_slots[0];
+        let tail = lane
+            .tail_slots
+            .entry(0)
+            .expect("enabled lane has tail slots");
         tail.reset_for(0, 7, epoch);
         tail.bed[64] = 0.75;
         tail.occupancy[64] = Occupancy::Filled;
@@ -2342,7 +2493,10 @@ mod tests {
         current.occupancy[0] = Occupancy::Filled;
         current.filled_start = 0;
         current.filled_end = 1;
-        let tail = &mut mixer.lanes[1].tail_slots[0];
+        let tail = mixer.lanes[1]
+            .tail_slots
+            .entry(0)
+            .expect("enabled lane has tail slots");
         tail.reset_for(0, 2, epoch);
         tail.bed[0] = 1.0;
         tail.occupancy[0] = Occupancy::Filled;
@@ -2373,9 +2527,20 @@ mod tests {
         });
         mixer.push_scene(0, &block, Some(&old)).unwrap();
         mixer.lane_start(0, 0);
-        let tail_epoch = mixer.lanes[0].tail_slots[0].layout_epoch;
+        let tail_epoch = mixer.lanes[0]
+            .tail_slots
+            .get(0)
+            .expect("tail interval is retained")
+            .layout_epoch;
         mixer.change_layout(Some(&old), &new);
-        assert_eq!(mixer.lanes[0].tail_slots[0].layout_epoch, tail_epoch);
+        assert_eq!(
+            mixer.lanes[0]
+                .tail_slots
+                .get(0)
+                .expect("tail interval is retained")
+                .layout_epoch,
+            tail_epoch
+        );
 
         let mut power = None;
         mixer.finish(&mut |mixed| {
@@ -2737,7 +2902,7 @@ mod tests {
                     for direction in 0..directions {
                         let target_gain = target[row + direction];
                         let gain = if output_frame < FADE_FRAMES && !is_new {
-                            ramped_gain(
+                            renderer_pan_ramp_gain(
                                 lane.pan_gains[row + direction],
                                 target_gain,
                                 output_frame,

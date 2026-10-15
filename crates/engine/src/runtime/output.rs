@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use render::Ramp;
 use rtrb::Producer;
 use ssr_types::{OutputError, OutputLayout, OutputSink, UnderrunSnapshot};
 
@@ -13,6 +14,17 @@ use super::{
 
 pub(super) fn boundary_fade_frames(rate: u32) -> usize {
     ((f64::from(rate) * BOUNDARY_FADE_MS / 1_000.0).round() as usize).max(1)
+}
+
+/// Gain at `offset` of a fade that falls linearly from 1 to 0 over `total`
+/// frames, reaching 0 on the last one. A fade of one frame or none is 0.
+#[inline]
+fn descending_boundary_gain(offset: usize, total: usize) -> f32 {
+    if total <= 1 {
+        0.0
+    } else {
+        (total - 1 - offset) as f32 / (total - 1) as f32
+    }
 }
 
 /// Gain of drain frame `frame` of an ASRC tail. The old resampler's last
@@ -39,7 +51,7 @@ pub(super) fn asrc_drain_gain(
         return 0.0;
     }
     let offset = lead_frames + (frame - fade_start);
-    (total - 1 - offset) as f32 / (total - 1) as f32
+    descending_boundary_gain(offset, total)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,6 +115,11 @@ pub(super) fn apply_fade_in(
     }
     let total = boundary_fade_frames(rate);
     let used = total.saturating_sub(*remaining);
+    let ramp = Ramp {
+        from: 0.0,
+        to: 1.0,
+        frames: total,
+    };
     for (offset, frame) in buffer
         .chunks_exact_mut(channels)
         .take(audible_frames)
@@ -111,7 +128,7 @@ pub(super) fn apply_fade_in(
         if offset >= *remaining {
             break;
         }
-        let gain = (used + offset) as f32 / total as f32;
+        let gain = ramp.gain_with_start(used + offset);
         for sample in frame {
             *sample *= gain;
         }
@@ -499,7 +516,7 @@ impl OutputState {
                 0.0
             } else {
                 let offset = frame_index - fade_start;
-                (total_fade_frames - 1 - offset) as f32 / (total_fade_frames - 1) as f32
+                descending_boundary_gain(offset, total_fade_frames)
             };
             for sample in frame {
                 *sample *= gain;
@@ -611,11 +628,7 @@ impl OutputState {
             .take(frames)
             .enumerate()
         {
-            let gain = if frames <= 1 {
-                0.0
-            } else {
-                (frames - 1 - offset) as f32 / (frames - 1) as f32
-            };
+            let gain = descending_boundary_gain(offset, frames);
             for (channel, sample) in frame.iter_mut().enumerate() {
                 *sample = self.last_output[channel] * gain;
             }
@@ -631,11 +644,7 @@ impl OutputState {
             .take(frames)
             .enumerate()
         {
-            let gain = if frames <= 1 {
-                0.0
-            } else {
-                (frames - 1 - offset) as f32 / (frames - 1) as f32
-            };
+            let gain = descending_boundary_gain(offset, frames);
             for sample in frame {
                 *sample *= gain;
             }

@@ -21,14 +21,44 @@ const GAIN_EPSILON: f32 = 1.0e-6;
 const HULL_SIDE_EPSILON: f32 = 2.0e-5;
 const HULL_VOLUME_EPSILON: f32 = 1.0e-6;
 
-/// Returns the linear gain at `frame` for a ramp whose first sample is one
-/// step past `old`. Frames at or beyond `ramp_frames` use `target`.
-#[inline]
-pub fn ramped_gain(old: f32, target: f32, frame: usize, ramp_frames: usize) -> f32 {
-    if frame < ramp_frames {
-        old + (target - old) / ramp_frames as f32 * (frame + 1) as f32
-    } else {
-        target
+/// A linear gain ramp from `from` to `to` over `frames` steps. Step `k` is
+/// `from + (to - from) * k / frames`, evaluated left to right as written, so
+/// every caller rounds the same way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ramp {
+    pub from: f32,
+    pub to: f32,
+    pub frames: usize,
+}
+
+impl Ramp {
+    #[inline]
+    fn step(&self, step: usize) -> f32 {
+        self.from + (self.to - self.from) * step as f32 / self.frames as f32
+    }
+
+    /// Gain of ramp frame `index` when the first frame is already one step
+    /// past `from`: step `index + 1` while `index < frames`, then `to`. A
+    /// zero-length ramp is `to` everywhere.
+    #[inline]
+    pub fn gain(&self, index: usize) -> f32 {
+        if index < self.frames {
+            self.step(index + 1)
+        } else {
+            self.to
+        }
+    }
+
+    /// Gain of ramp frame `frame` when the first frame plays `from`: step
+    /// `frame` while `frame < frames`, then `to`. A zero-length ramp is `to`
+    /// everywhere.
+    #[inline]
+    pub fn gain_with_start(&self, frame: usize) -> f32 {
+        if frame < self.frames {
+            self.step(frame)
+        } else {
+            self.to
+        }
     }
 }
 
@@ -1235,5 +1265,91 @@ mod hull_reference_tests {
                 .collect();
             assert_same_hull(&format!("random {case} ({count} points)"), &vectors);
         }
+    }
+}
+
+#[cfg(test)]
+mod ramp_tests {
+    use super::Ramp;
+
+    const ENDS: [(f32, f32); 5] = [
+        (0.0, 1.0),
+        (1.0, 0.0),
+        (-0.0, 1.0),
+        (0.25, 0.75),
+        (1.0, 1.0),
+    ];
+
+    fn written(from: f32, to: f32, step: usize, frames: usize) -> f32 {
+        from + (to - from) * step as f32 / frames as f32
+    }
+
+    #[test]
+    fn gain_is_the_written_step_one_past_the_index_then_the_target() {
+        for (from, to) in ENDS {
+            for frames in [0, 1, 2, 7, 64, 480] {
+                let ramp = Ramp { from, to, frames };
+                for index in 0..frames + 3 {
+                    let expected = if index < frames {
+                        written(from, to, index + 1, frames)
+                    } else {
+                        to
+                    };
+                    assert_eq!(
+                        ramp.gain(index).to_bits(),
+                        expected.to_bits(),
+                        "{from}->{to} over {frames}, index {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gain_with_start_is_the_written_step_at_the_frame_then_the_target() {
+        for (from, to) in ENDS {
+            for frames in [0, 1, 2, 7, 64, 480] {
+                let ramp = Ramp { from, to, frames };
+                for frame in 0..frames + 3 {
+                    let expected = if frame < frames {
+                        written(from, to, frame, frames)
+                    } else {
+                        to
+                    };
+                    assert_eq!(
+                        ramp.gain_with_start(frame).to_bits(),
+                        expected.to_bits(),
+                        "{from}->{to} over {frames}, frame {frame}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_ramp_from_negative_zero_starts_at_positive_zero() {
+        // The step is evaluated even on the first frame, so a ramp that
+        // starts at -0.0 plays +0.0 there, as the gain expressions it
+        // replaced did.
+        let ramp = Ramp {
+            from: -0.0,
+            to: 1.0,
+            frames: 480,
+        };
+        assert_eq!(ramp.gain_with_start(0).to_bits(), 0.0_f32.to_bits());
+    }
+
+    #[test]
+    fn the_last_ramp_frame_is_computed_not_forced_to_the_target() {
+        // 0.1 + (1.0 - 0.1) * 3 / 3 rounds to just under 1.0 in f32.
+        let ramp = Ramp {
+            from: 0.1,
+            to: 1.0,
+            frames: 3,
+        };
+        let last = written(0.1, 1.0, 3, 3);
+        assert_ne!(last.to_bits(), 1.0_f32.to_bits());
+        assert_eq!(ramp.gain(2).to_bits(), last.to_bits());
+        assert_eq!(ramp.gain(3).to_bits(), 1.0_f32.to_bits());
     }
 }
