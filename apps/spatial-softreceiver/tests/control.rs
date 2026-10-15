@@ -9,8 +9,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    DEV_A, DEV_A_NAME, FakeHost, FakeLauncher, MemoryStore, PanickingLauncher, Recorder, id,
-    wait_until,
+    DEV_A, DEV_A_NAME, FakeHost, FakeLauncher, MemoryStore, PanickingLauncher, Recorder,
+    ReprepareLauncher, id, wait_until,
 };
 use spatial_softreceiver::control::{self, Bridge, ControlConfig};
 use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep};
@@ -149,6 +149,117 @@ fn a_guarded_control_thread_writes_a_heartbeat_each_refresh() {
     let heartbeats = recorder.heartbeats();
     assert!(heartbeats.len() > before);
     assert!(!heartbeats[before].running);
+}
+
+#[test]
+fn a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard() {
+    let host = FakeHost::new();
+    let store = MemoryStore::with_output(DEV_A, DEV_A_NAME);
+    let recorder = Recorder::default();
+    let (bridge, _thread) = control::spawn(
+        host,
+        FakeLauncher,
+        common::config(),
+        ControlConfig {
+            tick: Duration::from_millis(5),
+            // Long enough that no refresh line lands inside the intent.
+            refresh: Duration::from_secs(60),
+        },
+        store,
+        recorder.clone(),
+        Vec::new(),
+    );
+    bridge.dispatch(Intent::Enable).expect("the engine starts");
+    assert_eq!(bridge.snapshot().phase, Phase::Running);
+
+    // The import may prepare for longer than the guard's stall limit: it is
+    // announced as not Running, and Running is said again right after, whether
+    // it succeeded or (as here, a file that is no BRIR set) failed.
+    for intent in [
+        Intent::ImportBrir("not-a-set.wav".into()),
+        Intent::ImportHeadphoneFir("absent.wav".into()),
+    ] {
+        let before = recorder.heartbeats().len();
+        assert!(bridge.dispatch(intent).is_err());
+        let heartbeats = recorder.heartbeats();
+        assert_eq!(heartbeats.len(), before + 2, "{heartbeats:?}");
+        assert!(!heartbeats[before].running);
+        assert!(heartbeats[before + 1].running);
+    }
+
+    // Outside Running there is no engine to prepare and no extra line.
+    bridge.dispatch(Intent::Disable).expect("the engine stops");
+    let before = recorder.heartbeats().len();
+    assert!(
+        bridge
+            .dispatch(Intent::ImportBrir("not-a-set.wav".into()))
+            .is_err()
+    );
+    assert_eq!(recorder.heartbeats().len(), before);
+}
+
+#[test]
+fn a_reprepare_after_needs_prepared_is_bracketed_by_heartbeats_for_the_guard() {
+    let launcher = ReprepareLauncher::default();
+    let recorder = Recorder::default();
+    let (bridge, _thread) = control::spawn(
+        FakeHost::new(),
+        launcher.clone(),
+        common::config(),
+        ControlConfig {
+            tick: Duration::from_millis(5),
+            // Long enough that no refresh line lands among these.
+            refresh: Duration::from_secs(60),
+        },
+        MemoryStore::with_output(DEV_A, DEV_A_NAME),
+        recorder.clone(),
+        Vec::new(),
+    );
+    // Answered after the thread's first heartbeat.
+    assert_eq!(bridge.snapshot().phase, Phase::Ready);
+    let before = recorder.heartbeats().len();
+    bridge.dispatch(Intent::Enable).expect("the engine starts");
+
+    // The engine's first poll asks for its output again: the tick prepares
+    // the running profile (the default stereo pair) between a not-Running
+    // line and a Running one, so a long prepare is not taken for a stall.
+    assert!(wait_until(Duration::from_secs(5), || {
+        recorder.heartbeats().len() >= before + 2
+    }));
+    let heartbeats = recorder.heartbeats();
+    assert_eq!(heartbeats.len(), before + 2, "{heartbeats:?}");
+    assert!(!heartbeats[before].running);
+    assert!(heartbeats[before + 1].running);
+    assert_eq!(launcher.prepared(), [2]);
+    assert_eq!(bridge.snapshot().phase, Phase::Running);
+}
+
+#[test]
+fn reprepare_apply_retries_do_not_emit_idle_heartbeats() {
+    let launcher = ReprepareLauncher::rejecting(3);
+    let recorder = Recorder::default();
+    let (bridge, _thread) = control::spawn(
+        FakeHost::new(),
+        launcher.clone(),
+        common::config(),
+        ControlConfig {
+            tick: Duration::from_millis(20),
+            refresh: Duration::from_secs(60),
+        },
+        MemoryStore::with_output(DEV_A, DEV_A_NAME),
+        recorder.clone(),
+        Vec::new(),
+    );
+    assert_eq!(bridge.snapshot().phase, Phase::Ready);
+    let before = recorder.heartbeats().len();
+    bridge.dispatch(Intent::Enable).expect("the engine starts");
+    assert!(wait_until(PATIENCE, || launcher.attempts() >= 4));
+
+    let heartbeats = recorder.heartbeats();
+    assert_eq!(heartbeats.len(), before + 2, "{heartbeats:?}");
+    assert!(!heartbeats[before].running);
+    assert!(heartbeats[before + 1].running);
+    assert_eq!(launcher.prepared(), [2]);
 }
 
 #[test]

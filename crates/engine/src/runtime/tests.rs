@@ -551,6 +551,7 @@ fn target_change_rejects_values_outside_crossing_capacity() {
     let engine = Engine {
         shared,
         changes: RefCell::new(changes),
+        directions: RefCell::new(DirectionTrack::default()),
         capture_events,
         output_events,
         retired,
@@ -574,6 +575,7 @@ fn lfe_gain_change_rejects_values_outside_the_supported_range() {
     let engine = Engine {
         shared: Arc::new(Shared::new()),
         changes: RefCell::new(changes),
+        directions: RefCell::new(DirectionTrack::default()),
         capture_events,
         output_events,
         retired,
@@ -2622,5 +2624,462 @@ fn endpoint_format_support_and_volume_share_one_seqlock_generation() {
             "torn endpoint state: {observed:?}"
         );
     }
+    handle.join().unwrap();
+}
+
+/// An engine without threads whose change queue the test drains itself.
+fn queue_engine(directions: Option<usize>) -> (Engine, Consumer<LiveChange>) {
+    let (changes, consumer) = RingBuffer::new(8);
+    let (_capture_events_in, capture_events) = RingBuffer::new(1);
+    let (_output_events_in, output_events) = RingBuffer::new(1);
+    let (_retired_in, retired) = RingBuffer::new(1);
+    let views = directions.map(|count| {
+        (0..count)
+            .map(|index| DirectionView {
+                id: DirectionId(index as u16),
+                name: format!("ch{index}"),
+                azimuth_deg: 0.0,
+                elevation_deg: 0.0,
+            })
+            .collect()
+    });
+    let engine = Engine {
+        shared: Arc::new(Shared::new()),
+        changes: RefCell::new(changes),
+        directions: RefCell::new(DirectionTrack::new(views)),
+        capture_events,
+        output_events,
+        retired,
+        capture_thread: None,
+        output_thread: None,
+    };
+    (engine, consumer)
+}
+
+/// A speaker set with one speaker per direction on the device channel of the
+/// same number: no FIR, crossover, delay or trim, so the output is the feed
+/// times the output gain.
+fn plain_speakers(directions: usize, gain: f32) -> Box<Prepared> {
+    plain_speakers_with_ceiling(directions, gain, 1.0)
+}
+
+fn plain_speakers_with_ceiling(directions: usize, gain: f32, ceiling: f32) -> Box<Prepared> {
+    use speakers::{PreparedSpeaker, PreparedSpeakers};
+    use ssr_types::{Direction, Layout};
+
+    let layout = Layout::new(
+        (0..directions)
+            .map(|index| Direction::new(format!("ch{index}"), 30.0 - 60.0 * index as f32, 0.0))
+            .collect(),
+    )
+    .unwrap();
+    let speakers = (0..directions)
+        .map(|index| PreparedSpeaker {
+            name: format!("ch{index}"),
+            device_channel: index,
+            small: false,
+            crossover: None,
+            delay_frames: 0,
+            gain: 1.0,
+            fir: None,
+        })
+        .collect();
+    Box::new(
+        Prepared::speakers(
+            Arc::new(PreparedSpeakers {
+                layout,
+                rate: crate::MIX_RATE,
+                partition: MIX_FRAMES,
+                device_channels: directions,
+                channel_mask: 0,
+                speakers,
+                subwoofers: Vec::new(),
+                bass_to: Vec::new(),
+                lfe_gain: 1.0,
+                gain,
+                limiter_ceiling: ceiling,
+            }),
+            MIX_FRAMES,
+        )
+        .unwrap(),
+    )
+}
+
+/// Runs one bed block through `chain` and returns its output channels.
+fn render_block(chain: &mut Chain, bed: &[f32], directions: usize, silent: bool) -> Vec<Vec<f32>> {
+    let block = crate::BedBlock {
+        epoch: 1,
+        rate: crate::MIX_RATE,
+        frames: MIX_FRAMES,
+        source_qpc: 0,
+        directions,
+        channels: bed,
+        lfe: None,
+        silent,
+        idle: silent,
+    };
+    let mut channels = Vec::new();
+    chain.process_bed(&block, &mut |event| {
+        if let ChainEvent::Block(block) = event {
+            channels = (0..block.channels)
+                .map(|channel| block.channel(channel).to_vec())
+                .collect();
+        }
+    });
+    assert!(!channels.is_empty(), "the chain rendered no block");
+    channels
+}
+
+/// Hands every change queued on `engine` to `chain` as the capture thread does.
+fn drain_into(consumer: &mut Consumer<LiveChange>, chain: &mut Chain, shared: &Shared) {
+    let (mut retired, _retired_out) = RingBuffer::new(4);
+    let mut pending = None;
+    drain_changes(consumer, chain, &mut retired, &mut pending, shared);
+    assert!(pending.is_none());
+}
+
+#[test]
+fn live_gain_ramps_persists_and_rejects_invalid_values() {
+    let (engine, mut consumer) = queue_engine(Some(1));
+    for valid in [-20.0, -6.0, 0.0, 10.0] {
+        assert_eq!(engine.apply(LiveChange::Gain(valid)), Ok(()), "{valid} dB");
+    }
+    for invalid in [
+        -20.01,
+        10.01,
+        -100.0,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        f32::NAN,
+    ] {
+        assert_eq!(
+            engine.apply(LiveChange::Gain(invalid)),
+            Err(Rejected),
+            "{invalid} dB"
+        );
+    }
+    // Only the four accepted values reached the queue.
+    assert_eq!(consumer.slots(), 4);
+    while consumer.pop().is_ok() {}
+
+    let level = 0.25_f32;
+    let bed = vec![level; MIX_FRAMES];
+    let mut chain = Chain::new(ChainConfig::default());
+    drop(chain.set_prepared(plain_speakers(1, 1.0)));
+    assert!(
+        render_block(&mut chain, &bed, 1, false)[0]
+            .iter()
+            .all(|sample| *sample == level)
+    );
+
+    let db = -6.0_f32;
+    let target = 10.0_f32.powf(db / 20.0);
+    engine.apply(LiveChange::Gain(db)).unwrap();
+    drain_into(&mut consumer, &mut chain, &engine.shared);
+    // The ramp takes exactly the next 480-frame block, linearly.
+    let ramp = &render_block(&mut chain, &bed, 1, false)[0];
+    assert_eq!(ramp[0], level);
+    for (frame, sample) in ramp.iter().enumerate() {
+        let expected = level * (1.0 + (target - 1.0) * frame as f32 / MIX_FRAMES as f32);
+        assert!(
+            (sample - expected).abs() <= 1.0e-6,
+            "frame {frame}: {sample} != {expected}"
+        );
+    }
+    assert!(ramp.windows(2).all(|pair| pair[1] < pair[0]));
+    let settled = render_block(&mut chain, &bed, 1, false);
+    assert!(
+        settled[0]
+            .iter()
+            .all(|sample| (sample - level * target).abs() <= 1.0e-7),
+        "the gain kept moving after one block"
+    );
+
+    // A new set with its own profile gain keeps the live gain.
+    drop(chain.set_prepared(plain_speakers(2, 2.0)));
+    let replaced = render_block(&mut chain, &[level; 2 * MIX_FRAMES], 2, false);
+    for channel in &replaced {
+        assert!(
+            channel
+                .iter()
+                .all(|sample| (sample - level * target).abs() <= 1.0e-7),
+            "a Prepared replacement dropped the live gain"
+        );
+    }
+
+    // The override lives as long as the chain: a restarted engine builds a new
+    // chain, which plays the profile's gain again.
+    let mut restarted = Chain::new(ChainConfig::default());
+    drop(restarted.set_prepared(plain_speakers(1, 2.0)));
+    assert!(
+        render_block(&mut restarted, &bed, 1, false)[0]
+            .iter()
+            .all(|sample| *sample == 2.0 * level)
+    );
+}
+
+#[test]
+fn a_live_gain_drained_with_a_new_set_still_ramps_over_one_block() {
+    let (engine, mut consumer) = queue_engine(Some(1));
+    let level = 0.25_f32;
+    let bed = vec![level; MIX_FRAMES];
+    let mut chain = Chain::new(ChainConfig::default());
+    drop(chain.set_prepared(plain_speakers(1, 1.0)));
+    render_block(&mut chain, &bed, 1, false);
+
+    // Gain, then a new set with its own gain and a lower ceiling, both taken
+    // in one drain before the next block.
+    let db = -6.0_f32;
+    let target = 10.0_f32.powf(db / 20.0);
+    let ceiling = 0.3_f32;
+    engine.apply(LiveChange::Gain(db)).unwrap();
+    engine
+        .apply(LiveChange::Prepared(plain_speakers_with_ceiling(
+            1, 2.0, ceiling,
+        )))
+        .unwrap();
+    drain_into(&mut consumer, &mut chain, &engine.shared);
+
+    // The ramp still takes exactly the next block, linearly from the old gain
+    // to the live one (not the new set's 2.0).
+    let ramp = &render_block(&mut chain, &bed, 1, false)[0];
+    for (frame, sample) in ramp.iter().enumerate() {
+        let expected = level * (1.0 + (target - 1.0) * frame as f32 / MIX_FRAMES as f32);
+        assert!(
+            (sample - expected).abs() <= 1.0e-6,
+            "frame {frame}: {sample} != {expected}"
+        );
+    }
+    let settled = render_block(&mut chain, &bed, 1, false);
+    assert!(
+        settled[0]
+            .iter()
+            .all(|sample| (sample - level * target).abs() <= 1.0e-7),
+        "the live gain did not hold after one block"
+    );
+
+    // The new set's ceiling is in force: a loud bed settles at it.
+    let loud = render_block(&mut chain, &[1.0; MIX_FRAMES], 1, false);
+    assert!(
+        loud[0][MIX_FRAMES - 100..]
+            .iter()
+            .all(|sample| *sample <= ceiling * 1.001),
+        "{:?}",
+        &loud[0][MIX_FRAMES - 4..]
+    );
+}
+
+/// Mean DFT power of `samples` at `bins` frequencies spread evenly from
+/// `from_hz` to `to_hz`.
+fn band_power(samples: &[f32], from_hz: f64, to_hz: f64, bins: usize) -> f64 {
+    let rate = f64::from(crate::MIX_RATE);
+    let mut total = 0.0;
+    for bin in 0..bins {
+        let hz = from_hz + (to_hz - from_hz) * bin as f64 / (bins - 1) as f64;
+        let omega = 2.0 * std::f64::consts::PI * hz / rate;
+        let (mut re, mut im) = (0.0_f64, 0.0_f64);
+        for (index, sample) in samples.iter().enumerate() {
+            let phase = omega * index as f64;
+            re += f64::from(*sample) * phase.cos();
+            im -= f64::from(*sample) * phase.sin();
+        }
+        total += re * re + im * im;
+    }
+    total / bins as f64
+}
+
+#[test]
+fn test_tone_is_bounded_faded_directional_and_retriggerable() {
+    use crate::test_tone::{
+        TEST_TONE_FADE_FRAMES, TEST_TONE_FRAMES, TEST_TONE_PEAK, test_tone_fade, test_tone_samples,
+    };
+
+    // The signal: 400 ms, deterministic, peak at or under -20 dBFS.
+    let tone = test_tone_samples();
+    assert_eq!(tone.len(), 19_200);
+    assert_eq!(TEST_TONE_FRAMES, 19_200);
+    assert_eq!(TEST_TONE_FADE_FRAMES, 480);
+    assert_eq!(tone, test_tone_samples(), "the signal is not deterministic");
+    let peak = tone
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    assert!(peak <= 0.1, "peak {peak} is above -20 dBFS");
+    assert!(
+        20.0 * peak.log10() > -21.0,
+        "peak {peak} is far below -20 dBFS"
+    );
+    // Raised-cosine fades: zero at both edges and inside the envelope.
+    assert_eq!(tone[0], 0.0);
+    assert_eq!(tone[TEST_TONE_FRAMES - 1], 0.0);
+    for frame in 0..TEST_TONE_FADE_FRAMES {
+        let bound = TEST_TONE_PEAK * test_tone_fade(frame) + 1.0e-7;
+        assert!(tone[frame].abs() <= bound, "fade-in frame {frame}");
+        assert!(
+            tone[TEST_TONE_FRAMES - 1 - frame].abs() <= bound,
+            "fade-out frame {frame}"
+        );
+    }
+    assert!(
+        (0..TEST_TONE_FADE_FRAMES).all(|frame| test_tone_fade(frame) <= test_tone_fade(frame + 1))
+    );
+    assert_eq!(test_tone_fade(TEST_TONE_FADE_FRAMES), 1.0);
+    // Band-limited to about 200 Hz to 8 kHz.
+    let body = &tone[TEST_TONE_FADE_FRAMES..TEST_TONE_FRAMES - TEST_TONE_FADE_FRAMES];
+    let pass = band_power(body, 600.0, 4_000.0, 24);
+    let low = band_power(body, 20.0, 60.0, 12);
+    let high = band_power(body, 16_000.0, 22_000.0, 24);
+    assert!(
+        10.0 * (low / pass).log10() < -30.0,
+        "low band {low} vs {pass}"
+    );
+    assert!(
+        10.0 * (high / pass).log10() < -15.0,
+        "high band {high} vs {pass}"
+    );
+
+    // Directions: the layout the change meets decides.
+    let (engine, mut consumer) = queue_engine(Some(2));
+    assert_eq!(engine.apply(LiveChange::TestTone(DirectionId(1))), Ok(()));
+    assert_eq!(
+        engine.apply(LiveChange::TestTone(DirectionId(2))),
+        Err(Rejected)
+    );
+    let (unprepared, _unprepared_changes) = queue_engine(None);
+    assert_eq!(
+        unprepared.apply(LiveChange::TestTone(DirectionId(0))),
+        Err(Rejected)
+    );
+    engine
+        .apply(LiveChange::Prepared(plain_speakers(3, 1.0)))
+        .unwrap();
+    assert_eq!(engine.apply(LiveChange::TestTone(DirectionId(2))), Ok(()));
+    assert_eq!(
+        engine.apply(LiveChange::TestTone(DirectionId(3))),
+        Err(Rejected)
+    );
+    while consumer.pop().is_ok() {}
+
+    // Played after panning: it lands only on its direction's speaker, equal
+    // to the signal sample for sample, then stops.
+    let silence = vec![0.0_f32; 2 * MIX_FRAMES];
+    let mut chain = Chain::new(ChainConfig::default());
+    assert!(
+        !chain.start_test_tone(DirectionId(0)),
+        "no set is installed"
+    );
+    drop(chain.set_prepared(plain_speakers(2, 1.0)));
+    assert!(!chain.start_test_tone(DirectionId(2)));
+    engine.apply(LiveChange::TestTone(DirectionId(1))).unwrap();
+    drain_into(&mut consumer, &mut chain, &engine.shared);
+    let mut played = Vec::new();
+    for _ in 0..TEST_TONE_FRAMES / MIX_FRAMES {
+        let block = render_block(&mut chain, &silence, 2, true);
+        assert!(block[0].iter().all(|sample| *sample == 0.0));
+        played.extend_from_slice(&block[1]);
+    }
+    assert_eq!(played, tone);
+    let after = render_block(&mut chain, &silence, 2, true);
+    assert!(after.iter().flatten().all(|sample| *sample == 0.0));
+
+    // A second trigger restarts it from the beginning.
+    assert!(chain.start_test_tone(DirectionId(0)));
+    let mut played = Vec::new();
+    for _ in 0..10 {
+        played.extend_from_slice(&render_block(&mut chain, &silence, 2, true)[0]);
+    }
+    assert!(chain.start_test_tone(DirectionId(0)));
+    for _ in 0..TEST_TONE_FRAMES / MIX_FRAMES {
+        played.extend_from_slice(&render_block(&mut chain, &silence, 2, true)[0]);
+    }
+    assert_eq!(played[..10 * MIX_FRAMES], tone[..10 * MIX_FRAMES]);
+    assert_eq!(played[10 * MIX_FRAMES..], tone[..]);
+
+    // The output gain applies to it like any other sound.
+    chain.set_gain(0.5);
+    assert!(chain.start_test_tone(DirectionId(0)));
+    let _ramp = render_block(&mut chain, &silence, 2, true);
+    let gained = render_block(&mut chain, &silence, 2, true);
+    for (sample, source) in gained[0].iter().zip(&tone[MIX_FRAMES..2 * MIX_FRAMES]) {
+        assert!((sample - source * 0.5).abs() <= 1.0e-7);
+    }
+
+    // A new set ends a playing tone: its direction numbers name other speakers.
+    drop(chain.set_prepared(plain_speakers(2, 1.0)));
+    let replaced = render_block(&mut chain, &silence, 2, true);
+    assert!(replaced.iter().flatten().all(|sample| *sample == 0.0));
+
+    // Headphones: a tone on a silent bed is convolved, not skipped by the
+    // quiet fast path.
+    let mut headphones = Chain::new(ChainConfig::default());
+    let ir = [1.0_f32];
+    let filters = [[ir.as_slice(), ir.as_slice()]];
+    let brir = Arc::new(brir::PreparedBrir {
+        layout: ssr_types::Layout::new(vec![ssr_types::Direction::new("front", 0.0, 0.0)]).unwrap(),
+        bank: Arc::new(convolver::FilterBank::new(&filters, MIX_FRAMES).unwrap()),
+        rate: crate::MIX_RATE,
+        partition: MIX_FRAMES,
+        lfe: None,
+        gain: 1.0,
+        limiter_ceiling: 1.0,
+        ir_frames: 1,
+        trimmed_leading_frames: 0,
+    });
+    drop(headphones.set_prepared(Box::new(Prepared::new(brir, MIX_FRAMES).unwrap())));
+    assert!(headphones.start_test_tone(DirectionId(0)));
+    let mut energy = 0.0_f64;
+    for _ in 0..4 {
+        let block = render_block(&mut headphones, &silence[..MIX_FRAMES], 1, true);
+        energy += block
+            .iter()
+            .flatten()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>();
+    }
+    assert!(energy > 0.0, "the headphone stage skipped the test signal");
+}
+
+#[test]
+fn scene_status_never_mixes_two_publications() {
+    let shared = Arc::new(Shared::new());
+    let writer = Arc::clone(&shared);
+    let object = |value: f32, index: u8| SceneObject {
+        lane: 1,
+        index,
+        x: value,
+        y: value,
+        z: value,
+        level_dbfs: value,
+    };
+    let first: Vec<_> = (0..40).map(|index| object(-1.0, index)).collect();
+    let second: Vec<_> = (0..7).map(|index| object(-2.0, index)).collect();
+    let done = Arc::new(AtomicBool::new(false));
+    let writer_done = Arc::clone(&done);
+    let handle = std::thread::spawn(move || {
+        while !writer_done.load(Ordering::Acquire) {
+            writer.scene.publish(&first);
+            writer.scene.publish(&second);
+        }
+    });
+    for _ in 0..20_000 {
+        let scene = shared.scene.read();
+        let value = scene.first().map_or(0.0, |object| object.x);
+        let expected = match scene.len() {
+            0 => 0,
+            40 => 40,
+            7 => 7,
+            other => panic!("torn scene length {other}"),
+        };
+        assert_eq!(scene.len(), expected);
+        assert!(
+            scene.iter().enumerate().all(|(index, object)| {
+                object.index == index as u8
+                    && object.lane == 1
+                    && [object.x, object.y, object.z, object.level_dbfs] == [value; 4]
+                    && (value == -1.0 && scene.len() == 40 || value == -2.0 && scene.len() == 7)
+            }),
+            "torn scene: {scene:?}"
+        );
+    }
+    done.store(true, Ordering::Release);
     handle.join().unwrap();
 }

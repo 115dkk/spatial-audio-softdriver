@@ -62,6 +62,12 @@
   --error: #c42b2b;
   --error-soft: #fcebea;
 
+  /* Object map lanes (main, music, PASS). Checked as a set for colour
+     vision deficiency and contrast on --surface-sunk in each palette. */
+  --lane-0: #1098ad;
+  --lane-1: #6250d6;
+  --lane-2: #eb6834;
+
   --radius: 8px;
   --radius-control: 6px;
   --nav-width: 184px;
@@ -93,6 +99,10 @@
     --warning-soft: #2c2114;
     --error: #ff7070;
     --error-soft: #321a1c;
+
+    --lane-0: #0ca5bb;
+    --lane-1: #8b7cf0;
+    --lane-2: #e0602a;
   }
 }
 
@@ -956,15 +966,86 @@ input[type="checkbox"] {
   gap: 16px;
 }
 
-.lead {
-  color: var(--text-muted);
-}
-
-.profile-grid,
 .settings-facts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   gap: 16px;
+}
+
+/* Controls on the left and the map beside them; one column (map last) when
+   the body is narrow, so the two never overlap. */
+.profile {
+  container-type: inline-size;
+}
+
+.profile-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.profile-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+@container (min-width: 700px) {
+  .profile-layout {
+    grid-template-columns: minmax(0, 1fr) clamp(260px, 40%, 380px);
+    align-items: start;
+  }
+
+  .object-map {
+    position: sticky;
+    top: 20px;
+  }
+}
+
+.profile-kind {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.path {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.panel-note {
+  margin-top: 10px;
+}
+
+.file-note {
+  margin-bottom: 14px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: var(--size-s);
+  font-weight: 500;
+}
+
+.import + .import {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.import-title {
+  margin-bottom: 6px;
+  font-size: var(--size-m);
+  font-weight: 600;
+}
+
+.import .actions {
+  margin-top: 12px;
+}
+
+.import-hint {
+  margin-top: 8px;
 }
 
 .gain {
@@ -987,7 +1068,7 @@ input[type="checkbox"] {
 
 .direction-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
   gap: 8px;
   margin-top: 14px;
 }
@@ -996,19 +1077,166 @@ input[type="checkbox"] {
   padding: 0 6px;
 }
 
-.placeholder {
-  display: grid;
-  place-items: center;
-  min-height: 140px;
-  padding: 16px;
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--radius-control);
-  color: var(--text-muted);
-  text-align: center;
+/* The object map. Lane colours mark identity, the outline marks height, and
+   size with strength marks level; the legend names all three. */
+
+.object-map {
+  container-type: inline-size;
 }
 
-.placeholder p {
-  max-width: 48ch;
+.map-frame {
+  display: grid;
+  place-items: center;
+  margin-top: 12px;
+}
+
+.map-drawing {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  height: auto;
+  aspect-ratio: 1;
+}
+
+.map-disc {
+  fill: var(--surface-sunk);
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.map-ring {
+  fill: none;
+  stroke: var(--line);
+  stroke-dasharray: 3 4;
+}
+
+.map-axis {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.map-listener circle {
+  fill: var(--surface);
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+}
+
+.map-listener path {
+  fill: var(--text-muted);
+}
+
+.map-direction circle {
+  fill: var(--text-muted);
+}
+
+.map-direction.is-up circle {
+  fill: var(--surface-sunk);
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+}
+
+/* Names wear a halo of the ground they sit on, clear of the rings and axes. */
+.map-label {
+  fill: var(--text-muted);
+  stroke: var(--surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.map-label.is-up {
+  stroke: var(--surface-sunk);
+}
+
+/* The drawing scales with the panel; keep the names readable when it is small. */
+@container (max-width: 320px) {
+  .map-label {
+    font-size: 14px;
+  }
+}
+
+.map-object,
+.map-swatch {
+  --lane: var(--text-muted);
+}
+
+.lane-0 {
+  --lane: var(--lane-0);
+}
+
+.lane-1 {
+  --lane: var(--lane-1);
+}
+
+.lane-2 {
+  --lane: var(--lane-2);
+}
+
+.map-object.is-flat {
+  fill: var(--lane);
+  stroke: var(--surface-sunk);
+  stroke-width: 1.5;
+}
+
+.map-object.is-up {
+  fill: color-mix(in srgb, var(--lane) 20%, var(--surface-sunk));
+  stroke: var(--lane);
+  stroke-width: 2.5;
+}
+
+.map-status {
+  margin-top: 10px;
+  font-size: var(--size-s);
+  font-weight: 500;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.map-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: var(--size-xs);
+  color: var(--text-muted);
+}
+
+.map-legend ul {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.map-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map-swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--lane);
+}
+
+.map-swatch.is-flat {
+  background: var(--text-muted);
+}
+
+.map-swatch.is-up {
+  border: 2px solid var(--text-muted);
+  background: transparent;
 }
 
 /* ---- Settings -------------------------------------------------------- */

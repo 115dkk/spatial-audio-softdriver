@@ -35,8 +35,25 @@ pub fn read_wav(path: &Path, target_rate: u32) -> Result<WavData, IrError> {
     Ok(wav)
 }
 
-pub(crate) fn read_wav_raw(path: &Path) -> Result<WavData, IrError> {
-    let mut reader = hound::WavReader::open(path).map_err(|error| map_wav_error(path, error))?;
+/// What a WAV header says, checked as [`read_wav`] would check it: at least
+/// one track, at least one frame, and a sample format this module decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WavHeader {
+    pub rate: u32,
+    pub tracks: usize,
+    pub frames: usize,
+}
+
+/// Reads and checks only the header of the WAV at `path`.
+pub fn read_wav_header(path: &Path) -> Result<WavHeader, IrError> {
+    let reader = hound::WavReader::open(path).map_err(|error| map_wav_error(path, error))?;
+    check_header(path, &reader)
+}
+
+fn check_header<R: std::io::Read>(
+    path: &Path,
+    reader: &hound::WavReader<R>,
+) -> Result<WavHeader, IrError> {
     let spec = reader.spec();
     if spec.channels == 0 {
         return Err(IrError::Wav {
@@ -44,7 +61,6 @@ pub(crate) fn read_wav_raw(path: &Path) -> Result<WavData, IrError> {
             detail: "the file has no tracks".into(),
         });
     }
-    let channel_count = usize::from(spec.channels);
     let frames = reader.duration() as usize;
     if frames == 0 {
         return Err(IrError::Wav {
@@ -52,6 +68,28 @@ pub(crate) fn read_wav_raw(path: &Path) -> Result<WavData, IrError> {
             detail: "the file has no samples".into(),
         });
     }
+    match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Int, 16 | 24 | 32) | (hound::SampleFormat::Float, 32) => {}
+        (format, bits) => {
+            return Err(IrError::Wav {
+                path: path.to_path_buf(),
+                detail: format!("unsupported {bits}-bit {format:?} samples"),
+            });
+        }
+    }
+    Ok(WavHeader {
+        rate: spec.sample_rate,
+        tracks: usize::from(spec.channels),
+        frames,
+    })
+}
+
+pub(crate) fn read_wav_raw(path: &Path) -> Result<WavData, IrError> {
+    let mut reader = hound::WavReader::open(path).map_err(|error| map_wav_error(path, error))?;
+    let header = check_header(path, &reader)?;
+    let spec = reader.spec();
+    let channel_count = header.tracks;
+    let frames = header.frames;
     let mut channels = vec![Vec::with_capacity(frames); channel_count];
     match (spec.sample_format, spec.bits_per_sample) {
         (hound::SampleFormat::Int, 16 | 24 | 32) => {
@@ -67,12 +105,7 @@ pub(crate) fn read_wav_raw(path: &Path) -> Result<WavData, IrError> {
                     .push(sample.map_err(|error| map_wav_error(path, error))?);
             }
         }
-        (format, bits) => {
-            return Err(IrError::Wav {
-                path: path.to_path_buf(),
-                detail: format!("unsupported {bits}-bit {format:?} samples"),
-            });
-        }
+        _ => unreachable!("check_header accepts only the formats decoded here"),
     }
     Ok(WavData {
         rate: spec.sample_rate,

@@ -10,7 +10,10 @@
 //!   result is sent back, and a fresh snapshot goes out whatever the result
 //!   (a failure's sentence is in the snapshot);
 //! * every tick (33 ms) the engine is polled; notices or a new phase send a
-//!   snapshot, and while Running the engine status goes out as meters (30 Hz);
+//!   snapshot, and while Running the engine status goes out as meters (30 Hz).
+//!   When the engine asked for its output again, the tick prepares it
+//!   between a not-Running heartbeat and a fresh one, as a running profile
+//!   import does (ADR 0033);
 //! * every refresh (1 s) a snapshot is taken and sent only when it differs
 //!   from the last one sent, the engine status left out of the comparison:
 //!   this is how a plugged or removed output reaches the screen;
@@ -248,16 +251,22 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
     /// ends.
     fn intent(&mut self, intent: Intent, reply: &Sender<Result<(), UserError>>) -> bool {
         let described = format!("{intent:?}");
-        if matches!(intent, Intent::Disable | Intent::Quit) {
-            // Both stop the engine and give the roles back in one step,
-            // during which no heartbeat goes out: the guard must not take
-            // that for a stalled, Running app and bring the engine back
+        // A running engine prepares an imported profile on this thread
+        // (decode, resample, fold, FFT), which can outlast the guard's 2 s
+        // stall limit. Announce the step as not Running, as Disable does, so
+        // the guard counts its silence against the 15 s takeover limit
+        // instead of restarting the app; a fresh line follows the step.
+        let long_step = *self.supervisor.phase() == Phase::Running
+            && matches!(
+                intent,
+                Intent::ImportBrir(_) | Intent::ImportHeadphoneFir(_)
+            );
+        if long_step || matches!(intent, Intent::Disable | Intent::Quit) {
+            // Disable and Quit stop the engine and give the roles back in one
+            // step, during which no heartbeat goes out: the guard must not
+            // take that for a stalled, Running app and bring the engine back
             // (ADR 0033).
-            self.emitter.heartbeat(&Heartbeat {
-                running: false,
-                output_periods: 0,
-                capture_reads: 0,
-            });
+            self.idle_heartbeat();
         }
         let result = self.supervisor.handle(intent);
         match &result {
@@ -266,6 +275,9 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
                 log::line(&format!("control: {described}: done"));
             }
             Err(error) => log::line(&format!("control: {described}: {}", error.message)),
+        }
+        if long_step {
+            self.heartbeat();
         }
         // The reply goes before the snapshot: a shell waiting for it must not
         // wait for the screen as well.
@@ -280,7 +292,20 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
 
     fn tick(&mut self, now: Instant) {
         let before = self.supervisor.phase().clone();
-        let notices = self.supervisor.tick(now);
+        let mut notices = self.supervisor.tick(now);
+        if self.supervisor.needs_prepared() {
+            // Only slow preparation is bracketed. If the change queue refused
+            // an already prepared output, later ticks retry the handoff while
+            // leaving the guard's Running stall clock untouched.
+            let slow = self.supervisor.prepare_work_pending();
+            if slow {
+                self.idle_heartbeat();
+            }
+            notices.extend(self.supervisor.prepare_again());
+            if slow {
+                self.heartbeat();
+            }
+        }
         let phase = self.supervisor.phase();
         if *phase != before {
             log::line(&format!("control: {before:?} -> {phase:?}"));
@@ -295,6 +320,17 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
         }
     }
 
+    /// A heartbeat that says the app is not Running, before a step that
+    /// sends none for longer than the guard's stall limit allows: the guard
+    /// counts that silence against its 15 s takeover limit instead.
+    fn idle_heartbeat(&self) {
+        self.emitter.heartbeat(&Heartbeat {
+            running: false,
+            output_periods: 0,
+            capture_reads: 0,
+        });
+    }
+
     /// One heartbeat line for the guard (ADR 0033): whether the supervisor
     /// is Running and the engine's progress counters.
     fn heartbeat(&mut self) {
@@ -306,6 +342,7 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
     /// Sends a snapshot only when it differs from the last one sent, engine
     /// status aside.
     fn refresh(&mut self) {
+        self.supervisor.watch_profile_file();
         let snapshot = self.supervisor.snapshot();
         self.emitter
             .heartbeat(&heartbeat_of(&snapshot.phase, snapshot.engine.as_ref()));
@@ -369,6 +406,7 @@ fn quitting() -> UserError {
 fn quit_snapshot() -> Snapshot {
     Snapshot {
         phase: Phase::Quit,
+        profile: supervisor::default_profile_view(),
         engine: None,
         outputs: Vec::new(),
         chosen_output: None,

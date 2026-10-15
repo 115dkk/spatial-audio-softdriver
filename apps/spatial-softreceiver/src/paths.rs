@@ -12,6 +12,10 @@ pub const STATE_DIR: &str = "Spatial SoftReceiver";
 pub const SETUP_EXE: &str = "ssr-setup.exe";
 pub const GUARD_EXE: &str = "ssr-guard.exe";
 
+/// The hand-written output profile in the state directory. When it exists it
+/// takes precedence over the imported BRIR set (`supervisor::machine::Config`).
+pub const PROFILE_FILE: &str = "profile.toml";
+
 /// `%LOCALAPPDATA%\Spatial SoftReceiver`, given the value of `LOCALAPPDATA`;
 /// without one (a test, or a session that lacks it) the same name under the
 /// temporary directory.
@@ -24,6 +28,11 @@ pub fn state_dir(local_app_data: Option<OsString>) -> PathBuf {
         Some(dir) => PathBuf::from(dir).join(STATE_DIR),
         None => std::env::temp_dir().join(STATE_DIR),
     }
+}
+
+/// `profile.toml` in the state directory, which may not exist.
+pub fn profile_file(state_dir: &Path) -> PathBuf {
+    state_dir.join(PROFILE_FILE)
 }
 
 /// `ssr-setup.exe` beside the app's executable. The driver package ships

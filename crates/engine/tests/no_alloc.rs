@@ -51,7 +51,6 @@ fn prepared() -> Box<Prepared> {
         gain: 1.0,
         limiter_ceiling: 1.0,
         ir_frames: 1,
-        omitted_silent_directions: Vec::new(),
         trimmed_leading_frames: 0,
     });
     Box::new(Prepared::new(brir, MIX_FRAMES).unwrap())

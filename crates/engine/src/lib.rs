@@ -11,6 +11,7 @@
 //!   null output.
 //! * [`decode_thread`]: the job queue that moves allocating codec decoders
 //!   (E-AC-3) off the capture thread onto `ssr-decode` (ADR 0031).
+//! * [`test_tone`]: the 400 ms direction test signal (`LiveChange::TestTone`).
 
 pub mod adapters;
 pub mod chain;
@@ -18,6 +19,7 @@ pub mod decode_thread;
 mod limiter;
 pub mod mixer;
 pub mod runtime;
+pub mod test_tone;
 
 /// The most output channels the crossing ring carries (ADR 0030).
 pub const MAX_OUTPUT_CHANNELS: usize = 32;
@@ -34,8 +36,8 @@ pub use decode::direct::{
 };
 pub use decode_thread::DecodeWorker;
 pub use mixer::{
-    BedBlock, MAX_ARRIVAL_SLACK_FRAMES, MAX_DELAY_FRAMES, MIX_FRAMES, MIX_RATE, MixerConfig,
-    SceneMixer,
+    BedBlock, MAX_ARRIVAL_SLACK_FRAMES, MAX_DELAY_FRAMES, MAX_SCENE_OBJECTS, MIX_FRAMES, MIX_RATE,
+    MixerConfig, SCENE_FLOOR_DBFS, SceneMixer,
 };
 pub use runtime::{
     ClockPreference, Engine, EngineConfig, EngineEvent, EngineThread, LiveChange, Rejected,

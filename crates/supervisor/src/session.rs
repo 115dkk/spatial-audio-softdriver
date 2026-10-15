@@ -86,13 +86,6 @@ pub enum SessionNotice {
     Fault(EngineFault),
 }
 
-#[derive(Debug)]
-pub enum SessionChange {
-    Mute(bool),
-    TargetMs(f32),
-    Profile(OutputProfile),
-}
-
 pub struct Session {
     engine: engine::Engine,
     profile: OutputProfile,
@@ -217,13 +210,26 @@ impl Session {
     /// Drains engine events and re-prepares the output when the engine
     /// asked, retrying while its change queue is full. A profile that fails
     /// to prepare is an error: the output cannot be rebuilt, as at start.
+    ///
+    /// The re-prepare builds from the profile the session started with (and
+    /// the gains [`Session::apply`] took since). A caller that hands the
+    /// engine profiles of its own (the supervisor, through
+    /// [`crate::EngineHandle`]) polls with [`Session::poll_events`] instead
+    /// and re-prepares its own profile.
     pub fn poll(&mut self) -> Result<Vec<SessionNotice>, SessionError> {
+        let mut notices = self.poll_events();
+        self.retry_prepared(&mut notices)?;
+        Ok(notices)
+    }
+
+    /// Drains engine events without acting on them: a `NeedsPrepared` is
+    /// passed on for the caller to answer with [`LiveChange::Prepared`].
+    pub fn poll_events(&mut self) -> Vec<SessionNotice> {
         let mut notices = Vec::new();
         for event in self.engine.poll() {
             self.handle_event(event, &mut notices);
         }
-        self.retry_prepared(&mut notices)?;
-        Ok(notices)
+        notices
     }
 
     fn handle_event(&mut self, event: EngineEvent, notices: &mut Vec<SessionNotice>) {
@@ -312,6 +318,7 @@ impl Session {
         };
         Snapshot {
             phase,
+            profile: crate::machine::default_profile_view(),
             engine: Some(status),
             outputs: Vec::new(),
             chosen_output: None,
@@ -323,22 +330,49 @@ impl Session {
         }
     }
 
-    pub fn apply(&mut self, change: SessionChange) -> Result<(), SessionError> {
-        match change {
-            SessionChange::Mute(mute) => self
-                .engine
-                .apply(LiveChange::Mute(mute))
-                .map_err(|_| SessionError::Rejected),
-            SessionChange::TargetMs(ms) => self
-                .engine
-                .apply(LiveChange::TargetMs(ms))
-                .map_err(|_| SessionError::Rejected),
-            SessionChange::Profile(profile) => {
-                self.profile = profile;
-                self.pending_prepared = true;
-                Ok(())
-            }
+    /// Hands `change` to the running engine, all or nothing: a change the
+    /// engine's queue refuses (full, or a value out of range) is
+    /// [`SessionError::Rejected`] and leaves the output as it was.
+    ///
+    /// A taken `Prepared` is the output from then on (the report's kind and
+    /// channels, and no re-prepare pending); it does not replace the profile
+    /// [`Session::poll`] re-prepares from, which only the caller knows. A
+    /// taken `Gain` is kept in that profile, as the engine keeps it across
+    /// re-prepares.
+    pub fn apply(&mut self, change: LiveChange) -> Result<(), SessionError> {
+        self.apply_retaining(change).map_err(|(error, _)| error)
+    }
+
+    /// As [`Session::apply`], but returns a rejected change for retry.
+    pub fn apply_retaining(
+        &mut self,
+        change: LiveChange,
+    ) -> Result<(), (SessionError, LiveChange)> {
+        let output = match &change {
+            LiveChange::Prepared(prepared) => Some((
+                prepared.kind(),
+                prepared.channels(),
+                prepared.channel_mask(),
+            )),
+            _ => None,
+        };
+        let gain = match change {
+            LiveChange::Gain(db) => Some(db),
+            _ => None,
+        };
+        self.engine
+            .apply_retaining(change)
+            .map_err(|(engine::Rejected, change)| (SessionError::Rejected, change))?;
+        if let Some((kind, channels, mask)) = output {
+            self.pending_prepared = false;
+            self.output_kind = kind;
+            self.output_channels = channels;
+            self.output_channel_mask = mask;
         }
+        if let Some(db) = gain {
+            set_gain_db(&mut self.profile, db);
+        }
+        Ok(())
     }
 
     pub fn observe(&mut self, second: u64) {
@@ -422,6 +456,13 @@ fn fault_error(fault: &EngineFault) -> UserError {
     }
 }
 
+fn set_gain_db(profile: &mut OutputProfile, db: f32) {
+    match profile {
+        OutputProfile::Headphones(profile) => profile.gain_db = db,
+        OutputProfile::Speakers(profile) => profile.gain_db = db,
+    }
+}
+
 fn stats_lock_error() -> CaptureError {
     CaptureError::Io("driver statistics lock was poisoned".into())
 }
@@ -436,7 +477,7 @@ mod tests {
     use std::time::Duration;
 
     use speakers::{SpeakerConfig, SpeakerProfile, SpeakerRange};
-    use ssr_types::{CaptureError, CaptureSource, TrimUnsupported};
+    use ssr_types::{CaptureError, CaptureSource, DirectionId, TrimUnsupported};
 
     use super::*;
 
@@ -534,6 +575,110 @@ mod tests {
         assert!(!session.pending_prepared);
 
         release_tx.send(()).unwrap();
+        session.stop().unwrap();
+    }
+
+    fn started(capture: BlockingCapture) -> Session {
+        Session::start(
+            SessionConfig {
+                engine: engine::EngineConfig {
+                    read_wait: Duration::ZERO,
+                    ..Default::default()
+                },
+                profile: profile(),
+                qpc_frequency: 1_000_000,
+                mute: false,
+                recorder: None,
+            },
+            capture,
+            engine::adapters::NullOpener {
+                rate: 48_000,
+                period_frames: 480,
+            },
+            None,
+        )
+        .unwrap()
+    }
+
+    fn speaker_names(profile: &OutputProfile) -> Vec<String> {
+        let OutputProfile::Speakers(profile) = profile else {
+            panic!("a speaker profile");
+        };
+        profile
+            .speakers
+            .iter()
+            .map(|speaker| speaker.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn live_changes_are_all_or_nothing() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let mut session = started(BlockingCapture {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // A gain the engine refuses changes nothing.
+        assert!(matches!(
+            session.apply(LiveChange::Gain(30.0)),
+            Err(SessionError::Rejected)
+        ));
+        let OutputProfile::Speakers(current) = &session.profile else {
+            unreachable!()
+        };
+        assert_eq!(current.gain_db, 0.0);
+
+        // A taken gain is what a later re-prepare builds from.
+        session.apply(LiveChange::Gain(-6.0)).unwrap();
+        let OutputProfile::Speakers(current) = &session.profile else {
+            unreachable!()
+        };
+        assert_eq!(current.gain_db, -6.0);
+
+        // A full queue refuses a prepared output and keeps the old one.
+        let mut mono = profile();
+        if let OutputProfile::Speakers(profile) = &mut mono {
+            profile.speakers.truncate(1);
+            profile.speakers[0].name = "FC".into();
+            profile.speakers[0].azimuth_deg = 0.0;
+            profile.channel_mask = 4;
+            profile.device_channels = 1;
+            profile.speakers[0].channel = 0;
+        }
+        let prepared = mono.prepare().unwrap();
+        assert_eq!(prepared.channels(), 1);
+        while session.engine.apply(LiveChange::Mute(false)).is_ok() {}
+        session.pending_prepared = true;
+        assert!(matches!(
+            session.apply(LiveChange::Prepared(Box::new(prepared))),
+            Err(SessionError::Rejected)
+        ));
+        assert_eq!(speaker_names(&session.profile), ["FL", "FR"]);
+        assert_eq!(session.output_channels, 2);
+        assert!(session.pending_prepared);
+        assert!(matches!(
+            session.apply(LiveChange::TestTone(DirectionId(0))),
+            Err(SessionError::Rejected)
+        ));
+
+        // Once the queue drains, a taken output is the output; the profile
+        // a re-prepare of the session's own builds from stays.
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let prepared = Box::new(mono.prepare().unwrap());
+            if session.apply(LiveChange::Prepared(prepared)).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the full queue was not drained");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(session.output_channels, 1);
+        assert!(!session.pending_prepared);
+        assert_eq!(speaker_names(&session.profile), ["FL", "FR"]);
         session.stop().unwrap();
     }
 

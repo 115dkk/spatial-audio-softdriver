@@ -19,13 +19,19 @@
 
 use std::cell::RefCell;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep, Snapshot, UserError};
+use engine::{LiveChange, OutputProfile, Prepared};
+use speakers::{SpeakerConfig, SpeakerProfile, SpeakerRange};
+use ssr_types::app::{
+    Intent, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep, Snapshot,
+    UserError,
+};
 use ssr_types::ports::PolicyState;
 use ssr_types::{
-    Arch, DeviceId, DeviceState, DriverState, EngineFault, EngineStatus, Host, HostError,
-    OutputDevice, Platform, Role, SecureBoot, SetupTask,
+    Arch, DeviceId, DeviceState, DirectionId, DirectionView, DriverState, EngineFault,
+    EngineStatus, Host, HostError, Layout, OutputDevice, Platform, Role, SecureBoot, SetupTask,
 };
 
 use crate::restore_point::{self, RestorePoint};
@@ -33,18 +39,39 @@ use crate::session::{Session, SessionError, SessionNotice};
 
 /// A running engine as the state machine sees it.
 pub trait EngineHandle {
+    /// The engine's notices since the last poll. A `NeedsPrepared` is
+    /// passed on, not answered: the supervisor prepares the profile it is
+    /// playing and hands it over with [`EngineHandle::apply`].
     fn poll(&mut self) -> Result<Vec<SessionNotice>, SessionError>;
     fn status(&self) -> EngineStatus;
+    /// Hands a change to the running engine, all or nothing: an `Err`
+    /// ([`SessionError::Rejected`] when the engine's queue refuses it) leaves
+    /// the output as it was. A `Prepared` was prepared by the caller, off the
+    /// engine's real-time threads.
+    fn apply(&mut self, change: LiveChange) -> Result<(), SessionError>;
+    /// As [`EngineHandle::apply`], but returns a rejected change so a prepared
+    /// output can be retried without doing the slow preparation again.
+    fn apply_retaining(&mut self, change: LiveChange) -> Result<(), (SessionError, LiveChange)>;
     fn stop(self: Box<Self>) -> Result<(), SessionError>;
 }
 
 impl EngineHandle for Session {
+    /// Leaves the re-prepare to the supervisor ([`Session::poll_events`]):
+    /// the session knows only the profile it started with.
     fn poll(&mut self) -> Result<Vec<SessionNotice>, SessionError> {
-        Session::poll(self)
+        Ok(Session::poll_events(self))
     }
 
     fn status(&self) -> EngineStatus {
         Session::status(self)
+    }
+
+    fn apply(&mut self, change: LiveChange) -> Result<(), SessionError> {
+        Session::apply(self, change)
+    }
+
+    fn apply_retaining(&mut self, change: LiveChange) -> Result<(), (SessionError, LiveChange)> {
+        Session::apply_retaining(self, change)
     }
 
     /// Discards the report: the shell has no use for it yet.
@@ -55,8 +82,48 @@ impl EngineHandle for Session {
 
 /// Starts the engine for the state machine.
 pub trait Launcher {
-    /// Starts the engine on `output` (an active device that is not ours).
-    fn launch(&mut self, output: &OutputDevice) -> Result<Box<dyn EngineHandle>, SessionError>;
+    /// Starts the engine on `output` (an active device that is not ours) with
+    /// `profile`, which the supervisor resolved ([`Supervisor::output_profile`])
+    /// and keeps: it is what a later re-prepare builds from. The launcher
+    /// reads no profile of its own.
+    fn launch(
+        &mut self,
+        output: &OutputDevice,
+        profile: &OutputProfile,
+    ) -> Result<Box<dyn EngineHandle>, SessionError>;
+}
+
+/// The running engine and the profile it plays.
+struct Running {
+    handle: Box<dyn EngineHandle>,
+    /// The profile launched, then each one a profile intent handed over and
+    /// each gain the engine took since: what a re-prepare builds from.
+    profile: OutputProfile,
+    /// The engine asked for its output again (`NeedsPrepared`) and has not
+    /// taken one since.
+    needs_prepared: bool,
+    /// A prepared output the engine's full change queue has not taken yet.
+    /// Keeping it makes retries cheap and leaves the guard's stall clock alone.
+    pending: Option<Box<Prepared>>,
+}
+
+/// What the profile intents remember (ADR 0013, 2026-10-15 addendum).
+///
+/// Every field has a default, so a settings file written before profiles
+/// existed, or one missing a field, still loads.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ProfileSettings {
+    /// The imported BRIR set: a folder of direction WAVs, `hesuvi.wav`, or
+    /// `hrir.wav`. `Some` makes the output headphones.
+    pub brir: Option<PathBuf>,
+    /// The imported headphone FIR, folded into the BRIR set.
+    pub headphone_fir: Option<PathBuf>,
+    /// The gain [`Intent::SetGain`] saved, in dB (-20 to +10). `None` (never
+    /// set, or a settings file from before profiles) keeps the gain of the
+    /// state directory's `profile.toml` and is 0 dB for an imported set or
+    /// the default stereo profile; `Some` overrides all of them.
+    pub gain_db: Option<f32>,
 }
 
 /// Settings the shell persists; the machine reads and updates them.
@@ -65,16 +132,19 @@ pub trait Launcher {
 /// after every [`Supervisor::handle`] that returns `Ok`, because both can
 /// rewrite the stored id (an output found again by its name). A `handle` that
 /// fails after such a rewrite leaves the old id persisted, which the name finds
-/// again next time.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// again next time. A profile intent changes the settings only when it
+/// succeeds, so a failed import or gain never reaches the file.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     /// The chosen output, remembered by id and name: the id can change across
     /// reboots, the name is the fallback.
     pub output: Option<OutputChoice>,
+    #[serde(default)]
+    pub profile: ProfileSettings,
 }
 
 /// What this build needs from the PC.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The driver package is test signed (until the attestation-signed driver
     /// of M5).
@@ -85,6 +155,10 @@ pub struct Config {
     /// How long the engine may try to reconnect a lost output or capture
     /// before the supervisor stops it and gives the roles back.
     pub fault_grace: Duration,
+    /// The state directory's `profile.toml`. When the file exists it decides
+    /// the output (headphones or speakers) and the import intents are
+    /// refused; only the saved gain overrides it.
+    pub profile_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -113,6 +187,7 @@ impl Default for Config {
             min_os_build: Self::MIN_OS_BUILD,
             arch: Self::BUILD_ARCH,
             fault_grace: Self::FAULT_GRACE,
+            profile_file: None,
         }
     }
 }
@@ -126,7 +201,7 @@ pub struct Supervisor<H: Host, L: Launcher> {
     settings: Settings,
     phase: Phase,
     /// `Some` exactly while the phase is [`Phase::Running`].
-    engine: Option<Box<dyn EngineHandle>>,
+    engine: Option<Running>,
     /// The engine reported a lost output or capture and is reconnecting.
     reconnecting: Option<Reconnecting>,
     /// The restore point written when the roles were taken; `Some` exactly
@@ -137,6 +212,10 @@ pub struct Supervisor<H: Host, L: Launcher> {
     error: Option<UserError>,
     notes: Vec<String>,
     shell_notes: Vec<String>,
+    /// The resolved profile as the screen sees it, cached: it changes only
+    /// when a profile intent succeeds or the engine starts, so a snapshot
+    /// never reads the disk for it.
+    profile: ProfileView,
 }
 
 impl<H: Host, L: Launcher> fmt::Debug for Supervisor<H, L> {
@@ -172,7 +251,9 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             error: None,
             notes: Vec::new(),
             shell_notes: Vec::new(),
+            profile: default_profile_view(),
         };
+        supervisor.refresh_profile();
         let driver = supervisor.host.get_mut().driver();
         let fine = driver_is_fine(&driver);
         supervisor.driver = Some(driver);
@@ -204,6 +285,12 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// Polls the running engine and returns its notices (none outside
     /// Running).
     ///
+    /// A `NeedsPrepared` notice is only remembered: the output is prepared
+    /// again by [`Supervisor::prepare_again`], which the caller runs when
+    /// [`Supervisor::needs_prepared`] says so. Preparing can take seconds,
+    /// and the shell first tells the guard it is not to count them as a
+    /// stall (ADR 0033).
+    ///
     /// A lost output or capture is the engine's to reconnect: it retries
     /// without limit and says `FaultCleared` when it succeeds. So a `Fault`
     /// notice keeps Running with an error that says it is reconnecting, and
@@ -211,10 +298,10 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// [`Config::fault_grace`] (from its first notice, by `now`), or a poll
     /// error, stops the engine, gives the roles back and moves to Faulted.
     pub fn tick(&mut self, now: Instant) -> Vec<SessionNotice> {
-        let Some(engine) = self.engine.as_mut() else {
+        let Some(running) = self.engine.as_mut() else {
             return Vec::new();
         };
-        let notices = match engine.poll() {
+        let notices = match running.handle.poll() {
             Ok(notices) => notices,
             Err(error) => {
                 self.fault(user_error(
@@ -236,6 +323,11 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                     }
                 }
                 SessionNotice::FaultCleared => self.reconnected(),
+                SessionNotice::NeedsPrepared => {
+                    if let Some(running) = self.engine.as_mut() {
+                        running.needs_prepared = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -260,6 +352,87 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         notices
     }
 
+    /// The running engine asked for its output to be prepared again and has
+    /// not taken one since.
+    pub fn needs_prepared(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|running| running.needs_prepared)
+    }
+
+    /// True when answering `NeedsPrepared` still has slow preparation ahead.
+    /// Once an output is pending, later calls only retry the nonblocking apply.
+    pub fn prepare_work_pending(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|running| running.needs_prepared && running.pending.is_none())
+    }
+
+    /// Answers the engine's `NeedsPrepared`: prepares the profile it plays
+    /// (the one launched, or the last one a profile intent handed over, with
+    /// the gain set since) on this thread and hands it over. A full change
+    /// queue is [`SessionNotice::PrepareRetry`]; the prepared output is kept so
+    /// the next call retries only the handoff. A profile that no longer
+    /// prepares (its files changed under it) stops the engine, gives the roles
+    /// back and moves to Faulted, since the output cannot be rebuilt. Nothing
+    /// happens unless [`Supervisor::needs_prepared`].
+    pub fn prepare_again(&mut self) -> Vec<SessionNotice> {
+        let Some(running) = self
+            .engine
+            .as_mut()
+            .filter(|running| running.needs_prepared)
+        else {
+            return Vec::new();
+        };
+        let mut millis = 0.0;
+        if running.pending.is_none() {
+            let started = Instant::now();
+            match running.profile.prepare() {
+                Ok(prepared) => running.pending = Some(Box::new(prepared)),
+                Err(error) => {
+                    self.fault(user_error(
+                        format!("엔진이 멈췄습니다: {}", SessionError::from(error)),
+                        NextAction::Retry,
+                    ));
+                    return Vec::new();
+                }
+            }
+            millis = started.elapsed().as_secs_f64() * 1_000.0;
+        }
+        let prepared = running
+            .pending
+            .take()
+            .expect("a requested output is prepared");
+        let kind = prepared.kind();
+        let channels = prepared.channels();
+        let directions = prepared.direction_views();
+        match running
+            .handle
+            .apply_retaining(LiveChange::Prepared(prepared))
+        {
+            Ok(()) => {
+                running.needs_prepared = false;
+                self.profile.directions = directions;
+                vec![SessionNotice::Prepared {
+                    kind,
+                    channels,
+                    millis,
+                }]
+            }
+            Err((SessionError::Rejected, LiveChange::Prepared(prepared))) => {
+                running.pending = Some(prepared);
+                vec![SessionNotice::PrepareRetry]
+            }
+            Err((error, _)) => {
+                self.fault(user_error(
+                    format!("엔진이 멈췄습니다: {error}"),
+                    NextAction::Retry,
+                ));
+                Vec::new()
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let outputs = self
             .host
@@ -274,7 +447,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             .collect();
         Snapshot {
             phase: self.phase.clone(),
-            engine: self.engine.as_ref().map(|engine| engine.status()),
+            profile: self.profile.clone(),
+            engine: self.engine_status(),
             outputs,
             chosen_output: self.settings.output.clone(),
             driver: self.driver.clone(),
@@ -306,7 +480,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// The running engine's status without listing the host's outputs, for
     /// the shell's 30 Hz meters; `None` outside Running.
     pub fn engine_status(&self) -> Option<EngineStatus> {
-        self.engine.as_ref().map(|engine| engine.status())
+        self.engine.as_ref().map(|running| running.handle.status())
     }
 
     fn dispatch(&mut self, intent: Intent) -> Outcome {
@@ -314,14 +488,33 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             return refused();
         }
         let result = match intent {
-            Intent::ImportBrir(_)
-            | Intent::ImportHeadphoneFir(_)
-            | Intent::SwitchProfile(_)
-            | Intent::SetGain(_)
-            | Intent::TestDirection(_)
-            | Intent::StartDiagnosticRecording => {
+            // The profile can change whenever the wizard is done; a running
+            // engine takes the change live, all or nothing.
+            Intent::ImportBrir(path) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.import_brir(path),
+                _ => return refused(),
+            },
+            Intent::ImportHeadphoneFir(path) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.import_headphone_fir(path),
+                _ => return refused(),
+            },
+            Intent::SetGain(db) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.set_gain(db),
+                _ => return refused(),
+            },
+            Intent::TestDirection(id) => match self.phase {
+                Phase::Running => self.test_direction(id),
+                Phase::Ready | Phase::Faulted => {
+                    return Outcome::Refused(user_error(
+                        "켠 뒤에 시험음을 낼 수 있습니다.",
+                        NextAction::None,
+                    ));
+                }
+                _ => return refused(),
+            },
+            Intent::StartDiagnosticRecording => {
                 return Outcome::Refused(user_error(
-                    "아직 지원하지 않는 동작입니다.",
+                    "진단 녹음은 다음 조각에서 옵니다.",
                     NextAction::None,
                 ));
             }
@@ -589,10 +782,19 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             self.phase = Phase::Setup(SetupStep::ChooseOutput);
             return Err(self.output_missing());
         };
+        // The profile is resolved before the roles move, so a broken
+        // profile.toml or a BRIR set that went missing changes nothing.
+        let resolved = resolve(&self.config, &self.settings.profile)?;
+        self.profile = resolved.view;
         self.take_roles(ours, output.id.clone())?;
-        match self.launcher.launch(&output) {
-            Ok(engine) => {
-                self.engine = Some(engine);
+        match self.launcher.launch(&output, &resolved.profile) {
+            Ok(handle) => {
+                self.engine = Some(Running {
+                    handle,
+                    profile: resolved.profile,
+                    needs_prepared: false,
+                    pending: None,
+                });
                 self.phase = Phase::Running;
                 Ok(())
             }
@@ -659,8 +861,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// Stops the engine if it runs; its error is a note, not a failure.
     fn stop_engine(&mut self) {
         self.reconnecting = None;
-        if let Some(engine) = self.engine.take()
-            && let Err(error) = engine.stop()
+        if let Some(running) = self.engine.take()
+            && let Err(error) = running.handle.stop()
         {
             self.notes
                 .push(format!("엔진을 멈추다가 오류가 났습니다: {error}"));
@@ -694,6 +896,135 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         Some(found.clone())
     }
 
+    /// The profile the next launch uses: the state directory's
+    /// `profile.toml` when it exists (with the saved gain), else headphones
+    /// from the imported BRIR set, else [`default_profile`] (with the saved
+    /// gain). Reads the disk; the snapshot uses the cached view instead.
+    pub fn output_profile(&self) -> Result<OutputProfile, UserError> {
+        resolve(&self.config, &self.settings.profile).map(|resolved| resolved.profile)
+    }
+
+    fn profile_file_active(&self) -> bool {
+        profile_file(&self.config).is_some()
+    }
+
+    /// Refreshes the cached profile when `profile.toml` appears or disappears.
+    /// Stable file presence does no disk work; edits to an existing file are
+    /// picked up by Enable or re-prepare as before.
+    pub fn watch_profile_file(&mut self) {
+        if self.profile_file_active() != self.profile.from_file {
+            self.refresh_profile();
+        }
+    }
+
+    /// Resolves the profile once at start for the snapshot. A profile that
+    /// does not resolve keeps what the settings say, with no directions, and
+    /// becomes a note; enabling then fails with the same sentence.
+    fn refresh_profile(&mut self) {
+        match resolve(&self.config, &self.settings.profile) {
+            Ok(resolved) => self.profile = resolved.view,
+            Err(error) => {
+                self.profile = unresolved_view(&self.config, &self.settings.profile);
+                self.notes.push(error.message);
+            }
+        }
+    }
+
+    fn import_brir(&mut self, path: PathBuf) -> Result<(), UserError> {
+        if self.profile_file_active() {
+            return Err(profile_file_error());
+        }
+        if brir_source(&path).is_none() {
+            return Err(invalid_brir_error());
+        }
+        let mut settings = self.settings.profile.clone();
+        settings.brir = Some(path);
+        self.change_profile(settings)
+    }
+
+    fn import_headphone_fir(&mut self, path: PathBuf) -> Result<(), UserError> {
+        if self.profile_file_active() {
+            return Err(profile_file_error());
+        }
+        if self.settings.profile.brir.is_none() {
+            return Err(user_error(
+                "먼저 BRIR 세트를 가져오십시오.",
+                NextAction::None,
+            ));
+        }
+        brir::check_headphone_fir(&path).map_err(|error| {
+            user_error(
+                format!("헤드폰 FIR을 읽지 못했습니다: {error}"),
+                NextAction::None,
+            )
+        })?;
+        let mut settings = self.settings.profile.clone();
+        settings.headphone_fir = Some(path);
+        self.change_profile(settings)
+    }
+
+    /// Resolves `settings`; with an engine running, prepares the result on
+    /// this thread (never the engine's real-time threads) and hands it over
+    /// as one [`LiveChange::Prepared`]. Only then are the settings, the view
+    /// and the profile a re-prepare builds from kept: any failure leaves
+    /// them and the running output as they were.
+    fn change_profile(&mut self, settings: ProfileSettings) -> Result<(), UserError> {
+        let resolved = resolve(&self.config, &settings)?;
+        if let Some(running) = self.engine.as_mut() {
+            let prepared = resolved
+                .profile
+                .prepare()
+                .map_err(|error| live_error(SessionError::Prepare(error)))?;
+            running
+                .handle
+                .apply(LiveChange::Prepared(Box::new(prepared)))
+                .map_err(live_error)?;
+            running.profile = resolved.profile;
+            running.needs_prepared = false;
+            running.pending = None;
+        }
+        self.settings.profile = settings;
+        self.profile = resolved.view;
+        Ok(())
+    }
+
+    fn set_gain(&mut self, db: f32) -> Result<(), UserError> {
+        if !db.is_finite() || !(GAIN_MIN_DB..=GAIN_MAX_DB).contains(&db) {
+            return Err(user_error(
+                "게인은 -20 dB에서 +10 dB 사이입니다.",
+                NextAction::None,
+            ));
+        }
+        if let Some(running) = self.engine.as_mut() {
+            running
+                .handle
+                .apply(LiveChange::Gain(db))
+                .map_err(live_error)?;
+            set_gain_db(&mut running.profile, db);
+        }
+        self.settings.profile.gain_db = Some(db);
+        self.profile.gain_db = db;
+        Ok(())
+    }
+
+    /// The direction must be in the cached profile's layout. That is the
+    /// layout of the last profile handed to the engine, which is also the
+    /// one the engine checks a test tone against (the last `Prepared` it
+    /// queued, installed or not): the header-only layout equals `prepare`'s
+    /// (ADR 0016, 2026-10-15 amendment), and the view changes only when the
+    /// engine took the profile.
+    fn test_direction(&mut self, id: DirectionId) -> Result<(), UserError> {
+        if id.index() >= self.profile.directions.len() {
+            return Err(user_error("그 방향이 없습니다.", NextAction::None));
+        }
+        self.engine
+            .as_mut()
+            .expect("Running has an engine")
+            .handle
+            .apply(LiveChange::TestTone(id))
+            .map_err(live_error)
+    }
+
     fn output_missing(&self) -> UserError {
         let name = self
             .settings
@@ -704,6 +1035,304 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             format!("저장된 출력 장치를 찾을 수 없습니다: {name}"),
             NextAction::OpenSettings,
         )
+    }
+}
+
+/// The gain range of [`Intent::SetGain`], the engine's own.
+const GAIN_MIN_DB: f32 = -20.0;
+const GAIN_MAX_DB: f32 = 10.0;
+
+/// The profile without a `profile.toml` or an imported BRIR set: two
+/// full-range speakers at ±30° on the device's first two channels, so every
+/// source is panned to stereo and the app makes sound from the first day.
+pub fn default_profile() -> OutputProfile {
+    let speaker = |name: &str, azimuth_deg: f32, channel: usize| SpeakerConfig {
+        name: name.into(),
+        azimuth_deg,
+        elevation_deg: 0.0,
+        channel,
+        distance_m: None,
+        delay_ms: None,
+        trim_db: 0.0,
+        range: SpeakerRange::Full,
+        crossover_hz: None,
+        fir: None,
+    };
+    OutputProfile::Speakers(SpeakerProfile {
+        name: "Stereo".into(),
+        device_channels: 2,
+        channel_mask: 3,
+        gain_db: 0.0,
+        limiter_ceiling_dbfs: -1.0,
+        crossover_hz: 80.0,
+        lfe_gain_db: 10.0,
+        speakers: vec![speaker("FL", 30.0, 0), speaker("FR", -30.0, 1)],
+        subwoofers: Vec::new(),
+        bass_to: Vec::new(),
+    })
+}
+
+fn set_gain_db(profile: &mut OutputProfile, db: f32) {
+    match profile {
+        OutputProfile::Headphones(profile) => profile.gain_db = db,
+        OutputProfile::Speakers(profile) => profile.gain_db = db,
+    }
+}
+
+/// [`default_profile`] as the screen sees it, for snapshots taken without a
+/// supervisor.
+pub fn default_profile_view() -> ProfileView {
+    let OutputProfile::Speakers(profile) = default_profile() else {
+        unreachable!("the default profile is a speaker profile");
+    };
+    speakers_view(&profile, ProfileKind::Stereo, false)
+}
+
+/// A resolved profile and its view.
+struct Resolved {
+    profile: OutputProfile,
+    view: ProfileView,
+}
+
+fn profile_file(config: &Config) -> Option<&Path> {
+    config.profile_file.as_deref().filter(|path| path.is_file())
+}
+
+/// The precedence of [`Supervisor::output_profile`], reading only headers.
+fn resolve(config: &Config, settings: &ProfileSettings) -> Result<Resolved, UserError> {
+    if let Some(path) = profile_file(config) {
+        let mut profile = engine::load_output_profile(path).map_err(|error| {
+            user_error(
+                format!("profile.toml을 읽지 못했습니다: {error}"),
+                NextAction::None,
+            )
+        })?;
+        let view = match &mut profile {
+            OutputProfile::Headphones(profile) => {
+                if let Some(db) = settings.gain_db {
+                    profile.gain_db = db;
+                }
+                headphones_view(profile, true)?
+            }
+            OutputProfile::Speakers(profile) => {
+                if let Some(db) = settings.gain_db {
+                    profile.gain_db = db;
+                }
+                speakers_view(profile, ProfileKind::Speakers, true)
+            }
+        };
+        return Ok(Resolved { profile, view });
+    }
+    if let Some(path) = &settings.brir {
+        let source = brir_source(path).ok_or_else(invalid_brir_error)?;
+        let mut profile = brir::Profile {
+            name: brir_name(path),
+            brir: source,
+            headphone_fir: settings.headphone_fir.clone(),
+            gain_db: settings.gain_db.unwrap_or(0.0),
+            limiter_ceiling_dbfs: -1.0,
+            lfe: brir::LfePolicy::Mute,
+            angles: brir::AnglePreset::Standard,
+            angle_overrides: Vec::new(),
+            truncate: None,
+            trim_leading_delay: true,
+        };
+        let layout = brir::layout(&profile).map_err(brir_error)?;
+        // The build logs routed LFE into the centre at 0 dB.
+        if layout.find("FC").is_some() {
+            profile.lfe = brir::LfePolicy::Direction {
+                name: "FC".into(),
+                gain_db: 0.0,
+            };
+        }
+        let view = ProfileView {
+            kind: ProfileKind::Headphones,
+            name: profile.name.clone(),
+            brir: Some(display(path)),
+            headphone_fir: profile.headphone_fir.as_deref().map(display),
+            gain_db: profile.gain_db,
+            directions: direction_views(&layout),
+            from_file: false,
+        };
+        return Ok(Resolved {
+            profile: OutputProfile::Headphones(profile),
+            view,
+        });
+    }
+    let mut profile = default_profile();
+    let OutputProfile::Speakers(speakers) = &mut profile else {
+        unreachable!("the default profile is a speaker profile");
+    };
+    speakers.gain_db = settings.gain_db.unwrap_or(0.0);
+    let view = speakers_view(speakers, ProfileKind::Stereo, false);
+    Ok(Resolved { profile, view })
+}
+
+/// What the view says when the profile does not resolve.
+fn unresolved_view(config: &Config, settings: &ProfileSettings) -> ProfileView {
+    let from_file = profile_file(config).is_some();
+    let headphones = !from_file && settings.brir.is_some();
+    ProfileView {
+        kind: if from_file {
+            ProfileKind::Speakers
+        } else if headphones {
+            ProfileKind::Headphones
+        } else {
+            ProfileKind::Stereo
+        },
+        name: match (&settings.brir, from_file) {
+            (_, true) => "profile.toml".to_owned(),
+            (Some(path), false) => brir_name(path),
+            (None, false) => "Stereo".to_owned(),
+        },
+        brir: settings.brir.as_deref().filter(|_| headphones).map(display),
+        headphone_fir: settings
+            .headphone_fir
+            .as_deref()
+            .filter(|_| headphones)
+            .map(display),
+        // The file's own gain is unknown when the file does not load.
+        gain_db: settings.gain_db.unwrap_or(0.0),
+        directions: Vec::new(),
+        from_file,
+    }
+}
+
+fn headphones_view(profile: &brir::Profile, from_file: bool) -> Result<ProfileView, UserError> {
+    let layout = brir::layout(profile).map_err(brir_error)?;
+    let brir = match &profile.brir {
+        brir::BrirSource::Hesuvi(path)
+        | brir::BrirSource::Hrir(path)
+        | brir::BrirSource::Folder(path)
+        | brir::BrirSource::Mapped { wav: path, .. } => Some(display(path)),
+        brir::BrirSource::Directions(_) => None,
+    };
+    Ok(ProfileView {
+        kind: ProfileKind::Headphones,
+        name: profile.name.clone(),
+        brir,
+        headphone_fir: profile.headphone_fir.as_deref().map(display),
+        gain_db: profile.gain_db,
+        directions: direction_views(&layout),
+        from_file,
+    })
+}
+
+/// Speakers in profile order, which is the order `speakers::prepare` lays
+/// them out in.
+fn speakers_view(profile: &SpeakerProfile, kind: ProfileKind, from_file: bool) -> ProfileView {
+    ProfileView {
+        kind,
+        name: profile.name.clone(),
+        brir: None,
+        headphone_fir: None,
+        gain_db: profile.gain_db,
+        directions: profile
+            .speakers
+            .iter()
+            .enumerate()
+            .map(|(index, speaker)| DirectionView {
+                id: direction_id(index),
+                name: speaker.name.clone(),
+                azimuth_deg: speaker.azimuth_deg,
+                elevation_deg: speaker.elevation_deg,
+            })
+            .collect(),
+        from_file,
+    }
+}
+
+fn direction_views(layout: &Layout) -> Vec<DirectionView> {
+    layout
+        .directions()
+        .iter()
+        .enumerate()
+        .map(|(index, direction)| DirectionView {
+            id: direction_id(index),
+            name: direction.name.clone(),
+            azimuth_deg: direction.azimuth_deg,
+            elevation_deg: direction.elevation_deg,
+        })
+        .collect()
+}
+
+fn direction_id(index: usize) -> DirectionId {
+    DirectionId(u16::try_from(index).expect("a layout has far fewer than 65536 directions"))
+}
+
+/// The BRIR source an imported path names: a folder of direction WAVs,
+/// `hesuvi.wav`, or `hrir.wav` (any case).
+fn brir_source(path: &Path) -> Option<brir::BrirSource> {
+    if path.is_dir() {
+        return Some(brir::BrirSource::Folder(path.to_owned()));
+    }
+    let name = path.file_name()?.to_str()?;
+    if name.eq_ignore_ascii_case("hesuvi.wav") {
+        Some(brir::BrirSource::Hesuvi(path.to_owned()))
+    } else if name.eq_ignore_ascii_case("hrir.wav") {
+        Some(brir::BrirSource::Hrir(path.to_owned()))
+    } else {
+        None
+    }
+}
+
+/// A folder's name, or the name of the folder holding `hesuvi.wav` or
+/// `hrir.wav` (what the measurement was saved as).
+fn brir_name(path: &Path) -> String {
+    let named = if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+    };
+    named
+        .and_then(Path::file_name)
+        .or_else(|| path.file_stem())
+        .map_or_else(
+            || "BRIR".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+}
+
+fn display(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn profile_file_error() -> UserError {
+    user_error(
+        "상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.",
+        NextAction::None,
+    )
+}
+
+fn invalid_brir_error() -> UserError {
+    user_error(
+        "hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오.",
+        NextAction::None,
+    )
+}
+
+fn brir_error(error: brir::BrirError) -> UserError {
+    user_error(
+        format!("BRIR 세트를 읽지 못했습니다: {error}"),
+        NextAction::None,
+    )
+}
+
+/// A change the running engine did not take; the output is as it was.
+fn live_error(error: SessionError) -> UserError {
+    match error {
+        SessionError::Prepare(error) => user_error(
+            format!("프로필을 준비하지 못했습니다: {error}"),
+            NextAction::None,
+        ),
+        SessionError::Rejected => user_error(
+            "엔진이 변경을 받지 못했습니다. 잠시 뒤 다시 시도하십시오.",
+            NextAction::Retry,
+        ),
+        error => user_error(
+            format!("엔진에 변경을 적용하지 못했습니다: {error}"),
+            NextAction::Retry,
+        ),
     }
 }
 

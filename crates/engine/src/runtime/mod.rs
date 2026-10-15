@@ -40,6 +40,7 @@ use crossing::{CrossingConsumer, CrossingProducer};
 use output::*;
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
@@ -48,13 +49,15 @@ use std::time::{Duration, Instant};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use ssr_types::{
     BitstreamCodec, BitstreamFormat, CaptureError, CaptureSource, ChainErrorCounts, ChainErrorKind,
-    ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault, EngineStatus, LatencyStats,
-    OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener, OutputSink, PcmFormat,
-    SampleType, SourceFormat, UnderrunSnapshot, UnsupportedReason,
+    ClockStatus, DirectionId, DirectionView, ENGINE_ENDPOINTS, EndpointStatus, EngineFault,
+    EngineStatus, LatencyStats, OutputError, OutputFormat, OutputLayout, OutputMode, OutputOpener,
+    OutputSink, PcmFormat, SampleType, SceneObject, SourceFormat, UnderrunSnapshot,
+    UnsupportedReason,
 };
 
 use crate::Chain;
 use crate::chain::{ChainConfig, ChainEvent, Prepared};
+use crate::mixer::MAX_SCENE_OBJECTS;
 use crate::{MAX_OUTPUT_CHANNELS, MIX_FRAMES};
 
 const DEFAULT_QPC_FREQUENCY: u64 = 10_000_000;
@@ -241,6 +244,15 @@ pub enum LiveChange {
     Prepared(Box<Prepared>),
     /// Mutes or unmutes the output (ramped, no click).
     Mute(bool),
+    /// Overrides the profile output gain in dB until the engine stops, ramped
+    /// over one mix block and retained across Prepared replacements. Finite
+    /// values from -20 to +10 dB are accepted.
+    Gain(f32),
+    /// Plays the 400 ms test signal ([`crate::test_tone`]) on one direction
+    /// of the output layout, restarting it if it is already playing. Refused
+    /// when the layout the change will meet (the last `Prepared` applied or
+    /// the one the engine started with) lacks the direction.
+    TestTone(DirectionId),
     /// Changes the output-stage LFE route in dB, ramped over one mix block.
     LfeGain(f32),
     /// Changes the crossing-ring trough target from the next output period.
@@ -319,11 +331,55 @@ impl Default for StartOptions {
 pub struct Engine {
     shared: Arc<Shared>,
     changes: RefCell<Producer<LiveChange>>,
+    directions: RefCell<DirectionTrack>,
     capture_events: Consumer<RtEvent>,
     output_events: Consumer<RtEvent>,
     retired: Consumer<Box<Prepared>>,
     capture_thread: Option<CaptureThreads>,
     output_thread: Option<JoinHandle<()>>,
+}
+
+/// The output layout's directions as the control thread knows them. Names
+/// are strings, so the views are built here on `apply` and never cross to the
+/// real-time threads; the capture thread only counts installed sets
+/// (`Shared::prepared_installed`), and [`Engine::status`] promotes a queued
+/// layout once its set is installed.
+#[derive(Debug, Default)]
+struct DirectionTrack {
+    /// The layout of the installed set.
+    current: Vec<DirectionView>,
+    /// Layouts sent and not yet installed, with the install count that
+    /// installs each.
+    queued: VecDeque<(u64, Vec<DirectionView>)>,
+    /// `Prepared` changes sent so far.
+    sent: u64,
+    /// Directions of the layout the next change will meet; `None` before any
+    /// set.
+    latest_len: Option<usize>,
+}
+
+impl DirectionTrack {
+    fn new(initial: Option<Vec<DirectionView>>) -> Self {
+        Self {
+            latest_len: initial.as_ref().map(Vec::len),
+            current: initial.unwrap_or_default(),
+            queued: VecDeque::new(),
+            sent: 0,
+        }
+    }
+
+    fn current(&mut self, installed: u64) -> &[DirectionView] {
+        while self
+            .queued
+            .front()
+            .is_some_and(|(sequence, _)| *sequence <= installed)
+        {
+            if let Some((_, directions)) = self.queued.pop_front() {
+                self.current = directions;
+            }
+        }
+        &self.current
+    }
 }
 
 /// The capture/DSP thread and the decode thread it hands bursts to.
@@ -436,6 +492,8 @@ where
     let initial_layout = prepared
         .as_ref()
         .map_or(OutputLayout::STEREO, |prepared| prepared.layout());
+    let directions =
+        DirectionTrack::new(prepared.as_ref().map(|prepared| prepared.direction_views()));
 
     let output_shared = Arc::clone(&shared);
     let output_config = config.clone();
@@ -578,6 +636,7 @@ where
     Ok(Engine {
         shared,
         changes: RefCell::new(changes),
+        directions: RefCell::new(directions),
         capture_events,
         output_events,
         retired,
@@ -590,14 +649,43 @@ where
 }
 
 impl Engine {
-    /// Queues a change for the capture thread; never blocks.
+    /// Queues a change for the capture thread; never blocks. Refuses values
+    /// out of range, a test direction the layout lacks, and any change while
+    /// the queue is full.
     pub fn apply(&self, change: LiveChange) -> Result<(), Rejected> {
-        if matches!(change, LiveChange::LfeGain(db) if !db.is_finite() || !(-40.0..=20.0).contains(&db))
-            || matches!(change, LiveChange::TargetMs(ms) if !valid_target_ms(ms, &self.shared))
-        {
-            return Err(Rejected);
+        self.apply_retaining(change).map_err(|(error, _)| error)
+    }
+
+    /// As [`Engine::apply`], but gives a refused change back to the caller.
+    /// This lets slow prepared output be retried without rebuilding it.
+    pub fn apply_retaining(&self, change: LiveChange) -> Result<(), (Rejected, LiveChange)> {
+        let mut directions = self.directions.borrow_mut();
+        let valid = match &change {
+            LiveChange::Gain(db) => db.is_finite() && (-20.0..=10.0).contains(db),
+            LiveChange::LfeGain(db) => db.is_finite() && (-40.0..=20.0).contains(db),
+            LiveChange::TargetMs(ms) => valid_target_ms(*ms, &self.shared),
+            LiveChange::TestTone(direction) => directions
+                .latest_len
+                .is_some_and(|len| direction.index() < len),
+            LiveChange::Prepared(_) | LiveChange::Mute(_) => true,
+        };
+        if !valid {
+            return Err((Rejected, change));
         }
-        self.changes.borrow_mut().push(change).map_err(|_| Rejected)
+        let views = match &change {
+            LiveChange::Prepared(prepared) => Some(prepared.direction_views()),
+            _ => None,
+        };
+        if let Err(PushError::Full(change)) = self.changes.borrow_mut().push(change) {
+            return Err((Rejected, change));
+        }
+        if let Some(views) = views {
+            directions.sent += 1;
+            directions.latest_len = Some(views.len());
+            let sequence = directions.sent;
+            directions.queued.push_back((sequence, views));
+        }
+        Ok(())
     }
 
     /// Drains pending events and drops retired buffers. Call from the control
@@ -616,9 +704,14 @@ impl Engine {
     }
 
     /// Copies status atomics and computes latency percentiles on this caller;
-    /// never blocks either real-time thread.
+    /// never blocks either real-time thread. `directions` is the installed
+    /// set's layout and `scene` the objects of the last block the capture
+    /// thread mixed.
     pub fn status(&self) -> EngineStatus {
-        self.shared.status()
+        let mut status = self.shared.status();
+        let installed = self.shared.prepared_installed.load(Ordering::Acquire);
+        status.directions = self.directions.borrow_mut().current(installed).to_vec();
+        status
     }
 
     /// Stops both threads, joins them, and reports totals.
@@ -658,7 +751,7 @@ impl Engine {
             output_channels: self.shared.output_channels.load(Ordering::Acquire) as u16,
             output_channel_mask: self.shared.output_channel_mask.load(Ordering::Acquire),
             output_reopens: self.shared.output_reopens.load(Ordering::Acquire),
-            final_status: self.shared.status(),
+            final_status: self.status(),
         }
     }
 }
@@ -833,6 +926,99 @@ struct Shared {
     fault: AtomicU32,
     output_error_seq: AtomicU32,
     output_error: [AtomicU32; 256],
+    /// `Prepared` sets the capture thread has installed from the change queue.
+    prepared_installed: AtomicU64,
+    scene: SceneShared,
+}
+
+/// One published scene entry as five words: lane and object index, then the
+/// bits of x, y, z and the level.
+#[derive(Debug)]
+struct SceneBuffer {
+    len: AtomicU32,
+    entries: [[AtomicU32; 5]; MAX_SCENE_OBJECTS],
+}
+
+impl SceneBuffer {
+    fn new() -> Self {
+        Self {
+            len: AtomicU32::new(0),
+            entries: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU32::new(0))),
+        }
+    }
+}
+
+/// The last mixed block's objects, published by the capture thread without
+/// locks or allocation. Two buffers alternate: publication `n` is written to
+/// buffer `n % 2` and then made current by storing `n` in `sequence`, so a
+/// reader copies the other buffer from the one being written. A reader that
+/// finds `sequence` moved while it copied (the writer came round to its
+/// buffer) copies again.
+#[derive(Debug)]
+struct SceneShared {
+    sequence: AtomicU64,
+    buffers: [SceneBuffer; 2],
+    /// The mixer generation last published; the capture thread's alone.
+    published_generation: AtomicU64,
+}
+
+impl SceneShared {
+    fn new() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            buffers: [SceneBuffer::new(), SceneBuffer::new()],
+            published_generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Single writer: the capture thread. Never allocates or waits.
+    fn publish(&self, objects: &[SceneObject]) {
+        let next = self.sequence.load(Ordering::Relaxed).wrapping_add(1);
+        let buffer = &self.buffers[(next & 1) as usize];
+        // Orders the previous publication's `sequence` store before these
+        // writes, so a reader that sees any of them also sees that store and
+        // retries.
+        std::sync::atomic::fence(Ordering::Release);
+        let len = objects.len().min(MAX_SCENE_OBJECTS);
+        for (slot, object) in buffer.entries.iter().zip(&objects[..len]) {
+            slot[0].store(
+                u32::from(object.lane) | u32::from(object.index) << 8,
+                Ordering::Relaxed,
+            );
+            slot[1].store(object.x.to_bits(), Ordering::Relaxed);
+            slot[2].store(object.y.to_bits(), Ordering::Relaxed);
+            slot[3].store(object.z.to_bits(), Ordering::Relaxed);
+            slot[4].store(object.level_dbfs.to_bits(), Ordering::Relaxed);
+        }
+        buffer.len.store(len as u32, Ordering::Relaxed);
+        self.sequence.store(next, Ordering::Release);
+    }
+
+    fn read(&self) -> Vec<SceneObject> {
+        let mut objects = Vec::new();
+        loop {
+            let sequence = self.sequence.load(Ordering::Acquire);
+            let buffer = &self.buffers[(sequence & 1) as usize];
+            let len = (buffer.len.load(Ordering::Relaxed) as usize).min(MAX_SCENE_OBJECTS);
+            objects.clear();
+            objects.extend(buffer.entries[..len].iter().map(|slot| {
+                let ids = slot[0].load(Ordering::Relaxed);
+                SceneObject {
+                    lane: ids as u8,
+                    index: (ids >> 8) as u8,
+                    x: f32::from_bits(slot[1].load(Ordering::Relaxed)),
+                    y: f32::from_bits(slot[2].load(Ordering::Relaxed)),
+                    z: f32::from_bits(slot[3].load(Ordering::Relaxed)),
+                    level_dbfs: f32::from_bits(slot[4].load(Ordering::Relaxed)),
+                }
+            }));
+            std::sync::atomic::fence(Ordering::Acquire);
+            if self.sequence.load(Ordering::Relaxed) == sequence {
+                return objects;
+            }
+            std::hint::spin_loop();
+        }
+    }
 }
 
 impl Shared {
@@ -891,6 +1077,19 @@ impl Shared {
             fault: AtomicU32::new(FAULT_NONE),
             output_error_seq: AtomicU32::new(0),
             output_error: std::array::from_fn(|_| AtomicU32::new(0)),
+            prepared_installed: AtomicU64::new(0),
+            scene: SceneShared::new(),
+        }
+    }
+
+    /// Publishes the chain's scene when it mixed a block since the last call.
+    fn publish_scene(&self, chain: &Chain) {
+        let generation = chain.scene_generation();
+        if self.scene.published_generation.load(Ordering::Relaxed) != generation {
+            self.scene.publish(chain.scene());
+            self.scene
+                .published_generation
+                .store(generation, Ordering::Relaxed);
         }
     }
 
@@ -1122,6 +1321,8 @@ impl Shared {
 
     fn status(&self) -> EngineStatus {
         EngineStatus {
+            directions: Vec::new(),
+            scene: self.scene.read(),
             endpoints: std::array::from_fn(|endpoint| self.read_endpoint(endpoint)),
             unattributed_chain_errors: self.read_unattributed_chain_errors(),
             skipped_records: self.skipped_records.load(Ordering::Acquire),
@@ -1373,9 +1574,11 @@ fn capture_rt_step<C: CaptureSource>(
             .checked_div(block_samples)
             .unwrap_or(0)
             .min(crossing.timing_slots());
-        return if chain.finish_step(block_budget, &mut |event| {
+        let finished = chain.finish_step(block_budget, &mut |event| {
             handle_chain_event(event, crossing, events, shared);
-        }) {
+        });
+        shared.publish_scene(chain);
+        return if finished {
             CaptureStep::Finished
         } else {
             CaptureStep::Continue
@@ -1417,6 +1620,7 @@ fn capture_rt_step<C: CaptureSource>(
     shared
         .volume_transitions_coalesced
         .store(chain.volume_transitions_coalesced(), Ordering::Release);
+    shared.publish_scene(chain);
     CaptureStep::Continue
 }
 
@@ -1620,7 +1824,9 @@ fn drain_changes(
         };
         match change {
             LiveChange::Prepared(prepared) => {
-                if let Some(old) = chain.set_prepared(prepared) {
+                let old = chain.set_prepared(prepared);
+                shared.prepared_installed.fetch_add(1, Ordering::AcqRel);
+                if let Some(old) = old {
                     match retired.push(old) {
                         Ok(()) => {}
                         Err(PushError::Full(old)) => *pending_retired = Some(old),
@@ -1628,6 +1834,12 @@ fn drain_changes(
                 }
             }
             LiveChange::Mute(mute) => shared.mute.store(mute, Ordering::Release),
+            LiveChange::Gain(db) => chain.set_gain(10.0_f32.powf(db / 20.0)),
+            // Engine::apply checked the direction against the layout this
+            // change meets; the chain checks again and ignores a mismatch.
+            LiveChange::TestTone(direction) => {
+                chain.start_test_tone(direction);
+            }
             LiveChange::LfeGain(db) => chain.set_lfe_gain(10.0_f32.powf(db / 20.0)),
             LiveChange::TargetMs(ms) => {
                 shared.target_ms_bits.store(ms.to_bits(), Ordering::Release)

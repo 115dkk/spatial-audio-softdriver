@@ -11,6 +11,7 @@ import type {
   BitstreamFormat,
   ChainErrorMap,
   ClockStatus,
+  DirectionView,
   DriverState,
   EndpointStatus,
   EngineFault,
@@ -24,7 +25,10 @@ import type {
   Phase,
   Platform,
   PolicyState,
+  ProfileKind,
+  ProfileView,
   SampleType,
+  SceneObject,
   SecureBoot,
   SetupStep,
   Snapshot,
@@ -150,6 +154,7 @@ export const NEXT_ACTIONS: Record<NextAction, true> = {
   none: true,
 };
 export const OUTPUT_MODES: Record<OutputMode, true> = { exclusive: true, shared: true };
+export const PROFILE_KINDS: Record<ProfileKind, true> = { stereo: true, headphones: true, speakers: true };
 export const CLOCKS: Record<ClockStatus, true> = { trim: true, asrc: true };
 export const SAMPLE_TYPES: Record<SampleType, true> = { int: true, float: true };
 export const UNSUPPORTED_REASONS: Record<UnsupportedReason, true> = {
@@ -174,6 +179,7 @@ const policyState = oneOf(POLICY_STATES);
 const setupStep = oneOf(SETUP_STEPS);
 const nextAction = oneOf(NEXT_ACTIONS);
 const outputMode = oneOf(OUTPUT_MODES);
+const profileKind = oneOf(PROFILE_KINDS);
 const clock = oneOf(CLOCKS);
 const sampleType = oneOf(SAMPLE_TYPES);
 const unsupportedReason = oneOf(UNSUPPORTED_REASONS);
@@ -245,7 +251,25 @@ const engineFault = tagged<EngineFault>({
   output_lost: carrying('output_lost', string),
 });
 
+const directionView = object<DirectionView>({
+  id: number,
+  name: string,
+  azimuth_deg: number,
+  elevation_deg: number,
+});
+
+const sceneObject = object<SceneObject>({
+  lane: number,
+  index: number,
+  x: number,
+  y: number,
+  z: number,
+  level_dbfs: number,
+});
+
 const engineStatus = object<EngineStatus>({
+  directions: array(directionView),
+  scene: array(sceneObject),
   endpoints,
   unattributed_chain_errors: chainErrors,
   skipped_records: number,
@@ -313,8 +337,19 @@ const platform = object<Platform>({
 
 const userError = object<UserError>({ message: string, next: nextAction });
 
+const profileView = object<ProfileView>({
+  kind: profileKind,
+  name: string,
+  brir: nullable(string),
+  headphone_fir: nullable(string),
+  gain_db: number,
+  directions: array(directionView),
+  from_file: boolean,
+});
+
 const snapshot = object<Snapshot>({
   phase,
+  profile: profileView,
   engine: nullable(engineStatus),
   outputs: array(outputChoice),
   chosen_output: nullable(outputChoice),
@@ -332,7 +367,6 @@ const intent = tagged<Intent>({
   choose_output: carrying('choose_output', string),
   import_brir: carrying('import_brir', string),
   import_headphone_fir: carrying('import_headphone_fir', string),
-  switch_profile: carrying('switch_profile', string),
   set_gain: carrying('set_gain', number),
   test_direction: carrying('test_direction', number),
   enable: unit('enable'),

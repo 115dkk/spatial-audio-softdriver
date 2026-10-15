@@ -12,11 +12,13 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use engine::adapters::NullOpener;
+use engine::{LiveChange, OutputProfile};
 use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep, UserError};
 use ssr_types::ports::PolicyState;
 use ssr_types::{
-    Arch, DefaultRoles, DeviceId, DeviceState, DriverState, EngineFault, EngineStatus, Host,
-    HostError, OutputDevice, Platform, Role, SecureBoot, SetupOutcome, SetupTask,
+    Arch, DefaultRoles, DeviceId, DeviceState, DirectionView, DriverState, EngineFault,
+    EngineStatus, Host, HostError, OutputDevice, Platform, Role, SecureBoot, SetupOutcome,
+    SetupTask,
 };
 use supervisor::machine::Config;
 use supervisor::restore_point::{self, RestorePoint, RestorePointError};
@@ -44,6 +46,14 @@ struct World {
     launch_fails: bool,
     /// What each engine `poll` returns in order; an empty queue is quiet.
     engine_polls: VecDeque<Result<Vec<SessionNotice>, SessionError>>,
+    /// Every profile a launch received, described, in order.
+    launched: Vec<String>,
+    /// Every change the running engine took, described.
+    applied: Vec<String>,
+    /// The engine refuses the next changes with these errors, in order.
+    apply_errors: VecDeque<SessionError>,
+    /// The directions the running engine reports in its status.
+    engine_directions: Vec<DirectionView>,
     calls: Vec<String>,
 }
 
@@ -139,9 +149,14 @@ impl Host for FakeHost {
 struct FakeLauncher(Shared);
 
 impl Launcher for FakeLauncher {
-    fn launch(&mut self, output: &OutputDevice) -> Result<Box<dyn EngineHandle>, SessionError> {
+    fn launch(
+        &mut self,
+        output: &OutputDevice,
+        profile: &OutputProfile,
+    ) -> Result<Box<dyn EngineHandle>, SessionError> {
         let mut world = self.0.get();
         world.calls.push(format!("launch {}", output.id.0));
+        world.launched.push(describe(profile));
         if world.launch_fails {
             return Err(SessionError::Recorder("scripted failure".into()));
         }
@@ -161,7 +176,39 @@ impl EngineHandle for FakeEngine {
     }
 
     fn status(&self) -> EngineStatus {
-        EngineStatus::default()
+        EngineStatus {
+            directions: self.0.get().engine_directions.clone(),
+            ..EngineStatus::default()
+        }
+    }
+
+    fn apply(&mut self, change: LiveChange) -> Result<(), SessionError> {
+        self.apply_retaining(change).map_err(|(error, _)| error)
+    }
+
+    fn apply_retaining(&mut self, change: LiveChange) -> Result<(), (SessionError, LiveChange)> {
+        let mut world = self.0.get();
+        if let Some(error) = world.apply_errors.pop_front() {
+            return Err((error, change));
+        }
+        let described = match change {
+            LiveChange::Prepared(prepared) => format!(
+                "prepared {:?} {}ch [{}]",
+                prepared.kind(),
+                prepared.channels(),
+                prepared
+                    .direction_views()
+                    .iter()
+                    .map(|direction| direction.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            LiveChange::Gain(db) => format!("gain {db}"),
+            LiveChange::TestTone(direction) => format!("test {}", direction.0),
+            other => format!("{other:?}"),
+        };
+        world.applied.push(described);
+        Ok(())
     }
 
     fn stop(self: Box<Self>) -> Result<(), SessionError> {
@@ -233,7 +280,51 @@ fn ready_pc() -> World {
         failing_role: None,
         launch_fails: false,
         engine_polls: VecDeque::new(),
+        launched: Vec::new(),
+        applied: Vec::new(),
+        apply_errors: VecDeque::new(),
+        engine_directions: Vec::new(),
         calls: Vec::new(),
+    }
+}
+
+/// A profile as one line: its kind, name, gain, LFE route and directions.
+fn describe(profile: &OutputProfile) -> String {
+    match profile {
+        OutputProfile::Speakers(profile) => format!(
+            "speakers {} {} dB [{}]",
+            profile.name,
+            profile.gain_db,
+            profile
+                .speakers
+                .iter()
+                .map(|speaker| speaker.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        OutputProfile::Headphones(profile) => format!(
+            "headphones {} {} dB fir={} lfe={:?} [{}]",
+            profile.name,
+            profile.gain_db,
+            profile
+                .headphone_fir
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map_or_else(
+                    || "none".to_owned(),
+                    |name| name.to_string_lossy().into_owned()
+                ),
+            profile.lfe,
+            brir::layout(profile).map_or_else(
+                |error| format!("error: {error}"),
+                |layout| layout
+                    .directions()
+                    .iter()
+                    .map(|direction| direction.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        ),
     }
 }
 
@@ -243,6 +334,7 @@ fn this_build() -> Config {
         min_os_build: 19_041,
         arch: Arch::X64,
         fault_grace: Config::FAULT_GRACE,
+        profile_file: None,
     }
 }
 
@@ -256,6 +348,7 @@ fn dac_choice() -> OutputChoice {
 fn dac_settings() -> Settings {
     Settings {
         output: Some(dac_choice()),
+        profile: Default::default(),
     }
 }
 
@@ -731,6 +824,7 @@ fn a_changed_device_id_is_found_by_name_and_remembered() {
                 id: id("{dac-before-reboot}"),
                 name: DAC_NAME.into(),
             }),
+            profile: Default::default(),
         },
     );
     let note = format!("출력 장치의 식별자가 바뀌어 이름으로 다시 찾았습니다: {DAC_NAME}");
@@ -1238,9 +1332,10 @@ fn a_refused_intent_keeps_the_step_explanation() {
 
     // Refusals are returned but leave the snapshot's explanation in place.
     assert_eq!(supervisor.handle(Intent::Enable), Err(not_allowed()));
+    assert_eq!(supervisor.handle(Intent::SetGain(-3.0)), Err(not_allowed()));
     assert_eq!(
-        supervisor.handle(Intent::SetGain(-3.0)),
-        Err(error("아직 지원하지 않는 동작입니다.", NextAction::None))
+        supervisor.handle(Intent::StartDiagnosticRecording),
+        Err(error("진단 녹음은 다음 조각에서 옵니다.", NextAction::None))
     );
     let snapshot = supervisor.snapshot();
     assert_eq!(snapshot.phase, Phase::Setup(SetupStep::Unsupported));
@@ -1255,26 +1350,32 @@ fn a_refused_intent_keeps_the_step_explanation() {
 }
 
 #[test]
-fn unlisted_and_unwired_intents_leave_the_state_alone() {
+fn unlisted_and_refused_intents_leave_the_state_alone() {
     let (shared, mut supervisor) = start(ready_pc(), dac_settings());
     for intent in [Intent::BeginSetup, Intent::Recheck, Intent::Disable] {
         assert_eq!(supervisor.handle(intent), Err(not_allowed()));
         assert_eq!(supervisor.snapshot().phase, Phase::Ready);
     }
-    for intent in [
-        Intent::ImportBrir("room.wav".into()),
-        Intent::ImportHeadphoneFir("hp.wav".into()),
-        Intent::SwitchProfile("speakers".into()),
-        Intent::SetGain(-3.0),
-        Intent::TestDirection(ssr_types::DirectionId(0)),
-        Intent::StartDiagnosticRecording,
+    // Diagnostic recording is the one intent not wired yet; a test tone
+    // needs a running engine. Both are refusals: nothing changes.
+    for (intent, refusal) in [
+        (
+            Intent::StartDiagnosticRecording,
+            "진단 녹음은 다음 조각에서 옵니다.",
+        ),
+        (
+            Intent::TestDirection(ssr_types::DirectionId(0)),
+            "켠 뒤에 시험음을 낼 수 있습니다.",
+        ),
     ] {
         assert_eq!(
             supervisor.handle(intent),
-            Err(error("아직 지원하지 않는 동작입니다.", NextAction::None))
+            Err(error(refusal, NextAction::None))
         );
         assert_eq!(supervisor.snapshot().phase, Phase::Ready);
+        assert_eq!(supervisor.snapshot().error, None);
     }
+    assert_eq!(supervisor.settings(), &dac_settings());
 
     // Ready may change the output; Running may not.
     supervisor
@@ -1348,6 +1449,7 @@ fn new_starts_at_welcome_otherwise() {
             id: id("{old-dac}"),
             name: "Old DAC".into(),
         }),
+        profile: Default::default(),
     };
     let unplugged = |mut world: World| {
         world
@@ -1407,9 +1509,21 @@ fn new_starts_at_welcome_otherwise() {
 struct SessionLauncher;
 
 impl Launcher for SessionLauncher {
-    fn launch(&mut self, _output: &OutputDevice) -> Result<Box<dyn EngineHandle>, SessionError> {
+    fn launch(
+        &mut self,
+        _output: &OutputDevice,
+        profile: &OutputProfile,
+    ) -> Result<Box<dyn EngineHandle>, SessionError> {
         let session = Session::start(
-            common::config(),
+            supervisor::SessionConfig {
+                profile: match profile {
+                    OutputProfile::Headphones(profile) => {
+                        OutputProfile::Headphones(profile.clone())
+                    }
+                    OutputProfile::Speakers(profile) => OutputProfile::Speakers(profile.clone()),
+                },
+                ..common::config()
+            },
             common::capture(),
             NullOpener {
                 rate: 48_000,
@@ -1518,4 +1632,856 @@ fn restore_point_round_trips_and_rejects_other_versions() {
         RestorePoint::from_json("not json"),
         Err(RestorePointError::Json(_))
     ));
+}
+
+/// A directory under the system's temporary directory, removed on drop.
+struct TestDirectory(std::path::PathBuf);
+
+impl TestDirectory {
+    fn new(name: &str) -> Self {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "ssr-supervisor-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn join(&self, name: &str) -> std::path::PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn write_wav(path: &std::path::Path, channels: &[Vec<f32>]) {
+    let frames = channels.iter().map(Vec::len).max().unwrap();
+    let mut writer = hound::WavWriter::create(
+        path,
+        hound::WavSpec {
+            channels: channels.len() as u16,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .unwrap();
+    for frame in 0..frames {
+        for channel in channels {
+            writer
+                .write_sample(*channel.get(frame).unwrap_or(&0.0))
+                .unwrap();
+        }
+    }
+    writer.finalize().unwrap();
+}
+
+/// A folder BRIR set with one audible stereo WAV per name.
+fn brir_folder(directory: &TestDirectory, folder: &str, names: &[&str]) -> std::path::PathBuf {
+    let path = directory.join(folder);
+    std::fs::create_dir_all(&path).unwrap();
+    for name in names {
+        write_wav(
+            &path.join(format!("{name}.wav")),
+            &[vec![0.5, 0.0, 0.0], vec![0.0, 0.25, 0.0]],
+        );
+    }
+    path
+}
+
+/// An Impulcifer `hesuvi.wav` with the seven 7.1 directions, in a folder.
+fn hesuvi(directory: &TestDirectory, folder: &str) -> std::path::PathBuf {
+    let path = directory.join(folder);
+    std::fs::create_dir_all(&path).unwrap();
+    let path = path.join("hesuvi.wav");
+    let tracks: Vec<Vec<f32>> = (0..14)
+        .map(|track| {
+            let mut samples = vec![0.0; 32];
+            samples[track + 1] = 0.25;
+            samples
+        })
+        .collect();
+    write_wav(&path, &tracks);
+    path
+}
+
+fn view_names(snapshot: &ssr_types::app::Snapshot) -> Vec<String> {
+    snapshot
+        .profile
+        .directions
+        .iter()
+        .map(|direction| direction.name.clone())
+        .collect()
+}
+
+fn launched(shared: &Shared) -> Vec<String> {
+    shared.get().launched.clone()
+}
+
+#[test]
+fn profile_intents_apply_persist_and_reject_by_phase() {
+    use ssr_types::DirectionId;
+    use ssr_types::app::ProfileKind;
+
+    let directory = TestDirectory::new("profile-intents");
+    let room = brir_folder(&directory, "living-room", &["FL", "FR", "C"]);
+    let studio = hesuvi(&directory, "studio");
+    let fir = directory.join("hd650.wav");
+    write_wav(&fir, &[vec![1.0, 0.5]]);
+    let measurement = directory.join("headphones_measurement_LR.wav");
+    write_wav(&measurement, &[vec![1.0], vec![1.0]]);
+
+    // The wizard is not done: every profile intent is refused.
+    let (shared, mut supervisor) = start(ready_pc(), Settings::default());
+    assert_eq!(
+        supervisor.snapshot().phase,
+        Phase::Setup(SetupStep::Welcome)
+    );
+    for intent in [
+        Intent::ImportBrir(room.clone()),
+        Intent::ImportHeadphoneFir(fir.clone()),
+        Intent::SetGain(-3.0),
+        Intent::TestDirection(DirectionId(0)),
+    ] {
+        assert_eq!(supervisor.handle(intent), Err(not_allowed()));
+    }
+    assert_eq!(supervisor.settings(), &Settings::default());
+    assert!(shared.take_calls().is_empty());
+
+    // Ready: the default stereo profile, cached in the snapshot.
+    let (shared, mut supervisor) = start(ready_pc(), dac_settings());
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Ready);
+    assert_eq!(snapshot.profile, supervisor::default_profile_view());
+    assert_eq!(snapshot.profile.kind, ProfileKind::Stereo);
+    assert_eq!(view_names(&snapshot), ["FL", "FR"]);
+
+    supervisor.handle(Intent::SetGain(-3.5)).unwrap();
+    assert_eq!(supervisor.settings().profile.gain_db, Some(-3.5));
+    assert_eq!(supervisor.snapshot().profile.gain_db, -3.5);
+
+    let gain_range = error("게인은 -20 dB에서 +10 dB 사이입니다.", NextAction::None);
+    for db in [10.5, -20.5, f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            supervisor.handle(Intent::SetGain(db)),
+            Err(gain_range.clone())
+        );
+        assert_eq!(supervisor.snapshot().error, Some(gain_range.clone()));
+    }
+    assert_eq!(supervisor.settings().profile.gain_db, Some(-3.5));
+
+    assert_eq!(
+        supervisor.handle(Intent::ImportBrir(directory.join("room.wav"))),
+        Err(error(
+            "hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오.",
+            NextAction::None
+        ))
+    );
+    assert_eq!(
+        supervisor.handle(Intent::ImportHeadphoneFir(fir.clone())),
+        Err(error("먼저 BRIR 세트를 가져오십시오.", NextAction::None))
+    );
+    let missing = supervisor
+        .handle(Intent::ImportBrir(
+            directory.join("gone").join("hesuvi.wav"),
+        ))
+        .unwrap_err();
+    assert!(
+        missing.message.starts_with("BRIR 세트를 읽지 못했습니다: "),
+        "{missing:?}"
+    );
+    assert_eq!(supervisor.settings().profile.brir, None);
+    assert_eq!(supervisor.snapshot().profile.kind, ProfileKind::Stereo);
+
+    // Importing a folder makes the output headphones; nothing is running.
+    supervisor.handle(Intent::ImportBrir(room.clone())).unwrap();
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.error, None);
+    assert_eq!(snapshot.profile.kind, ProfileKind::Headphones);
+    assert_eq!(snapshot.profile.name, "living-room");
+    assert_eq!(
+        snapshot.profile.brir,
+        Some(room.to_string_lossy().into_owned())
+    );
+    assert_eq!(snapshot.profile.gain_db, -3.5);
+    assert!(!snapshot.profile.from_file);
+    assert_eq!(view_names(&snapshot), ["FL", "FR", "FC"]);
+    assert_eq!(snapshot.profile.directions[2].id, DirectionId(2));
+    assert_eq!(supervisor.settings().profile.brir, Some(room.clone()));
+
+    let rejected = supervisor
+        .handle(Intent::ImportHeadphoneFir(measurement))
+        .unwrap_err();
+    assert!(
+        rejected
+            .message
+            .starts_with("헤드폰 FIR을 읽지 못했습니다: "),
+        "{rejected:?}"
+    );
+    assert_eq!(supervisor.settings().profile.headphone_fir, None);
+    supervisor
+        .handle(Intent::ImportHeadphoneFir(fir.clone()))
+        .unwrap();
+    assert_eq!(
+        supervisor.settings().profile.headphone_fir,
+        Some(fir.clone())
+    );
+    assert_eq!(
+        supervisor.snapshot().profile.headphone_fir,
+        Some(fir.to_string_lossy().into_owned())
+    );
+    assert!(shared.get().applied.is_empty());
+
+    // The launch gets the resolved profile.
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared),
+        ["headphones living-room -3.5 dB fir=hd650.wav \
+             lfe=Direction { name: \"FC\", gain_db: 0.0 } [FL FR FC]"]
+    );
+    shared.take_calls();
+
+    // Running: gain and test tone go live.
+    supervisor.handle(Intent::SetGain(-6.0)).unwrap();
+    supervisor
+        .handle(Intent::TestDirection(DirectionId(2)))
+        .unwrap();
+    assert_eq!(
+        supervisor.handle(Intent::TestDirection(DirectionId(3))),
+        Err(error("그 방향이 없습니다.", NextAction::None))
+    );
+    assert_eq!(supervisor.settings().profile.gain_db, Some(-6.0));
+    assert_eq!(supervisor.snapshot().profile.gain_db, -6.0);
+
+    // A new BRIR set is prepared into the running engine.
+    supervisor
+        .handle(Intent::ImportBrir(studio.clone()))
+        .unwrap();
+    assert_eq!(
+        std::mem::take(&mut shared.get().applied),
+        [
+            "gain -6".to_owned(),
+            "test 2".to_owned(),
+            "prepared Headphones 2ch [FL SL BL FC FR SR BR]".to_owned(),
+        ]
+    );
+    let snapshot = supervisor.snapshot();
+    assert_eq!(
+        view_names(&snapshot),
+        ["FL", "SL", "BL", "FC", "FR", "SR", "BR"]
+    );
+    assert_eq!(snapshot.profile.name, "studio");
+
+    // What the engine refuses changes nothing: not the settings, not the view.
+    let settings = supervisor.settings().clone();
+    let view = supervisor.snapshot().profile;
+    shared.get().apply_errors.extend([
+        SessionError::Rejected,
+        SessionError::Rejected,
+        SessionError::Recorder("scripted".into()),
+        SessionError::Rejected,
+    ]);
+    let busy = error(
+        "엔진이 변경을 받지 못했습니다. 잠시 뒤 다시 시도하십시오.",
+        NextAction::Retry,
+    );
+    assert_eq!(
+        supervisor.handle(Intent::ImportBrir(room.clone())),
+        Err(busy.clone())
+    );
+    assert_eq!(supervisor.handle(Intent::SetGain(0.0)), Err(busy.clone()));
+    assert_eq!(
+        supervisor.handle(Intent::ImportHeadphoneFir(fir.clone())),
+        Err(error(
+            "엔진에 변경을 적용하지 못했습니다: diagnostic recorder failed: scripted",
+            NextAction::Retry
+        ))
+    );
+    assert_eq!(
+        supervisor.handle(Intent::TestDirection(DirectionId(0))),
+        Err(busy)
+    );
+    assert_eq!(supervisor.settings(), &settings);
+    assert_eq!(supervisor.snapshot().profile, view);
+    assert_eq!(supervisor.snapshot().phase, Phase::Running);
+    assert!(shared.get().applied.is_empty());
+    assert!(shared.take_calls().is_empty());
+
+    // The settings that persist carry the profile.
+    let json = serde_json::to_value(supervisor.settings()).unwrap();
+    assert_eq!(json["profile"]["gain_db"], -6.0);
+    assert_eq!(
+        json["profile"]["brir"],
+        serde_json::Value::String(studio.to_string_lossy().into_owned())
+    );
+    let reloaded: Settings = serde_json::from_value(json).unwrap();
+    assert_eq!(&reloaded, supervisor.settings());
+
+    // Faulted: profile intents are saved for the next start; no test tone.
+    shared
+        .get()
+        .engine_polls
+        .push_back(Err(SessionError::Rejected));
+    supervisor.tick(Instant::now());
+    assert_eq!(supervisor.snapshot().phase, Phase::Faulted);
+    supervisor.handle(Intent::SetGain(2.0)).unwrap();
+    supervisor.handle(Intent::ImportBrir(room.clone())).unwrap();
+    assert_eq!(
+        supervisor.handle(Intent::TestDirection(DirectionId(0))),
+        Err(error("켠 뒤에 시험음을 낼 수 있습니다.", NextAction::None))
+    );
+    assert!(shared.get().applied.is_empty());
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared).last().unwrap(),
+        "headphones living-room 2 dB fir=hd650.wav \
+         lfe=Direction { name: \"FC\", gain_db: 0.0 } [FL FR FC]"
+    );
+
+    // Quit refuses everything.
+    supervisor.handle(Intent::Quit).unwrap();
+    for intent in [
+        Intent::ImportBrir(room),
+        Intent::ImportHeadphoneFir(fir),
+        Intent::SetGain(0.0),
+        Intent::TestDirection(DirectionId(0)),
+        Intent::StartDiagnosticRecording,
+    ] {
+        assert_eq!(supervisor.handle(intent), Err(not_allowed()));
+    }
+}
+
+#[test]
+fn old_settings_without_profile_use_defaults() {
+    let mut json = serde_json::to_value(dac_settings()).unwrap();
+    json.as_object_mut().unwrap().remove("profile");
+    assert!(json.get("output").is_some());
+    let settings: Settings = serde_json::from_value(json).unwrap();
+    assert_eq!(settings, dac_settings());
+    assert_eq!(settings.profile, supervisor::ProfileSettings::default());
+
+    // A profile written with fewer fields fills the rest in.
+    let partial: Settings =
+        serde_json::from_str(r#"{"output":null,"profile":{"gain_db":-2.0}}"#).unwrap();
+    assert_eq!(partial.profile.gain_db, Some(-2.0));
+    // No gain, or an explicit null, is no saved gain.
+    let unset: Settings =
+        serde_json::from_str(r#"{"output":null,"profile":{"gain_db":null}}"#).unwrap();
+    assert_eq!(unset.profile.gain_db, None);
+    let unset: Settings = serde_json::from_str(r#"{"output":null,"profile":{}}"#).unwrap();
+    assert_eq!(unset.profile.gain_db, None);
+    assert_eq!(partial.profile.brir, None);
+    assert_eq!(partial.profile.headphone_fir, None);
+
+    let (shared, mut supervisor) = start(ready_pc(), settings);
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Ready);
+    assert_eq!(snapshot.profile, supervisor::default_profile_view());
+    assert!(snapshot.notes.is_empty());
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(launched(&shared), ["speakers Stereo 0 dB [FL FR]"]);
+}
+
+#[test]
+fn an_existing_profile_file_wins_over_imports_and_takes_the_saved_gain() {
+    use ssr_types::app::ProfileKind;
+
+    let directory = TestDirectory::new("profile-file");
+    brir_folder(&directory, "set", &["FL", "FR", "TFL", "TFR"]);
+    let imported = brir_folder(&directory, "imported", &["FL", "FR"]);
+    let file = directory.join("profile.toml");
+    std::fs::write(
+        &file,
+        "name = \"desk\"\ngain_db = 4.0\nlimiter_ceiling_dbfs = -1.0\n\n[brir]\nfolder = \"set\"\n",
+    )
+    .unwrap();
+    let config = Config {
+        profile_file: Some(file.clone()),
+        ..this_build()
+    };
+    let shared = Shared::new(ready_pc());
+    let mut settings = dac_settings();
+    settings.profile.gain_db = Some(-2.0);
+    settings.profile.brir = Some(imported.clone());
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        FakeLauncher(shared.clone()),
+        config.clone(),
+        settings.clone(),
+    );
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.profile.kind, ProfileKind::Headphones);
+    assert_eq!(snapshot.profile.name, "desk");
+    assert!(snapshot.profile.from_file);
+    assert_eq!(snapshot.profile.gain_db, -2.0);
+    assert_eq!(view_names(&snapshot), ["FL", "FR", "TFL", "TFR"]);
+
+    let file_wins = error(
+        "상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.",
+        NextAction::None,
+    );
+    assert_eq!(
+        supervisor.handle(Intent::ImportBrir(imported.clone())),
+        Err(file_wins.clone())
+    );
+    assert_eq!(
+        supervisor.handle(Intent::ImportHeadphoneFir(directory.join("hp.wav"))),
+        Err(file_wins)
+    );
+    assert_eq!(supervisor.settings(), &settings);
+    supervisor.handle(Intent::SetGain(-1.0)).unwrap();
+    assert_eq!(supervisor.snapshot().profile.gain_db, -1.0);
+    assert!(supervisor.snapshot().profile.from_file);
+
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared),
+        ["headphones desk -1 dB fir=none lfe=Mute [FL FR TFL TFR]"]
+    );
+
+    // Without the file, the imported set decides again (read when enabling).
+    supervisor.handle(Intent::Disable).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared).last().unwrap(),
+        "headphones imported -1 dB fir=none lfe=Mute [FL FR]"
+    );
+    assert!(!supervisor.snapshot().profile.from_file);
+
+    // A broken file is a note at start and stops Enable before the roles move.
+    supervisor.handle(Intent::Disable).unwrap();
+    std::fs::write(&file, "name = \"broken\"\n").unwrap();
+    let shared = Shared::new(ready_pc());
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        FakeLauncher(shared.clone()),
+        config,
+        settings,
+    );
+    let snapshot = supervisor.snapshot();
+    assert!(snapshot.profile.from_file);
+    assert!(snapshot.profile.directions.is_empty());
+    assert_eq!(snapshot.notes.len(), 1);
+    assert!(snapshot.notes[0].starts_with("profile.toml을 읽지 못했습니다: "));
+    let failed = supervisor.handle(Intent::Enable).unwrap_err();
+    assert!(
+        failed
+            .message
+            .starts_with("profile.toml을 읽지 못했습니다: ")
+    );
+    assert_eq!(supervisor.snapshot().phase, Phase::Ready);
+    assert!(shared.take_calls().is_empty());
+    assert_eq!(shared.get().roles, previous_roles());
+}
+
+#[test]
+fn without_a_saved_gain_the_profile_file_keeps_its_own() {
+    let directory = TestDirectory::new("profile-file-gain");
+    brir_folder(&directory, "set", &["FL", "FR"]);
+    let imported = brir_folder(&directory, "imported", &["FL", "FR"]);
+    let file = directory.join("profile.toml");
+    std::fs::write(
+        &file,
+        "name = \"desk\"\ngain_db = 4.0\nlimiter_ceiling_dbfs = -1.0\n\n[brir]\nfolder = \"set\"\n",
+    )
+    .unwrap();
+    let config = Config {
+        profile_file: Some(file.clone()),
+        ..this_build()
+    };
+    let shared = Shared::new(ready_pc());
+    let mut settings = dac_settings();
+    settings.profile.brir = Some(imported);
+    assert_eq!(settings.profile.gain_db, None);
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        FakeLauncher(shared.clone()),
+        config,
+        settings,
+    );
+    // No saved gain: the file's 4 dB stands, in the view and at launch.
+    assert_eq!(supervisor.snapshot().profile.gain_db, 4.0);
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared),
+        ["headphones desk 4 dB fir=none lfe=Mute [FL FR]"]
+    );
+
+    // An explicit 0 dB is a saved gain and overrides it.
+    supervisor.handle(Intent::SetGain(0.0)).unwrap();
+    assert_eq!(supervisor.settings().profile.gain_db, Some(0.0));
+    assert_eq!(supervisor.snapshot().profile.gain_db, 0.0);
+    supervisor.handle(Intent::Disable).unwrap();
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared).last().unwrap(),
+        "headphones desk 0 dB fir=none lfe=Mute [FL FR]"
+    );
+
+    // Without the file, an imported set with no saved gain plays at 0 dB.
+    supervisor.handle(Intent::Disable).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let mut settings = supervisor.settings().clone();
+    settings.profile.gain_db = None;
+    let shared = Shared::new(ready_pc());
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        FakeLauncher(shared.clone()),
+        Config {
+            profile_file: Some(file),
+            ..this_build()
+        },
+        settings,
+    );
+    assert_eq!(supervisor.snapshot().profile.gain_db, 0.0);
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared),
+        ["headphones imported 0 dB fir=none lfe=Mute [FL FR]"]
+    );
+}
+
+#[test]
+fn a_missing_brir_set_stops_enable_before_the_roles_move() {
+    use ssr_types::app::ProfileKind;
+
+    let directory = TestDirectory::new("missing-set");
+    let mut settings = dac_settings();
+    settings.profile.brir = Some(directory.join("moved").join("hrir.wav"));
+    let (shared, mut supervisor) = start(ready_pc(), settings.clone());
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.profile.kind, ProfileKind::Headphones);
+    assert_eq!(snapshot.profile.name, "moved");
+    assert!(snapshot.profile.directions.is_empty());
+    assert!(snapshot.notes[0].starts_with("BRIR 세트를 읽지 못했습니다: "));
+
+    let failed = supervisor.handle(Intent::Enable).unwrap_err();
+    assert!(failed.message.starts_with("BRIR 세트를 읽지 못했습니다: "));
+    assert_eq!(supervisor.snapshot().phase, Phase::Ready);
+    assert!(shared.take_calls().is_empty());
+    assert!(shared.get().launched.is_empty());
+    assert_eq!(supervisor.settings(), &settings);
+
+    // Importing a set that is there fixes it.
+    let set = brir_folder(&directory, "here", &["FL", "FR"]);
+    supervisor.handle(Intent::ImportBrir(set)).unwrap();
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        launched(&shared),
+        ["headphones here 0 dB fir=none lfe=Mute [FL FR]"]
+    );
+}
+
+#[test]
+fn a_test_tone_is_checked_against_the_profile_the_engine_was_last_given() {
+    use ssr_types::DirectionId;
+
+    let directory = TestDirectory::new("test-tone-layout");
+    let studio = hesuvi(&directory, "studio");
+    let (shared, mut supervisor) = running(ready_pc());
+    // The engine still reports its installed stereo set while a new one is
+    // queued (EngineStatus.directions lags): the cached profile, which is the
+    // layout the engine checks a test tone against, decides.
+    shared.get().engine_directions = vec![DirectionView {
+        id: DirectionId(0),
+        name: "FL".into(),
+        azimuth_deg: 30.0,
+        elevation_deg: 0.0,
+    }];
+    supervisor
+        .handle(Intent::TestDirection(DirectionId(1)))
+        .unwrap();
+    assert_eq!(
+        supervisor.handle(Intent::TestDirection(DirectionId(2))),
+        Err(error("그 방향이 없습니다.", NextAction::None))
+    );
+
+    // A seven-direction set handed to the engine: its directions are good
+    // at once, before the engine reports them.
+    supervisor.handle(Intent::ImportBrir(studio)).unwrap();
+    supervisor
+        .handle(Intent::TestDirection(DirectionId(6)))
+        .unwrap();
+    assert_eq!(
+        supervisor.handle(Intent::TestDirection(DirectionId(7))),
+        Err(error("그 방향이 없습니다.", NextAction::None))
+    );
+    let applied = shared.get().applied.clone();
+    assert_eq!(applied.len(), 3, "{applied:?}");
+    assert_eq!(applied[0], "test 1");
+    assert_eq!(applied[2], "test 6");
+}
+
+#[test]
+fn needs_prepared_rebuilds_the_profile_the_engine_plays_now() {
+    let directory = TestDirectory::new("needs-prepared");
+    let studio = hesuvi(&directory, "studio");
+    let room = brir_folder(&directory, "room", &["FL", "FR"]);
+    let (shared, mut supervisor) = running(ready_pc());
+
+    // Asked at once after the launch: the stereo profile it was launched with.
+    shared
+        .get()
+        .engine_polls
+        .push_back(Ok(vec![SessionNotice::NeedsPrepared]));
+    assert!(!supervisor.needs_prepared());
+    assert_eq!(
+        supervisor.tick(Instant::now()),
+        [SessionNotice::NeedsPrepared]
+    );
+    // The tick only remembers it: the caller prepares (ADR 0033).
+    assert!(supervisor.needs_prepared());
+    assert!(shared.get().applied.is_empty());
+    let notices = supervisor.prepare_again();
+    assert!(
+        matches!(
+            notices.as_slice(),
+            [SessionNotice::Prepared {
+                kind: engine::OutputKind::Speakers,
+                channels: 2,
+                ..
+            }]
+        ),
+        "{notices:?}"
+    );
+    assert!(!supervisor.needs_prepared());
+    assert_eq!(
+        std::mem::take(&mut shared.get().applied),
+        ["prepared Speakers 2ch [FL FR]"]
+    );
+    assert!(supervisor.prepare_again().is_empty());
+
+    // A set imported while running is what the next re-prepare builds, not
+    // the profile the engine was launched with.
+    supervisor.handle(Intent::SetGain(-6.0)).unwrap();
+    supervisor
+        .handle(Intent::ImportBrir(studio.clone()))
+        .unwrap();
+    shared.get().applied.clear();
+    shared
+        .get()
+        .engine_polls
+        .push_back(Ok(vec![SessionNotice::NeedsPrepared]));
+    supervisor.tick(Instant::now());
+    // A full queue: the output is prepared again on the next call.
+    shared.get().apply_errors.push_back(SessionError::Rejected);
+    assert_eq!(supervisor.prepare_again(), [SessionNotice::PrepareRetry]);
+    assert!(supervisor.needs_prepared());
+    assert!(matches!(
+        supervisor.prepare_again().as_slice(),
+        [SessionNotice::Prepared {
+            kind: engine::OutputKind::Headphones,
+            channels: 2,
+            ..
+        }]
+    ));
+    assert_eq!(
+        std::mem::take(&mut shared.get().applied),
+        ["prepared Headphones 2ch [FL SL BL FC FR SR BR]"]
+    );
+
+    // A profile handed over while one is owed answers it.
+    shared
+        .get()
+        .engine_polls
+        .push_back(Ok(vec![SessionNotice::NeedsPrepared]));
+    supervisor.tick(Instant::now());
+    supervisor.handle(Intent::ImportBrir(room.clone())).unwrap();
+    assert!(!supervisor.needs_prepared());
+    assert_eq!(
+        std::mem::take(&mut shared.get().applied),
+        ["prepared Headphones 2ch [FL FR]"]
+    );
+
+    // A set whose files went away cannot rebuild the output: as a failed
+    // start, the engine stops, the roles go back, and the app is Faulted.
+    std::fs::remove_dir_all(&room).unwrap();
+    shared
+        .get()
+        .engine_polls
+        .push_back(Ok(vec![SessionNotice::NeedsPrepared]));
+    supervisor.tick(Instant::now());
+    assert!(supervisor.prepare_again().is_empty());
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Faulted);
+    let error = snapshot.error.expect("the fault is explained");
+    assert!(
+        error
+            .message
+            .starts_with("엔진이 멈췄습니다: output preparation failed: "),
+        "{error:?}"
+    );
+    assert_eq!(error.next, NextAction::Retry);
+    assert!(!supervisor.needs_prepared());
+    assert!(shared.get().applied.is_empty());
+    assert_eq!(shared.get().roles, previous_roles());
+}
+
+#[test]
+fn a_reprepare_is_built_once_retried_and_refreshes_the_direction_cache() {
+    use ssr_types::DirectionId;
+
+    let directory = TestDirectory::new("reprepare-retry");
+    let room = brir_folder(&directory, "room", &["FL", "FR"]);
+    let (shared, mut supervisor) = start(ready_pc(), dac_settings());
+    supervisor.handle(Intent::ImportBrir(room.clone())).unwrap();
+    supervisor.handle(Intent::Enable).unwrap();
+    write_wav(
+        &room.join("FC.wav"),
+        &[vec![0.5, 0.0, 0.0], vec![0.0, 0.25, 0.0]],
+    );
+    shared
+        .get()
+        .engine_polls
+        .push_back(Ok(vec![SessionNotice::NeedsPrepared]));
+    supervisor.tick(Instant::now());
+    assert!(supervisor.prepare_work_pending());
+    shared.get().apply_errors.extend([
+        SessionError::Rejected,
+        SessionError::Rejected,
+        SessionError::Rejected,
+    ]);
+
+    assert_eq!(supervisor.prepare_again(), [SessionNotice::PrepareRetry]);
+    assert!(!supervisor.prepare_work_pending());
+    // If a retry prepared again this removal would fault the supervisor. The
+    // already prepared three-direction output must instead survive it.
+    std::fs::remove_file(room.join("FC.wav")).unwrap();
+    for _ in 0..2 {
+        assert_eq!(supervisor.prepare_again(), [SessionNotice::PrepareRetry]);
+        assert!(!supervisor.prepare_work_pending());
+    }
+    assert!(matches!(
+        supervisor.prepare_again().as_slice(),
+        [SessionNotice::Prepared {
+            kind: engine::OutputKind::Headphones,
+            channels: 2,
+            ..
+        }]
+    ));
+    assert!(!supervisor.needs_prepared());
+    assert_eq!(view_names(&supervisor.snapshot()), ["FL", "FR", "FC"]);
+    supervisor
+        .handle(Intent::TestDirection(DirectionId(2)))
+        .unwrap();
+    assert_eq!(
+        shared.get().applied,
+        [
+            "prepared Headphones 2ch [FL FR FC]".to_owned(),
+            "test 2".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn watching_profile_file_presence_unlocks_and_relocks_imports() {
+    let directory = TestDirectory::new("watch-profile-file");
+    let set = brir_folder(&directory, "set", &["FL", "FR"]);
+    let imported = brir_folder(&directory, "imported", &["FL", "FR", "FC"]);
+    let file = directory.join("profile.toml");
+    std::fs::write(
+        &file,
+        "name = \"desk\"\ngain_db = 0.0\nlimiter_ceiling_dbfs = -1.0\n\n[brir]\nfolder = \"set\"\n",
+    )
+    .unwrap();
+    let shared = Shared::new(ready_pc());
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        FakeLauncher(shared),
+        Config {
+            profile_file: Some(file.clone()),
+            ..this_build()
+        },
+        dac_settings(),
+    );
+    assert!(supervisor.snapshot().profile.from_file);
+
+    std::fs::remove_file(&file).unwrap();
+    supervisor.watch_profile_file();
+    assert!(!supervisor.snapshot().profile.from_file);
+    supervisor.handle(Intent::ImportBrir(imported)).unwrap();
+    assert_eq!(view_names(&supervisor.snapshot()), ["FL", "FR", "FC"]);
+
+    std::fs::write(
+        &file,
+        "name = \"desk\"\ngain_db = 0.0\nlimiter_ceiling_dbfs = -1.0\n\n[brir]\nfolder = \"set\"\n",
+    )
+    .unwrap();
+    supervisor.watch_profile_file();
+    assert!(supervisor.snapshot().profile.from_file);
+    assert_eq!(view_names(&supervisor.snapshot()), ["FL", "FR"]);
+    assert_eq!(
+        supervisor.handle(Intent::ImportBrir(set)),
+        Err(error(
+            "상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.",
+            NextAction::None
+        ))
+    );
+}
+
+#[test]
+fn a_real_session_takes_profile_gain_and_test_tone_live() {
+    use ssr_types::DirectionId;
+
+    let directory = TestDirectory::new("real-session");
+    let set = brir_folder(&directory, "set", &["FL", "FR", "FC"]);
+    // An unmeasured, silent centre stays a direction (ADR 0016, 2026-10-15),
+    // so the LFE route into FC that the headers chose still prepares.
+    let unmeasured = brir_folder(&directory, "unmeasured", &["FL", "FR"]);
+    write_wav(&unmeasured.join("FC.wav"), &[vec![0.0; 3], vec![0.0; 3]]);
+    // A data chunk shorter than its header says: only prepare finds out.
+    let truncated = directory.join("truncated");
+    std::fs::create_dir_all(&truncated).unwrap();
+    let cut = truncated.join("FL.wav");
+    write_wav(&cut, &[vec![0.5; 4_096], vec![0.25; 4_096]]);
+    let bytes = std::fs::read(&cut).unwrap();
+    std::fs::write(&cut, &bytes[..bytes.len() / 2]).unwrap();
+
+    let shared = Shared::new(ready_pc());
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        SessionLauncher,
+        this_build(),
+        dac_settings(),
+    );
+    supervisor.handle(Intent::Enable).unwrap();
+    supervisor.handle(Intent::SetGain(-6.0)).unwrap();
+    supervisor
+        .handle(Intent::TestDirection(DirectionId(1)))
+        .unwrap();
+    supervisor.handle(Intent::ImportBrir(unmeasured)).unwrap();
+    assert_eq!(supervisor.snapshot().profile.directions.len(), 3);
+    supervisor
+        .handle(Intent::TestDirection(DirectionId(2)))
+        .unwrap();
+    supervisor.handle(Intent::ImportBrir(set.clone())).unwrap();
+    assert_eq!(supervisor.snapshot().profile.directions.len(), 3);
+
+    // Headers pass, but the samples are cut short: prepare fails, and the
+    // running output, the settings and the view stay as they were.
+    let view = supervisor.snapshot().profile;
+    let failed = supervisor
+        .handle(Intent::ImportBrir(truncated))
+        .unwrap_err();
+    assert!(
+        failed.message.starts_with("프로필을 준비하지 못했습니다: "),
+        "{failed:?}"
+    );
+    assert_eq!(supervisor.settings().profile.brir, Some(set));
+    assert_eq!(supervisor.snapshot().profile, view);
+    assert_eq!(supervisor.snapshot().phase, Phase::Running);
+    supervisor.tick(Instant::now());
+    assert_eq!(supervisor.snapshot().phase, Phase::Running);
+
+    supervisor.handle(Intent::Disable).unwrap();
+    assert_eq!(shared.get().roles, previous_roles());
 }

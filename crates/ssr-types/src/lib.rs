@@ -22,7 +22,7 @@ pub mod status;
 
 pub use feeds::Feeds;
 pub use format::{BitstreamCodec, BitstreamFormat, PcmFormat, SampleType, SourceFormat};
-pub use layout::{Direction, DirectionId, Layout, LayoutError};
+pub use layout::{Direction, DirectionId, DirectionView, Layout, LayoutError};
 pub use ports::{
     Arch, CaptureError, CaptureSource, DefaultRoles, DeviceId, DeviceState, DriverState,
     EngineThread, Host, HostError, OutputDevice, OutputError, OutputFormat, OutputLayout,
@@ -56,7 +56,7 @@ pub fn channel_layout_preset(name: &str) -> Option<&'static [Speaker]> {
 pub use scene::{MAX_OBJECTS, Object, Position, SceneBlock};
 pub use status::{
     ChainErrorCounts, ChainErrorKind, ClockStatus, ENGINE_ENDPOINTS, EndpointStatus, EngineFault,
-    EngineStatus, LatencyStats, UnderrunSnapshot, UnsupportedReason,
+    EngineStatus, LatencyStats, SceneObject, UnderrunSnapshot, UnsupportedReason,
 };
 
 /// The fixed scene sample rate every decoder produces.

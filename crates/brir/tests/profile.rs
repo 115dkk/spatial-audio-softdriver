@@ -255,7 +255,7 @@ fn sixteen_track_hrir_drops_silent_lfe_placeholders() {
 }
 
 #[test]
-fn extended_hesuvi_drops_unmeasured_silent_speakers() {
+fn extended_hesuvi_keeps_unmeasured_silent_speakers() {
     let directory = TestDirectory::new("hesuvi-silent");
     let path = directory.join("hesuvi.wav");
     let mut tracks = impulse_tracks(18, 40);
@@ -266,48 +266,63 @@ fn extended_hesuvi_drops_unmeasured_silent_speakers() {
         track.fill(0.0);
     }
     write_wav(&path, 48_000, &tracks);
-    let prepared = prepare(&profile(BrirSource::Hesuvi(path)), 48_000, 64).unwrap();
+    let input = profile(BrirSource::Hesuvi(path));
+    let prepared = prepare(&input, 48_000, 64).unwrap();
     let names: Vec<&str> = prepared
         .layout
         .directions()
         .iter()
         .map(|direction| direction.name.as_str())
         .collect();
-    assert_eq!(names, ["FL", "FR", "WL", "WR"]);
+    // ADR 0016 (2026-10-15): every declared speaker stays, measured or not,
+    // so the layout is exactly what the header-only `brir::layout` reads.
     assert_eq!(
-        prepared.omitted_silent_directions,
-        ["SL", "BL", "FC", "SR", "BR"]
+        names,
+        ["FL", "SL", "BL", "FC", "FR", "SR", "BR", "WL", "WR"]
+    );
+    assert_eq!(
+        brir::layout(&input).unwrap().directions(),
+        prepared.layout.directions()
     );
 }
 
 #[test]
-fn direction_files_drop_and_report_silent_directions() {
+fn direction_files_keep_silent_directions_and_trim_by_the_audible_ones() {
     let directory = TestDirectory::new("directions-silent");
     let audible = directory.join("audible.wav");
     let silent = directory.join("silent.wav");
-    write_wav(&audible, 48_000, &[vec![1.0], vec![0.5]]);
+    // The audible direction starts 200 frames in; the silent one has no
+    // onset, so it does not hold the common leading-delay trim back.
+    let mut left = vec![0.0; 256];
+    left[200] = 1.0;
+    let mut right = vec![0.0; 256];
+    right[210] = 0.5;
+    write_wav(&audible, 48_000, &[left, right]);
     write_wav(&silent, 48_000, &[vec![0.0; 4], vec![0.0; 4]]);
-    let prepared = prepare(
-        &profile(BrirSource::Directions(vec![
-            DirectionFile {
-                name: "Audible".into(),
-                azimuth_deg: 0.0,
-                elevation_deg: 0.0,
-                path: audible,
-            },
-            DirectionFile {
-                name: "Silent".into(),
-                azimuth_deg: 30.0,
-                elevation_deg: 0.0,
-                path: silent,
-            },
-        ])),
-        48_000,
-        64,
-    )
-    .unwrap();
-    assert_eq!(prepared.layout.len(), 1);
-    assert_eq!(prepared.omitted_silent_directions, ["Silent"]);
+    let mut input = profile(BrirSource::Directions(vec![
+        DirectionFile {
+            name: "Audible".into(),
+            azimuth_deg: 0.0,
+            elevation_deg: 0.0,
+            path: audible,
+        },
+        DirectionFile {
+            name: "Silent".into(),
+            azimuth_deg: 30.0,
+            elevation_deg: 0.0,
+            path: silent,
+        },
+    ]));
+    input.trim_leading_delay = true;
+    let prepared = prepare(&input, 48_000, 64).unwrap();
+    assert_eq!(prepared.layout.len(), 2);
+    assert_eq!(prepared.layout.directions()[1].name, "Silent");
+    assert_eq!(
+        brir::layout(&input).unwrap().directions(),
+        prepared.layout.directions()
+    );
+    // 200 frames less the 1 ms (48-frame) margin.
+    assert_eq!(prepared.trimmed_leading_frames, 152);
 }
 
 #[test]

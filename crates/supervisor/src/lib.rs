@@ -18,7 +18,10 @@ pub mod restore_point;
 pub mod session;
 
 pub use driver_stats::{DriverStatsSource, DriverStatsTotals};
-pub use machine::{EngineHandle, Launcher, Settings, Supervisor};
+pub use machine::{
+    EngineHandle, Launcher, ProfileSettings, Settings, Supervisor, default_profile,
+    default_profile_view,
+};
 pub use recorder::{Recorder, RecorderConfig, TeeCapture};
 pub use report::{DirectLayoutField, RequestFields, RunFigures, SessionReport, chain_errors_json};
-pub use session::{Session, SessionChange, SessionConfig, SessionError, SessionNotice};
+pub use session::{Session, SessionConfig, SessionError, SessionNotice};

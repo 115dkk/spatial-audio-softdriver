@@ -233,8 +233,6 @@ pub struct PreparedBrir {
     pub limiter_ceiling: f32,
     /// Length in frames of the longest filter after folding and resampling.
     pub ir_frames: usize,
-    /// Direction names omitted because both ears were exactly silent.
-    pub omitted_silent_directions: Vec<String>,
     /// Frames removed equally from the front of every direction and ear.
     pub trimmed_leading_frames: usize,
 }
@@ -556,6 +554,156 @@ pub fn load_profile(path: &Path) -> Result<Profile, BrirError> {
     })
 }
 
+/// The feed layout [`prepare`] would build for `profile`, read from WAV
+/// headers, the folder listing and the sidecar only: no sample is decoded,
+/// so it is cheap enough for the control thread to call when a BRIR set is
+/// imported.
+///
+/// It equals [`prepare`]'s layout (order, names, angles) for every set
+/// [`prepare`] accepts, because [`prepare`] keeps every declared direction,
+/// silent ones included (ADR 0016, 2026-10-15 amendment). Every check
+/// [`prepare`] makes on the headers is made here too (track counts, sample
+/// format, one sample rate per set, sidecar rows, duplicate directions,
+/// unknown angles, an empty set); what only the samples can tell (a data
+/// chunk shorter than its header says) is left to [`prepare`].
+pub fn layout(profile: &Profile) -> Result<Layout, BrirError> {
+    let directions = match &profile.brir {
+        BrirSource::Hesuvi(path) => {
+            ordered_layout(path, &HESUVI_TRACK_ORDER, 14, "HeSuVi", profile)?
+        }
+        BrirSource::Hrir(path) => ordered_layout(path, &HRIR_TRACK_ORDER, 16, "hrir", profile)?,
+        BrirSource::Directions(files) => {
+            let mut rate = SetRate::default();
+            let mut directions = Vec::with_capacity(files.len());
+            for file in files {
+                let header = direction_header(&file.path)?;
+                rate.check(&file.path, header.rate)?;
+                directions.push(Direction::new(
+                    file.name.clone(),
+                    file.azimuth_deg,
+                    file.elevation_deg,
+                ));
+            }
+            directions
+        }
+        BrirSource::Mapped { wav, map } => mapped_layout(wav, map, profile)?,
+        BrirSource::Folder(path) => folder_layout(path, profile)?,
+    };
+    Ok(Layout::new(directions)?)
+}
+
+/// Checks that `path` is a headphone FIR [`prepare`] can fold: not a raw
+/// measurement file (`*_measurement_lr.wav`), and a readable WAV with one
+/// track (both ears) or two (left, right).
+pub fn check_headphone_fir(path: impl AsRef<Path>) -> Result<(), BrirError> {
+    let path = path.as_ref();
+    if is_measurement_file(path) {
+        return Err(BrirError::MeasurementFir {
+            path: path.to_path_buf(),
+        });
+    }
+    let header = ir::read_wav_header(path)?;
+    if header.tracks != 1 && header.tracks != 2 {
+        return Err(BrirError::Wav {
+            path: path.to_path_buf(),
+            detail: format!(
+                "headphone FIR needs one or two tracks, got {}",
+                header.tracks
+            ),
+        });
+    }
+    // A FIR is short; decoding it once proves the data chunk is readable too.
+    ir::read_wav_raw(path)?;
+    Ok(())
+}
+
+/// The first sample rate of a set of direction files, which the rest must
+/// share (as in [`load_direction_files`] and [`load_folder`]).
+#[derive(Default)]
+struct SetRate(Option<u32>);
+
+impl SetRate {
+    fn check(&mut self, path: &Path, rate: u32) -> Result<(), BrirError> {
+        match self.0 {
+            Some(expected) if expected != rate => Err(BrirError::Wav {
+                path: path.to_path_buf(),
+                detail: format!("sample rate {rate} differs from the first direction's {expected}"),
+            }),
+            Some(_) => Ok(()),
+            None => {
+                self.0 = Some(rate);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A direction file's header, which must have two tracks (left ear, right ear).
+fn direction_header(path: &Path) -> Result<ir::WavHeader, BrirError> {
+    let header = ir::read_wav_header(path)?;
+    if header.tracks != 2 {
+        return Err(BrirError::Wav {
+            path: path.to_path_buf(),
+            detail: format!("a direction WAV needs two tracks, got {}", header.tracks),
+        });
+    }
+    Ok(header)
+}
+
+fn ordered_layout(
+    path: &Path,
+    order: &[&str],
+    minimum_tracks: usize,
+    format: &'static str,
+    profile: &Profile,
+) -> Result<Vec<Direction>, BrirError> {
+    let tracks = ir::read_wav_header(path)?.tracks;
+    if tracks < minimum_tracks || tracks > order.len() || !tracks.is_multiple_of(2) {
+        return Err(BrirError::TrackCount {
+            path: path.to_path_buf(),
+            tracks,
+            format,
+        });
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for track in &order[..tracks] {
+        let (speaker, _) = track
+            .rsplit_once('-')
+            .expect("constant track names contain an ear suffix");
+        if speaker != "LFE" && !names.contains(&speaker) {
+            names.push(speaker);
+        }
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let (azimuth, elevation) = angles_for(profile, name)?;
+            Ok(Direction::new(name, azimuth, elevation))
+        })
+        .collect()
+}
+
+fn folder_layout(path: &Path, profile: &Profile) -> Result<Vec<Direction>, BrirError> {
+    let mut rate = SetRate::default();
+    folder_files(path)?
+        .into_iter()
+        .map(|(name, file_path)| {
+            let header = direction_header(&file_path)?;
+            rate.check(&file_path, header.rate)?;
+            let (azimuth, elevation) = angles_for(profile, &name)?;
+            Ok(Direction::new(name, azimuth, elevation))
+        })
+        .collect()
+}
+
+fn mapped_layout(wav: &Path, map: &Path, profile: &Profile) -> Result<Vec<Direction>, BrirError> {
+    let tracks = ir::read_wav_header(wav)?.tracks;
+    Ok(read_sidecar(map, tracks, profile)?
+        .into_iter()
+        .map(|row| row.direction)
+        .collect())
+}
+
 /// Prepares `profile` for scenes at `rate` and blocks that are multiples of
 /// `partition`.
 pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<PreparedBrir, BrirError> {
@@ -649,7 +797,6 @@ pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<Prepare
         gain: db_to_linear(profile.gain_db),
         limiter_ceiling: db_to_linear(profile.limiter_ceiling_dbfs),
         ir_frames,
-        omitted_silent_directions: loaded.omitted_silent_directions,
         trimmed_leading_frames,
     })
 }
@@ -670,28 +817,12 @@ struct LoadedBrir {
     rate: u32,
     directions: Vec<Direction>,
     irs: Vec<[Vec<f32>; 2]>,
-    omitted_silent_directions: Vec<String>,
-}
-
-impl LoadedBrir {
-    fn omit_silent_directions(&mut self) {
-        let mut kept_directions = Vec::with_capacity(self.directions.len());
-        let mut kept_irs = Vec::with_capacity(self.irs.len());
-        for (direction, ears) in self.directions.drain(..).zip(self.irs.drain(..)) {
-            if is_silent(&ears[0]) && is_silent(&ears[1]) {
-                self.omitted_silent_directions.push(direction.name);
-            } else {
-                kept_directions.push(direction);
-                kept_irs.push(ears);
-            }
-        }
-        self.directions = kept_directions;
-        self.irs = kept_irs;
-    }
 }
 
 fn load_brir_source(source: &BrirSource, profile: &Profile) -> Result<LoadedBrir, BrirError> {
-    let mut loaded = match source {
+    // Every declared direction is kept, silent ones included, so the layout
+    // is what the headers say (`layout`, ADR 0016's 2026-10-15 amendment).
+    let loaded = match source {
         BrirSource::Hesuvi(path) => {
             load_ordered_wav(path, &HESUVI_TRACK_ORDER, 14, "HeSuVi", profile)
         }
@@ -700,7 +831,6 @@ fn load_brir_source(source: &BrirSource, profile: &Profile) -> Result<LoadedBrir
         BrirSource::Mapped { wav, map } => load_mapped_wav(wav, map, profile),
         BrirSource::Folder(path) => load_folder(path, profile),
     }?;
-    loaded.omit_silent_directions();
     if loaded.directions.is_empty() {
         return Err(BrirError::Layout(ssr_types::LayoutError::Empty));
     }
@@ -774,7 +904,6 @@ fn load_ordered_wav(
         rate: wav.rate,
         directions,
         irs,
-        omitted_silent_directions: Vec::new(),
     })
 }
 
@@ -801,7 +930,6 @@ fn load_direction_files(files: &[DirectionFile]) -> Result<LoadedBrir, BrirError
             rate: 0,
             directions: Vec::new(),
             irs: Vec::new(),
-            omitted_silent_directions: Vec::new(),
         });
     }
     let mut rate = None;
@@ -845,7 +973,6 @@ fn load_direction_files(files: &[DirectionFile]) -> Result<LoadedBrir, BrirError
         rate: rate.expect("nonempty files set a rate"),
         directions,
         irs,
-        omitted_silent_directions: Vec::new(),
     })
 }
 
@@ -855,6 +982,37 @@ fn load_mapped_wav(
     profile: &Profile,
 ) -> Result<LoadedBrir, BrirError> {
     let wav = ir::read_wav_raw(wav_path)?;
+    let rows = read_sidecar(map_path, wav.channels.len(), profile)?;
+    let mut directions = Vec::with_capacity(rows.len());
+    let mut irs = Vec::with_capacity(rows.len());
+    for row in rows {
+        irs.push([
+            wav.channels[row.left].clone(),
+            wav.channels[row.right].clone(),
+        ]);
+        directions.push(row.direction);
+    }
+    Ok(LoadedBrir {
+        rate: wav.rate,
+        directions,
+        irs,
+    })
+}
+
+/// One sidecar row: the direction and its zero-based left and right tracks.
+struct SidecarRow {
+    direction: Direction,
+    left: usize,
+    right: usize,
+}
+
+/// Parses the sidecar of a `tracks`-track WAV in file order, skipping blank
+/// lines and repeat measurements.
+fn read_sidecar(
+    map_path: &Path,
+    tracks: usize,
+    profile: &Profile,
+) -> Result<Vec<SidecarRow>, BrirError> {
     let contents = fs::read_to_string(map_path).map_err(|source| BrirError::Io {
         path: map_path.to_path_buf(),
         source,
@@ -876,8 +1034,7 @@ fn load_mapped_wav(
         return Err(sidecar_error(map_path, 1, "unsupported header"));
     };
 
-    let mut directions = Vec::new();
-    let mut irs = Vec::new();
+    let mut rows = Vec::new();
     let mut seen = HashSet::new();
     for (index, line) in lines.enumerate() {
         let line_number = index + 2;
@@ -912,28 +1069,16 @@ fn load_mapped_wav(
             SidecarShape::Channels => (1, 2),
             SidecarShape::ReaVerb => (2, 3),
         };
-        let left = parse_track(
-            map_path,
-            line_number,
-            fields[left_field],
-            wav.channels.len(),
-        )?;
-        let right = parse_track(
-            map_path,
-            line_number,
-            fields[right_field],
-            wav.channels.len(),
-        )?;
+        let left = parse_track(map_path, line_number, fields[left_field], tracks)?;
+        let right = parse_track(map_path, line_number, fields[right_field], tracks)?;
         let (azimuth, elevation) = angles_for(profile, name)?;
-        directions.push(Direction::new(name, azimuth, elevation));
-        irs.push([wav.channels[left].clone(), wav.channels[right].clone()]);
+        rows.push(SidecarRow {
+            direction: Direction::new(name, azimuth, elevation),
+            left,
+            right,
+        });
     }
-    Ok(LoadedBrir {
-        rate: wav.rate,
-        directions,
-        irs,
-        omitted_silent_directions: Vec::new(),
-    })
+    Ok(rows)
 }
 
 #[derive(Clone, Copy)]
@@ -969,6 +1114,52 @@ fn parse_track(path: &Path, line: usize, value: &str, tracks: usize) -> Result<u
 }
 
 fn load_folder(path: &Path, profile: &Profile) -> Result<LoadedBrir, BrirError> {
+    let files = folder_files(path)?;
+    let mut rate = None;
+    let mut directions = Vec::with_capacity(files.len());
+    let mut irs = Vec::with_capacity(files.len());
+    for (name, file_path) in files {
+        let wav = ir::read_wav_raw(&file_path)?;
+        if wav.channels.len() != 2 {
+            return Err(BrirError::Wav {
+                path: file_path,
+                detail: format!(
+                    "a direction WAV needs two tracks, got {}",
+                    wav.channels.len()
+                ),
+            });
+        }
+        match rate {
+            Some(expected) if expected != wav.rate => {
+                return Err(BrirError::Wav {
+                    path: file_path,
+                    detail: format!(
+                        "sample rate {} differs from the first direction's {expected}",
+                        wav.rate
+                    ),
+                });
+            }
+            None => rate = Some(wav.rate),
+            _ => {}
+        }
+        let (azimuth, elevation) = angles_for(profile, &name)?;
+        directions.push(Direction::new(name, azimuth, elevation));
+        let mut channels = wav.channels;
+        let right = channels.pop().expect("two channels were checked");
+        let left = channels.pop().expect("two channels were checked");
+        irs.push([left, right]);
+    }
+    Ok(LoadedBrir {
+        rate: rate.unwrap_or(0),
+        directions,
+        irs,
+    })
+}
+
+/// The folder's direction WAVs as (canonical name, path) in feed order:
+/// canonical directions first in [`CANONICAL_ORDER`], then other names by
+/// lowercase file stem. Repeat measurements and non-WAV entries are skipped.
+fn folder_files(path: &Path) -> Result<Vec<(String, PathBuf)>, BrirError> {
     let entries = fs::read_dir(path).map_err(|source| BrirError::Io {
         path: path.to_path_buf(),
         source,
@@ -1011,47 +1202,7 @@ fn load_folder(path: &Path, profile: &Profile) -> Result<LoadedBrir, BrirError> 
     files.sort_by(|(left_name, left_path), (right_name, right_path)| {
         folder_sort_key(left_name, left_path).cmp(&folder_sort_key(right_name, right_path))
     });
-
-    let mut rate = None;
-    let mut directions = Vec::with_capacity(files.len());
-    let mut irs = Vec::with_capacity(files.len());
-    for (name, file_path) in files {
-        let wav = ir::read_wav_raw(&file_path)?;
-        if wav.channels.len() != 2 {
-            return Err(BrirError::Wav {
-                path: file_path,
-                detail: format!(
-                    "a direction WAV needs two tracks, got {}",
-                    wav.channels.len()
-                ),
-            });
-        }
-        match rate {
-            Some(expected) if expected != wav.rate => {
-                return Err(BrirError::Wav {
-                    path: file_path,
-                    detail: format!(
-                        "sample rate {} differs from the first direction's {expected}",
-                        wav.rate
-                    ),
-                });
-            }
-            None => rate = Some(wav.rate),
-            _ => {}
-        }
-        let (azimuth, elevation) = angles_for(profile, &name)?;
-        directions.push(Direction::new(name, azimuth, elevation));
-        let mut channels = wav.channels;
-        let right = channels.pop().expect("two channels were checked");
-        let left = channels.pop().expect("two channels were checked");
-        irs.push([left, right]);
-    }
-    Ok(LoadedBrir {
-        rate: rate.unwrap_or(0),
-        directions,
-        irs,
-        omitted_silent_directions: Vec::new(),
-    })
+    Ok(files)
 }
 
 fn folder_sort_key(name: &str, path: &Path) -> (usize, String) {
@@ -1117,10 +1268,6 @@ fn is_measurement_file(path: &Path) -> bool {
         .is_some_and(|name| name.to_ascii_lowercase().ends_with("_measurement_lr.wav"))
 }
 
-fn is_silent(samples: &[f32]) -> bool {
-    samples.iter().all(|sample| *sample == 0.0)
-}
-
 fn convolve(signal: &[f32], filter: &[f32]) -> Vec<f32> {
     debug_assert!(!signal.is_empty() && !filter.is_empty());
     let output_len = signal.len() + filter.len() - 1;
@@ -1159,16 +1306,14 @@ fn trim_common_leading_delay(irs: &mut [[Vec<f32>; 2]], rate: u32) -> usize {
     let earliest = irs
         .iter()
         .flat_map(|ears| ears.iter())
-        .map(|samples| {
+        .filter_map(|samples| {
             let peak = samples
                 .iter()
                 .map(|sample| sample.abs())
                 .fold(0.0, f32::max);
             let threshold = peak * 10.0_f32.powf(-60.0 / 20.0);
-            samples
-                .iter()
-                .position(|sample| sample.abs() > threshold)
-                .unwrap_or(0)
+            // A silent track has no onset and does not hold the trim back.
+            samples.iter().position(|sample| sample.abs() > threshold)
         })
         .min()
         .unwrap_or(0);
@@ -1176,7 +1321,9 @@ fn trim_common_leading_delay(irs: &mut [[Vec<f32>; 2]], rate: u32) -> usize {
     let trim = earliest.saturating_sub(margin);
     if trim != 0 {
         for samples in irs.iter_mut().flat_map(|ears| ears.iter_mut()) {
-            samples.drain(..trim.min(samples.len()));
+            // An audible track starts after `trim`; a silent one shorter than
+            // it keeps one (silent) sample, so no filter is left empty.
+            samples.drain(..trim.min(samples.len().saturating_sub(1)));
         }
     }
     trim

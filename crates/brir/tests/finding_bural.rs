@@ -231,7 +231,7 @@ fn mapped_channels_sidecar_preserves_every_track_delay_and_level() {
 }
 
 #[test]
-fn mapped_wav_drops_and_reports_silent_directions() {
+fn mapped_wav_keeps_silent_directions_as_its_headers_declare() {
     let directory = TestDirectory::new("mapped-silent");
     let wav = directory.join("set.wav");
     let map = directory.join("channels.csv");
@@ -241,9 +241,16 @@ fn mapped_wav_drops_and_reports_silent_directions() {
         "speaker,BRIR_left_1based,BRIR_right_1based\nFL,1,2\nTC,3,4\n",
     )
     .unwrap();
-    let prepared = prepare(&profile(BrirSource::Mapped { wav, map }), 48_000, 64).unwrap();
-    assert_eq!(prepared.layout.len(), 1);
-    assert_eq!(prepared.omitted_silent_directions, ["TC"]);
+    let input = profile(BrirSource::Mapped { wav, map });
+    let prepared = prepare(&input, 48_000, 64).unwrap();
+    // ADR 0016 (2026-10-15): a silent direction stays, so the layout is what
+    // the headers declare.
+    assert_eq!(prepared.layout.len(), 2);
+    assert_eq!(prepared.layout.directions()[1].name, "TC");
+    assert_eq!(
+        brir::layout(&input).unwrap().directions(),
+        prepared.layout.directions()
+    );
 }
 
 #[test]
@@ -351,7 +358,7 @@ fn folder_aliases_are_canonical_and_follow_documented_order() {
 }
 
 #[test]
-fn folder_drops_and_reports_silent_directions() {
+fn folder_keeps_silent_directions_as_its_files_declare() {
     let directory = TestDirectory::new("folder-silent");
     write_wav(&directory.join("FL.wav"), 48_000, &[vec![1.0], vec![0.5]]);
     write_wav(
@@ -359,14 +366,14 @@ fn folder_drops_and_reports_silent_directions() {
         48_000,
         &[vec![0.0; 4], vec![0.0; 4]],
     );
-    let prepared = prepare(
-        &profile(BrirSource::Folder(directory.0.clone())),
-        48_000,
-        64,
-    )
-    .unwrap();
-    assert_eq!(prepared.layout.len(), 1);
-    assert_eq!(prepared.omitted_silent_directions, ["TC"]);
+    let input = profile(BrirSource::Folder(directory.0.clone()));
+    let prepared = prepare(&input, 48_000, 64).unwrap();
+    assert_eq!(prepared.layout.len(), 2);
+    assert_eq!(prepared.layout.directions()[1].name, "TC");
+    assert_eq!(
+        brir::layout(&input).unwrap().directions(),
+        prepared.layout.directions()
+    );
 }
 
 #[test]

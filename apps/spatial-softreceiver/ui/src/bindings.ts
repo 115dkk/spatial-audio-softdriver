@@ -60,6 +60,11 @@ export type DeviceId = string
  */
 export type DirectionId = number
 
+/**
+ * One measured speaker position as shown by the application.
+ */
+export type DirectionView = { id: DirectionId; name: string; azimuth_deg: number; elevation_deg: number }
+
 export type DriverState = { kind: "not_installed" } |
 /**
  * `problem_code` is DEVPKEY_Device_ProblemCode (0 is fine, 52 is an
@@ -88,7 +93,16 @@ chain_errors: ChainErrorMap }
  */
 export type EngineFault = { kind: "capture_lost"; value: string } | { kind: "output_lost"; value: string }
 
-export type EngineStatus = { endpoints: [EndpointStatus, EndpointStatus, EndpointStatus, EndpointStatus];
+export type EngineStatus = {
+/**
+ * Directions in the current output layout (BRIR directions for headphones,
+ * physical speakers for speaker output).
+ */
+directions: DirectionView[];
+/**
+ * Active objects with finite, nonzero signal in the last mixed block.
+ */
+scene: SceneObject[]; endpoints: [EndpointStatus, EndpointStatus, EndpointStatus, EndpointStatus];
 /**
  * Chain errors whose malformed record did not identify an entrance.
  */
@@ -199,7 +213,7 @@ export type Intent = { kind: "begin_setup" } | { kind: "install_driver" } |
  * (a reboot, test signing, a repair, a device plugged in at the output
  * step), or leaves the faulted state.
  */
-{ kind: "recheck" } | { kind: "choose_output"; value: DeviceId } | { kind: "import_brir"; value: string } | { kind: "import_headphone_fir"; value: string } | { kind: "switch_profile"; value: string } | { kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
+{ kind: "recheck" } | { kind: "choose_output"; value: DeviceId } | { kind: "import_brir"; value: string } | { kind: "import_headphone_fir"; value: string } | { kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
 
 /**
  * Latency of the whole chain, from the driver's record QPC to the output
@@ -277,6 +291,18 @@ export type PolicyState =
  */
 "unknown"
 
+export type ProfileKind = "stereo" | "headphones" | "speakers"
+
+export type ProfileView = { kind: ProfileKind; name: string;
+/**
+ * Imported BRIR set (folder, hesuvi.wav, or hrir.wav).
+ */
+brir: string | null; headphone_fir: string | null; gain_db: number; directions: DirectionView[];
+/**
+ * The state directory's profile.toml takes precedence over import intents.
+ */
+from_file: boolean }
+
 /**
  * How PCM samples are stored.
  */
@@ -289,6 +315,8 @@ export type SampleType =
  * Little-endian IEEE float (32 bits).
  */
 "float"
+
+export type SceneObject = { lane: number; index: number; x: number; y: number; z: number; level_dbfs: number }
 
 export type SecureBoot = "enabled" | "disabled" |
 /**
@@ -315,7 +343,7 @@ export type SetupStep = "welcome" |
  */
 "driver" | "reboot_required" | "choose_output"
 
-export type Snapshot = { phase: Phase; engine: EngineStatus | null;
+export type Snapshot = { phase: Phase; profile: ProfileView; engine: EngineStatus | null;
 /**
  * Outputs the user may choose: active, and never our own endpoints.
  */

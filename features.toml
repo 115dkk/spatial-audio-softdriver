@@ -305,10 +305,14 @@ tests = [
   "brir::standard_speaker_angles_match_contract",
   "brir::synthetic_hesuvi_maps_every_direction_and_ear",
   "brir::sixteen_track_hrir_drops_silent_lfe_placeholders",
-  "brir::extended_hesuvi_drops_unmeasured_silent_speakers",
-  "brir::direction_files_drop_and_report_silent_directions",
-  "brir::mapped_wav_drops_and_reports_silent_directions",
-  "brir::folder_drops_and_reports_silent_directions",
+  "brir::extended_hesuvi_keeps_unmeasured_silent_speakers",
+  "brir::direction_files_keep_silent_directions_and_trim_by_the_audible_ones",
+  "brir::mapped_wav_keeps_silent_directions_as_its_headers_declare",
+  "brir::folder_keeps_silent_directions_as_its_files_declare",
+  "brir::silent_directions_are_kept_by_headers_and_prepare_alike",
+  "brir::hesuvi_layout_equals_prepare_for_every_track_count",
+  "brir::layout_reads_headers_only",
+  "brir::layout_rejects_what_prepare_rejects_from_headers",
   "brir::directions_profile_keeps_file_order_and_angles",
   "brir::headphone_fir_folding_equals_filtering_the_binaural_output",
   "brir::fft_convolution_matches_direct_reference",
@@ -320,7 +324,7 @@ tests = [
   "brir::bad_track_count_and_unknown_lfe_direction_are_errors",
   "brir::gains_and_lfe_route_become_linear",
 ]
-note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs; all loaders omit and report directions silent in both ears; headphone FIR folded by one-shot FFT convolution at load (ADR 0016); rubato resampling with delay compensation; common leading delay trimmed to a 1 ms margin by default; no level normalisation"
+note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs; all loaders keep every declared direction, silent ones included, so the header-only brir::layout equals prepare's layout (ADR 0016, 2026-10-15 amendment); headphone FIR folded by one-shot FFT convolution at load (ADR 0016); rubato resampling with delay compensation; common leading delay trimmed to a 1 ms margin by default; no level normalisation"
 
 [[feature]]
 id = "brir.finding_bural_sets"
@@ -720,7 +724,7 @@ tests = [
   "supervisor::a_fault_that_outlasts_the_grace_stops_and_restores",
   "supervisor::quit_from_running_stops_and_restores",
   "supervisor::intents_after_quit_are_refused",
-  "supervisor::unlisted_and_unwired_intents_leave_the_state_alone",
+  "supervisor::unlisted_and_refused_intents_leave_the_state_alone",
   "supervisor::a_refused_intent_keeps_the_step_explanation",
   "supervisor::a_hidden_main_endpoint_refuses_to_enable",
   "supervisor::a_missing_exclusive_policy_asks_for_a_repair",
@@ -730,7 +734,7 @@ tests = [
   "supervisor::a_real_session_runs_behind_the_engine_handle",
   "supervisor::restore_point_round_trips_and_rejects_other_versions",
 ]
-note = "ADR 0013: supervisor::machine holds the wizard steps (Welcome, Unsupported, NotTestSigning, Driver, RebootRequired, ChooseOutput), Ready, Running, Faulted and Quit; the OS is reached only through the ssr-types Host port (platform facts, driver state, outputs with our endpoint numbers, the three default roles, ssr-setup, the restore point) and the engine through Launcher/EngineHandle (Session implements it). Enabling writes the restore point, takes the three roles and launches; disabling, a fault and quit restore only the roles that still point at us (restore_roles, shared with the guard), falling back to the chosen output when the previous device is gone or was ours. A recoverable engine fault (lost output or capture) keeps Running while the engine reconnects and stops only after Config::fault_grace (15 s). The chosen output is kept by id and name and re-found by a unique name after an id change. Tested on Linux with a scripted Fake Host and a fake engine, plus one real Session behind the handle. The Windows Host adapter is ssr-sys::host (ADR 0032) and the Tauri shell drives the machine from its control thread (app.shell). Still planned: BRIR/profile/gain intents"
+note = "ADR 0013: supervisor::machine holds the wizard steps (Welcome, Unsupported, NotTestSigning, Driver, RebootRequired, ChooseOutput), Ready, Running, Faulted and Quit; the OS is reached only through the ssr-types Host port (platform facts, driver state, outputs with our endpoint numbers, the three default roles, ssr-setup, the restore point) and the engine through Launcher/EngineHandle (Session implements it). Enabling writes the restore point, takes the three roles and launches; disabling, a fault and quit restore only the roles that still point at us (restore_roles, shared with the guard), falling back to the chosen output when the previous device is gone or was ours. A recoverable engine fault (lost output or capture) keeps Running while the engine reconnects and stops only after Config::fault_grace (15 s). The chosen output is kept by id and name and re-found by a unique name after an id change. Tested on Linux with a scripted Fake Host and a fake engine, plus one real Session behind the handle. The Windows Host adapter is ssr-sys::host (ADR 0032) and the Tauri shell drives the machine from its control thread (app.shell)."
 
 [[feature]]
 id = "supervisor.live_session"
@@ -747,7 +751,7 @@ tests = [
   "supervisor::driver_stats_json_keeps_stable_keys",
   "supervisor::the_driver_baseline_is_taken_before_the_output_is_prepared",
 ]
-note = "supervisor::Session runs one live session for ssr-live today and the M4 shell later: it starts the engine with the prepared output, re-prepares when the engine asks (retrying while the change queue is full; a profile that no longer prepares is an error), keeps the run figures, tees capture reads into the diagnostic recorder, totals driver statistics across reconnects from a baseline taken before the output is prepared to a last sample taken while the engine still reads, and stops the engine and then the recorder, which also writes out what it holds when dropped on an error. SessionReport::to_json is the ssr-live --report contract CI reads; the test pins its key set"
+note = "supervisor::Session runs one live session for ssr-live today and the M4 shell later: it starts the engine with the prepared output, re-prepares when the engine asks (retrying while the change queue is full; a profile that no longer prepares is an error), keeps the run figures, tees capture reads into the diagnostic recorder, totals driver statistics across reconnects from a baseline taken before the output is prepared to a last sample taken while the engine still reads, and stops the engine and then the recorder, which also writes out what it holds when dropped on an error. Behind supervisor::EngineHandle the session only passes NeedsPrepared on (Session::poll_events) and takes LiveChange as is; the supervisor re-prepares the profile it is playing. SessionReport::to_json is the ssr-live --report contract CI reads; the test pins its key set"
 
 [[feature]]
 id = "setup.tasks"
@@ -1179,6 +1183,7 @@ tests = [
   "spatial-softreceiver::a_dropped_bridge_quits_the_supervisor",
   "spatial-softreceiver::dispatch_after_the_thread_ended_is_an_error",
   "spatial-softreceiver::a_panicking_launcher_still_quits_the_supervisor",
+  "spatial-softreceiver::reprepare_apply_retries_do_not_emit_idle_heartbeats",
   "spatial-softreceiver::settings_round_trip",
   "spatial-softreceiver::a_broken_or_foreign_settings_file_starts_fresh",
   "spatial-softreceiver::state_dir_falls_back_to_the_temp_dir_without_local_app_data",
@@ -1186,7 +1191,44 @@ tests = [
   "ssr-types::typescript_bindings_match_the_types",
   "ssr-types::snapshot_fixtures_match_the_types",
 ]
-note = "ADR 0001 (2026-10-15 addendum): apps/spatial-softreceiver is the Tauri 2 shell. A control thread (never the UI thread, so the Windows host can join the multithreaded apartment) owns the supervisor: it takes intents over a channel, polls every 33 ms, emits the `snapshot` event when the phase, an intent or a notice changes it (and every second when the output list differs), emits `meters` (EngineStatus) at the tick rate while Running, and persists supervisor::Settings as %LOCALAPPDATA%\\Spatial SoftReceiver\\settings.json after new and every successful intent. Two commands (dispatch, snapshot) and two events are the whole IPC; the TypeScript bindings (ui/src/bindings.ts) and the snapshot fixtures the screens are tested with are generated from ssr-types by tests/ui_contract.rs and compared in CI. The Windows launcher opens the driver ring, WASAPI (exclusive with shared fallback) and a stereo speaker profile until a BRIR set is imported. Tray (open, enable/disable, quit), close to tray, single instance, autostart on login, and a --smoke mode the Windows CI runs (WebView2 draws the screens and asks for a snapshot). The screens (ui/, vitest + gallery screenshots) are the wizard, the status screen with 30 Hz meters, a profile screen whose intents the supervisor still refuses, and settings. Still planned: profile intents, the object map, the installer and Velopack updates, English text. ADR 0033: an ordinary launch starts ssr-guard and exits; the guard launches the app with --guarded, and that app writes a one-line heartbeat (ssr_types::app::Heartbeat) to stdout every refresh; --resume (after the guard restarted it) enables once from Ready. At startup a restore point left by a previous instance is restored before the supervisor exists, and the guard's marker becomes a note on the first snapshot (Supervisor::note)"
+note = "ADR 0001 (2026-10-15 addendum): apps/spatial-softreceiver is the Tauri 2 shell. A control thread (never the UI thread, so the Windows host can join the multithreaded apartment) owns the supervisor: it takes intents over a channel, polls every 33 ms, emits the `snapshot` event when the phase, an intent or a notice changes it (and every second when the output list differs), emits `meters` (EngineStatus) at the tick rate while Running, and persists supervisor::Settings as %LOCALAPPDATA%\\Spatial SoftReceiver\\settings.json after new and every successful intent. Two commands (dispatch, snapshot) and two events are the whole IPC; the TypeScript bindings (ui/src/bindings.ts) and the snapshot fixtures the screens are tested with are generated from ssr-types by tests/ui_contract.rs and compared in CI. The Windows launcher opens the driver ring and WASAPI (exclusive with shared fallback) with the profile resolved by the supervisor. Tray (open, enable/disable, quit), close to tray, single instance, autostart on login, and a --smoke mode the Windows CI runs (WebView2 draws the screens and asks for a snapshot). The screens (ui/, vitest + gallery screenshots) are the wizard, the status screen with 30 Hz meters, a profile screen, and settings. Still planned: the installer and Velopack updates, English text. ADR 0033: an ordinary launch starts ssr-guard and exits; the guard launches the app with --guarded, and that app writes a one-line heartbeat (ssr_types::app::Heartbeat) to stdout every refresh; --resume (after the guard restarted it) enables once from Ready. At startup a restore point left by a previous instance is restored before the supervisor exists, and the guard's marker becomes a note on the first snapshot (Supervisor::note)"
+
+[[feature]]
+id = "app.profile_intents"
+kind = "app"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "supervisor::profile_intents_apply_persist_and_reject_by_phase",
+  "supervisor::old_settings_without_profile_use_defaults",
+  "supervisor::live_changes_are_all_or_nothing",
+  "supervisor::needs_prepared_rebuilds_the_profile_the_engine_plays_now",
+  "supervisor::a_reprepare_is_built_once_retried_and_refreshes_the_direction_cache",
+  "supervisor::watching_profile_file_presence_unlocks_and_relocks_imports",
+  "spatial-softreceiver::a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard",
+  "spatial-softreceiver::a_reprepare_after_needs_prepared_is_bracketed_by_heartbeats_for_the_guard",
+]
+
+[[feature]]
+id = "engine.live_gain_and_test_tone"
+kind = "pipeline"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "engine::live_gain_ramps_persists_and_rejects_invalid_values",
+  "engine::test_tone_is_bounded_faded_directional_and_retriggerable",
+]
+
+[[feature]]
+id = "engine.scene_snapshot"
+kind = "pipeline"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "engine::status_reports_current_directions_and_latest_scene",
+  "engine::scene_and_test_tone_realtime_paths_do_not_allocate",
+  "engine::scene_energy_follows_every_frame_of_the_endpoint_volume_ramp",
+]
 
 [[feature]]
 id = "app.installer"

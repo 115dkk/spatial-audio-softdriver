@@ -14,15 +14,19 @@ use std::path::{Path, PathBuf};
 
 use specta::TypeCollection;
 use specta_typescript::{BigIntExportBehavior, Typescript};
-use ssr_types::app::{Intent, NextAction, OutputChoice, Phase, SetupStep, Snapshot, UserError};
+use ssr_types::app::{
+    Intent, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep, Snapshot,
+    UserError,
+};
 use ssr_types::ports::PolicyState;
 use ssr_types::status::{
     ChainErrorCounts, ChainErrorKind, ClockStatus, EndpointStatus, LatencyStats, UnderrunSnapshot,
     UnsupportedReason,
 };
 use ssr_types::{
-    Arch, BitstreamCodec, BitstreamFormat, DeviceId, DirectionId, DriverState, EngineFault,
-    EngineStatus, OutputMode, PcmFormat, Platform, SampleType, SecureBoot, SourceFormat,
+    Arch, BitstreamCodec, BitstreamFormat, DeviceId, DirectionId, DirectionView, DriverState,
+    EngineFault, EngineStatus, OutputMode, PcmFormat, Platform, SampleType, SceneObject,
+    SecureBoot, SourceFormat,
 };
 
 const BLESS: &str = "SSR_UI_BLESS";
@@ -121,9 +125,60 @@ fn error(message: &str, next: NextAction) -> UserError {
     }
 }
 
+fn direction(id: u16, name: &str, azimuth_deg: f32, elevation_deg: f32) -> DirectionView {
+    DirectionView {
+        id: DirectionId(id),
+        name: name.to_owned(),
+        azimuth_deg,
+        elevation_deg,
+    }
+}
+
+fn stereo_profile() -> ProfileView {
+    ProfileView {
+        kind: ProfileKind::Stereo,
+        name: "Stereo".to_owned(),
+        brir: None,
+        headphone_fir: None,
+        gain_db: 0.0,
+        directions: vec![
+            direction(0, "FL", 30.0, 0.0),
+            direction(1, "FR", -30.0, 0.0),
+        ],
+        from_file: false,
+    }
+}
+
+fn headphone_profile() -> ProfileView {
+    ProfileView {
+        kind: ProfileKind::Headphones,
+        name: "거실 7.1.4 헤드폰".to_owned(),
+        brir: Some(r"C:\Users\me\BRIR\living-room".to_owned()),
+        headphone_fir: Some(r"C:\Users\me\hd650.wav".to_owned()),
+        gain_db: -3.5,
+        directions: vec![
+            // 7.1.4 has eleven render directions: LFE is routed separately and
+            // therefore is not a BRIR direction or a test-tone target.
+            direction(0, "FL", 30.0, 0.0),
+            direction(1, "FR", -30.0, 0.0),
+            direction(2, "FC", 0.0, 0.0),
+            direction(3, "SL", 90.0, 0.0),
+            direction(4, "SR", -90.0, 0.0),
+            direction(5, "BL", 150.0, 0.0),
+            direction(6, "BR", -150.0, 0.0),
+            direction(7, "TFL", 30.0, 45.0),
+            direction(8, "TFR", -30.0, 45.0),
+            direction(9, "TBL", 150.0, 45.0),
+            direction(10, "TBR", -150.0, 45.0),
+        ],
+        from_file: false,
+    }
+}
+
 fn blank(phase: Phase) -> Snapshot {
     Snapshot {
         phase,
+        profile: stereo_profile(),
         engine: None,
         outputs: Vec::new(),
         chosen_output: None,
@@ -193,6 +248,41 @@ fn engine_status() -> EngineStatus {
         }),
     };
     EngineStatus {
+        directions: headphone_profile().directions,
+        scene: vec![
+            SceneObject {
+                lane: 0,
+                index: 0,
+                x: -0.5,
+                y: 0.866,
+                z: 0.0,
+                level_dbfs: -12.0,
+            },
+            SceneObject {
+                lane: 0,
+                index: 1,
+                x: 0.5,
+                y: 0.866,
+                z: 0.0,
+                level_dbfs: -18.0,
+            },
+            SceneObject {
+                lane: 1,
+                index: 0,
+                x: 0.0,
+                y: -1.0,
+                z: 0.0,
+                level_dbfs: -24.0,
+            },
+            SceneObject {
+                lane: 2,
+                index: 3,
+                x: 0.25,
+                y: 0.433,
+                z: 0.866,
+                level_dbfs: -30.0,
+            },
+        ],
         endpoints,
         unattributed_chain_errors: ChainErrorCounts::default(),
         skipped_records: 0,
@@ -350,6 +440,7 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
         (
             "running",
             Snapshot {
+                profile: headphone_profile(),
                 engine: Some(engine_status()),
                 roles_taken: true,
                 notes: vec![
@@ -361,6 +452,7 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
         (
             "running-reconnecting",
             Snapshot {
+                profile: headphone_profile(),
                 engine: Some(EngineStatus {
                     fault: Some(EngineFault::OutputLost(
                         "AUDCLNT_E_DEVICE_INVALIDATED".to_owned(),
@@ -399,7 +491,6 @@ fn intents() -> Vec<Intent> {
         Intent::ChooseOutput(outputs()[1].id.clone()),
         Intent::ImportBrir(PathBuf::from(r"C:\Users\me\BRIR\living-room")),
         Intent::ImportHeadphoneFir(PathBuf::from(r"C:\Users\me\hd650.wav")),
-        Intent::SwitchProfile("거실".to_owned()),
         Intent::SetGain(-3.5),
         Intent::TestDirection(DirectionId(7)),
         Intent::Enable,

@@ -1,7 +1,7 @@
 // Screenshots for review: every fixture at 1280x800 in the light palette
-// (<name>.png) and the dark one (<name>-dark.png), plus the profile and
-// settings screens and the smallest window. The page must load without a
-// console error and with IBM Plex Sans KR in place.
+// (<name>.png) and the dark one (<name>-dark.png), plus the profile screen
+// (off and running), the settings screen and the smaller windows. The page
+// must load without a console error and with IBM Plex Sans KR in place.
 
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,6 +26,9 @@ const shots: Shot[] = [
     schemes: ['light', 'dark'] as ('light' | 'dark')[],
   })),
   { name: 'ready-profile', query: 'fixture=ready&tab=profile', width: 1280, height: 800, schemes: ['light', 'dark'] },
+  { name: 'running-profile', query: 'fixture=running&tab=profile', width: 1280, height: 800, schemes: ['light', 'dark'] },
+  { name: 'running-profile-960x640', query: 'fixture=running&tab=profile', width: 960, height: 640, schemes: ['light'] },
+  { name: 'running-profile-720x480', query: 'fixture=running&tab=profile', width: 720, height: 480, schemes: ['light'] },
   { name: 'ready-settings', query: 'fixture=ready&tab=settings', width: 1280, height: 800, schemes: ['light', 'dark'] },
   { name: 'running-960x640', query: 'fixture=running', width: 960, height: 640, schemes: ['light'] },
   { name: 'running-720x480', query: 'fixture=running', width: 720, height: 480, schemes: ['light'] },

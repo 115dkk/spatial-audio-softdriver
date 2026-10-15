@@ -2,7 +2,185 @@
   "phase": {
     "kind": "running"
   },
+  "profile": {
+    "kind": "headphones",
+    "name": "거실 7.1.4 헤드폰",
+    "brir": "C:\\Users\\me\\BRIR\\living-room",
+    "headphone_fir": "C:\\Users\\me\\hd650.wav",
+    "gain_db": -3.5,
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 2,
+        "name": "FC",
+        "azimuth_deg": 0.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 3,
+        "name": "SL",
+        "azimuth_deg": 90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 4,
+        "name": "SR",
+        "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "BL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "BR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 7,
+        "name": "TFL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 8,
+        "name": "TFR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 9,
+        "name": "TBL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 10,
+        "name": "TBR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 45.0
+      }
+    ],
+    "from_file": false
+  },
   "engine": {
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 2,
+        "name": "FC",
+        "azimuth_deg": 0.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 3,
+        "name": "SL",
+        "azimuth_deg": 90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 4,
+        "name": "SR",
+        "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "BL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "BR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 7,
+        "name": "TFL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 8,
+        "name": "TFR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 9,
+        "name": "TBL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 10,
+        "name": "TBR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 45.0
+      }
+    ],
+    "scene": [
+      {
+        "lane": 0,
+        "index": 0,
+        "x": -0.5,
+        "y": 0.866,
+        "z": 0.0,
+        "level_dbfs": -12.0
+      },
+      {
+        "lane": 0,
+        "index": 1,
+        "x": 0.5,
+        "y": 0.866,
+        "z": 0.0,
+        "level_dbfs": -18.0
+      },
+      {
+        "lane": 1,
+        "index": 0,
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0,
+        "level_dbfs": -24.0
+      },
+      {
+        "lane": 2,
+        "index": 3,
+        "x": 0.25,
+        "y": 0.433,
+        "z": 0.866,
+        "level_dbfs": -30.0
+      }
+    ],
     "endpoints": [
       {
         "format": {

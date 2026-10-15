@@ -228,9 +228,7 @@ fn setup(
     }
     initial_notes.extend(consume_guard_marker(&state_dir));
     let host = windows_host(&state_dir);
-    let launcher = WindowsLauncher {
-        state_dir: state_dir.clone(),
-    };
+    let launcher = WindowsLauncher;
     let store = JsonSettingsFile::in_dir(&state_dir);
 
     let open = MenuItem::with_id(app, MENU_OPEN, "열기", true, None::<&str>)?;
@@ -257,7 +255,10 @@ fn setup(
     let (bridge, control) = control::spawn(
         host,
         launcher,
-        Config::default(),
+        Config {
+            profile_file: Some(paths::profile_file(&state_dir)),
+            ..Config::default()
+        },
         ControlConfig::default(),
         store,
         emitter,

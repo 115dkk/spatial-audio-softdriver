@@ -48,7 +48,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
     tab: options.tab ?? 'status',
     outputsOpen: false,
     dismissed: null,
-    gain: 0,
+    gainSending: null,
     autostart: null,
     autostartWanted: null,
     update: null,
@@ -156,7 +156,11 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
       head = h('header', { class: 'main-head' }, h('h1', null, titles[view.tab]));
       const engineNow = phase.kind === 'running' ? (meters ?? snapshot.engine) : snapshot.engine;
       const drawn =
-        view.tab === 'status' ? status(ctx, engineNow) : view.tab === 'profile' ? profile(ctx) : settings(ctx);
+        view.tab === 'status'
+          ? status(ctx, engineNow)
+          : view.tab === 'profile'
+            ? profile(ctx, engineNow)
+            : settings(ctx);
       body = drawn.element;
       live = drawn.live ?? null;
     }

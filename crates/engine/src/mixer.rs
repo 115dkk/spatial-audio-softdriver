@@ -6,7 +6,7 @@
 
 use render::{PanGeometry, Ramp};
 use ssr_abi::MAX_ENDPOINTS;
-use ssr_types::{Layout, MAX_OBJECTS, Object, Position, SceneBlock};
+use ssr_types::{Layout, MAX_OBJECTS, Object, Position, SceneBlock, SceneObject};
 
 pub const MIX_RATE: u32 = 48_000;
 pub const MIX_FRAMES: usize = 480;
@@ -32,6 +32,13 @@ const MAX_OUTPUT_FRAMES: usize = (MAX_SCENE_FRAMES * MIX_RATE as u64).div_ceil(4
 const CONVERSION_RING: usize = 4;
 const MAX_DIRECTIONS: usize = Layout::MAX_DIRECTIONS;
 const MATRIX_VALUES: usize = MAX_DIRECTIONS * MAX_DIRECTIONS;
+/// Most objects one mixed block can report: every lane's every object.
+pub const MAX_SCENE_OBJECTS: usize = MAX_ENDPOINTS * MAX_OBJECTS;
+/// The lowest level reported for an object: a signal quieter than this, but
+/// not silent, still shows at this level. Silent objects are not reported.
+pub const SCENE_FLOOR_DBFS: f32 = -120.0;
+const _: () = assert!(MAX_OBJECTS <= u64::BITS as usize && MAX_OBJECTS <= 256);
+const _: () = assert!(MAX_ENDPOINTS <= 256);
 
 /// Timeline frames one lane's slot ring must retain ahead of the frontier: the
 /// delivery-lateness bound, the admitted arrival slack, the largest decoded
@@ -115,6 +122,15 @@ struct Slot {
     occupancy: [Occupancy; MIX_FRAMES],
     filled_start: usize,
     filled_end: usize,
+    /// Bit `i`: object `i` placed at least one frame here.
+    object_mask: u64,
+    /// Per-frame squared signal for each object (after its gain and the lane
+    /// fade, before panning); valid where `object_mask` is set. Kept in f64 so
+    /// that no finite nonzero f32 sample squares to 0 or to infinity. The
+    /// storage is allocated with the slot, never on a real-time path.
+    object_energy: Vec<f64>,
+    /// Each object's position at the last frame it placed here.
+    object_positions: [Position; MAX_OBJECTS],
 }
 
 impl Slot {
@@ -132,7 +148,18 @@ impl Slot {
             occupancy: [Occupancy::Empty; MIX_FRAMES],
             filled_start: MIX_FRAMES,
             filled_end: 0,
+            object_mask: 0,
+            object_energy: vec![0.0; MAX_OBJECTS * MIX_FRAMES],
+            object_positions: [Position::FRONT; MAX_OBJECTS],
         }
+    }
+
+    fn note_object(&mut self, object: usize, frame: usize, sample: f32, position: Position) {
+        let bit = 1_u64 << object;
+        let sample = f64::from(sample);
+        self.object_mask |= bit;
+        self.object_energy[object * MIX_FRAMES + frame] += sample * sample;
+        self.object_positions[object] = position;
     }
 
     fn reset_for(&mut self, interval: u64, directions: usize, layout_epoch: u32) {
@@ -148,6 +175,8 @@ impl Slot {
         self.occupancy.fill(Occupancy::Empty);
         self.filled_start = MIX_FRAMES;
         self.filled_end = 0;
+        self.object_mask = 0;
+        self.object_energy.fill(0.0);
     }
 
     fn clear(&mut self) {
@@ -155,6 +184,7 @@ impl Slot {
         self.occupancy.fill(Occupancy::Empty);
         self.filled_start = MIX_FRAMES;
         self.filled_end = 0;
+        self.object_mask = 0;
     }
 
     fn refresh_filled_range(&mut self) {
@@ -630,6 +660,24 @@ impl Lane {
                     target.filled_end = target.filled_end.max(offset + 1);
                 }
                 target.has_lfe |= source.has_lfe;
+                let mut objects = source.object_mask;
+                while objects != 0 {
+                    let object = objects.trailing_zeros() as usize;
+                    objects &= objects - 1;
+                    let bit = 1_u64 << object;
+                    let is_new = target.object_mask & bit == 0;
+                    target.object_mask |= bit;
+                    let range = object * MIX_FRAMES..(object + 1) * MIX_FRAMES;
+                    for (target, source) in target.object_energy[range.clone()]
+                        .iter_mut()
+                        .zip(&source.object_energy[range])
+                    {
+                        *target += *source;
+                    }
+                    if is_new {
+                        target.object_positions[object] = source.object_positions[object];
+                    }
+                }
                 if target.scene_epoch == 0 {
                     target.scene_epoch = source.scene_epoch;
                     target.source_qpc = source.source_qpc;
@@ -878,6 +926,10 @@ pub struct SceneMixer {
     waiting: u32,
     lane_underrun_frames: u64,
     dropped_frames: u64,
+    /// Objects of the last emitted interval ([`SceneMixer::scene`]).
+    scene: [SceneObject; MAX_SCENE_OBJECTS],
+    scene_len: usize,
+    scene_generation: u64,
     #[cfg(test)]
     emitted_filled_frames: [u64; MAX_ENDPOINTS],
     #[cfg(test)]
@@ -941,6 +993,9 @@ impl SceneMixer {
             waiting: 0,
             lane_underrun_frames: 0,
             dropped_frames: 0,
+            scene: [EMPTY_SCENE_OBJECT; MAX_SCENE_OBJECTS],
+            scene_len: 0,
+            scene_generation: 0,
             #[cfg(test)]
             emitted_filled_frames: [0; MAX_ENDPOINTS],
             #[cfg(test)]
@@ -1494,6 +1549,23 @@ impl SceneMixer {
             .map(|lane| lane.volume_transitions_coalesced)
             .sum()
     }
+    /// The active objects of the most recently emitted interval, by lane and
+    /// then object index: each one's unit direction vector at the last frame
+    /// it placed and the RMS level of its signal over the interval (after its
+    /// gain, the lane's fade and endpoint volume, before panning), in dBFS and
+    /// never below [`SCENE_FLOOR_DBFS`]. An object whose signal there was
+    /// silent (all zeros, or muted by its gain, the fade or the volume) or not
+    /// finite is not active and is left out. Empty for an interval no lane
+    /// filled with sound.
+    pub fn scene(&self) -> &[SceneObject] {
+        &self.scene[..self.scene_len]
+    }
+
+    /// Counts emitted intervals; [`SceneMixer::scene`] changes only with it.
+    pub fn scene_generation(&self) -> u64 {
+        self.scene_generation
+    }
+
     pub fn now(&self) -> u64 {
         self.now
     }
@@ -1727,6 +1799,13 @@ impl SceneMixer {
         if has_geometry {
             for object in 0..object_count {
                 let sample = self.resample_scratch[object * MAX_OUTPUT_FRAMES + scratch_frame];
+                let source = &scene.objects[object];
+                slot.note_object(
+                    object,
+                    offset,
+                    sample * source.gain * fade_scale,
+                    source.position,
+                );
                 let row = object * MAX_DIRECTIONS;
                 for active in 0..self.active_direction_counts[object] {
                     let direction = self.active_directions[row + active];
@@ -1865,11 +1944,15 @@ impl SceneMixer {
         self.mixed_lfe.fill(0.0);
         let mut has_lfe = false;
         let mut chosen: Option<(u64, usize, u64, u32)> = None;
+        self.scene_len = 0;
 
         for lane_index in 0..MAX_ENDPOINTS {
             if !self.lanes[lane_index].enabled() {
                 continue;
             }
+            let volumes =
+                std::array::from_fn(|offset| self.lanes[lane_index].gain_at(start + offset as u64));
+            let mut objects = LaneObjects::default();
             if self.lanes[lane_index].slot(interval).is_none()
                 && !self.ensure_slot_current(lane_index, interval, start)
             {
@@ -1927,13 +2010,14 @@ impl SceneMixer {
                     chosen = Some((delay, lane_index, source_qpc, scene_epoch));
                 }
                 if let Some(slot) = self.lanes[lane_index].slot(interval) {
+                    objects.add(slot, &volumes);
                     for direction in 0..self.directions {
                         let mixed = &mut self.mixed_bed
                             [direction * MIX_FRAMES..(direction + 1) * MIX_FRAMES];
                         let source =
                             &slot.bed[direction * MIX_FRAMES..(direction + 1) * MIX_FRAMES];
                         for (offset, (mixed, source)) in mixed.iter_mut().zip(source).enumerate() {
-                            let gain = self.lanes[lane_index].gain_at(start + offset as u64);
+                            let gain = volumes[offset];
                             if gain == 1.0 {
                                 *mixed += *source;
                             } else {
@@ -1945,7 +2029,7 @@ impl SceneMixer {
                         for (offset, (mixed, source)) in
                             self.mixed_lfe.iter_mut().zip(&slot.lfe).enumerate()
                         {
-                            let gain = self.lanes[lane_index].gain_at(start + offset as u64);
+                            let gain = volumes[offset];
                             if gain == 1.0 {
                                 *mixed += *source;
                             } else {
@@ -1970,6 +2054,7 @@ impl SceneMixer {
                 if chosen.is_none_or(|current| (delay, lane_index) < (current.0, current.1)) {
                     chosen = Some((delay, lane_index, tail.source_qpc, tail.scene_epoch));
                 }
+                objects.add(tail, &volumes);
                 for direction in 0..self.directions {
                     let mixed =
                         &mut self.mixed_bed[direction * MIX_FRAMES..(direction + 1) * MIX_FRAMES];
@@ -1998,9 +2083,13 @@ impl SceneMixer {
                 }
             }
             self.lanes[lane_index].clear_tail_interval(interval);
+            if objects.mask != 0 {
+                self.scene_len = objects.report(lane_index, &mut self.scene, self.scene_len);
+            }
             self.lanes[lane_index]
                 .retire_volume_transitions(start.saturating_add(MIX_FRAMES as u64));
         }
+        self.scene_generation = self.scene_generation.wrapping_add(1);
 
         // Silence carries the last source time on. Before any audio, or after
         // audio without one, it has none and is stamped 0 (unknown); counting
@@ -2080,6 +2169,100 @@ impl SceneMixer {
                 lane.state = LaneState::Idle;
             }
         }
+    }
+}
+
+const EMPTY_SCENE_OBJECT: SceneObject = SceneObject {
+    lane: 0,
+    index: 0,
+    x: 0.0,
+    y: 0.0,
+    z: 0.0,
+    level_dbfs: SCENE_FLOOR_DBFS,
+};
+
+/// One lane's objects in the interval being emitted: its current slot, then
+/// its ended-generation tail. Lives on the stack; never allocates.
+struct LaneObjects {
+    mask: u64,
+    energy: [f64; MAX_OBJECTS],
+    positions: [Position; MAX_OBJECTS],
+}
+
+impl Default for LaneObjects {
+    fn default() -> Self {
+        Self {
+            mask: 0,
+            energy: [0.0; MAX_OBJECTS],
+            positions: [Position::FRONT; MAX_OBJECTS],
+        }
+    }
+}
+
+impl LaneObjects {
+    /// Adds a slot's objects; the first slot added keeps its positions.
+    fn add(&mut self, slot: &Slot, volumes: &[f32; MIX_FRAMES]) {
+        let mut objects = slot.object_mask;
+        while objects != 0 {
+            let object = objects.trailing_zeros() as usize;
+            objects &= objects - 1;
+            let bit = 1_u64 << object;
+            let range = object * MIX_FRAMES..(object + 1) * MIX_FRAMES;
+            let energy = slot.object_energy[range]
+                .iter()
+                .zip(volumes)
+                .map(|(energy, volume)| {
+                    let volume = f64::from(*volume);
+                    energy * volume * volume
+                })
+                .sum();
+            if self.mask & bit == 0 {
+                self.mask |= bit;
+                self.energy[object] = energy;
+                self.positions[object] = slot.object_positions[object];
+            } else {
+                self.energy[object] += energy;
+            }
+        }
+    }
+
+    /// Writes the lane's active objects from `len` on and returns the new
+    /// length. An object is active when its signal after the endpoint volume
+    /// has finite, nonzero energy over the interval: one that placed only
+    /// zeros (or was muted by its gain, the fade or the volume) or that
+    /// carried a non-finite sample is left out. A quiet active object is
+    /// floored at [`SCENE_FLOOR_DBFS`].
+    fn report(
+        &self,
+        lane: usize,
+        scene: &mut [SceneObject; MAX_SCENE_OBJECTS],
+        mut len: usize,
+    ) -> usize {
+        let mut objects = self.mask;
+        while objects != 0 && len < MAX_SCENE_OBJECTS {
+            let object = objects.trailing_zeros() as usize;
+            objects &= objects - 1;
+            let mean_square = self.energy[object] / MIX_FRAMES as f64;
+            if !(mean_square > 0.0 && mean_square.is_finite()) {
+                continue;
+            }
+            let level_dbfs = ((10.0 * mean_square.log10()) as f32).max(SCENE_FLOOR_DBFS);
+            let position = self.positions[object];
+            // The renderer ignores vector length; report the unit direction.
+            let [x, y, z] = position
+                .direction()
+                .unwrap_or([position.x, position.y, position.z]);
+            scene[len] = SceneObject {
+                lane: lane as u8,
+                index: object as u8,
+                x,
+                y,
+                z,
+                level_dbfs,
+            };
+            len += 1;
+        }
+        len
     }
 }
 
@@ -2420,6 +2603,29 @@ mod tests {
                 .all(|sample| (*sample - 0.176_776_69).abs() < 1e-5)
         );
         assert!(direction[0] > direction[63]);
+    }
+
+    #[test]
+    fn scene_energy_follows_every_frame_of_the_endpoint_volume_ramp() {
+        let geometry = geometry();
+        let signal = vec![1.0; MIX_FRAMES];
+        let mut objects = [Object::SILENT; MAX_OBJECTS];
+        let block = scene(&signal, &mut objects);
+        let mut mixer = SceneMixer::new(MixerConfig {
+            arrival_slack_frames: 0,
+            ..MixerConfig::default()
+        });
+        mixer.push_scene(0, &block, Some(&geometry)).unwrap();
+        mixer.set_lane_volume(0, 0.0, 0);
+        mixer.advance(0, MIX_FRAMES as u64, &mut |_| {});
+        assert_eq!(mixer.scene().len(), 1, "the 64-frame ramp has energy");
+        assert!(mixer.scene()[0].level_dbfs < 0.0);
+
+        let mut objects = [Object::SILENT; MAX_OBJECTS];
+        let block = scene(&signal, &mut objects);
+        mixer.push_scene(0, &block, Some(&geometry)).unwrap();
+        mixer.advance(0, 2 * MIX_FRAMES as u64, &mut |_| {});
+        assert!(mixer.scene().is_empty(), "a fully muted block is silent");
     }
 
     #[test]

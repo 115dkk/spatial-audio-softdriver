@@ -37,6 +37,30 @@ export function append(parent: Node, children: Child[]): void {
   }
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * `svg('circle', { cx: 10, cy: 10, r: 4 })`: like `h`, in the SVG namespace.
+ * Attributes only; listeners are not needed on the drawings.
+ */
+export function svg<K extends keyof SVGElementTagNameMap>(
+  tag: K,
+  attributes?: Record<string, string | number | null | undefined> | null,
+  ...children: Child[]
+): SVGElementTagNameMap[K] {
+  const element = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes ?? {})) {
+    if (value !== null && value !== undefined) element.setAttribute(name, String(value));
+  }
+  append(element, children);
+  return element;
+}
+
+/** Sets an attribute only when its text changes (30 Hz updates). */
+export function setAttr(element: Element, name: string, value: string): void {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
 /** A text node and a setter that touches it only when the text changes. */
 export function liveText(initial = ''): { node: Text; set(value: string): void } {
   const node = document.createTextNode(initial);

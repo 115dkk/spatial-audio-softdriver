@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use engine::{BedBlock, MIX_FRAMES, MIX_RATE, MixerConfig, SceneMixer};
+use engine::{BedBlock, MIX_FRAMES, MIX_RATE, MixerConfig, SCENE_FLOOR_DBFS, SceneMixer};
 use render::PanGeometry;
 use ssr_types::{Direction, Layout, MAX_OBJECTS, Object, Position, SceneBlock};
 
@@ -1159,5 +1159,115 @@ fn silence_has_no_source_time_until_audio_gives_one() {
     assert!(
         stamps.windows(2).all(|pair| pair[1] == pair[0] + 10_000),
         "{stamps:?}"
+    );
+}
+
+type LaneSignals<'a> = (u16, &'a [Vec<f32>], &'a [f32]);
+
+/// Pushes `signals` (with `gains`) into each listed lane for `intervals`
+/// whole intervals, emitting each one, and returns the mixer.
+fn run_lanes(lanes: &[LaneSignals<'_>], volumes: &[(u16, f32)], intervals: usize) -> SceneMixer {
+    let geometry = PanGeometry::new(&layout(&[0.0])).unwrap();
+    let positions = vec![Position::FRONT; MAX_OBJECTS];
+    let mut mixer = SceneMixer::new(config());
+    for (endpoint, _, _) in lanes {
+        mixer.lane_start(*endpoint, 0);
+    }
+    for (endpoint, gain) in volumes {
+        mixer.set_lane_volume(*endpoint, *gain, 0);
+    }
+    for interval in 0..intervals {
+        for (endpoint, signals, gains) in lanes {
+            let mut objects = [Object::SILENT; MAX_OBJECTS];
+            let block = scene(
+                1,
+                MIX_RATE,
+                (interval * MIX_FRAMES) as u64,
+                signals,
+                &positions,
+                gains,
+                &mut objects,
+            );
+            mixer
+                .push_scene(*endpoint, &block, Some(&geometry))
+                .unwrap();
+        }
+        mixer.advance(lanes[0].0, MIX_FRAMES as u64, &mut |_| {});
+    }
+    mixer
+}
+
+#[test]
+fn scene_reports_only_objects_with_finite_nonzero_energy() {
+    let level = |value: f32| 20.0 * value.log10();
+    let mut nan = vec![0.5; MIX_FRAMES];
+    nan[7] = f32::NAN;
+    let mut infinite = vec![0.5; MIX_FRAMES];
+    infinite[11] = f32::INFINITY;
+    // Lane 0: present but silent, sounding, muted by its gain, a NaN, sounding
+    // again, an infinity. Lane 1 sounds but its endpoint volume is 0. Lane 2:
+    // silent, then sounding.
+    let first = [
+        vec![0.0; MIX_FRAMES],
+        vec![0.5; MIX_FRAMES],
+        vec![0.5; MIX_FRAMES],
+        nan,
+        vec![0.5; MIX_FRAMES],
+        infinite,
+    ];
+    let first_gains = [1.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let second = [vec![0.25; MIX_FRAMES]];
+    let third = [vec![0.0; MIX_FRAMES], vec![0.125; MIX_FRAMES]];
+    let mixer = run_lanes(
+        &[
+            (0, &first, &first_gains),
+            (1, &second, &[1.0]),
+            (2, &third, &[1.0, 1.0]),
+        ],
+        &[(1, 0.0)],
+        4,
+    );
+    let reported = mixer
+        .scene()
+        .iter()
+        .map(|object| (object.lane, object.index))
+        .collect::<Vec<_>>();
+    assert_eq!(reported, [(0, 1), (0, 4), (2, 1)], "{:?}", mixer.scene());
+    for (object, value) in mixer.scene().iter().zip([0.5, 0.5, 0.125]) {
+        assert!(
+            (object.level_dbfs - level(value)).abs() < 0.01,
+            "{object:?}"
+        );
+    }
+
+    // Every lane present, none sounding: the scene is empty.
+    let silent = [vec![0.0; MIX_FRAMES], vec![0.0; MIX_FRAMES]];
+    let mixer = run_lanes(
+        &[(0, &silent, &[1.0, 1.0]), (1, &silent, &[1.0, 1.0])],
+        &[],
+        2,
+    );
+    assert!(mixer.scene().is_empty(), "{:?}", mixer.scene());
+}
+
+#[test]
+fn a_tiny_nonzero_object_stays_in_the_scene_at_the_floor() {
+    // One smallest subnormal sample per interval (about -910 dBFS RMS, far
+    // below what f32 squares can hold) and a steady 1e-7 (-140 dBFS) both
+    // stay, floored; the silent object between them does not.
+    let mut subnormal = vec![0.0; MIX_FRAMES];
+    subnormal[MIX_FRAMES / 2] = f32::from_bits(1);
+    let signals = [subnormal, vec![0.0; MIX_FRAMES], vec![1.0e-7; MIX_FRAMES]];
+    let mixer = run_lanes(&[(0, &signals, &[1.0, 1.0, 1.0])], &[], 3);
+    let reported = mixer
+        .scene()
+        .iter()
+        .map(|object| (object.lane, object.index, object.level_dbfs))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reported,
+        [(0, 0, SCENE_FLOOR_DBFS), (0, 2, SCENE_FLOOR_DBFS)],
+        "{:?}",
+        mixer.scene()
     );
 }

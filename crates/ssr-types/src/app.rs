@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use crate::layout::DirectionId;
+use crate::layout::{DirectionId, DirectionView};
 use crate::ports::{DeviceId, DriverState, Platform};
 use crate::status::EngineStatus;
 
@@ -32,7 +32,6 @@ pub enum Intent {
     ChooseOutput(DeviceId),
     ImportBrir(PathBuf),
     ImportHeadphoneFir(PathBuf),
-    SwitchProfile(String),
     SetGain(f32),
     TestDirection(DirectionId),
     Enable,
@@ -70,6 +69,29 @@ pub enum Phase {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKind {
+    Stereo,
+    Headphones,
+    Speakers,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct ProfileView {
+    pub kind: ProfileKind,
+    pub name: String,
+    /// Imported BRIR set (folder, hesuvi.wav, or hrir.wav).
+    pub brir: Option<String>,
+    pub headphone_fir: Option<String>,
+    pub gain_db: f32,
+    pub directions: Vec<DirectionView>,
+    /// The state directory's profile.toml takes precedence over import intents.
+    pub from_file: bool,
+}
+
 /// An output the user may choose, or has chosen.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
@@ -82,6 +104,7 @@ pub struct OutputChoice {
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct Snapshot {
     pub phase: Phase,
+    pub profile: ProfileView,
     pub engine: Option<EngineStatus>,
     /// Outputs the user may choose: active, and never our own endpoints.
     pub outputs: Vec<OutputChoice>,

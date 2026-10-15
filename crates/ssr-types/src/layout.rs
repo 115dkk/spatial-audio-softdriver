@@ -20,6 +20,16 @@ impl DirectionId {
     }
 }
 
+/// One measured speaker position as shown by the application.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct DirectionView {
+    pub id: DirectionId,
+    pub name: String,
+    pub azimuth_deg: f32,
+    pub elevation_deg: f32,
+}
+
 /// One measured speaker position.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Direction {

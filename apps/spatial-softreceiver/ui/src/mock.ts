@@ -6,16 +6,20 @@
 
 import type { Api, Shell, Unlisten } from './api';
 import type {
+  DirectionView,
   DriverState,
   EngineStatus,
   Intent,
   NextAction,
   OutputChoice,
   Platform,
+  ProfileView,
+  SceneObject,
   Snapshot,
   UserError,
 } from './bindings';
 import { fixture } from './fixtures';
+import { text } from './text';
 
 export interface MockOptions {
   /** Emit 30 Hz meters while running (off for the gallery and tests). */
@@ -43,13 +47,50 @@ const GOOD_DRIVER: DriverState = {
 const mockShell: Shell = {
   native: false,
   pickFolder: async () => 'C:\\Users\\me\\BRIR\\living-room',
-  pickFile: async () => 'C:\\Users\\me\\hd650.wav',
+  // The BRIR picker asks for hesuvi.wav or hrir.wav; the other for an FIR.
+  pickFile: async (_title, filter) =>
+    filter.name === text.profile.brirFilter ? 'C:\\Users\\me\\BRIR\\studio\\hesuvi.wav' : 'C:\\Users\\me\\hd650.wav',
   autostartEnabled: async () => false,
   setAutostart: async () => {},
   updateState: async () => ({ current: '0.0.0', ready: null }),
   applyUpdate: async () => {},
   onUpdate: async () => () => {},
 };
+
+/** The supervisor's gain range (machine.rs GAIN_MIN_DB, GAIN_MAX_DB). */
+const GAIN_MIN_DB = -20;
+const GAIN_MAX_DB = 10;
+
+const PROFILE_FILE_WINS = '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.';
+
+/** What the supervisor keeps in Settings.profile. */
+interface ProfileSettings {
+  brir: string | null;
+  headphoneFir: string | null;
+  gainDb: number | null;
+}
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
+
+/** A folder of direction WAVs, hesuvi.wav or hrir.wav, as machine.rs brir_source. */
+function brirSource(path: string): 'folder' | 'file' | null {
+  const name = fileName(path).toLowerCase();
+  if (name === 'hesuvi.wav' || name === 'hrir.wav') return 'file';
+  // The mock cannot look at the disk: a name without an extension is a folder.
+  return name.includes('.') ? null : 'folder';
+}
+
+/** The folder's name, or the name of the folder holding the file. */
+function brirName(path: string): string {
+  const parts = path.split(/[\\/]/).filter((part) => part !== '');
+  const named = brirSource(path) === 'file' ? parts[parts.length - 2] : parts[parts.length - 1];
+  return named ?? 'BRIR';
+}
+
+/** The layout an imported set reads as: the running fixture's 7.1.4 directions. */
+function brirDirections(): DirectionView[] {
+  return fixture('running').profile.directions;
+}
 
 export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
   let state: Snapshot = structuredClone(start);
@@ -60,6 +101,13 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
     outputs: start.outputs.length > 0 ? start.outputs : fixture('ready').outputs,
   };
   const engineTemplate: EngineStatus = start.engine ?? (fixture('running').engine as EngineStatus);
+  // The scene the meters move around the listener, from the fixture.
+  const sceneTemplate: SceneObject[] = structuredClone(engineTemplate.scene);
+  const settings: ProfileSettings = {
+    brir: start.profile.from_file ? null : start.profile.brir,
+    headphoneFir: start.profile.from_file ? null : start.profile.headphone_fir,
+    gainDb: start.profile.gain_db,
+  };
   const snapshotListeners = new Set<(snapshot: Snapshot) => void>();
   const meterListeners = new Set<(engine: EngineStatus) => void>();
   let meterTimer: ReturnType<typeof setInterval> | undefined;
@@ -95,8 +143,84 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
     engine.ring_level_ms = 9.6 + 0.4 * Math.cos(tick / 11);
     engine.clock_ppm = -37.5 + 0.6 * Math.sin(tick / 41);
     engine.idle_blocks += 1;
+    engine.scene = movingScene(tick);
     const copy = structuredClone(engine);
     for (const listener of meterListeners) listener(copy);
+  }
+
+  /**
+   * The fixture's objects turning slowly around the listener, each at its
+   * own pace and height, with a level that breathes.
+   */
+  function movingScene(at: number): SceneObject[] {
+    return sceneTemplate.map((object, slot) => {
+      const seconds = at / 30;
+      const turn = ((slot % 2 === 0 ? 1 : -1) * 2 * Math.PI * seconds) / (18 + 7 * slot);
+      const cos = Math.cos(turn);
+      const sin = Math.sin(turn);
+      return {
+        ...object,
+        x: object.x * cos - object.y * sin,
+        y: object.x * sin + object.y * cos,
+        level_dbfs: Math.min(0, object.level_dbfs + 6 * Math.sin(seconds * 0.9 + slot)),
+      };
+    });
+  }
+
+  /** What resolve() in machine.rs makes of the settings (no profile.toml). */
+  function resolveProfile(next: ProfileSettings): ProfileView {
+    if (next.brir === null) {
+      return {
+        kind: 'stereo',
+        name: 'Stereo',
+        brir: null,
+        headphone_fir: null,
+        gain_db: next.gainDb ?? 0,
+        directions: fixture('ready').profile.directions,
+        from_file: false,
+      };
+    }
+    return {
+      kind: 'headphones',
+      name: brirName(next.brir),
+      brir: next.brir,
+      headphone_fir: next.headphoneFir,
+      gain_db: next.gainDb ?? 0,
+      directions: brirDirections(),
+      from_file: false,
+    };
+  }
+
+  /** change_profile: a running engine takes the new layout with it. */
+  function changeProfile(next: ProfileSettings): Outcome {
+    Object.assign(settings, next);
+    state.profile = resolveProfile(settings);
+    if (state.engine !== null) state.engine.directions = structuredClone(state.profile.directions);
+    return done;
+  }
+
+  function importBrir(path: string): Outcome {
+    if (state.profile.from_file) return failed(PROFILE_FILE_WINS, 'none');
+    if (brirSource(path) === null) return failed('hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오.', 'none');
+    return changeProfile({ ...settings, brir: path });
+  }
+
+  function importHeadphoneFir(path: string): Outcome {
+    if (state.profile.from_file) return failed(PROFILE_FILE_WINS, 'none');
+    if (settings.brir === null) return failed('먼저 BRIR 세트를 가져오십시오.', 'none');
+    if (!fileName(path).toLowerCase().endsWith('.wav')) {
+      return failed(`헤드폰 FIR을 읽지 못했습니다: ${fileName(path)}`, 'none');
+    }
+    return changeProfile({ ...settings, headphoneFir: path });
+  }
+
+  function setGain(db: number): Outcome {
+    if (!Number.isFinite(db) || db < GAIN_MIN_DB || db > GAIN_MAX_DB) {
+      return failed('게인은 -20 dB에서 +10 dB 사이입니다.', 'none');
+    }
+    settings.gainDb = db;
+    state.profile.gain_db = db;
+    return done;
   }
 
   function setupStep(step: Extract<Snapshot['phase'], { kind: 'setup' }>['value']) {
@@ -176,6 +300,7 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
     const previous = host.outputs.find((output) => output.id !== chosen.id) ?? chosen;
     state.engine = structuredClone(engineTemplate);
     state.engine.fault = null;
+    state.engine.directions = structuredClone(state.profile.directions);
     state.roles_taken = true;
     state.notes = [`이전 기본 장치 '${previous.name}'를 복원점에 적었습니다.`];
     state.phase = { kind: 'running' };
@@ -190,14 +315,22 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
   function apply(intent: Intent): Outcome {
     const phase = state.phase;
     if (phase.kind === 'quit') return refused();
+    // The profile can change whenever the wizard is done.
+    const profileOpen = phase.kind === 'ready' || phase.kind === 'running' || phase.kind === 'faulted';
     switch (intent.kind) {
       case 'import_brir':
+        return profileOpen ? importBrir(intent.value) : refused();
       case 'import_headphone_fir':
-      case 'switch_profile':
+        return profileOpen ? importHeadphoneFir(intent.value) : refused();
       case 'set_gain':
+        return profileOpen ? setGain(intent.value) : refused();
       case 'test_direction':
+        if (phase.kind === 'running') {
+          return intent.value < state.profile.directions.length ? done : failed('그 방향이 없습니다.', 'none');
+        }
+        return profileOpen ? refused('켠 뒤에 시험음을 낼 수 있습니다.') : refused();
       case 'start_diagnostic_recording':
-        return refused('아직 지원하지 않는 동작입니다.');
+        return refused('진단 녹음은 다음 조각에서 옵니다.');
       case 'begin_setup':
         if (phase.kind !== 'setup' || phase.value !== 'welcome') return refused();
         state.notes = [];

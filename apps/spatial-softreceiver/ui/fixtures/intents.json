@@ -21,10 +21,6 @@
     "value": "C:\\Users\\me\\hd650.wav"
   },
   {
-    "kind": "switch_profile",
-    "value": "거실"
-  },
-  {
     "kind": "set_gain",
     "value": -3.5
   },

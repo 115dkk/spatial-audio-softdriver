@@ -84,7 +84,6 @@ fn prepared(channels: usize) -> Box<Prepared> {
             gain: 1.0,
             limiter_ceiling: 1.0,
             ir_frames: 1,
-            omitted_silent_directions: Vec::new(),
             trimmed_leading_frames: 0,
         });
         return Box::new(Prepared::new(brir, BLOCK).unwrap());
@@ -639,4 +638,109 @@ fn ddp_capture_section_does_not_allocate() {
         first_second.lane_underrun_frames,
         report.lane_underrun_frames
     );
+}
+
+#[test]
+fn scene_and_test_tone_realtime_paths_do_not_allocate() {
+    for channels in [2, 12] {
+        let periods = Arc::new(AtomicU64::new(0));
+        let processed = Arc::new(AtomicU64::new(0));
+        let emitted = Arc::new(AtomicU64::new(0));
+        let gate = Arc::new(AtomicBool::new(false));
+        let hook_periods = Arc::clone(&periods);
+        let hook_processed = Arc::clone(&processed);
+        let config = EngineConfig {
+            clock: ClockPreference::Trim,
+            target_ms: 10.0,
+            capacity_ms: 80.0,
+            read_wait: Duration::ZERO,
+            // Armed from the first record: every capture step that mixes a
+            // block, publishes its scene, ramps the gain or plays the tone
+            // runs under the guard.
+            rt_scope: Some(Arc::new(move |section, work| {
+                let armed = match section {
+                    RtSection::Capture => hook_processed.load(Ordering::Acquire) >= 1,
+                    RtSection::Output => hook_periods.load(Ordering::Acquire) >= WARMUP,
+                };
+                if armed {
+                    assert_no_alloc::assert_no_alloc(work);
+                } else {
+                    work();
+                }
+            })),
+            ..EngineConfig::default()
+        };
+        let capture = Capture {
+            records: records(32),
+            next: 0,
+            gate: Arc::clone(&gate),
+            periods: Arc::clone(&periods),
+            now_qpc: (40 * BLOCK) as u64,
+            processed: Arc::clone(&processed),
+            fail_once_at: None,
+            failed: false,
+            reconnects: Arc::new(AtomicU64::new(0)),
+            end_after_records: false,
+            end_gate: None,
+        };
+        let engine = start_with_clock(
+            config,
+            capture,
+            Opener {
+                periods: Arc::clone(&periods),
+                rate: RATE,
+                period_frames: BLOCK,
+                emitted: Arc::clone(&emitted),
+                fail_drain: Arc::new(AtomicBool::new(false)),
+            },
+            RATE as u64,
+        )
+        .unwrap();
+        engine
+            .apply(LiveChange::Prepared(prepared(channels)))
+            .unwrap();
+        gate.store(true, Ordering::Release);
+        let start = Instant::now();
+        let wait_for = |count: u64| {
+            while processed.load(Ordering::Acquire) < count
+                && start.elapsed() < Duration::from_secs(5)
+            {
+                std::thread::yield_now();
+            }
+        };
+        wait_for(4);
+        // The changes are drained by armed capture steps. Two channels are
+        // the one-direction headphone set, twelve the twelve-speaker one.
+        let directions = if channels == 2 { 1 } else { channels };
+        let last = ssr_types::DirectionId(directions as u16 - 1);
+        engine.apply(LiveChange::Gain(-3.0)).unwrap();
+        engine.apply(LiveChange::TestTone(last)).unwrap();
+        wait_for(12);
+        // Retrigger while it plays, and move the gain again.
+        engine.apply(LiveChange::TestTone(last)).unwrap();
+        engine.apply(LiveChange::Gain(2.0)).unwrap();
+        wait_for(24);
+        let mut status = engine.status();
+        while status.scene.is_empty() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::yield_now();
+            status = engine.status();
+        }
+        // The output thread renders behind the capture steps; on a loaded
+        // runner it has not played a block yet when the scene is up.
+        while emitted.load(Ordering::Acquire) == 0 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::yield_now();
+        }
+        gate.store(false, Ordering::Release);
+        let report = engine.stop();
+        assert!(
+            processed.load(Ordering::Acquire) >= 24,
+            "{channels} channels: capture stalled: {report:?}"
+        );
+        assert_eq!(status.directions.len(), directions, "{status:?}");
+        assert!(
+            status.scene.iter().any(|object| object.lane == 0),
+            "{channels} channels: no scene was published: {status:?}"
+        );
+        assert!(emitted.load(Ordering::Acquire) > 0, "{report:?}");
+    }
 }
