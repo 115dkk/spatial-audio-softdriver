@@ -30,7 +30,9 @@ name: Driver
 #              app's Windows host adapter reads the driver, the endpoints
 #              with their KS-mapped numbers and the default roles and
 #              switches the roles through IPolicyConfig (ssr-live host,
-#              tools/ci/host_check.py, host_role_check.py); the kit's
+#              tools/ci/host_check.py, host_role_check.py); ssr-guard gives
+#              the roles back for a fake app that dies or stalls
+#              (tools/ci/guard_check.py, ADR 0033); the kit's
 #              collect.ps1 runs as a tester would; then ssr-setup, elevated
 #              through the host adapter, uninstalls, installs from the kit,
 #              changes the endpoint mask, restarts, repairs and uninstalls
@@ -440,6 +442,27 @@ jobs:
           python tools/ci/host_role_check.py --ssr-live target/release/ssr-live.exe --summary (Join-Path $env:RUNNER_TEMP 'host-roles.json') --state-dir (Join-Path $env:RUNNER_TEMP 'host-state')
           if ($LASTEXITCODE -ne 0) { throw "host_role_check.py exited $LASTEXITCODE" }
 
+      # ADR 0033: the guard process against a fake app. tools/ci/guard_check.py
+      # points the three default roles at our main endpoint, writes a restore
+      # point as the supervisor would, and lets ssr-guard run the fake app
+      # (tools/ci/fake_app.py) through three endings: it exits, it stalls (one
+      # restart, then the roles go back), it quits cleanly (nothing to give
+      # back). The roles must come back through the guard's restore and the
+      # marker file must name why.
+      - name: Build ssr-guard for the guard check
+        id: guard-build
+        if: ${{ !cancelled() && steps.host-build.outcome == 'success' }}
+        shell: bash
+        run: cargo build --locked --release -p ssr-guard
+
+      - name: The guard gives the roles back when the app dies or stalls (tools/ci/guard_check.py)
+        if: ${{ !cancelled() && steps.guard-build.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          python tools/ci/guard_check.py --ssr-guard target/release/ssr-guard.exe --ssr-live target/release/ssr-live.exe --state-dir (Join-Path $env:RUNNER_TEMP 'guard-state') --summary (Join-Path $env:RUNNER_TEMP 'guard-check.json')
+          if ($LASTEXITCODE -ne 0) { throw "guard_check.py exited $LASTEXITCODE" }
+
       - name: Crash stacks of ssr-live (cdb on any dump)
         if: ${{ failure() && steps.e2e-build.outcome == 'success' }}
         shell: pwsh
@@ -603,6 +626,10 @@ jobs:
             ${{ runner.temp }}/endpoints*.json
             ${{ runner.temp }}/exclusive-policy-*.json
             ${{ runner.temp }}/setup-uninstall.json
+            ${{ runner.temp }}/guard-check.json
+            ${{ runner.temp }}/guard-state/*.log
+            ${{ runner.temp }}/guard-state/*.json
+            ${{ runner.temp }}/guard-state/guard-output/*.txt
           if-no-files-found: ignore
 
       # Last: the tester's uninstaller must leave no device, driver package,

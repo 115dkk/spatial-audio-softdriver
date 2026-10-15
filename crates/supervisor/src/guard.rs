@@ -118,6 +118,14 @@ impl Guard {
         self.reset_clock();
     }
 
+    /// The app says it is not Running (off, in setup, or quitting): the
+    /// counters are not expected to move, so the stall clock stops. The
+    /// restart already spent stays spent: a second stall after the app is
+    /// enabled again still restores.
+    pub fn app_idle(&mut self) {
+        self.reset_clock();
+    }
+
     fn reset_clock(&mut self) {
         self.last_progress = None;
         self.still_since = None;
@@ -265,6 +273,40 @@ mod tests {
         assert_eq!(guard.observe(at(start, 4_000), unreadable), Action::Nothing);
         assert_eq!(
             guard.observe(at(start, 5_000), unreadable),
+            Action::RestoreAndNotify {
+                reason: Reason::RestartFailed
+            }
+        );
+    }
+
+    #[test]
+    fn idling_stops_the_clock_but_keeps_the_restart_spent() {
+        let mut guard = Guard::new(Guard::STALL_AFTER);
+        let start = Instant::now();
+        assert_eq!(guard.observe(start, alive(1, 1)), Action::Nothing);
+        assert_eq!(
+            guard.observe(at(start, 2_000), alive(1, 1)),
+            Action::RestartApp
+        );
+        guard.app_restarted();
+        assert_eq!(
+            guard.observe(at(start, 3_000), alive(1, 1)),
+            Action::Nothing
+        );
+
+        // Off for a while: no stall, however long.
+        guard.app_idle();
+        assert_eq!(
+            guard.observe(at(start, 10_000), alive(1, 1)),
+            Action::Nothing
+        );
+        assert_eq!(
+            guard.observe(at(start, 11_000), alive(2, 2)),
+            Action::Nothing
+        );
+        // Enabled again and stalled again: the one restart is spent.
+        assert_eq!(
+            guard.observe(at(start, 13_000), alive(2, 2)),
             Action::RestoreAndNotify {
                 reason: Reason::RestartFailed
             }

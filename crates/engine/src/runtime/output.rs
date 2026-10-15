@@ -825,6 +825,7 @@ impl OutputState {
         }
         for _ in 0..self.tail_periods {
             sink.next_period(&mut |buffer| self.fill_tail_period(buffer))?;
+            self.shared.output_periods.fetch_add(1, Ordering::Relaxed);
             self.tail_periods -= 1;
         }
         Ok(())
@@ -847,6 +848,7 @@ impl OutputState {
     ) -> Result<bool, OutputError> {
         debug_assert!(self.tail_periods != 0);
         sink.next_period(&mut |buffer| self.fill_tail_period(buffer))?;
+        self.shared.output_periods.fetch_add(1, Ordering::Relaxed);
         self.tail_periods = self.tail_periods.saturating_sub(1);
         Ok(self.tail_periods == 0)
     }

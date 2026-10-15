@@ -64,6 +64,12 @@ fn typescript_bindings_match_the_types() {
         .bigint(BigIntExportBehavior::Number)
         .export(&types)
         .unwrap();
+    let bindings = bindings
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     check_or_bless(&ui_dir().join("src/bindings.ts"), &bindings);
 }
 
@@ -205,6 +211,8 @@ fn engine_status() -> EngineStatus {
             produced_frames: 96,
             since_block_ms: 31.5,
         }),
+        output_periods: 12_345,
+        capture_reads: 6_789,
         output_restarts: 0,
         output_rate: 48_000,
         trim_available: true,

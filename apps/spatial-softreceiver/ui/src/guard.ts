@@ -253,6 +253,8 @@ const engineStatus = object<EngineStatus>({
   ring_level_ms: number,
   underruns: number,
   last_underrun: nullable(underrun),
+  output_periods: number,
+  capture_reads: number,
   output_restarts: number,
   output_rate: number,
   trim_available: boolean,

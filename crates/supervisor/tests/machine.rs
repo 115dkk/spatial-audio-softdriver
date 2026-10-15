@@ -272,6 +272,16 @@ fn start(world: World, settings: Settings) -> (Shared, Machine) {
     (shared, supervisor)
 }
 
+#[test]
+fn a_note_from_the_shell_stays_until_setup_begins() {
+    let (_shared, mut supervisor) = start(ready_pc(), Settings::default());
+    supervisor.note("지난 실행을 복원했습니다.".to_owned());
+    assert_eq!(supervisor.snapshot().notes, ["지난 실행을 복원했습니다."]);
+
+    supervisor.handle(Intent::BeginSetup).unwrap();
+    assert!(supervisor.snapshot().notes.is_empty());
+}
+
 /// Starts Ready on the DAC and enables; the call log starts empty.
 fn running(world: World) -> (Shared, Machine) {
     let (shared, mut supervisor) = start(world, dac_settings());

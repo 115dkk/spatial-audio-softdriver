@@ -277,6 +277,10 @@ pub struct EngineStatus {
     pub underruns: u64,
     /// The last of those times, as the output saw it.
     pub last_underrun: Option<UnderrunSnapshot>,
+    /// Output periods completed, including periods filled with silence.
+    pub output_periods: u64,
+    /// Capture reads returned, including reads that returned zero bytes.
+    pub capture_reads: u64,
     /// Times the output device's stream was restarted after it stalled.
     pub output_restarts: u64,
     /// Sample rate of the currently open output sink, or zero before open.

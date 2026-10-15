@@ -15,7 +15,43 @@ fn main() {
             std::process::exit(2);
         }
     };
+    #[cfg(windows)]
+    if args.smoke.is_none() && !args.guarded {
+        match start_guard(args) {
+            Ok(()) => return,
+            Err(message) => {
+                eprintln!("Spatial SoftReceiver: {message}");
+                spatial_softreceiver::log::line(&format!("guard: {message}; running directly"));
+            }
+        }
+    }
     run(args);
+}
+
+#[cfg(windows)]
+fn start_guard(args: Args) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    let app = std::env::current_exe().map_err(|error| format!("app path: {error}"))?;
+    let exe_dir = app.parent().ok_or("the app has no parent directory")?;
+    let state_dir = spatial_softreceiver::paths::state_dir(std::env::var_os("LOCALAPPDATA"));
+    spatial_softreceiver::log::Log::open(&state_dir);
+    let mut command = Command::new(spatial_softreceiver::paths::guard_exe(exe_dir));
+    command
+        .arg("--state-dir")
+        .arg(state_dir)
+        .arg("--app")
+        .arg(app)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if args.minimized {
+        command.arg("--minimized");
+    }
+    command
+        .spawn()
+        .map(drop)
+        .map_err(|error| format!("the guard did not start: {error}"))
 }
 
 #[cfg(windows)]

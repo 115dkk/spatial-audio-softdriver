@@ -29,7 +29,7 @@
 //! point.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use ssr_sys::WindowsHost;
 use ssr_sys::host::RESTORE_POINT_FILE;
 use ssr_types::EngineStatus;
-use ssr_types::app::{Intent, Phase, Snapshot, UserError};
+use ssr_types::app::{Heartbeat, Intent, Phase, Snapshot, UserError};
 use supervisor::machine::Config;
 use supervisor::restore_point::{self, RestorePoint};
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -164,6 +164,19 @@ fn setup(
     ending: &Ending,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let state_dir = ending.state_dir.clone();
+    let mut initial_notes = Vec::new();
+    if state_dir.join(RESTORE_POINT_FILE).exists() {
+        log::line("지난 실행이 역할을 쥔 채 끝났음");
+        let restore_dir = state_dir.clone();
+        match thread::spawn(move || last_resort_restore(&restore_dir)).join() {
+            Ok(notes) => initial_notes.extend(notes),
+            Err(_) => {
+                log::line("shell: startup restore thread panicked");
+                initial_notes.push("지난 실행의 기본 장치를 되돌리지 못했습니다.".to_owned());
+            }
+        }
+    }
+    initial_notes.extend(consume_guard_marker(&state_dir));
     let host = windows_host(&state_dir);
     let launcher = WindowsLauncher {
         state_dir: state_dir.clone(),
@@ -188,6 +201,8 @@ fn setup(
         last: Arc::clone(&last),
         toggle,
         ending: ending.clone(),
+        heartbeat_enabled: args.guarded,
+        heartbeat_broken: AtomicBool::new(false),
     };
     let (bridge, control) = control::spawn(
         host,
@@ -196,13 +211,32 @@ fn setup(
         ControlConfig::default(),
         store,
         emitter,
+        initial_notes,
     );
     app.manage(bridge.clone());
+    if args.resume && bridge.snapshot().phase == Phase::Ready {
+        send(&bridge, Intent::Enable);
+    }
     let watched = ending.clone();
     let handle = app.handle().clone();
     thread::spawn(move || {
         if control.join().is_err() {
             watched.control_died(&handle);
+        }
+    });
+    // A second launch (its guard could not take the guard lock) asks for the
+    // window through a file (ADR 0033). One that arrived while this
+    // instance was starting (a manual launch during the login autostart)
+    // is served by the first poll.
+    let show_handle = app.handle().clone();
+    let show_dir = state_dir.clone();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            if ssr_guard::show::take(&show_dir) {
+                log::line("shell: a second launch asked for the window");
+                show_main(&show_handle);
+            }
         }
     });
 
@@ -253,6 +287,8 @@ struct TauriEmitter {
     last: Arc<Mutex<Option<Snapshot>>>,
     toggle: MenuItem<Wry>,
     ending: Ending,
+    heartbeat_enabled: bool,
+    heartbeat_broken: AtomicBool,
 }
 
 impl control::Emitter for TauriEmitter {
@@ -288,6 +324,22 @@ impl control::Emitter for TauriEmitter {
     fn meters(&self, status: &EngineStatus) {
         if let Err(error) = self.handle.emit(METERS_EVENT, status) {
             log::line(&format!("shell: the meters event failed: {error}"));
+        }
+    }
+
+    fn heartbeat(&self, heartbeat: &Heartbeat) {
+        if !self.heartbeat_enabled || self.heartbeat_broken.load(Ordering::Relaxed) {
+            return;
+        }
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        let written = serde_json::to_writer(&mut stdout, heartbeat)
+            .and_then(|()| writeln!(stdout).map_err(serde_json::Error::io))
+            .and_then(|()| stdout.flush().map_err(serde_json::Error::io));
+        if let Err(error) = written
+            && !self.heartbeat_broken.swap(true, Ordering::Relaxed)
+        {
+            log::line(&format!("shell: the heartbeat pipe failed: {error}"));
         }
     }
 
@@ -418,7 +470,7 @@ impl Ending {
             return;
         }
         if quit_within(bridge, QUIT_WAIT) != QuitOutcome::Done {
-            last_resort_restore(&self.state_dir);
+            drop(last_resort_restore(&self.state_dir));
         }
         if !self.allowed.swap(true, Ordering::SeqCst) {
             handle.exit(code);
@@ -430,7 +482,7 @@ impl Ending {
     fn control_died(&self, handle: &AppHandle) {
         log::line("shell: the control thread died; giving the roles back from the restore point");
         self.started.store(true, Ordering::SeqCst);
-        last_resort_restore(&self.state_dir);
+        drop(last_resort_restore(&self.state_dir));
         if !self.allowed.swap(true, Ordering::SeqCst) {
             handle.exit(1);
         }
@@ -455,7 +507,7 @@ impl Ending {
         let state_dir = self.state_dir.clone();
         let (done, finished) = mpsc::channel();
         thread::spawn(move || {
-            last_resort_restore(&state_dir);
+            drop(last_resort_restore(&state_dir));
             let _ = done.send(());
         });
         if finished.recv_timeout(LAST_RESORT_WAIT).is_err() {
@@ -508,34 +560,67 @@ fn quit_within(bridge: &Bridge, limit: Duration) -> QuitOutcome {
 /// ([`restore_point::restore`]: `restore_roles`, then the file is removed).
 /// Without a restore point the roles are not ours and nothing happens. Makes
 /// the host's COM calls, so never on the UI thread.
-fn last_resort_restore(state_dir: &Path) {
+fn last_resort_restore(state_dir: &Path) -> Vec<String> {
     let path = state_dir.join(RESTORE_POINT_FILE);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             log::line("shell: last resort: there is no restore point; the roles are not ours");
-            return;
+            return Vec::new();
         }
         Err(error) => {
             log::line(&format!(
                 "shell: last resort: {} cannot be read: {error}",
                 path.display()
             ));
-            return;
+            return vec![format!("복원점을 읽지 못했습니다: {error}")];
         }
     };
     let point = match RestorePoint::from_json(&text) {
         Ok(point) => point,
         Err(error) => {
             log::line(&format!("shell: last resort: {}: {error}", path.display()));
-            return;
+            return vec![format!("복원점을 읽지 못했습니다: {error}")];
         }
     };
     let notes = restore_point::restore(&point, &mut windows_host(state_dir));
     log::line("shell: last resort: gave the roles back from the restore point");
-    for note in notes {
+    for note in &notes {
         log::line(&format!("shell: last resort: {note}"));
     }
+    notes
+}
+
+fn consume_guard_marker(state_dir: &Path) -> Vec<String> {
+    let path = state_dir.join(ssr_guard::marker::FILE);
+    let marker = match ssr_guard::marker::read(&path) {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            log::line(&format!("shell: guard marker: {error}"));
+            return Vec::new();
+        }
+    };
+    if let Err(error) = fs::remove_file(&path) {
+        log::line(&format!(
+            "shell: guard marker could not be removed: {error}"
+        ));
+    }
+    let sentence = match marker.reason {
+        ssr_guard::marker::MarkerReason::AppExited => {
+            "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다."
+        }
+        ssr_guard::marker::MarkerReason::StallRestarted => "엔진이 멈춰 앱을 다시 시작했습니다.",
+        ssr_guard::marker::MarkerReason::RestartFailed => {
+            "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다."
+        }
+        ssr_guard::marker::MarkerReason::Stuck => {
+            "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다."
+        }
+    };
+    std::iter::once(sentence.to_owned())
+        .chain(marker.notes)
+        .collect()
 }
 
 /// The host adapter with `ssr-setup.exe` beside this executable.
