@@ -138,6 +138,9 @@ struct Capture {
     reconnects: Arc<AtomicU64>,
     end_after_records: bool,
     end_gate: Option<Arc<AtomicBool>>,
+    /// When set, reads nothing past this many records, so the test decides
+    /// which records the capture thread places before and after a change.
+    limit: Option<Arc<AtomicU64>>,
 }
 
 impl CaptureSource for Capture {
@@ -150,7 +153,12 @@ impl CaptureSource for Capture {
             std::thread::yield_now();
             return Ok(0);
         }
-        if self.next > self.periods.load(Ordering::Acquire) as usize + 16 {
+        if self.next > self.periods.load(Ordering::Acquire) as usize + 16
+            || self
+                .limit
+                .as_ref()
+                .is_some_and(|limit| self.next as u64 >= limit.load(Ordering::Acquire))
+        {
             std::thread::yield_now();
             return Ok(0);
         }
@@ -293,6 +301,7 @@ fn run_no_alloc(
         reconnects: Arc::clone(&reconnects),
         end_after_records: false,
         end_gate: None,
+        limit: None,
     };
     let engine = start_with_clock(
         config,
@@ -384,6 +393,7 @@ fn eof_drain_sink_failure_returns_from_the_allocation_free_scope() {
         reconnects,
         end_after_records: true,
         end_gate: Some(end_gate),
+        limit: None,
     };
     let engine = start_with_clock(
         config,
@@ -685,6 +695,7 @@ fn scene_and_test_tone_realtime_paths_do_not_allocate() {
             reconnects: Arc::new(AtomicU64::new(0)),
             end_after_records: false,
             end_gate: None,
+            limit: None,
         };
         let engine = start_with_clock(
             config,
@@ -753,6 +764,9 @@ fn upmixer_changes_are_drained_without_allocating() {
     let periods = Arc::new(AtomicU64::new(0));
     let processed = Arc::new(AtomicU64::new(0));
     let gate = Arc::new(AtomicBool::new(false));
+    // The output runs unpaced, so without a limit the capture could read
+    // every record before a change arrives; the test releases them in steps.
+    let limit = Arc::new(AtomicU64::new(0));
     let hook_periods = Arc::clone(&periods);
     let hook_processed = Arc::clone(&processed);
     let config = EngineConfig {
@@ -787,6 +801,7 @@ fn upmixer_changes_are_drained_without_allocating() {
         reconnects: Arc::new(AtomicU64::new(0)),
         end_after_records: false,
         end_gate: None,
+        limit: Some(Arc::clone(&limit)),
     };
     // The capture clock counts 48 kHz frames.
     let qpc_frequency = RATE as u64;
@@ -843,35 +858,45 @@ fn upmixer_changes_are_drained_without_allocating() {
         .unwrap();
     gate.store(true, Ordering::Release);
     let start = Instant::now();
-    let wait_for = |count: u64| {
+    // Lets the capture read up to `count` records and waits until it has.
+    let release = |count: u64| {
+        limit.store(count, Ordering::Release);
         while processed.load(Ordering::Acquire) < count && start.elapsed() < Duration::from_secs(5)
         {
             std::thread::yield_now();
         }
     };
-    wait_for(6);
+    release(6);
     let installed = engine.upmix_status(0).unwrap();
     assert!(installed.installed);
     assert_eq!(installed.delay_frames as usize, 2 * BLOCK + BLOCK / 5);
     engine.apply(LiveChange::UpmixApply(false)).unwrap();
-    wait_for(10);
+    release(10);
     engine.apply(LiveChange::UpmixApply(true)).unwrap();
-    wait_for(14);
+    release(14);
     engine
         .apply(LiveChange::Upmixer {
             endpoint: 0,
             stage: stage(37),
         })
         .unwrap();
-    wait_for(20);
-    let upmixing = engine.upmix_status(0).unwrap();
+    release(20);
+    // The route is decided by the first scene placed after the swap; the
+    // record read last may still be on its way to the lane.
+    let upmixing = loop {
+        let status = engine.upmix_status(0).unwrap();
+        if status.upmixing || start.elapsed() >= Duration::from_secs(5) {
+            break status;
+        }
+        std::thread::yield_now();
+    };
     engine
         .apply(LiveChange::Upmixer {
             endpoint: 0,
             stage: None,
         })
         .unwrap();
-    wait_for(24);
+    release(24);
     let mut retired = 0;
     while retired < 2 && start.elapsed() < Duration::from_secs(5) {
         retired += engine
