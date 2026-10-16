@@ -357,7 +357,15 @@ impl Vst2Plugin {
         if control.effect().flags & HAS_EDITOR == 0 {
             return Err(PluginError("plugin has no editor".into()));
         }
-        let mut rect = std::ptr::null::<Rect>();
+        // effEditGetRect writes a pointer to the plugin's own rectangle, or
+        // leaves the out-pointer alone (some plugins return null instead).
+        let fallback = Rect {
+            top: 0,
+            left: 0,
+            bottom: 480,
+            right: 640,
+        };
+        let mut rect: *const Rect = &fallback;
         control.call(
             EDIT_GET_RECT,
             0,
@@ -365,16 +373,13 @@ impl Vst2Plugin {
             (&mut rect as *mut *const Rect).cast(),
             0.0,
         );
-        let (width, height) = if rect.is_null() {
-            (640, 480)
-        } else {
-            // SAFETY: effEditGetRect returns a live rectangle for immediate reading.
-            let rect = unsafe { *rect };
-            (
-                i32::from(rect.right) - i32::from(rect.left),
-                i32::from(rect.bottom) - i32::from(rect.top),
-            )
-        };
+        // SAFETY: `rect` is still `&fallback`, or null, or the plugin's
+        // rectangle, which stays valid until the next dispatcher call.
+        let rect = unsafe { rect.as_ref() }.copied().unwrap_or(fallback);
+        let (width, height) = (
+            i32::from(rect.right) - i32::from(rect.left),
+            i32::from(rect.bottom) - i32::from(rect.top),
+        );
         let editor = EditorWindow::open(&self.info.name, width, height)
             .map_err(|e| PluginError(e.to_string()))?;
         control.call(EDIT_OPEN, 0, 0, editor.handle_value() as *mut c_void, 0.0);
