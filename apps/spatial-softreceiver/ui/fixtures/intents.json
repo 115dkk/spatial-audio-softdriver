@@ -56,6 +56,38 @@
     "value": 7
   },
   {
+    "kind": "set_upmixer",
+    "value": {
+      "endpoint": 1,
+      "choice": "plugin"
+    }
+  },
+  {
+    "kind": "set_upmixer",
+    "value": {
+      "endpoint": 0,
+      "choice": "off"
+    }
+  },
+  {
+    "kind": "choose_plugin",
+    "value": {
+      "endpoint": 1,
+      "path": "C:\\Program Files\\Common Files\\VST3\\Example Upmixer.vst3"
+    }
+  },
+  {
+    "kind": "open_plugin_editor",
+    "value": 1
+  },
+  {
+    "kind": "set_upmix_apply",
+    "value": {
+      "kind": "speakers",
+      "on": false
+    }
+  },
+  {
     "kind": "enable"
   },
   {

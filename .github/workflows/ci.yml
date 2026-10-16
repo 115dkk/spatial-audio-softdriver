@@ -27,6 +27,15 @@ name: CI
 #             offline render, and soaks (exclusive, shared, under CPU load and
 #             under full page heap) that must end without faults, restarts or
 #             underruns
+#   plughost  Windows Server 2022 and 2025 (x64) and Windows 11 (ARM64): the
+#             plugin host process (ssr-plughost) loads the repository's own
+#             test plugin (plughost-testplugin, never shipped) as VST 2 and as
+#             VST 3, and the #[ignore]d tests drive it end to end: processing
+#             through the shared-memory ring, state, editor, crash, hang and
+#             NaN (ADR 0021, 0035). On x64 it also loads a third-party VST 3
+#             upmixer kept encrypted in tools/ci/private/, decrypted into the
+#             runner's temp folder only when the secret is there; it is never
+#             uploaded, cached or logged. Nothing is downloaded.
 #   docs      rustdoc with warnings denied (broken intra-doc links included),
 #             for Linux and for the Windows target
 #   miri      the pure parsing crates under Miri
@@ -470,6 +479,61 @@ jobs:
             target/release/ssr_replay.pdb
           if-no-files-found: ignore
           retention-days: 14
+
+  plughost:
+    name: plugin host (${{ matrix.os }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/rust-toolchain
+        with:
+          cache-key: plughost
+
+      - name: Build the plugin host and the test plugin
+        shell: bash
+        run: cargo build --locked -p ssr-plughost -p plughost-testplugin
+
+      # The third-party upmixer is x64 only and is not open source: it stays
+      # in $RUNNER_TEMP, outside the checkout and the cache, and nothing
+      # uploads it (tools/ci/private/README.md). Without the secret (forks)
+      # the path is empty and its test skips itself.
+      - name: Decrypt the third-party test upmixer (x64, needs the secret)
+        id: third_party
+        if: runner.arch == 'X64'
+        shell: bash
+        env:
+          UPMIX_PLUGIN_KEY: ${{ secrets.UPMIX_PLUGIN_KEY }}
+        run: ./tools/ci/private/decrypt-upmix-plugin.sh
+
+      # One test at a time: each one starts, kills and restarts host
+      # processes, and the crash test counts failures over wall-clock time.
+      # The same test DLL carries both entry points; the VST 3 copy only
+      # needs the bundle-less .vst3 name.
+      - name: Plugin host end to end (ignored tests)
+        shell: bash
+        env:
+          SSR_THIRD_PARTY_VST3: ${{ steps.third_party.outputs.path }}
+        run: |
+          set -euo pipefail
+          export SSR_PLUGHOST_EXE="$PWD/target/debug/ssr-plughost.exe"
+          export SSR_TEST_PLUGIN_VST2="$PWD/target/debug/ssr_testplugin.dll"
+          export SSR_TEST_PLUGIN_VST3="$PWD/target/debug/ssr_testplugin.vst3"
+          cp "$SSR_TEST_PLUGIN_VST2" "$SSR_TEST_PLUGIN_VST3"
+          test -f "$SSR_PLUGHOST_EXE"
+          if [ -z "$SSR_THIRD_PARTY_VST3" ]; then unset SSR_THIRD_PARTY_VST3; fi
+          cargo test --locked -p plughost --test windows -- --ignored --test-threads=1
+
+      - name: Remove the decrypted third-party upmixer
+        if: always() && runner.arch == 'X64'
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/upmix-plugin"
 
   docs:
     name: rustdoc (deny warnings)

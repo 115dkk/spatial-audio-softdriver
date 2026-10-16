@@ -99,6 +99,17 @@ fn every_message_renders_nonempty_and_distinct_in_both_languages() {
             role: Role::Communications,
             detail: "detail".into(),
         },
+        Message::UpmixerUnavailable,
+        Message::EndpointCannotUpmix,
+        Message::PluginScanFailed {
+            detail: "detail".into(),
+        },
+        Message::PluginNotUpmixer {
+            name: "Example Upmixer".into(),
+        },
+        Message::PluginDisabled {
+            name: "Example Upmixer".into(),
+        },
     ];
 
     for message in messages {

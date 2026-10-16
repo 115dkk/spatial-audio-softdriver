@@ -11,6 +11,8 @@ pub const STATE_DIR: &str = "Spatial SoftReceiver";
 /// The administrator helper, next to the app's executable.
 pub const SETUP_EXE: &str = "ssr-setup.exe";
 pub const GUARD_EXE: &str = "ssr-guard.exe";
+/// The plugin host, one process per VST upmixer (ADR 0021, ADR 0035).
+pub const PLUGHOST_EXE: &str = "ssr-plughost.exe";
 
 /// The hand-written output profile in the state directory. When it exists it
 /// takes precedence over the imported BRIR set (`supervisor::machine::Config`).
@@ -21,8 +23,9 @@ pub const PROFILE_FILE: &str = "profile.toml";
 /// temporary directory.
 ///
 /// The Windows host gets this directory (`WindowsHost::new`), and the restore
-/// point (`restore-point.json`), `settings.json`, `app.log` and
-/// `profile.toml` live in it.
+/// point (`restore-point.json`), `settings.json`, `app.log`,
+/// `profile.toml` and the upmixer plugins' saved states
+/// ([`upmix_state`]) live in it.
 pub fn state_dir(local_app_data: Option<OsString>) -> PathBuf {
     match local_app_data.filter(|value| !value.is_empty()) {
         Some(dir) => PathBuf::from(dir).join(STATE_DIR),
@@ -45,6 +48,23 @@ pub fn setup_exe(exe_dir: &Path) -> PathBuf {
 /// `ssr-guard.exe` beside the app executable (ADR 0033).
 pub fn guard_exe(exe_dir: &Path) -> PathBuf {
     exe_dir.join(GUARD_EXE)
+}
+
+/// `ssr-plughost.exe` beside the app executable (ADR 0035).
+pub fn plughost_exe(exe_dir: &Path) -> PathBuf {
+    exe_dir.join(PLUGHOST_EXE)
+}
+
+/// The saved state of `endpoint`'s upmixer plugin, `upmix-<endpoint>.state`
+/// in the state directory (ADR 0021).
+pub fn upmix_state(state_dir: &Path, endpoint: u16) -> PathBuf {
+    state_dir.join(format!("upmix-{endpoint}.state"))
+}
+
+/// The state saved before [`upmix_state`], restored when the newest one
+/// will not load: `upmix-<endpoint>.previous.state`.
+pub fn upmix_previous_state(state_dir: &Path, endpoint: u16) -> PathBuf {
+    state_dir.join(format!("upmix-{endpoint}.previous.state"))
 }
 
 /// The app's command line.

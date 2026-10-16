@@ -1,8 +1,9 @@
 // The profile screen: the two outputs side by side as tabs (headphones with
 // their BRIR set, speakers with a layout or a SECS 2R correction), the gain
 // of the output in use, a test tone per direction of its layout, and the
-// object map. Every value comes from `Snapshot.profile`. Which tab is open is
-// view state; Rust decides whether a switch, an import or a tone is taken
+// object map. Every value comes from `Snapshot.profile`; each tab's upmix
+// switch comes from `Snapshot.upmix` (ADR 0035). Which tab is open is view
+// state; Rust decides whether a switch, an import or a tone is taken
 // (ADR 0034).
 
 import type { EngineStatus, ProfileKind, SpeakerLayout } from '../bindings';
@@ -10,7 +11,7 @@ import { type Child, facts, h } from '../dom';
 import { oneDecimal } from '../format';
 import { SPEAKER_LAYOUTS } from '../guard';
 import { text } from '../text';
-import { type Context, type Drawn, button, intentButton, panel } from './common';
+import { type Context, type Drawn, described, intentButton, panel, picker, switchControl } from './common';
 import { objectMap } from './objectmap';
 
 export const GAIN_MIN = -20;
@@ -25,37 +26,6 @@ const LAYOUTS = Object.keys(SPEAKER_LAYOUTS) as SpeakerLayout[];
 const FILE_HINT = 'profile-file-hint';
 /** While running, a change re-prepares the engine. */
 const RUNNING_HINT = 'profile-running-hint';
-
-/** The ids that describe a control, or null when none does. */
-function described(...ids: (string | false | null)[]): string | null {
-  const present = ids.filter((id): id is string => typeof id === 'string');
-  return present.length === 0 ? null : present.join(' ');
-}
-
-function picker(
-  ctx: Context,
-  label: string,
-  key: string,
-  locked: boolean,
-  describedBy: string | null,
-  pick: () => Promise<string | null>,
-  send: (path: string) => void,
-) {
-  const element = button(
-    label,
-    () => {
-      pick().then(
-        (path) => {
-          if (path !== null) send(path);
-        },
-        (reason: unknown) => ctx.report({ message: String(reason), next: 'none' }),
-      );
-    },
-    { key, disabled: ctx.busy || locked },
-  );
-  if (describedBy !== null) element.setAttribute('aria-describedby', describedBy);
-  return element;
-}
 
 /** A path as data, or 없음. */
 const path = (value: string | null) => h('span', { class: value === null ? 'muted' : 'path' }, value ?? text.profile.none);
@@ -174,6 +144,33 @@ function footer(ctx: Context, kind: ProfileKind): HTMLElement {
   return h('div', { class: 'tab-footer' }, ...children);
 }
 
+/**
+ * Whether this kind applies the upmixers (ADR 0035). Shown only while some
+ * endpoint's upmixer resolves to something other than off; profile.toml
+ * does not lock it.
+ */
+function upmixApply(ctx: Context, kind: ProfileKind): HTMLElement | null {
+  const { upmix } = ctx.snapshot;
+  if (upmix.endpoints.every((endpoint) => endpoint.effective === 'off')) return null;
+  const sending = ctx.sending?.kind === 'set_upmix_apply' && ctx.sending.value.kind === kind ? ctx.sending.value : null;
+  const hint = `upmix-apply-${kind}-hint`;
+  return h(
+    'div',
+    { class: 'upmix-apply' },
+    switchControl({
+      key: `upmix-apply-${kind}`,
+      label: text.profile.upmixApply,
+      // While the change is in flight the switch already stands where it goes.
+      on: sending?.on ?? upmix[kind],
+      disabled: ctx.busy,
+      busy: sending !== null,
+      describedBy: hint,
+      onToggle: (on) => ctx.send({ kind: 'set_upmix_apply', value: { kind, on } }),
+    }),
+    h('p', { id: hint, class: 'hint' }, text.profile.upmixApplyHint),
+  );
+}
+
 function headphonesTab(ctx: Context): Child[] {
   const { profile } = ctx.snapshot;
   const shell = ctx.shell;
@@ -206,6 +203,7 @@ function headphonesTab(ctx: Context): Child[] {
       ),
     ),
     importing ? h('p', { id: 'brir-hint', class: 'hint import-hint' }, text.profile.importing) : null,
+    upmixApply(ctx, 'headphones'),
     footer(ctx, 'headphones'),
   ];
 }
@@ -326,7 +324,7 @@ function channelTable(ctx: Context): HTMLElement {
 }
 
 function speakersTab(ctx: Context): Child[] {
-  return [layoutField(ctx), correctionSection(ctx), channelTable(ctx), footer(ctx, 'speakers')];
+  return [layoutField(ctx), correctionSection(ctx), channelTable(ctx), upmixApply(ctx, 'speakers'), footer(ctx, 'speakers')];
 }
 
 /** The output panel: the file note, the tabs, and the open tab's settings. */

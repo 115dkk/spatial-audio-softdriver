@@ -1,5 +1,5 @@
 {
-  "$comment": "화면 갤러리의 장면 표. e2e/gallery.spec.ts가 장면마다 languages × schemes 장을 <name>.<language>.<scheme>.png로 찍고, tools/ui-gallery-issue.mjs가 같은 표로 찍힌 파일을 대조해 리뷰 이슈 본문을 만듭니다. fixture는 fixtures/index.json의 이름이고 모든 이름이 한 장면 이상에 나와야 합니다. tab은 status, profile, settings 중 하나(마법사와 종료 화면은 null). shell은 앱 셸이 OS에서 읽는 값(로그인 자동 시작, 업데이트)을 정합니다. hold가 true면 의도가 끝나지 않아 버튼이 진행 중인 모습으로 남습니다. steps는 찍기 전에 차례로 하는 일입니다: click은 그 선택자를 누르고 wait는 그 선택자가 보일 때까지 기다립니다.",
+  "$comment": "화면 갤러리의 장면 표. e2e/gallery.spec.ts가 장면마다 languages × schemes 장을 <name>.<language>.<scheme>.png로 찍고, tools/ui-gallery-issue.mjs가 같은 표로 찍힌 파일을 대조해 리뷰 이슈 본문을 만듭니다. fixture는 fixtures/index.json의 이름이고 모든 이름이 한 장면 이상에 나와야 합니다. tab은 status, profile, upmix, settings 중 하나(마법사와 종료 화면은 null). shell은 앱 셸이 OS에서 읽는 값(로그인 자동 시작, 업데이트)을 정합니다. hold가 true면 의도가 끝나지 않아 버튼이 진행 중인 모습으로 남습니다. steps는 찍기 전에 차례로 하는 일입니다: click은 그 선택자를 누르고 focus는 그 선택자에 키보드 초점을 두며 wait는 그 선택자가 보일 때까지 기다립니다.",
   "languages": ["ko", "en"],
   "languageNames": { "ko": "한국어", "en": "English" },
   "schemeNames": { "light": "밝게", "dark": "어둡게" },
@@ -12,6 +12,7 @@
     { "id": "wizard", "title": "처음 설정" },
     { "id": "status", "title": "상태" },
     { "id": "profile", "title": "프로필" },
+    { "id": "upmix", "title": "업믹스" },
     { "id": "settings", "title": "설정" },
     { "id": "quit", "title": "종료" },
     { "id": "window", "title": "작은 창" }
@@ -87,6 +88,34 @@
     { "name": "running-profile", "group": "profile", "title": "켜짐, 헤드폰 객체 지도", "fixture": "running", "tab": "profile" },
     { "name": "faulted-profile", "group": "profile", "title": "멈춘 상태의 프로필", "fixture": "faulted", "tab": "profile" },
 
+    { "name": "ready-upmix-default", "group": "upmix", "title": "업믹스, 처음 상태", "fixture": "ready", "tab": "upmix" },
+    { "name": "ready-upmix", "group": "upmix", "title": "음악 엔드포인트에 VST 업믹서를 고름, 꺼짐", "fixture": "ready-upmix", "tab": "upmix" },
+    { "name": "running-upmix", "group": "upmix", "title": "켜짐, VST 업믹서가 도는 중", "fixture": "running-upmix", "tab": "upmix" },
+    { "name": "running-upmix-fallback", "group": "upmix", "title": "VST 업믹서가 응답하지 않아 원래 스테레오", "fixture": "running-upmix-fallback", "tab": "upmix" },
+    { "name": "running-upmix-pass", "group": "upmix", "title": "PASS에 VST 업믹서, 2.0 비트스트림을 업믹스하는 중", "fixture": "running-upmix-pass", "tab": "upmix" },
+    { "name": "running-upmix-native-surround", "group": "upmix", "title": "PASS의 5.1 비트스트림은 업믹스하지 않음", "fixture": "running-upmix-native-surround", "tab": "upmix" },
+    {
+      "name": "upmix-info-open",
+      "group": "upmix",
+      "title": "(i) 툴팁을 키보드 초점으로 연 상태",
+      "fixture": "running-upmix-pass",
+      "tab": "upmix",
+      "steps": [{ "focus": "[data-key=\"upmix-info\"]" }, { "wait": ".info-tip-wrap.is-open [role=\"tooltip\"]" }]
+    },
+    { "name": "ready-upmix-failed", "group": "upmix", "title": "세 번 멈춰 꺼짐", "fixture": "ready-upmix-failed", "tab": "upmix" },
+    {
+      "name": "ready-upmix-profile-headphones",
+      "group": "upmix",
+      "title": "프로필 헤드폰 탭의 '업믹스 적용' 켜짐",
+      "fixture": "ready-upmix",
+      "tab": "profile",
+      "steps": [{ "click": "[data-key=\"profile-tab-headphones\"]" }, { "wait": "[data-key=\"upmix-apply-headphones\"]" }]
+    },
+    { "name": "ready-speakers-upmix-off", "group": "upmix", "title": "스피커에서 업믹스 적용 꺼짐", "fixture": "ready-speakers-upmix-off", "tab": "profile" },
+    { "name": "running-upmix-720x480", "group": "upmix", "title": "업믹스, 720×480", "fixture": "running-upmix", "tab": "upmix", "size": [720, 480] },
+    { "name": "running-upmix-fallback-status", "group": "upmix", "title": "상태 화면의 업믹스 줄, 원래 스테레오", "fixture": "running-upmix-fallback", "tab": "status" },
+    { "name": "running-upmix-native-surround-status", "group": "upmix", "title": "상태 화면의 업믹스 줄, 모노·스테레오가 아니라 업믹스하지 않음", "fixture": "running-upmix-native-surround", "tab": "status" },
+
     { "name": "ready-settings", "group": "settings", "title": "설정(업데이트 없음)", "fixture": "ready", "tab": "settings" },
     {
       "name": "ready-settings-update-ready",
@@ -112,6 +141,16 @@
     { "name": "running-profile-960x640", "group": "window", "title": "프로필, 960×640", "fixture": "running", "tab": "profile", "size": [960, 640], "schemes": ["light"] },
     { "name": "running-profile-720x480", "group": "window", "title": "프로필, 720×480", "fixture": "running", "tab": "profile", "size": [720, 480], "schemes": ["light"] },
     { "name": "ready-speakers-profile-720x480", "group": "window", "title": "스피커 보정 프로필, 720×480", "fixture": "ready-speakers", "tab": "profile", "size": [720, 480], "schemes": ["light"] },
+    {
+      "name": "upmix-info-open-720x480",
+      "group": "window",
+      "title": "업믹스 (i) 툴팁, 720×480",
+      "fixture": "running-upmix-pass",
+      "tab": "upmix",
+      "size": [720, 480],
+      "schemes": ["light"],
+      "steps": [{ "focus": "[data-key=\"upmix-info\"]" }, { "wait": ".info-tip-wrap.is-open [role=\"tooltip\"]" }]
+    },
     { "name": "ready-settings-720x480", "group": "window", "title": "설정, 720×480", "fixture": "ready", "tab": "settings", "size": [720, 480], "schemes": ["light"] },
     { "name": "setup-choose-output-720x480", "group": "window", "title": "출력 고르기, 720×480", "fixture": "setup-choose-output", "tab": null, "size": [720, 480], "schemes": ["light"] }
   ]

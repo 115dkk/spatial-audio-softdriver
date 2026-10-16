@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use assert_no_alloc::AllocDisabler;
 use brir::PreparedBrir;
 use convolver::FilterBank;
-use engine::{ClockPreference, EngineConfig, LiveChange, Prepared, RtSection, start_with_clock};
+use engine::{
+    ClockPreference, EngineConfig, EngineEvent, LiveChange, MatrixUpmixer, Prepared, RtSection,
+    UpmixStage, UpmixStatus, start_with_clock,
+};
 use speakers::{PreparedSpeaker, PreparedSpeakers};
 use ssr_abi::{RecordWriter, VolumePayload, wave_format_bytes};
 use ssr_types::{
@@ -135,6 +138,9 @@ struct Capture {
     reconnects: Arc<AtomicU64>,
     end_after_records: bool,
     end_gate: Option<Arc<AtomicBool>>,
+    /// When set, reads nothing past this many records, so the test decides
+    /// which records the capture thread places before and after a change.
+    limit: Option<Arc<AtomicU64>>,
 }
 
 impl CaptureSource for Capture {
@@ -147,7 +153,12 @@ impl CaptureSource for Capture {
             std::thread::yield_now();
             return Ok(0);
         }
-        if self.next > self.periods.load(Ordering::Acquire) as usize + 16 {
+        if self.next > self.periods.load(Ordering::Acquire) as usize + 16
+            || self
+                .limit
+                .as_ref()
+                .is_some_and(|limit| self.next as u64 >= limit.load(Ordering::Acquire))
+        {
             std::thread::yield_now();
             return Ok(0);
         }
@@ -290,6 +301,7 @@ fn run_no_alloc(
         reconnects: Arc::clone(&reconnects),
         end_after_records: false,
         end_gate: None,
+        limit: None,
     };
     let engine = start_with_clock(
         config,
@@ -381,6 +393,7 @@ fn eof_drain_sink_failure_returns_from_the_allocation_free_scope() {
         reconnects,
         end_after_records: true,
         end_gate: Some(end_gate),
+        limit: None,
     };
     let engine = start_with_clock(
         config,
@@ -682,6 +695,7 @@ fn scene_and_test_tone_realtime_paths_do_not_allocate() {
             reconnects: Arc::new(AtomicU64::new(0)),
             end_after_records: false,
             end_gate: None,
+            limit: None,
         };
         let engine = start_with_clock(
             config,
@@ -743,4 +757,164 @@ fn scene_and_test_tone_realtime_paths_do_not_allocate() {
         );
         assert!(emitted.load(Ordering::Acquire) > 0, "{report:?}");
     }
+}
+
+#[test]
+fn upmixer_changes_are_drained_without_allocating() {
+    let periods = Arc::new(AtomicU64::new(0));
+    let processed = Arc::new(AtomicU64::new(0));
+    let gate = Arc::new(AtomicBool::new(false));
+    // The output runs unpaced, so without a limit the capture could read
+    // every record before a change arrives; the test releases them in steps.
+    let limit = Arc::new(AtomicU64::new(0));
+    let hook_periods = Arc::clone(&periods);
+    let hook_processed = Arc::clone(&processed);
+    let config = EngineConfig {
+        clock: ClockPreference::Trim,
+        target_ms: 10.0,
+        capacity_ms: 80.0,
+        read_wait: Duration::ZERO,
+        // Armed from the first record: installing, toggling and swapping the
+        // stages happens in armed capture steps.
+        rt_scope: Some(Arc::new(move |section, work| {
+            let armed = match section {
+                RtSection::Capture => hook_processed.load(Ordering::Acquire) >= 1,
+                RtSection::Output => hook_periods.load(Ordering::Acquire) >= WARMUP,
+            };
+            if armed {
+                assert_no_alloc::assert_no_alloc(work);
+            } else {
+                work();
+            }
+        })),
+        ..EngineConfig::default()
+    };
+    let capture = Capture {
+        records: records(32),
+        next: 0,
+        gate: Arc::clone(&gate),
+        periods: Arc::clone(&periods),
+        now_qpc: (40 * BLOCK) as u64,
+        processed: Arc::clone(&processed),
+        fail_once_at: None,
+        failed: false,
+        reconnects: Arc::new(AtomicU64::new(0)),
+        end_after_records: false,
+        end_gate: None,
+        limit: Some(Arc::clone(&limit)),
+    };
+    // The capture clock counts 48 kHz frames.
+    let qpc_frequency = RATE as u64;
+    let mut engine = start_with_clock(
+        config,
+        capture,
+        Opener {
+            periods: Arc::clone(&periods),
+            rate: RATE,
+            period_frames: BLOCK,
+            emitted: Arc::new(AtomicU64::new(0)),
+            fail_drain: Arc::new(AtomicBool::new(false)),
+        },
+        qpc_frequency,
+    )
+    .unwrap();
+    let stage = |latency: usize| {
+        let upmixer = Box::new(MatrixUpmixer::stereo_to_5_1(RATE, latency));
+        Some(Box::new(
+            UpmixStage::new(0, upmixer, qpc_frequency).unwrap(),
+        ))
+    };
+    engine.apply(LiveChange::Prepared(prepared(2))).unwrap();
+    // Another clock's stage, or one for another endpoint, is refused.
+    let foreign = UpmixStage::new(0, Box::new(MatrixUpmixer::stereo_to_5_1(RATE, 0)), 1_000);
+    let refused = LiveChange::Upmixer {
+        endpoint: 0,
+        stage: Some(Box::new(foreign.unwrap())),
+    };
+    assert!(engine.apply(refused).is_err());
+    let music = UpmixStage::new(
+        1,
+        Box::new(MatrixUpmixer::stereo_to_5_1(RATE, 0)),
+        qpc_frequency,
+    );
+    let refused = LiveChange::Upmixer {
+        endpoint: 0,
+        stage: Some(Box::new(music.unwrap())),
+    };
+    assert!(engine.apply(refused).is_err());
+    assert!(
+        engine
+            .apply(LiveChange::Upmixer {
+                endpoint: 3,
+                stage: None
+            })
+            .is_err()
+    );
+    engine
+        .apply(LiveChange::Upmixer {
+            endpoint: 0,
+            stage: stage(0),
+        })
+        .unwrap();
+    gate.store(true, Ordering::Release);
+    let start = Instant::now();
+    // Lets the capture read up to `count` records and waits until it has.
+    let release = |count: u64| {
+        limit.store(count, Ordering::Release);
+        while processed.load(Ordering::Acquire) < count && start.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::yield_now();
+        }
+    };
+    release(6);
+    let installed = engine.upmix_status(0).unwrap();
+    assert!(installed.installed);
+    assert_eq!(installed.delay_frames as usize, 2 * BLOCK + BLOCK / 5);
+    engine.apply(LiveChange::UpmixApply(false)).unwrap();
+    release(10);
+    engine.apply(LiveChange::UpmixApply(true)).unwrap();
+    release(14);
+    engine
+        .apply(LiveChange::Upmixer {
+            endpoint: 0,
+            stage: stage(37),
+        })
+        .unwrap();
+    release(20);
+    // The route is decided by the first scene placed after the swap; the
+    // record read last may still be on its way to the lane.
+    let upmixing = loop {
+        let status = engine.upmix_status(0).unwrap();
+        if status.upmixing || start.elapsed() >= Duration::from_secs(5) {
+            break status;
+        }
+        std::thread::yield_now();
+    };
+    engine
+        .apply(LiveChange::Upmixer {
+            endpoint: 0,
+            stage: None,
+        })
+        .unwrap();
+    release(24);
+    let mut retired = 0;
+    while retired < 2 && start.elapsed() < Duration::from_secs(5) {
+        retired += engine
+            .poll()
+            .iter()
+            .filter(|event| **event == EngineEvent::UpmixerRetired { endpoint: 0 })
+            .count();
+        std::thread::yield_now();
+    }
+    gate.store(false, Ordering::Release);
+    assert_eq!(engine.upmix_status(0), Some(UpmixStatus::not_installed()));
+    assert!(engine.upmix_status(3).is_none());
+    let report = engine.stop();
+    assert!(
+        processed.load(Ordering::Acquire) >= 24,
+        "capture stalled: {report:?}"
+    );
+    assert!(upmixing.upmixing, "{upmixing:?}");
+    assert_eq!(upmixing.delay_frames as usize, 2 * BLOCK + 37 + BLOCK / 5);
+    assert_eq!(retired, 2);
 }

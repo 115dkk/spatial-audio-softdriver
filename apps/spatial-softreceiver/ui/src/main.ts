@@ -12,7 +12,7 @@ const params = new URLSearchParams(location.search);
 
 function tabParam(): Tab | undefined {
   const tab = params.get('tab');
-  return tab === 'status' || tab === 'profile' || tab === 'settings' ? tab : undefined;
+  return tab === 'status' || tab === 'profile' || tab === 'upmix' || tab === 'settings' ? tab : undefined;
 }
 
 async function start(host: HTMLElement) {

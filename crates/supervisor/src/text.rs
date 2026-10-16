@@ -54,6 +54,11 @@ pub enum Message {
     RestoreFallback { role: Role, name: String },
     RestoreLeftToWindows { role: Role },
     RestoreRoleFailed { role: Role, detail: String },
+    UpmixerUnavailable,
+    EndpointCannotUpmix,
+    PluginScanFailed { detail: String },
+    PluginNotUpmixer { name: String },
+    PluginDisabled { name: String },
 }
 
 impl Message {
@@ -160,6 +165,11 @@ impl Message {
             Self::RestoreRoleFailed { role, detail } => {
                 text::restore_role_failed(language, role_name(*role, language), detail)
             }
+            Self::UpmixerUnavailable => text::upmixer_unavailable(language).into(),
+            Self::EndpointCannotUpmix => text::endpoint_cannot_upmix(language).into(),
+            Self::PluginScanFailed { detail } => text::plugin_scan_failed(language, detail),
+            Self::PluginNotUpmixer { name } => text::plugin_not_upmixer(language, name),
+            Self::PluginDisabled { name } => text::plugin_disabled(language, name),
         }
     }
 }

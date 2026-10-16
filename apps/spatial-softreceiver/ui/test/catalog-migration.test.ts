@@ -36,8 +36,8 @@ describe('catalog caller-owned choices', () => {
     expect(scene.length).toBeGreaterThan(1);
     const map = objectMap(engine.directions, true);
     const expected = language === 'ko'
-      ? ['소리를 내는 객체가 없습니다.', '소리 객체 1개', '소리 객체 2개']
-      : ['No sound objects are active.', '1 sound object', '2 sound objects'];
+      ? ['지금 들리는 소리가 없습니다.', '소리 위치 1곳', '소리 위치 2곳']
+      : ['No sound is playing now.', '1 sound position', '2 sound positions'];
     const status = () => map.element.querySelector('.map-status')?.textContent;
     expect(status()).toBe(expected[0]);
     for (const n of [1, 2, 0]) {

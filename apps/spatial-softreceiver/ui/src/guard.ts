@@ -16,6 +16,7 @@ import type {
   DriverState,
   EndpointStatus,
   EngineFault,
+  EndpointUpmixView,
   EngineStatus,
   HeadphonesView,
   Intent,
@@ -27,6 +28,9 @@ import type {
   PcmFormat,
   Phase,
   Platform,
+  PluginChoice,
+  PluginFormat,
+  PluginView,
   PolicyState,
   ProfileKind,
   ProfileView,
@@ -41,6 +45,12 @@ import type {
   SpeakersView,
   UnderrunSnapshot,
   UnsupportedReason,
+  UpmixApply,
+  UpmixBypass,
+  UpmixState,
+  UpmixView,
+  UpmixerChoice,
+  UpmixerSetting,
   UserError,
 } from './bindings';
 
@@ -174,6 +184,15 @@ export const SPEAKER_LAYOUTS: Record<SpeakerLayout, true> = {
   '7.1.2': true,
   '7.1.4': true,
 };
+/** The upmixers an endpoint may choose (ADR 0035). */
+export const UPMIXER_CHOICES: Record<UpmixerChoice, true> = { first_party: true, plugin: true, off: true };
+export const PLUGIN_FORMATS: Record<PluginFormat, true> = { vst2: true, vst3: true };
+/** Why an endpoint's sound goes around its running upmixer (ADR 0035). */
+export const UPMIX_BYPASSES: Record<UpmixBypass, true> = {
+  native_surround: true,
+  kind_off: true,
+  rate_change: true,
+};
 export const CLOCKS: Record<ClockStatus, true> = { trim: true, asrc: true };
 export const SAMPLE_TYPES: Record<SampleType, true> = { int: true, float: true };
 export const UNSUPPORTED_REASONS: Record<UnsupportedReason, true> = {
@@ -201,6 +220,9 @@ const nextAction = oneOf(NEXT_ACTIONS);
 const outputMode = oneOf(OUTPUT_MODES);
 const profileKind = oneOf(PROFILE_KINDS);
 const speakerLayout = oneOf(SPEAKER_LAYOUTS);
+const upmixerChoice = oneOf(UPMIXER_CHOICES);
+const pluginFormat = oneOf(PLUGIN_FORMATS);
+const upmixBypass = oneOf(UPMIX_BYPASSES);
 const clock = oneOf(CLOCKS);
 const sampleType = oneOf(SAMPLE_TYPES);
 const unsupportedReason = oneOf(UNSUPPORTED_REASONS);
@@ -384,12 +406,45 @@ const profileView = object<ProfileView>({
   speakers: speakersView,
 });
 
+const pluginView = object<PluginView>({ path: string, format: pluginFormat, name: string, vendor: string });
+
+const upmixState = tagged<UpmixState>({
+  stopped: unit('stopped'),
+  starting: unit('starting'),
+  running: unit('running'),
+  fallback: unit('fallback'),
+  failed: carrying('failed', string),
+});
+
+const endpointUpmixView = object<EndpointUpmixView>({
+  endpoint: number,
+  choice: nullable(upmixerChoice),
+  effective: upmixerChoice,
+  plugin: nullable(pluginView),
+  state: upmixState,
+  bypass: nullable(upmixBypass),
+  latency_ms: nullable(number),
+  inputs: array(string),
+  outputs: array(string),
+});
+
+const upmixView = object<UpmixView>({
+  endpoints: array(endpointUpmixView),
+  headphones: boolean,
+  speakers: boolean,
+  first_party_available: boolean,
+});
+
+const upmixerSetting = object<UpmixerSetting>({ endpoint: number, choice: upmixerChoice });
+const pluginChoice = object<PluginChoice>({ endpoint: number, path: string });
+const upmixApply = object<UpmixApply>({ kind: profileKind, on: boolean });
 
 const snapshot = object<Snapshot>({
   language,
   language_choice: nullable(language),
   phase,
   profile: profileView,
+  upmix: upmixView,
   engine: nullable(engineStatus),
   outputs: array(outputChoice),
   chosen_output: nullable(outputChoice),
@@ -413,6 +468,10 @@ const intent = tagged<Intent>({
   clear_correction: unit('clear_correction'),
   set_gain: carrying('set_gain', number),
   test_direction: carrying('test_direction', number),
+  set_upmixer: carrying('set_upmixer', upmixerSetting),
+  choose_plugin: carrying('choose_plugin', pluginChoice),
+  open_plugin_editor: carrying('open_plugin_editor', number),
+  set_upmix_apply: carrying('set_upmix_apply', upmixApply),
   enable: unit('enable'),
   disable: unit('disable'),
   start_diagnostic_recording: unit('start_diagnostic_recording'),

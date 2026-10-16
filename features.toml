@@ -39,6 +39,14 @@ status = "implemented"
 tests = ["ssr-policy::windows_code_stays_in_ssr_sys"]
 note = "only ssr-sys names windows, windows-sys or wasapi; only apps other than ssr-replay depend on ssr-sys, so engine and everything below it build and test without Windows"
 
+[[feature]]
+id = "policy.plugin_protocol_independence"
+kind = "policy"
+milestone = "M4"
+status = "implemented"
+tests = ["ssr-policy::streamring_and_plughost_crates_stay_independent_of_ssr_crates"]
+note = "streamring and plughost-* remain reusable protocol crates and may not depend on ssr-* crates (ADR 0021)"
+
 # ---- Contract (M0) ----
 
 [[feature]]
@@ -792,9 +800,43 @@ note = "ADR 0032: ssr-sys::host::WindowsHost implements the ssr-types Host port:
 id = "upmix.stage"
 kind = "pipeline"
 milestone = "M4"
-status = "planned"
-tests = []
-note = "upmix stage between the decoder and scene trimming; bed channel tags, latency alignment, fallback signal and crossfades live inside the stage (extension design, candidate 10)"
+status = "implemented"
+tests = [
+  "engine::delay_is_two_blocks_plus_latency_plus_two_ms",
+  "engine::adversarial_scene_sizes_never_drain_the_fifo",
+  "engine::stereo_folds_bit_exact_and_mono_splits_by_the_panning_law",
+  "engine::object_gains_ramp_across_the_scene_unless_new",
+  "engine::source_lfe_bypasses_an_upmixer_without_lfe_input_delayed_by_d",
+  "engine::source_lfe_goes_through_an_upmixer_with_lfe_input",
+  "engine::the_first_block_after_a_restart_is_the_fallback",
+  "engine::a_generation_change_discards_a_late_result",
+  "engine::a_single_miss_is_concealed_for_exactly_that_block",
+  "engine::three_misses_enter_fallback_mode_and_a_delivery_leaves_it",
+  "engine::a_nan_block_gives_zeros_and_counts_every_sample",
+  "engine::native_surround_is_transparent_and_bit_exact",
+  "engine::a_shape_flip_restarts_the_lane_once_per_flip",
+  "engine::format_changes_restart_the_stage_for_each_shape",
+  "engine::setting_changes_restart_a_playing_lane_only_across_upmixing",
+  "engine::a_stopped_lane_reports_nothing_playing",
+  "engine::upmixed_pcm_leaves_the_chain_exactly_d_later",
+  "engine::ten_seconds_of_adversarial_records_keep_the_lane_accounting",
+  "engine::a_5_1_bitstream_is_transparent_and_bit_exact_on_music_and_pass",
+  "engine::native_surround_pcm_is_never_upmixed",
+  "engine::mono_pcm_is_upmixed_onto_left_and_right",
+  "engine::transparent_stages_are_bit_exact_to_no_stage",
+  "engine::changes_while_playing_restart_the_lane_once",
+  "engine::removing_while_playing_matches_switching_off",
+  "engine::pass_upmixes_and_endpoint_three_is_refused",
+  "engine::format_changes_switch_between_upmixed_and_transparent",
+  "engine::every_refusal_reason",
+  "engine::the_ring_upmixer_matches_the_matrix_block_by_block",
+  "engine::a_generation_change_discards_a_late_ring_result",
+  "engine::a_stalled_host_is_concealed_and_never_blocks_the_producer",
+  "engine::the_ring_must_match_the_upmixer",
+  "engine::upmix_stages_do_not_allocate",
+  "engine::upmixer_changes_are_drained_without_allocating",
+]
+note = "ADR 0021 and ADR 0035 (2026-10-16 correction): on endpoints 0, 1 and 2 (main, music, PASS), stereo and mono content (at most two objects besides LFE) is upmixed whether it arrives as PCM or as a decoded bitstream, judged from each decoded scene's shape; native surround is always transparent, and a bitstream's stereo/surround flip restarts the lane. Scenes are panned onto the upmixer's input layout with the renderer's PanGeometry (gains interpolated across each scene; LFE to the input LFE, or around the upmixer delayed the same). Constant delay of 2 blocks + plugin latency + 2 ms with as many frames out as in, so lane accounting is unchanged. Fallback (the folded input delayed by the plugin latency, laid onto the outputs) for the first block after a restart and for missed blocks, 2 ms fade-out from a held-back plugin tail and fade-back, fallback mode after three misses, non-finite samples zeroed and counted (ADR 0021). Transparent and undelayed when the output kind does not apply upmixing, the rate differs from the upmixer's, or no upmixer is installed; changes between upmixing and transparent restart the lane. Upmixers: MatrixUpmixer (fake) and RingUpmixer (streamring producer of a plugin host)"
 
 [[feature]]
 id = "upmix.first_party"
@@ -805,28 +847,74 @@ tests = []
 note = "Rust rewrite of the upmixer posted in dcinside speakers 580088, as a derivative work once its repository and licence are published (ADR 0020); runs in the engine process, separation inference on a worker thread"
 
 [[feature]]
-id = "hostvst.isolation"
+id = "upmix.supervisor"
+kind = "app"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "supervisor::upmix_settings_default_and_older_files_migrate",
+  "supervisor::upmix_intents_refuse_endpoint_three_the_first_party_upmixer_and_the_wizard",
+  "supervisor::choose_plugin_scans_and_refuses_what_it_cannot_read",
+  "supervisor::a_plugin_choice_starts_the_host_and_installs_the_stage_while_running",
+  "supervisor::each_kind_keeps_its_switch_and_the_engine_takes_the_one_in_use",
+  "supervisor::a_full_change_queue_hands_stages_and_switches_over_on_the_next_tick",
+  "supervisor::a_rate_change_restarts_the_host_at_the_new_rate",
+  "supervisor::a_respawn_reinstalls_the_stage_and_a_new_latency_restarts_the_host",
+  "supervisor::a_disabled_plugin_stays_failed_until_chosen_again",
+  "supervisor::a_host_that_fails_to_start_or_is_no_upmixer_fails_with_its_sentence",
+  "supervisor::a_slow_host_is_starting_until_it_reports_running",
+  "supervisor::stopping_the_engine_shuts_every_host_down",
+  "supervisor::an_engine_fault_shuts_the_hosts_down",
+  "supervisor::pass_upmixes_like_the_other_endpoints",
+  "supervisor::a_profile_file_locks_no_upmix_intent",
+  "supervisor::every_fixture_sentence_is_the_supervisors",
+  "supervisor::every_message_renders_nonempty_and_distinct_in_both_languages",
+  "spatial-softreceiver::wave_bits_map_to_speakers_and_unknown_bits_are_refused",
+  "spatial-softreceiver::a_respawn_restores_the_newest_state_then_the_one_before",
+  "spatial-softreceiver::states_rotate_through_two_files_and_clear",
+  "spatial-softreceiver::hosting_is_unavailable_off_windows",
+]
+note = "ADR 0035 (2026-10-16 correction) and ADR 0021: supervisor::upmix keeps each endpoint's choice (main, music, PASS; None follows DEFAULT_UPMIXER, Off until the first-party upmixer exists), its scanned plugin and each output kind's apply switch in Settings.upmix (older settings load the defaults), and runs the VST upmixers through the PluginHost port. SetUpmixer refuses endpoint 3 and FirstParty; ChoosePlugin takes a .vst3 file or bundle or a VST 2 .dll, scans it and keeps the first class (a different plugin forgets the old saved state); OpenPluginEditor needs a host that is up; a profile.toml locks none of them. While the engine runs, every endpoint whose effective choice is a plugin has a host started at its source rate (48 kHz before any FormatChanged of mono or stereo PCM or a bitstream) and an UpmixStage built on the control thread; a rate change, a new plugin latency and the watch's respawn restart the host and reinstall the stage, a host with no more outputs than inputs or a failed start is Failed(plugin_not_upmixer / plugin_scan_failed), and the watch's three-failure disable is Failed(plugin_disabled) until the user chooses again or the app restarts. The kind in use's switch reaches the engine as LiveChange::UpmixApply at start and on kind changes while the hosts stay up; a change the full queue refuses is handed over on the next tick; engine stop shuts every host down and polls it until it exits (Quit waits up to 2.5 s). Snapshot.upmix shows the fixtures' shapes (state, bypass and latency from Engine::upmix_status, inputs and outputs as the host last reported them). Tested on Linux with a fake host over MatrixUpmixer. The Windows adapter (apps/spatial-softreceiver plugin_host) starts each host on a thread of its own around plughost::PluginProcess, builds the RingUpmixer from the Started ring, maps wave bits to speakers, carries the ControlWatch across respawns and keeps two state files per endpoint; its file rotation, respawn state choice and speaker mapping are tested on Linux, the process paths are type-checked by the Windows-target clippy"
+
+[[feature]]
+id = "plughost.isolation"
 kind = "platform"
 milestone = "M4"
-status = "planned"
-tests = []
+status = "implemented"
+tests = ["plughost::frame_session_and_ring_round_trip", "plughost::watch_detects_hang_and_three_crashes", "plughost::crash_respawn_and_disable", "plughost::hung_process_is_killed", "plughost::shutdown_exits_zero_without_respawn"]
 note = "one ssr-plughost process per plugin under a job object; shared-memory ring one block behind, the engine never waits; crash and hang restart with state restore (ADR 0021)"
 
 [[feature]]
-id = "hostvst.vst3"
+id = "plughost.vst3"
 kind = "platform"
 milestone = "M4"
-status = "planned"
-tests = []
+status = "implemented"
+tests = ["plughost::scan_vst3_lists_one_audio_effect_class", "plughost::vst3_bus_arrangements_end_at_stereo_in_surround_out", "plughost::vst3_state_framing_round_trip", "plughost::loaded_main_bus_layouts_come_from_plugin", "plughost::start_and_process_matrix_with_latency", "plughost::state_round_trip", "plughost::editor_round_trip", "plughost-sys::stream_buffer_read_write_seek_bounds"]
 note = "VST 3 adapter through the vst3 crate (bindings generated from the MIT-licensed SDK 3.8)"
 
 [[feature]]
-id = "hostvst.vst2"
+id = "plughost.no_silence_during_control"
 kind = "platform"
 milestone = "M4"
-status = "planned"
-tests = []
-note = "VST 2 adapter from a Rust translation of Xaymar's clean-room vst2sdk header (BSD-2-Clause), never the Steinberg SDK"
+status = "implemented"
+tests = ["plughost::closed_admission_keeps_sequences_pending_and_heartbeat_alive"]
+note = "Closed admission leaves sequences pending while heartbeat advances; reopening drains in order so the engine uses fallback rather than completed silence."
+
+[[feature]]
+id = "plughost.vst2"
+kind = "platform"
+milestone = "M4"
+status = "implemented"
+tests = ["plughost::common_layouts", "plughost::unknown_layouts_are_errors", "plughost::start_and_process_matrix_with_latency", "plughost::state_round_trip", "plughost::editor_round_trip", "plughost::scan_returns_name_and_vendor"]
+note = "VST 2 adapter from Xaymar's clean-room header at 339d4f31590bf77c0d0d248e09a380ac6285e069 (BSD-3-Clause), never the Steinberg SDK"
+
+[[feature]]
+id = "plughost.testplugin"
+kind = "platform"
+milestone = "M4"
+status = "implemented"
+tests = ["plughost::start_and_process_matrix_with_latency", "plughost::nan_is_preserved_for_app_sanitization", "plughost::failed_restore_uses_previous_state"]
+note = "Test-only stereo-to-5.1 cdylib with 64-frame delay and state-selected crash, hang and NaN modes; never shipped"
 
 [[feature]]
 id = "app.default_device_guard"
@@ -1103,9 +1191,32 @@ note = "ADR 0028: sends known exclusive and bitstream players to the passthrough
 id = "ring.streamring"
 kind = "pipeline"
 milestone = "M4"
-status = "planned"
-tests = []
-note = "cross-process block ring ported from EqualizerAPO-XT StreamRing with its author's permission; shared by the plugin host and the ASIO entrance"
+status = "implemented"
+tests = [
+  "streamring::readiness_in_order_late_drop_fault_and_close",
+  "streamring::hostile_headers_are_rejected",
+  "streamring::pipeline_rule_covers_first_misses_generation_and_late_results",
+  "streamring::producer_per_block_path_does_not_allocate",
+  "streamring::publisher_and_owned_region_cross_threads_after_announcement",
+]
+note = "cross-process block ring ported with the author's permission from EqualizerAPO-XT StreamRing commit 1432f61cc437c99fde8e8e84e10e648fe516d4ce; shared by the plugin host and the ASIO entrance"
+
+[[feature]]
+id = "plughost.proto"
+kind = "platform"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "plughost-proto::codec_round_trips_every_message",
+  "plughost-proto::malicious_frames_are_rejected_and_unknown_kinds_skip",
+  "plughost-proto::every_deadline_fires_at_its_edge",
+  "plughost-proto::backoff_sequence_and_three_failures_window",
+  "plughost-proto::fallback_enters_after_exactly_three_and_leaves_on_delivery",
+  "plughost-proto::state_save_timing_and_previous_fallback",
+  "plughost-proto::a_requested_stop_is_not_a_failure",
+  "plughost-proto::every_pending_request_has_its_own_deadline",
+]
+note = "ADR 0021 control framing, deterministic deadlines, fallback and restart policy, and two-generation state history"
 
 [[feature]]
 id = "asio.entrance"

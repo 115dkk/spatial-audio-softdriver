@@ -20,9 +20,10 @@
 //! Neither real-time thread allocates or locks after start-up. The control
 //! thread talks to them through lock-free queues: [`Engine::apply`] sends a
 //! [`LiveChange`] in, [`Engine::poll`] drains [`EngineEvent`]s out and drops
-//! the buffers the capture thread retired (old `Prepared` sets), so freeing
-//! happens on the control thread. [`Engine::status`] copies atomics and sorts a
-//! latency snapshot without blocking either real-time thread.
+//! the buffers the capture thread retired (old `Prepared` sets and upmix
+//! stages), so freeing happens on the control thread. [`Engine::status`]
+//! copies atomics and sorts a latency snapshot without blocking either
+//! real-time thread.
 //!
 //! The crossing ring carries the fixed 48 kHz scene timeline. An output period
 //! may contain at most 16,384 frames and device rates below 8 kHz are rejected.
@@ -58,6 +59,7 @@ use ssr_types::{
 use crate::Chain;
 use crate::chain::{ChainConfig, ChainEvent, Prepared};
 use crate::mixer::MAX_SCENE_OBJECTS;
+use crate::upmix::{UPMIX_ENDPOINTS, UpmixMonitor, UpmixStage, UpmixStatus};
 use crate::{MAX_OUTPUT_CHANNELS, MIX_FRAMES};
 
 const DEFAULT_QPC_FREQUENCY: u64 = 10_000_000;
@@ -257,6 +259,20 @@ pub enum LiveChange {
     LfeGain(f32),
     /// Changes the crossing-ring trough target from the next output period.
     TargetMs(f32),
+    /// Installs (`Some`) or removes (`None`) the upmix stage of `endpoint`
+    /// (0 to 2), built on the control thread with [`UpmixStage::new`] for
+    /// the engine's QPC frequency. The old stage comes back through
+    /// [`Engine::poll`], which drops it and reports
+    /// [`EngineEvent::UpmixerRetired`]. While the lane plays it restarts when
+    /// the old stage was upmixing or the new one will.
+    Upmixer {
+        endpoint: u16,
+        stage: Option<Box<UpmixStage>>,
+    },
+    /// The output kind's "apply upmixing" switch, resolved by the supervisor
+    /// for the kind in use (ADR 0035); on by default. Off, every stage is
+    /// transparent while the upmixers keep running.
+    UpmixApply(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -291,6 +307,18 @@ pub enum EngineEvent {
     OutputCadenceReopen { period_ms: f32 },
     /// The engine stopped making sound; it keeps running until stopped.
     Fault(EngineFault),
+    /// The capture thread let go of `endpoint`'s previous upmix stage, and
+    /// [`Engine::poll`] dropped it: the engine no longer touches its upmixer
+    /// (a plugin host's shared memory may close).
+    UpmixerRetired { endpoint: u16 },
+}
+
+enum Retired {
+    Prepared(Box<Prepared>),
+    Upmix {
+        endpoint: u16,
+        stage: Box<UpmixStage>,
+    },
 }
 
 /// Totals when the engine stops.
@@ -332,9 +360,12 @@ pub struct Engine {
     shared: Arc<Shared>,
     changes: RefCell<Producer<LiveChange>>,
     directions: RefCell<DirectionTrack>,
+    /// Status readers of the stages sent to the capture thread, by endpoint.
+    upmix: RefCell<[Option<UpmixMonitor>; UPMIX_ENDPOINTS]>,
+    qpc_frequency: u64,
     capture_events: Consumer<RtEvent>,
     output_events: Consumer<RtEvent>,
-    retired: Consumer<Box<Prepared>>,
+    retired: Consumer<Retired>,
     capture_thread: Option<CaptureThreads>,
     output_thread: Option<JoinHandle<()>>,
 }
@@ -384,7 +415,7 @@ impl DirectionTrack {
 
 /// The capture/DSP thread and the decode thread it hands bursts to.
 struct CaptureThreads {
-    capture: JoinHandle<Option<Box<Prepared>>>,
+    capture: JoinHandle<Option<Retired>>,
     /// `ssr-decode` (ADR 0031); joined after the capture thread. It parks for
     /// up to a second between jobs, so a stop unparks it through this handle.
     decode: Option<JoinHandle<()>>,
@@ -637,6 +668,8 @@ where
         shared,
         changes: RefCell::new(changes),
         directions: RefCell::new(directions),
+        upmix: RefCell::new(Default::default()),
+        qpc_frequency,
         capture_events,
         output_events,
         retired,
@@ -667,7 +700,15 @@ impl Engine {
             LiveChange::TestTone(direction) => directions
                 .latest_len
                 .is_some_and(|len| direction.index() < len),
-            LiveChange::Prepared(_) | LiveChange::Mute(_) => true,
+            // The stage validated its upmixer when it was built; it must be
+            // for this endpoint and this engine's clock.
+            LiveChange::Upmixer { endpoint, stage } => {
+                (*endpoint as usize) < UPMIX_ENDPOINTS
+                    && stage.as_deref().is_none_or(|stage| {
+                        stage.endpoint() == *endpoint && stage.qpc_frequency() == self.qpc_frequency
+                    })
+            }
+            LiveChange::Prepared(_) | LiveChange::Mute(_) | LiveChange::UpmixApply(_) => true,
         };
         if !valid {
             return Err((Rejected, change));
@@ -676,8 +717,18 @@ impl Engine {
             LiveChange::Prepared(prepared) => Some(prepared.direction_views()),
             _ => None,
         };
+        let monitor = match &change {
+            LiveChange::Upmixer { endpoint, stage } => Some((
+                *endpoint as usize,
+                stage.as_deref().map(UpmixStage::monitor),
+            )),
+            _ => None,
+        };
         if let Err(PushError::Full(change)) = self.changes.borrow_mut().push(change) {
             return Err((Rejected, change));
+        }
+        if let Some((endpoint, monitor)) = monitor {
+            self.upmix.borrow_mut()[endpoint] = monitor;
         }
         if let Some(views) = views {
             directions.sent += 1;
@@ -688,12 +739,34 @@ impl Engine {
         Ok(())
     }
 
+    /// The upmix stage of `endpoint` (0 to 2; `None` for others) as last
+    /// sent with [`LiveChange::Upmixer`], read from atomics the capture thread
+    /// writes. Never blocks it.
+    pub fn upmix_status(&self, endpoint: u16) -> Option<UpmixStatus> {
+        let upmix = self.upmix.borrow();
+        let monitor = upmix.get(endpoint as usize)?;
+        Some(
+            monitor
+                .as_ref()
+                .map_or_else(UpmixStatus::not_installed, UpmixMonitor::status),
+        )
+    }
+
     /// Drains pending events and drops retired buffers. Call from the control
     /// thread, about 30 times a second.
     pub fn poll(&mut self) -> Vec<EngineEvent> {
-        while self.retired.pop().is_ok() {}
-        let capacity = self.capture_events.slots() + self.output_events.slots();
+        let capacity =
+            self.capture_events.slots() + self.output_events.slots() + RETIRED_QUEUE_CAPACITY;
         let mut events = Vec::with_capacity(capacity);
+        while let Ok(retired) = self.retired.pop() {
+            match retired {
+                Retired::Prepared(prepared) => drop(prepared),
+                Retired::Upmix { endpoint, stage } => {
+                    drop(stage);
+                    events.push(EngineEvent::UpmixerRetired { endpoint });
+                }
+            }
+        }
         while let Ok(event) = self.capture_events.pop() {
             events.push(event.into_public(&self.shared));
         }
@@ -737,7 +810,9 @@ impl Engine {
         if let Some(thread) = self.output_thread.take() {
             let _ = thread.join();
         }
-        while self.retired.pop().is_ok() {}
+        while let Ok(retired) = self.retired.pop() {
+            drop(retired);
+        }
         StopReport {
             blocks: self.shared.blocks.load(Ordering::Acquire),
             underruns: self.shared.underruns.load(Ordering::Acquire),
@@ -1552,14 +1627,14 @@ fn capture_rt_step<C: CaptureSource>(
     read_wait: Duration,
     trim_supported: bool,
     changes: &mut Consumer<LiveChange>,
-    retired: &mut Producer<Box<Prepared>>,
+    retired: &mut Producer<Retired>,
     crossing: &mut CrossingProducer,
     shared: &Shared,
     chain: &mut Chain,
     events: &mut EventWriter,
     read_buffer: &mut [u8],
     applied_trim: &mut f64,
-    pending_retired: &mut Option<Box<Prepared>>,
+    pending_retired: &mut Option<Retired>,
     finishing: &mut bool,
 ) -> CaptureStep {
     drain_changes(changes, chain, retired, pending_retired, shared);
@@ -1631,18 +1706,18 @@ fn capture_thread_main<C: CaptureSource>(
     trim_supported: bool,
     mut changes: Consumer<LiveChange>,
     event_producer: Producer<RtEvent>,
-    mut retired: Producer<Box<Prepared>>,
+    mut retired: Producer<Retired>,
     mut crossing: CrossingProducer,
     shared: Arc<Shared>,
     mut chain: Chain,
-) -> Option<Box<Prepared>> {
+) -> Option<Retired> {
     if let Some(hook) = &config.thread_hook {
         hook(EngineThread::Capture);
     }
     let mut read_buffer = vec![0_u8; config.read_buffer_bytes];
     let mut events = EventWriter::new(event_producer, Arc::clone(&shared));
     let mut applied_trim = f64::NAN;
-    let mut pending_retired: Option<Box<Prepared>> = None;
+    let mut pending_retired: Option<Retired> = None;
     let mut arrivals = ArrivalPeak::new();
     shared.capture_started.store(true, Ordering::Release);
     let mut finishing = false;
@@ -1808,8 +1883,8 @@ fn handle_chain_event(
 fn drain_changes(
     changes: &mut Consumer<LiveChange>,
     chain: &mut Chain,
-    retired: &mut Producer<Box<Prepared>>,
-    pending_retired: &mut Option<Box<Prepared>>,
+    retired: &mut Producer<Retired>,
+    pending_retired: &mut Option<Retired>,
     shared: &Shared,
 ) {
     if let Some(old) = pending_retired.take() {
@@ -1827,7 +1902,7 @@ fn drain_changes(
                 let old = chain.set_prepared(prepared);
                 shared.prepared_installed.fetch_add(1, Ordering::AcqRel);
                 if let Some(old) = old {
-                    match retired.push(old) {
+                    match retired.push(Retired::Prepared(old)) {
                         Ok(()) => {}
                         Err(PushError::Full(old)) => *pending_retired = Some(old),
                     }
@@ -1843,6 +1918,15 @@ fn drain_changes(
             LiveChange::LfeGain(db) => chain.set_lfe_gain(10.0_f32.powf(db / 20.0)),
             LiveChange::TargetMs(ms) => {
                 shared.target_ms_bits.store(ms.to_bits(), Ordering::Release)
+            }
+            LiveChange::UpmixApply(on) => chain.set_upmix_apply(on),
+            LiveChange::Upmixer { endpoint, stage } => {
+                if let Some(stage) = chain.set_upmixer(endpoint, stage) {
+                    match retired.push(Retired::Upmix { endpoint, stage }) {
+                        Ok(()) => {}
+                        Err(PushError::Full(old)) => *pending_retired = Some(old),
+                    }
+                }
             }
         }
     }

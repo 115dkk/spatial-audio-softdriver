@@ -8,23 +8,23 @@ fn every_marker_reason_has_both_languages_without_changing_the_record() {
     for (reason, korean, english) in [
         (
             MarkerReason::AppExited,
-            "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
+            "지난번에 앱이 예기치 않게 종료되어 기본 오디오 장치를 되돌렸습니다.",
             "The app exited unexpectedly. The default audio devices have been restored.",
         ),
         (
             MarkerReason::StallRestarted,
-            "엔진이 멈춰 앱을 다시 시작했습니다.",
-            "The engine stopped responding, so the app was restarted.",
+            "소리 처리가 멈춰 앱을 다시 시작했습니다.",
+            "Audio processing stopped responding, so the app was restarted.",
         ),
         (
             MarkerReason::RestartFailed,
-            "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다.",
-            "The engine stopped responding after restarting. The default audio devices have been restored.",
+            "다시 시작한 뒤에도 소리 처리가 멈춰 기본 오디오 장치를 되돌렸습니다.",
+            "Audio processing stopped responding after restarting. The default audio devices have been restored.",
         ),
         (
             MarkerReason::Stuck,
-            "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다.",
-            "The app stopped responding while holding the default audio devices. The defaults have been restored.",
+            "앱을 기본 오디오 장치로 사용하던 중 응답이 없어 이전 장치로 되돌렸습니다.",
+            "The app stopped responding while it was the default audio device. The previous devices have been restored.",
         ),
     ] {
         let marker = Marker::new(reason, 123, vec!["diagnostic detail".to_owned()]);

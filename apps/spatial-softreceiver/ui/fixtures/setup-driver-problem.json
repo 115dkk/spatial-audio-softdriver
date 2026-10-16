@@ -44,6 +44,52 @@
       ]
     }
   },
+  "upmix": {
+    "endpoints": [
+      {
+        "endpoint": 0,
+        "choice": null,
+        "effective": "off",
+        "plugin": null,
+        "state": {
+          "kind": "stopped"
+        },
+        "bypass": null,
+        "latency_ms": null,
+        "inputs": [],
+        "outputs": []
+      },
+      {
+        "endpoint": 1,
+        "choice": null,
+        "effective": "off",
+        "plugin": null,
+        "state": {
+          "kind": "stopped"
+        },
+        "bypass": null,
+        "latency_ms": null,
+        "inputs": [],
+        "outputs": []
+      },
+      {
+        "endpoint": 2,
+        "choice": null,
+        "effective": "off",
+        "plugin": null,
+        "state": {
+          "kind": "stopped"
+        },
+        "bypass": null,
+        "latency_ms": null,
+        "inputs": [],
+        "outputs": []
+      }
+    ],
+    "headphones": true,
+    "speakers": true,
+    "first_party_available": false
+  },
   "engine": null,
   "outputs": [],
   "chosen_output": null,
@@ -63,7 +109,7 @@
   },
   "roles_taken": false,
   "error": {
-    "message": "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오.",
+    "message": "Windows가 드라이버 서명을 확인하지 못했습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오.",
     "next": "retry"
   },
   "notes": []

@@ -91,19 +91,19 @@ mod tests {
         for (reason, expected) in [
             (
                 MarkerReason::AppExited,
-                "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
+                "지난번에 앱이 예기치 않게 종료되어 기본 오디오 장치를 되돌렸습니다.",
             ),
             (
                 MarkerReason::StallRestarted,
-                "엔진이 멈춰 앱을 다시 시작했습니다.",
+                "소리 처리가 멈춰 앱을 다시 시작했습니다.",
             ),
             (
                 MarkerReason::RestartFailed,
-                "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다.",
+                "다시 시작한 뒤에도 소리 처리가 멈춰 기본 오디오 장치를 되돌렸습니다.",
             ),
             (
                 MarkerReason::Stuck,
-                "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다.",
+                "앱을 기본 오디오 장치로 사용하던 중 응답이 없어 이전 장치로 되돌렸습니다.",
             ),
         ] {
             let marker = Marker::new(reason, 0, Vec::new());

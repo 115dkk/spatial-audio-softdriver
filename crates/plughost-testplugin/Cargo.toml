@@ -1,0 +1,27 @@
+[package]
+name = "plughost-testplugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "ssr_testplugin"
+crate-type = ["cdylib"]
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+dbg_macro = "deny"
+
+[target.'cfg(windows)'.dependencies]
+plughost-sys.workspace = true
+vst3.workspace = true

@@ -350,11 +350,11 @@ mod tests {
     fn apply_errors_render_in_both_languages_and_keep_the_detail() {
         assert_eq!(
             ApplyError::NotBuilt.render(Language::Ko),
-            "이 빌드에는 업데이트 기능이 없습니다."
+            "이 버전에는 업데이트 기능이 없습니다."
         );
         assert_eq!(
             ApplyError::NotBuilt.render(Language::En),
-            "This build has no updater."
+            "This version has no update feature."
         );
         let failed = ApplyError::Failed("exit code 3".to_owned());
         assert_eq!(

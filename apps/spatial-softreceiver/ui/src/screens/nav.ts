@@ -1,4 +1,4 @@
-// The narrow column on the left: the mark, the three screens and a one-word
+// The narrow column on the left: the mark, the four screens and a one-word
 // power state so it is visible from every screen.
 
 import type { Intent, Snapshot } from '../bindings';
@@ -6,7 +6,7 @@ import { h } from '../dom';
 import { text } from '../text';
 import type { Context, Tab } from './common';
 
-const TABS: Tab[] = ['status', 'profile', 'settings'];
+const TABS: Tab[] = ['status', 'profile', 'upmix', 'settings'];
 
 /**
  * The power state in one word, and its tone. `pending` is the intent in

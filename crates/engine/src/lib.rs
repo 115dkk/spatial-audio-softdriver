@@ -12,6 +12,8 @@
 //! * [`decode_thread`]: the job queue that moves allocating codec decoders
 //!   (E-AC-3) off the capture thread onto `ssr-decode` (ADR 0031).
 //! * [`test_tone`]: the 400 ms direction test signal (`LiveChange::TestTone`).
+//! * [`upmix`]: the stereo and mono upmix stage of endpoints 0 to 2 and its
+//!   upmixers (ADR 0021, ADR 0035).
 
 pub mod adapters;
 pub mod chain;
@@ -20,6 +22,7 @@ mod limiter;
 pub mod mixer;
 pub mod runtime;
 pub mod test_tone;
+pub mod upmix;
 
 /// The most output channels the crossing ring carries (ADR 0030).
 pub const MAX_OUTPUT_CHANNELS: usize = 32;
@@ -43,4 +46,9 @@ pub use runtime::{
     ClockPreference, Engine, EngineConfig, EngineEvent, EngineThread, LiveChange, Rejected,
     RtEventHook, RtLoopEvent, RtScope, RtSection, StartError, StartOptions, StopReport, ThreadHook,
     start, start_with, start_with_clock,
+};
+pub use upmix::{
+    MAX_UPMIX_CHANNELS, MAX_UPMIX_LATENCY_SECONDS, MatrixUpmixer, RingFault, RingUpmixer,
+    SpeakerFault, UPMIX_ENDPOINTS, UpmixError, UpmixMode, UpmixMonitor, UpmixStage, UpmixStatus,
+    Upmixer,
 };

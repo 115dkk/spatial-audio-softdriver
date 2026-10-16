@@ -57,6 +57,17 @@ pub enum Intent {
     /// The gain of the output in use; each kind keeps its own.
     SetGain(f32),
     TestDirection(DirectionId),
+    /// Chooses an endpoint's upmixer (ADR 0035). `FirstParty` is refused
+    /// until the first-party upmixer exists (ADR 0020).
+    SetUpmixer(UpmixerSetting),
+    /// Chooses the VST upmixer plugin of an endpoint: a `.vst3` bundle or a
+    /// VST 2 `.dll`. The supervisor scans it before keeping it.
+    ChoosePlugin(PluginChoice),
+    /// Opens the plugin's editor window of an endpoint (its host process's
+    /// own top-level window).
+    OpenPluginEditor(u16),
+    /// Whether an output kind applies upmixing (ADR 0035); on by default.
+    SetUpmixApply(UpmixApply),
     Enable,
     Disable,
     StartDiagnosticRecording,
@@ -268,6 +279,136 @@ pub struct SpeakerChannelView {
     pub subwoofer: bool,
 }
 
+/// The upmixers an endpoint's sound may go through (ADR 0035).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum UpmixerChoice {
+    /// The first-party upmixer (ADR 0020). Not built yet; it becomes the
+    /// default once it is.
+    FirstParty,
+    /// A VST 2 or VST 3 upmixer plugin in its own host process (ADR 0021).
+    Plugin,
+    /// No upmixing.
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub enum PluginFormat {
+    #[serde(rename = "vst2")]
+    Vst2,
+    #[serde(rename = "vst3")]
+    Vst3,
+}
+
+/// [`Intent::SetUpmixer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct UpmixerSetting {
+    /// Endpoint number: 0 main, 1 music, 2 PASS (ADR 0035, the 2026-10-16
+    /// correction).
+    pub endpoint: u16,
+    pub choice: UpmixerChoice,
+}
+
+/// [`Intent::ChoosePlugin`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct PluginChoice {
+    pub endpoint: u16,
+    pub path: PathBuf,
+}
+
+/// [`Intent::SetUpmixApply`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct UpmixApply {
+    pub kind: ProfileKind,
+    pub on: bool,
+}
+
+/// Why an endpoint's sound plays as it came while its upmixer runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum UpmixBypass {
+    /// The source playing now is native surround (more than two channels
+    /// besides LFE, or objects); it is never upmixed.
+    NativeSurround,
+    /// The output kind in use does not apply upmixing.
+    KindOff,
+    /// The source's sample rate changed; the upmixer is being set up for it.
+    RateChange,
+}
+
+/// A chosen upmixer plugin.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct PluginView {
+    /// The `.vst3` bundle or `.dll`.
+    pub path: String,
+    pub format: PluginFormat,
+    /// The plugin's own name and vendor, as it reports them.
+    pub name: String,
+    pub vendor: String,
+}
+
+/// What an endpoint's upmixer is doing.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum UpmixState {
+    /// Not running: upmixing is off for this endpoint, the output kind in use
+    /// does not apply it, or the engine is off.
+    Stopped,
+    /// The plugin host is starting or loading the plugin.
+    Starting,
+    Running,
+    /// The plugin missed blocks or is restarting; the upmixer's input plays,
+    /// delayed the same (ADR 0021, ADR 0035).
+    Fallback,
+    /// Off for this session; the sentence says why.
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct EndpointUpmixView {
+    /// Endpoint number: 0 main, 1 music, 2 PASS.
+    pub endpoint: u16,
+    /// The saved choice; `None` follows the default (ADR 0035).
+    pub choice: Option<UpmixerChoice>,
+    /// What the choice resolves to now, the default included.
+    pub effective: UpmixerChoice,
+    pub plugin: Option<PluginView>,
+    pub state: UpmixState,
+    /// Set while the upmixer runs but the sound playing now goes around it.
+    pub bypass: Option<UpmixBypass>,
+    /// The upmix path's added latency while it runs: two blocks, the
+    /// plugin's own latency and the 2 ms concealment (ADR 0035).
+    pub latency_ms: Option<f32>,
+    /// The plugin's input speakers by name (`"L"`, `"R"`, ...); the stereo is
+    /// placed onto them first.
+    pub inputs: Vec<String>,
+    /// The plugin's output speakers by name (`"L"`, `"C"`, `"LFE"`, ...).
+    pub outputs: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct UpmixView {
+    /// The main, music and PASS endpoints, in endpoint order.
+    pub endpoints: Vec<EndpointUpmixView>,
+    /// Whether headphones apply upmixing (on by default).
+    pub headphones: bool,
+    /// Whether speakers apply upmixing (on by default).
+    pub speakers: bool,
+    /// The first-party upmixer exists in this build. False until ADR 0020's
+    /// conditions are met; the screen then shows it as not yet built.
+    pub first_party_available: bool,
+}
+
 /// An output the user may choose, or has chosen.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
@@ -287,6 +428,7 @@ pub struct Snapshot {
     pub language_choice: Option<Language>,
     pub phase: Phase,
     pub profile: ProfileView,
+    pub upmix: UpmixView,
     pub engine: Option<EngineStatus>,
     /// Outputs the user may choose: active, and never our own endpoints.
     pub outputs: Vec<OutputChoice>,

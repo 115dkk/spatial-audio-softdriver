@@ -421,8 +421,87 @@ select {
 }
 
 input[type="range"],
-input[type="checkbox"] {
+input[type="checkbox"],
+input[type="radio"] {
   accent-color: var(--accent);
+}
+
+/* An on/off switch (role="switch"): the track and thumb, then the label, all
+   one button. Off is a hollow track with a muted thumb, on the accent with
+   the thumb at the right, so the two differ in more than colour. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.switch:focus-visible {
+  outline: none;
+}
+
+.switch:focus-visible .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.switch-track {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  border: 1px solid var(--text-muted);
+  border-radius: 999px;
+  background: var(--surface-sunk);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease;
+}
+
+.switch[aria-checked="true"] .switch-track {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.switch[aria-checked="true"] .switch-thumb {
+  transform: translateX(16px);
+  background: var(--accent-text);
+}
+
+.switch:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.switch[aria-busy="true"] {
+  opacity: 0.8;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch-track,
+  .switch-thumb {
+    transition: none;
+  }
 }
 
 .actions {
@@ -500,6 +579,14 @@ input[type="checkbox"] {
   font-size: var(--size-xs);
   font-weight: 500;
   white-space: nowrap;
+}
+
+/* A tag that marks something not there yet, not something chosen. */
+.tag.tag-quiet {
+  padding: 1px 7px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--text-muted);
 }
 
 /* ---- Error band and notes -------------------------------------------- */
@@ -836,6 +923,34 @@ input[type="checkbox"] {
 
 .endpoint-card.is-off {
   background: var(--surface-sunk);
+}
+
+.card-upmix {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* The lamp stands at the first line when the name wraps. */
+.card-upmix .lamp {
+  margin-top: 5px;
+}
+
+/* The name, and under it why the sound now goes around the upmixer. */
+.card-upmix-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.card-upmix-reason {
+  font-weight: 400;
+}
+
+.card-upmix.tone-warning {
+  color: var(--warning);
 }
 
 .card-warning {
@@ -1265,6 +1380,22 @@ input[type="checkbox"] {
   margin-top: 8px;
 }
 
+/* The tab's upmix switch (ADR 0035), set apart like a section, its hint
+   under the label. */
+.upmix-apply {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.upmix-apply .hint {
+  padding-left: 46px;
+}
+
 .gain {
   display: grid;
   grid-template-columns: auto minmax(80px, 1fr) auto minmax(72px, auto);
@@ -1454,6 +1585,316 @@ input[type="checkbox"] {
 .map-swatch.is-up {
   border: 2px solid var(--text-muted);
   background: transparent;
+}
+
+/* ---- Upmix ----------------------------------------------------------- */
+
+/* One card per endpoint (main, music, PASS), three abreast when there is
+   room and stacked when there is not: its state, its three upmixers as radio
+   rows with the delay under them, and the VST upmixer's plugin. The screen is
+   the box the intro's (i) line keeps inside. */
+.upmix {
+  container-type: inline-size;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.upmix-cards {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+}
+
+@container (min-width: 960px) {
+  .upmix-cards {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.upmix-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.upmix-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+
+.upmix-card-title {
+  font-size: var(--size-l);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+/* The lamp at the first line, then the word and its details, which wrap in
+   a narrow card. */
+.upmix-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: var(--size-s);
+  color: var(--text-muted);
+}
+
+.upmix-state .lamp {
+  margin-top: 6px;
+}
+
+/* The dot before each detail stands in the gap to its left; the box clips
+   the one a detail that starts a line would bring. */
+.upmix-state-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 18px;
+  min-width: 0;
+  overflow: clip;
+}
+
+.upmix-state-word {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.upmix-state.tone-off .upmix-state-word {
+  color: var(--text-muted);
+}
+
+.upmix-state-detail {
+  position: relative;
+  color: var(--text-muted);
+}
+
+.upmix-state-detail::before {
+  content: "·";
+  position: absolute;
+  right: 100%;
+  width: 18px;
+  text-align: center;
+  color: var(--line-strong);
+}
+
+/* Starting: the spinner turns where the lamp stands. */
+.upmix-state .spinner {
+  position: static;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin: 4px 0 0;
+  color: var(--accent);
+}
+
+/* The original stereo in place of the plugin, or the plugin off for good:
+   the sentence on its tone. */
+.upmix-state.is-alert {
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.upmix-state.is-alert.tone-error {
+  background: var(--error-soft);
+  color: var(--error);
+}
+
+.upmix-state.is-alert .upmix-state-word {
+  color: inherit;
+}
+
+.upmix-section {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.upmix-section-title {
+  margin-bottom: 8px;
+  font-size: var(--size-m);
+  font-weight: 600;
+}
+
+.upmix-choices {
+  display: grid;
+  gap: 6px;
+}
+
+.upmix-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.upmix-option:not(.is-checked):not(.is-locked):hover {
+  background: var(--bg);
+}
+
+.upmix-option.is-checked {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* Not built: shown, but neither chosen nor choosable. */
+.upmix-option.is-locked {
+  background: var(--surface-sunk);
+  cursor: default;
+}
+
+.upmix-option input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  margin: 3px 0 0;
+}
+
+.upmix-option input[type="radio"]:disabled {
+  cursor: default;
+}
+
+.upmix-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.upmix-option-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.upmix-option-name {
+  font-weight: 500;
+}
+
+.upmix-option.is-checked .upmix-option-name {
+  font-weight: 600;
+}
+
+.upmix-option.is-locked .upmix-option-name {
+  color: var(--text-muted);
+}
+
+.upmix-option-body {
+  font-size: var(--size-s);
+  color: var(--text-muted);
+}
+
+.upmix-default {
+  font-size: var(--size-xs);
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.facts.upmix-facts {
+  margin: 0;
+}
+
+.upmix-no-plugin {
+  font-weight: 500;
+}
+
+.upmix-plugin .actions {
+  margin-top: 12px;
+}
+
+/* What upmixing costs this input, under the radios. */
+.upmix-delay {
+  margin-top: 8px;
+}
+
+/* ---- Info tip -------------------------------------------------------- */
+
+/* An (i) in the line of text it explains (common.ts infoTip): a round
+   24 px target around a 16 px glyph that does not push the line apart. */
+.info-tip-wrap {
+  anchor-scope: --info-tip;
+}
+
+.info-tip {
+  anchor-name: --info-tip;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: -4px 0 -4px 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  vertical-align: middle;
+  cursor: help;
+}
+
+.info-tip:hover,
+.info-tip-wrap.is-open .info-tip {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.info-tip-glyph {
+  display: block;
+}
+
+/* Closed, the line is still the button's description, read but not seen. */
+.info-tip-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Open, it hangs under the (i) in the reverse of the page's colours, and
+   turns to the left of it, or to the screen's edge, rather than leave it. */
+.info-tip-wrap.is-open .info-tip-text {
+  position-anchor: --info-tip;
+  top: anchor(bottom);
+  left: anchor(left);
+  z-index: 1;
+  width: max-content;
+  max-width: min(320px, 100%);
+  height: auto;
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+  border-radius: var(--radius-control);
+  background: var(--text);
+  color: var(--surface);
+  font-size: var(--size-s);
+  font-weight: 400;
+  line-height: 1.5;
+  position-try-fallbacks: flip-inline, --info-tip-edge;
+}
+
+/* The gap over the line, so the pointer can cross onto it (WCAG 1.4.13). */
+.info-tip-wrap.is-open .info-tip-text::before {
+  content: "";
+  position: absolute;
+  inset: -8px 0 auto;
+  height: 8px;
+}
+
+@position-try --info-tip-edge {
+  left: 0;
+  right: auto;
 }
 
 /* ---- Settings -------------------------------------------------------- */

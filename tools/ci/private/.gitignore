@@ -1,0 +1,4 @@
+# Decrypted third-party test material must never be committed (README.md).
+*.vst3
+*.dll
+!*.gpg

@@ -12,6 +12,7 @@ import { nav } from './screens/nav';
 import { profile } from './screens/profile';
 import { settings } from './screens/settings';
 import { status } from './screens/status';
+import { upmix } from './screens/upmix';
 import { quit, wizard } from './screens/wizard';
 
 export interface App {
@@ -58,6 +59,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
   let lastKey = '';
   let transient: UserError | null = null;
   let pending: Intent['kind'] | null = null;
+  let sending: Intent | null = null;
   let live: Live | null = null;
   let meters: EngineStatus | null = null;
   let focusKey: string | null = null;
@@ -87,6 +89,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
   async function send(intent: Intent, after?: (ok: boolean) => void): Promise<void> {
     if (pending !== null) return;
     pending = intent.kind;
+    sending = intent;
     transient = null;
     render();
     let ok = true;
@@ -103,6 +106,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
     render();
     await snapshotLanded(SETTLE_MS);
     pending = null;
+    sending = null;
     render();
   }
 
@@ -135,6 +139,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
       view,
       busy: pending !== null,
       pending,
+      sending,
       shell: api.shell,
       send: (intent, after) => void send(intent, after),
       setView,
@@ -155,6 +160,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
       const titles: Record<Tab, string> = {
         status: text.status.title,
         profile: text.profile.title,
+        upmix: text.upmix.title,
         settings: text.settings.title,
       };
       head = h('header', { class: 'main-head' }, h('h1', null, titles[view.tab]));
@@ -164,7 +170,9 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
           ? status(ctx, engineNow)
           : view.tab === 'profile'
             ? profile(ctx, engineNow)
-            : settings(ctx);
+            : view.tab === 'upmix'
+              ? upmix(ctx)
+              : settings(ctx);
       body = drawn.element;
       live = drawn.live ?? null;
     }

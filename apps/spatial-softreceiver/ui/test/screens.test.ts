@@ -4,9 +4,18 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Api } from '../src/api';
 import { mountApp } from '../src/app';
-import type { EngineStatus, Intent, ProfileKind, Snapshot } from '../src/bindings';
+import type {
+  EndpointUpmixView,
+  EngineStatus,
+  Intent,
+  ProfileKind,
+  Snapshot,
+  SourceFormat,
+  UpmixBypass,
+  UpmixState,
+} from '../src/bindings';
 import { fixture, fixtureNames } from '../src/fixtures';
-import { SPEAKER_LAYOUTS } from '../src/guard';
+import { SPEAKER_LAYOUTS, assertIntent } from '../src/guard';
 import { createMockApi } from '../src/mock';
 import type { Tab } from '../src/screens/common';
 import { MAP_POOL } from '../src/screens/objectmap';
@@ -38,7 +47,7 @@ describe('every fixture draws', () => {
   });
 
   it.each(['ready', 'running', 'faulted'])('%s on every tab', (name) => {
-    for (const tab of ['status', 'profile', 'settings'] as const) {
+    for (const tab of ['status', 'profile', 'upmix', 'settings'] as const) {
       expect(() => draw(name, tab)).not.toThrow();
     }
   });
@@ -108,7 +117,7 @@ describe('what each state says', () => {
     expect(text).toContain('PCM 8채널 48\u00a0kHz float32');
     expect(text).toContain('DD+ 6채널 48\u00a0kHz');
     expect(text).toContain('직접 출력 12채널');
-    expect(text).toContain('이 채널 수에는 직접 배치가 없습니다.');
+    expect(text).toContain('이 채널 수에 맞는 스피커 위치가 정해져 있지 않습니다.');
     expect(text).toContain('12.4');
     expect(text).toContain('18.9');
     expect(text).toContain('-37.5');
@@ -138,7 +147,7 @@ describe('what each state says', () => {
     draw('ready', 'profile');
     expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('스피커사용 중');
     expect(textOf()).toContain(ko.profile.usingSpeakers);
-    expect(textOf()).toContain('객체 지도');
+    expect(textOf()).toContain(ko.profile.mapTitle);
     expect(textOf()).not.toContain('다음 조각');
     expect(buttons()).toEqual(expect.arrayContaining(['헤드폰', '스피커사용 중', '보정 파일 고르기']));
     expect(root.querySelector<HTMLSelectElement>('[data-key="speaker-layout"]')?.disabled).toBe(false);
@@ -153,7 +162,7 @@ describe('what each state says', () => {
     expect(root.querySelector<HTMLInputElement>('#autostart')?.disabled).toBe(true);
     expect(textOf()).toContain('26100');
     expect(textOf()).toContain('적용됨');
-    expect(buttons()).toContain('진단 녹화 시작');
+    expect(buttons()).toContain('진단 기록 시작');
     // No updater outside Tauri: the panel says so and offers no button.
     expect(textOf()).toContain('앱 안에서만 확인합니다.');
     expect(root.querySelector('[data-key="update-apply"]')).toBeNull();
@@ -866,7 +875,7 @@ describe('the profile screen', () => {
     draw('ready', 'profile');
     expect(tones().map((tone) => tone.textContent)).toEqual(['L', 'R']);
     expect(tones().every((tone) => tone.disabled)).toBe(true);
-    expect(root.querySelector('#test-hint')?.textContent).toBe('켠 뒤에 시험음을 낼 수 있습니다.');
+    expect(root.querySelector('#test-hint')?.textContent).toBe('켠 뒤에 시험용 신호를 재생할 수 있습니다.');
     draw('running', 'profile');
     expect(root.querySelector('#test-hint')).toBeNull();
   });
@@ -905,7 +914,7 @@ describe('the object map', () => {
     expect(lanes).toEqual(scene.map((object) => `lane-${object.lane}`));
     // Height picks the outline: the fixture's objects are level or well above.
     expect(shown().map((circle) => circle.classList.contains('is-up'))).toEqual(scene.map((object) => object.z > 0.5));
-    expect(textOf()).toContain(`소리 객체 ${scene.length}개`);
+    expect(textOf()).toContain(`소리 위치 ${scene.length}곳`);
   });
 
   it('puts x to the right and the front at the top', () => {
@@ -949,7 +958,7 @@ describe('the object map', () => {
     expect(at(after[0], 'cy')).toBeGreaterThan(150);
     expect(before.at(-1)?.getAttribute('display')).toBe('none');
     expect(pool()).toHaveLength(MAP_POOL);
-    expect(textOf()).toContain(`소리 객체 ${engine.scene.length}개`);
+    expect(textOf()).toContain(`소리 위치 ${engine.scene.length}곳`);
   });
 
   it('follows a layout the engine changed', () => {
@@ -966,7 +975,7 @@ describe('the object map', () => {
     expect(shown()).toHaveLength(0);
     const names = [...root.querySelectorAll('.map-label')].map((label) => label.textContent);
     expect(names).toEqual(['L', 'R']);
-    expect(textOf()).toContain('켜면 소리 객체가 보입니다.');
+    expect(textOf()).toContain('켜면 소리의 위치가 보입니다.');
     app.updateMeters(runningEngine());
     expect(shown()).toHaveLength(0);
   });
@@ -1083,7 +1092,7 @@ describe('the mock supervisor follows the profile rules', () => {
     await api.dispatch({ kind: 'set_gain', value: -6 });
     expect((await api.snapshot()).profile.gain_db).toBe(-6);
     await expect(api.dispatch({ kind: 'set_gain', value: 12 })).rejects.toMatchObject({
-      message: '게인은 -20 dB에서 +10 dB 사이입니다.',
+      message: '출력 음량 조절 범위는 -20 dB에서 +10 dB까지입니다.',
     });
     expect((await api.snapshot()).profile.gain_db).toBe(-6);
   });
@@ -1092,11 +1101,11 @@ describe('the mock supervisor follows the profile rules', () => {
     const api = createMockApi(fixture('running'));
     await api.dispatch({ kind: 'test_direction', value: 3 });
     await expect(api.dispatch({ kind: 'test_direction', value: 99 })).rejects.toMatchObject({
-      message: '그 방향이 없습니다.',
+      message: '선택한 방향을 찾을 수 없습니다.',
     });
     await api.dispatch({ kind: 'disable' });
     await expect(api.dispatch({ kind: 'test_direction', value: 0 })).rejects.toEqual({
-      message: '켠 뒤에 시험음을 낼 수 있습니다.',
+      message: '켠 뒤에 시험용 신호를 재생할 수 있습니다.',
       next: 'none',
     });
   });
@@ -1118,5 +1127,891 @@ describe('the mock supervisor follows the profile rules', () => {
     await api.dispatch({ kind: 'enable' });
     const { engine, profile } = await api.snapshot();
     expect(engine?.directions).toEqual(profile.directions);
+  });
+});
+
+describe('the upmix screen', () => {
+  const byKey = <T extends HTMLElement = HTMLButtonElement>(key: string) =>
+    root.querySelector<T>(`[data-key="${key}"]`);
+  const radio = (endpoint: number, choice: string) => byKey<HTMLInputElement>(`upmixer-${endpoint}-${choice}`);
+  const cards = () => [...root.querySelectorAll<HTMLElement>('.upmix-card')];
+  const card = (endpoint: number) => root.querySelector<HTMLElement>(`.upmix-card[data-endpoint="${endpoint}"]`);
+  const stateOf = (endpoint: number) => card(endpoint)?.querySelector('.upmix-state');
+  const describedBy = (element: Element | null) => element?.getAttribute('aria-describedby')?.split(' ') ?? [];
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  /** The screen over a bridge that only records what it is asked to send. */
+  function recording(start: Snapshot, shell: Partial<Api['shell']> = {}, tab: Tab = 'upmix') {
+    const sent: Intent[] = [];
+    const inner = createMockApi(start);
+    const api: Api = { ...inner, shell: { ...inner.shell, ...shell }, dispatch: async (intent) => void sent.push(intent) };
+    const app = mountApp(root, api, { tab });
+    app.draw(start);
+    return { app, sent };
+  }
+  /** `name` with the music endpoint's upmixer changed. */
+  function music(name: string, patch: Partial<EndpointUpmixView>): Snapshot {
+    const snapshot = fixture(name);
+    Object.assign(snapshot.upmix.endpoints[1]!, patch);
+    return snapshot;
+  }
+  /** `name` with the PASS endpoint's upmixer changed. */
+  function pass(name: string, patch: Partial<EndpointUpmixView>): Snapshot {
+    const snapshot = fixture(name);
+    Object.assign(snapshot.upmix.endpoints[2]!, patch);
+    return snapshot;
+  }
+
+  it('sits between the profile and the settings in the navigation', () => {
+    draw('ready');
+    const items = [...root.querySelectorAll<HTMLButtonElement>('.nav-item')].map((item) => item.dataset.key);
+    expect(items).toEqual(['nav-status', 'nav-profile', 'nav-upmix', 'nav-settings']);
+    root.querySelector<HTMLButtonElement>('[data-key="nav-upmix"]')?.click();
+    expect(root.querySelector('h1')?.textContent).toBe('업믹스');
+    expect(root.querySelector('[aria-current="page"]')?.textContent).toBe('업믹스');
+    // The intro, then its (i) with the rule of what is upmixed.
+    expect(root.querySelector('.upmix-intro')?.textContent).toBe(`${ko.upmix.intro}\u00a0${ko.upmix.infoTip}`);
+  });
+
+  it('draws one card per endpoint, main, music and PASS, in order, by its name and purpose', () => {
+    draw('ready', 'upmix');
+    expect(cards().map((element) => element.dataset.endpoint)).toEqual(['0', '1', '2']);
+    expect(cards().map((element) => element.querySelector('h2')?.textContent)).toEqual([
+      '공간 소프트리시버',
+      '공간 소프트리시버 음악',
+      '공간 소프트리시버 PASS',
+    ]);
+    // The purposes the status screen gives the same endpoints.
+    expect(cards().map((element) => element.querySelector('.upmix-card-head p')?.textContent)).toEqual(
+      ko.endpoints.map((endpoint) => endpoint.purpose),
+    );
+    for (const element of cards()) {
+      const title = element.querySelector('h2');
+      expect(element.getAttribute('aria-labelledby')).toBe(title?.id);
+      const group = element.querySelector('[role="radiogroup"]');
+      expect(group?.getAttribute('aria-labelledby')?.split(' ')).toContain(title?.id);
+      expect([...(group?.querySelectorAll('input[type="radio"]') ?? [])].map((input) => (input as HTMLInputElement).value)).toEqual([
+        'first_party',
+        'plugin',
+        'off',
+      ]);
+    }
+  });
+
+  it('shows the first-party upmixer locked, tagged not built, and says why', () => {
+    draw('ready', 'upmix');
+    for (const endpoint of [0, 1, 2]) {
+      const first = radio(endpoint, 'first_party');
+      expect(first?.disabled).toBe(true);
+      const label = first?.closest('label');
+      expect(label?.querySelector('.tag')?.textContent).toBe('미구현');
+      // Its name is the head of the row, the tag included; the line under it describes it.
+      expect(root.querySelector(`#${first?.getAttribute('aria-labelledby')}`)?.textContent).toBe('앱 자체 업믹서미구현');
+      const hint = root.querySelector(`#${describedBy(first)[0]}`);
+      expect(hint?.textContent).toContain(ko.upmix.firstPartyHint);
+      expect(radio(endpoint, 'plugin')?.disabled).toBe(false);
+      expect(radio(endpoint, 'off')?.disabled).toBe(false);
+    }
+    // Once it is built, it is an upmixer like the others.
+    const built = fixture('ready');
+    built.upmix.first_party_available = true;
+    recording(built);
+    expect(radio(0, 'first_party')?.disabled).toBe(false);
+    expect(root.querySelector('.upmix-option .tag')).toBeNull();
+    expect(root.querySelector(`#${describedBy(radio(0, 'first_party'))[0]}`)?.textContent).toBe(ko.upmix.firstPartyBody);
+  });
+
+  it('checks what the choice resolves to and marks the default when nothing was chosen', () => {
+    draw('ready', 'upmix');
+    for (const endpoint of [0, 1, 2]) {
+      expect(radio(endpoint, 'off')?.checked).toBe(true);
+      expect(radio(endpoint, 'off')?.closest('label')?.querySelector('.upmix-default')?.textContent).toBe('기본값');
+    }
+    expect(root.querySelectorAll('.upmix-default')).toHaveLength(3);
+
+    draw('ready-upmix', 'upmix');
+    expect(radio(0, 'off')?.checked).toBe(true);
+    expect(radio(1, 'plugin')?.checked).toBe(true);
+    expect(radio(1, 'plugin')?.closest('label')?.classList.contains('is-checked')).toBe(true);
+    // Both were chosen: neither follows the default.
+    expect(root.querySelector('.upmix-default')).toBeNull();
+  });
+
+  it('sends set_upmixer with the endpoint and the upmixer of the radio chosen', () => {
+    const choose = (start: Snapshot, endpoint: number, choice: string) => {
+      const { sent } = recording(start);
+      radio(endpoint, choice)?.click();
+      return sent;
+    };
+    expect(choose(fixture('ready'), 1, 'plugin')).toEqual([{ kind: 'set_upmixer', value: { endpoint: 1, choice: 'plugin' } }]);
+    expect(choose(fixture('ready'), 0, 'plugin')).toEqual([{ kind: 'set_upmixer', value: { endpoint: 0, choice: 'plugin' } }]);
+    // PASS chooses as the others do: bitstream stereo is upmixed when it has an upmixer.
+    expect(choose(fixture('ready'), 2, 'plugin')).toEqual([{ kind: 'set_upmixer', value: { endpoint: 2, choice: 'plugin' } }]);
+    expect(choose(fixture('running-upmix-pass'), 2, 'off')).toEqual([{ kind: 'set_upmixer', value: { endpoint: 2, choice: 'off' } }]);
+    expect(choose(fixture('running-upmix-pass'), 2, 'first_party')).toEqual([]);
+    expect(choose(fixture('ready-upmix'), 1, 'off')).toEqual([{ kind: 'set_upmixer', value: { endpoint: 1, choice: 'off' } }]);
+    // The option already checked sends nothing; the locked one cannot be chosen.
+    expect(choose(fixture('ready-upmix'), 1, 'plugin')).toEqual([]);
+    expect(choose(fixture('ready'), 0, 'first_party')).toEqual([]);
+  });
+
+  it('shows the plugin block only for a VST upmixer, with the plugin as Rust names it', () => {
+    draw('ready', 'upmix');
+    expect(root.querySelector('.upmix-plugin')).toBeNull();
+    draw('ready-upmix', 'upmix');
+    expect(card(0)?.querySelector('.upmix-plugin')).toBeNull();
+    const block = card(1)?.querySelector('.upmix-plugin');
+    const plugin = fixture('ready-upmix').upmix.endpoints[1]?.plugin;
+    if (plugin === null || plugin === undefined) throw new Error('ready-upmix has a plugin on the music endpoint');
+    const rows = [...(block?.querySelectorAll('.fact') ?? [])].map((row) => [
+      row.querySelector('dt')?.textContent,
+      row.querySelector('dd')?.textContent,
+    ]);
+    expect(rows).toEqual([
+      ['이름', plugin.name],
+      ['제작사', plugin.vendor],
+      ['형식', 'VST 3'],
+      ['입력', 'L R'],
+      ['경로', plugin.path],
+    ]);
+    expect(block?.querySelector('dd .path')?.textContent).toBe(plugin.path);
+
+    recording(music('ready-upmix', { plugin: { ...plugin, format: 'vst2', path: 'C:\\VST\\Upmixer.dll' } }));
+    expect(card(1)?.textContent).toContain('VST 2');
+  });
+
+  it('asks for a plugin when the VST upmixer has none, and offers no editor', () => {
+    recording(music('ready', { choice: 'plugin', effective: 'plugin' }));
+    const block = card(1)?.querySelector('.upmix-plugin');
+    expect(block?.querySelector('.upmix-no-plugin')?.textContent).toBe('고른 플러그인이 없습니다.');
+    expect(block?.textContent).toContain('먼저 업믹스 플러그인을 고르십시오.');
+    expect(block?.querySelector('dl')).toBeNull();
+    expect(byKey('plugin-editor-1')).toBeNull();
+    for (const key of ['plugin-folder-1', 'plugin-file-1']) {
+      expect(byKey(key)?.disabled, key).toBe(false);
+      expect(describedBy(byKey(key)), key).toContain('plugin-1-needed');
+    }
+    expect(stateOf(1)?.textContent).toBe('쓰지 않음');
+  });
+
+  it.each([
+    ['plugin-folder-1', 'C:\\Program Files\\Common Files\\VST3\\Wide.vst3', ['VST 3 묶음 폴더']],
+    [
+      'plugin-file-1',
+      'C:\\VSTPlugins\\Wide.dll',
+      ['VST 3 또는 VST 2 플러그인 파일', { name: 'VST 플러그인', extensions: ['vst3', 'dll'] }],
+    ],
+  ] as const)('%s sends choose_plugin with the path picked', async (key, path, dialog) => {
+    const picked: unknown[][] = [];
+    const pick = async (...args: unknown[]) => {
+      picked.push(args);
+      return path;
+    };
+    const { sent } = recording(fixture('ready-upmix'), { pickFolder: pick, pickFile: pick });
+    expect(byKey('plugin-folder-1')?.textContent).toBe('VST 3 묶음 폴더 고르기');
+    expect(byKey('plugin-file-1')?.textContent).toBe('플러그인 파일 고르기');
+    byKey(key)?.click();
+    await settle();
+    expect(picked).toEqual([dialog]);
+    expect(sent).toEqual([{ kind: 'choose_plugin', value: { endpoint: 1, path } }]);
+  });
+
+  it('a cancelled picker sends nothing', async () => {
+    const { sent } = recording(fixture('ready-upmix'), { pickFolder: async () => null, pickFile: async () => null });
+    byKey('plugin-folder-1')?.click();
+    byKey('plugin-file-1')?.click();
+    await settle();
+    expect(sent).toEqual([]);
+  });
+
+  it.each<[string, UpmixState['kind'], boolean]>([
+    ['ready-upmix', 'stopped', false],
+    ['running-upmix', 'running', true],
+    ['running-upmix-fallback', 'fallback', true],
+    ['ready-upmix-failed', 'failed', false],
+  ])('%s: the editor opens only while the host is up (%s)', (name, kind, open) => {
+    const { sent } = recording(fixture(name));
+    expect(fixture(name).upmix.endpoints[1]?.state.kind).toBe(kind);
+    const editor = byKey('plugin-editor-1');
+    expect(editor?.textContent).toBe('편집기 열기');
+    expect(editor?.disabled).toBe(!open);
+    const hint = root.querySelector('#plugin-1-editor-hint');
+    if (open) {
+      expect(hint).toBeNull();
+      editor?.click();
+      expect(sent).toEqual([{ kind: 'open_plugin_editor', value: 1 }]);
+    } else {
+      expect(describedBy(editor)).toContain('plugin-1-editor-hint');
+      expect(hint?.textContent).toBe(ko.upmix.editorHint);
+    }
+  });
+
+  it('keeps the editor closed while the host starts', () => {
+    recording(music('running-upmix', { state: { kind: 'starting' }, latency_ms: null }));
+    expect(byKey('plugin-editor-1')?.disabled).toBe(true);
+  });
+
+  describe('the state line', () => {
+    it('stopped: off, or starting when turned on, or not applied to the kind in use', () => {
+      draw('ready', 'upmix');
+      expect([stateOf(0)?.textContent, stateOf(1)?.textContent]).toEqual(['쓰지 않음', '쓰지 않음']);
+      expect(stateOf(0)?.classList.contains('tone-off')).toBe(true);
+
+      draw('ready-upmix', 'upmix');
+      expect(stateOf(0)?.textContent).toBe('쓰지 않음');
+      expect(stateOf(1)?.textContent).toBe('켜면 시작합니다');
+
+      // Speakers are in use and do not apply upmixing: it still starts when
+      // turned on, and the sound will go around it, as the line says.
+      draw('ready-speakers-upmix-off', 'upmix');
+      expect(stateOf(1)?.querySelector('.upmix-state-word')?.textContent).toBe('켜면 시작합니다');
+      expect(stateOf(1)?.querySelector('.upmix-state-reason')?.textContent).toBe('지금 쓰는 출력에는 적용하지 않음');
+      expect(stateOf(1)?.classList.contains('tone-off')).toBe(true);
+      expect(stateOf(1)?.classList.contains('is-alert')).toBe(false);
+
+      // Running, but stopped: whatever the switch says, it is just off.
+      recording(music('running-upmix', { state: { kind: 'stopped' }, latency_ms: null }));
+      expect(stateOf(1)?.textContent).toBe('쓰지 않음');
+      const off = fixture('running-upmix');
+      off.upmix.headphones = false;
+      Object.assign(off.upmix.endpoints[1]!, { state: { kind: 'stopped' }, latency_ms: null });
+      recording(off);
+      expect(stateOf(1)?.textContent).toBe('쓰지 않음');
+    });
+
+    it('starting turns the spinner', () => {
+      recording(music('running-upmix', { state: { kind: 'starting' }, latency_ms: null }));
+      const line = stateOf(1);
+      expect(line?.textContent).toBe('시작하는 중');
+      expect(line?.querySelector('.spinner')?.getAttribute('aria-hidden')).toBe('true');
+      expect(line?.querySelector('.lamp')).toBeNull();
+    });
+
+    it('running names the latency to one decimal and the outputs', () => {
+      draw('running-upmix', 'upmix');
+      const line = stateOf(1);
+      expect(line?.classList.contains('tone-on')).toBe(true);
+      expect(line?.querySelector('.upmix-state-word')?.textContent).toBe('실행 중');
+      expect([...(line?.querySelectorAll('.upmix-state-detail') ?? [])].map((detail) => detail.textContent)).toEqual([
+        '지연 23.3\u00a0ms',
+        '출력 L R C LFE Ls Rs',
+      ]);
+      recording(music('running-upmix', { latency_ms: 21 }));
+      expect(stateOf(1)?.textContent).toContain('지연 21.0\u00a0ms');
+    });
+
+    it('fallback says the original stereo plays, in the warning tone', () => {
+      draw('running-upmix-fallback', 'upmix');
+      const line = stateOf(1);
+      expect(line?.textContent).toBe('플러그인이 응답하지 않아 원래 스테레오를 재생합니다.');
+      expect(line?.classList.contains('tone-warning')).toBe(true);
+      expect(line?.classList.contains('is-alert')).toBe(true);
+    });
+
+    it('failed shows the supervisor sentence as it is, in the error tone', () => {
+      draw('ready-upmix-failed', 'upmix');
+      const failed = fixture('ready-upmix-failed').upmix.endpoints[1]?.state;
+      if (failed?.kind !== 'failed') throw new Error('ready-upmix-failed has a failed music endpoint');
+      expect(stateOf(1)?.textContent).toBe(failed.value);
+      expect(stateOf(1)?.classList.contains('tone-error')).toBe(true);
+      const english = fixture('ready-upmix-failed', 'en');
+      recording(english);
+      const sentence = english.upmix.endpoints[1]?.state;
+      expect(sentence?.kind === 'failed' && stateOf(1)?.textContent === sentence.value).toBe(true);
+    });
+  });
+
+  it('locks every upmix control while an intent is in flight, and shows the choice it sends', () => {
+    const start = fixture('ready-upmix');
+    const api = createMockApi(start, { hold: true });
+    mountApp(root, api, { tab: 'upmix' }).draw(start);
+    radio(1, 'off')?.click();
+    for (const choice of ['first_party', 'plugin', 'off']) {
+      for (const endpoint of [0, 1]) expect(radio(endpoint, choice)?.disabled, `${endpoint} ${choice}`).toBe(true);
+    }
+    expect(radio(1, 'off')?.checked).toBe(true);
+    const group = card(1)?.querySelector('[role="radiogroup"]');
+    expect(group?.getAttribute('aria-busy')).toBe('true');
+    expect(card(0)?.querySelector('[role="radiogroup"]')?.hasAttribute('aria-busy')).toBe(false);
+    expect(root.querySelector('#upmixer-1-applying')?.textContent).toBe(ko.profile.applying);
+    expect(describedBy(radio(1, 'plugin'))).toContain('upmixer-1-applying');
+    // The plugin block stays until the snapshot says otherwise; its buttons wait too.
+    for (const key of ['plugin-folder-1', 'plugin-file-1', 'plugin-editor-1']) expect(byKey(key)?.disabled, key).toBe(true);
+  });
+
+  it('says the plugin is being checked while choose_plugin is in flight', async () => {
+    const start = fixture('ready-upmix');
+    const api = createMockApi(start, { hold: true });
+    mountApp(root, api, { tab: 'upmix' }).draw(start);
+    byKey('plugin-file-1')?.click();
+    await vi.waitFor(() => expect(root.querySelector('#plugin-1-scanning')?.textContent).toBe(ko.upmix.scanning));
+    expect(byKey('plugin-file-1')?.disabled).toBe(true);
+    expect(describedBy(byKey('plugin-folder-1'))).toContain('plugin-1-scanning');
+  });
+
+  it('says the editor is opening on its own button only', () => {
+    const start = fixture('running-upmix');
+    Object.assign(start.upmix.endpoints[0]!, structuredClone(start.upmix.endpoints[1]!), { endpoint: 0 });
+    const api = createMockApi(start, { hold: true });
+    mountApp(root, api, { tab: 'upmix' }).draw(start);
+    byKey('plugin-editor-1')?.click();
+    expect(byKey('plugin-editor-1')?.textContent).toBe('여는 중');
+    expect(byKey('plugin-editor-1')?.getAttribute('aria-busy')).toBe('true');
+    expect(byKey('plugin-editor-0')?.textContent).toBe('편집기 열기');
+    expect(byKey('plugin-editor-0')?.hasAttribute('aria-busy')).toBe(false);
+    expect(byKey('plugin-editor-0')?.disabled).toBe(true);
+  });
+
+  it('has no choice of how stereo arrives, on any card', () => {
+    for (const name of ['ready-upmix', 'running-upmix', 'running-upmix-pass', 'running-upmix-native-surround']) {
+      draw(name, 'upmix');
+      expect(root.querySelectorAll('input[type="checkbox"]'), name).toHaveLength(0);
+      expect(root.querySelector('[role="group"]'), name).toBeNull();
+      expect(root.querySelector('[data-intent="set_upmix_sources"]'), name).toBeNull();
+      expect(textOf(), name).not.toContain('비트스트림 스테레오');
+    }
+  });
+
+  describe('the delay under the choices', () => {
+    const delayOf = (endpoint: number) => root.querySelector(`#upmixer-${endpoint}-delay`);
+
+    it('says what upmixing costs the input while an upmixer is in effect and its delay is known', () => {
+      draw('running-upmix', 'upmix');
+      expect(delayOf(1)?.textContent).toBe('업믹스하면 이 입력의 소리가 약 23.3\u00a0ms 늦어집니다.');
+      expect(delayOf(1)?.closest('.upmix-section')?.querySelector('[role="radiogroup"]')).not.toBeNull();
+      expect(card(1)?.querySelector('[role="radiogroup"]')?.getAttribute('aria-describedby')).toBe('upmixer-1-delay');
+      expect([delayOf(0), delayOf(2)]).toEqual([null, null]);
+      expect(root.querySelectorAll('.upmix-delay')).toHaveLength(1);
+
+      draw('running-upmix-pass', 'upmix');
+      expect(delayOf(2)?.textContent).toContain('약 23.3\u00a0ms');
+      recording(pass('running-upmix-pass', { latency_ms: 21 }));
+      expect(delayOf(2)?.textContent).toContain('약 21.0\u00a0ms');
+
+      // Gone around for now, it still costs that much whenever mono or stereo comes.
+      draw('running-upmix-native-surround', 'upmix');
+      expect(delayOf(2)?.textContent).toContain('약 23.3\u00a0ms');
+
+      // A first-party upmixer says it the same way once it is built.
+      const built = music('running-upmix', { choice: 'first_party', effective: 'first_party', plugin: null });
+      built.upmix.first_party_available = true;
+      recording(built);
+      expect(delayOf(1)?.textContent).toContain('약 23.3\u00a0ms');
+    });
+
+    it.each<[string, Snapshot]>([
+      ['no upmixer', fixture('ready')],
+      ['an upmixer that has not started', fixture('ready-upmix')],
+      ['an upmixer starting', music('running-upmix', { state: { kind: 'starting' }, latency_ms: null })],
+      ['upmixing off with a delay left over', music('running-upmix', { choice: 'off', effective: 'off' })],
+    ])('says nothing with %s', (_what, start) => {
+      recording(start);
+      expect(root.querySelector('.upmix-delay')).toBeNull();
+      for (const element of root.querySelectorAll('[role="radiogroup"]')) expect(element.hasAttribute('aria-describedby')).toBe(false);
+    });
+  });
+
+  describe('the (i) beside the intro', () => {
+    const info = () => byKey('upmix-info');
+    const tip = () => root.querySelector<HTMLElement>('#upmix-info-tip');
+    const isOpen = () => info()?.closest('.info-tip-wrap')?.classList.contains('is-open') ?? false;
+    const key = (target: EventTarget, name: string) =>
+      target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true }));
+
+    afterEach(() => {
+      // Leave no tip open, or closed by Escape, for the next test.
+      info()?.blur();
+      info()?.closest('.info-tip-wrap')?.dispatchEvent(new MouseEvent('mouseleave'));
+    });
+
+    it('is a named button described by the one line that says what is upmixed', () => {
+      draw('ready', 'upmix');
+      const button = info();
+      expect(button?.tagName).toBe('BUTTON');
+      expect(button?.getAttribute('type')).toBe('button');
+      expect(button?.classList.contains('info-tip')).toBe(true);
+      expect(button?.getAttribute('aria-label')).toBe('업믹스 대상');
+      expect(button?.getAttribute('aria-describedby')).toBe('upmix-info-tip');
+      expect(button?.textContent).toBe('');
+      expect(button?.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+      // In the DOM while closed, so a screen reader always has it.
+      expect(tip()?.getAttribute('role')).toBe('tooltip');
+      expect(tip()?.textContent).toBe('업믹스는 모노와 스테레오에만 적용합니다.');
+      expect(isOpen()).toBe(false);
+      expect(root.querySelector('.upmix-intro')?.contains(button ?? null)).toBe(true);
+      // The rule is said there once: not in the intro, and nowhere about native surround.
+      expect(ko.upmix.intro).not.toContain('모노');
+      expect(textOf()).not.toContain('네이티브 서라운드');
+    });
+
+    it('opens on focus, and Escape closes it until the focus comes back', () => {
+      draw('running-upmix-pass', 'upmix');
+      info()?.focus();
+      expect(document.activeElement).toBe(info());
+      expect(isOpen()).toBe(true);
+      key(info()!, 'Enter');
+      expect(isOpen()).toBe(true);
+      key(info()!, 'Escape');
+      expect(isOpen()).toBe(false);
+      expect(tip()?.textContent).toBe(ko.upmix.infoTip);
+      info()?.blur();
+      info()?.focus();
+      expect(isOpen()).toBe(true);
+      info()?.blur();
+      expect(isOpen()).toBe(false);
+    });
+
+    it('opens on hover, stays while the pointer is on it, and Escape closes it there too', () => {
+      draw('ready', 'upmix');
+      const wrap = info()?.closest('.info-tip-wrap');
+      wrap?.dispatchEvent(new MouseEvent('mouseenter'));
+      expect(isOpen()).toBe(true);
+      key(document, 'Escape');
+      expect(isOpen()).toBe(false);
+      wrap?.dispatchEvent(new MouseEvent('mouseleave'));
+      wrap?.dispatchEvent(new MouseEvent('mouseenter'));
+      expect(isOpen()).toBe(true);
+      // Leaving with the focus still on it keeps it open.
+      info()?.focus();
+      wrap?.dispatchEvent(new MouseEvent('mouseleave'));
+      expect(isOpen()).toBe(true);
+    });
+
+    it('stays open, or closed, across a redraw that gives the focus back', () => {
+      const start = fixture('running-upmix-pass');
+      const app = mountApp(root, createMockApi(start), { tab: 'upmix' });
+      app.draw(start);
+      info()?.focus();
+      app.draw(fixture('running-upmix-pass'));
+      expect(document.activeElement).toBe(info());
+      expect(isOpen()).toBe(true);
+      key(info()!, 'Escape');
+      app.draw(fixture('running-upmix-pass'));
+      expect(document.activeElement).toBe(info());
+      expect(isOpen()).toBe(false);
+    });
+  });
+
+  it('names the plugin\'s input speakers, and leaves the row out when it reports none', () => {
+    const rows = () =>
+      [...(card(1)?.querySelectorAll('.upmix-plugin .fact') ?? [])].map((row) => [
+        row.querySelector('dt')?.textContent,
+        row.querySelector('dd')?.textContent,
+      ]);
+    draw('running-upmix', 'upmix');
+    expect(rows()).toContainEqual(['입력', 'L R']);
+    recording(music('running-upmix', { inputs: ['L', 'R', 'C'] }));
+    expect(rows()).toContainEqual(['입력', 'L R C']);
+    recording(music('running-upmix', { inputs: [] }));
+    expect(rows().map(([label]) => label)).toEqual(['이름', '제작사', '형식', '경로']);
+    // The outputs stay on the state line.
+    expect(stateOf(1)?.textContent).toContain('출력 L R C LFE Ls Rs');
+  });
+
+  describe('while the sound goes around a running upmixer', () => {
+    const REASONS: [UpmixBypass, string][] = [
+      ['native_surround', '모노·스테레오가 아니라 업믹스하지 않음'],
+      ['kind_off', '지금 쓰는 출력에는 적용하지 않음'],
+      ['rate_change', '새 표본율에 맞추는 중'],
+    ];
+
+    it.each(REASONS)('%s: the state line says it runs and why, quietly, without the delay', (bypass, reason) => {
+      recording(music('running-upmix', { bypass }));
+      const line = stateOf(1);
+      expect(line?.querySelector('.upmix-state-word')?.textContent).toBe('실행 중');
+      expect(line?.querySelector('.upmix-state-reason')?.textContent).toBe(reason);
+      expect([...(line?.querySelectorAll('.upmix-state-detail') ?? [])].map((detail) => detail.textContent)).toEqual([
+        reason,
+        '출력 L R C LFE Ls Rs',
+      ]);
+      expect(line?.classList.contains('tone-on')).toBe(true);
+      expect(line?.classList.contains('is-alert')).toBe(false);
+      expect(line?.textContent).not.toContain('지연');
+    });
+
+    it('running-upmix-native-surround says why on the PASS card, and the 2.0 stream of running-upmix-pass goes through', () => {
+      draw('running-upmix-native-surround', 'upmix');
+      expect(stateOf(2)?.querySelector('.upmix-state-reason')?.textContent).toBe('모노·스테레오가 아니라 업믹스하지 않음');
+      expect(stateOf(2)?.textContent).not.toContain('지연');
+      draw('running-upmix-pass', 'upmix');
+      expect(stateOf(2)?.querySelector('.upmix-state-reason')).toBeNull();
+      expect([...(stateOf(2)?.querySelectorAll('.upmix-state-detail') ?? [])].map((detail) => detail.textContent)).toEqual([
+        '지연 23.3\u00a0ms',
+        '출력 L R C LFE Ls Rs',
+      ]);
+      expect([stateOf(0)?.textContent, stateOf(1)?.textContent]).toEqual(['쓰지 않음', '쓰지 않음']);
+    });
+
+    it.each(REASONS)('%s: the status card says it in words, the lamp unlit', (bypass, reason) => {
+      const start = music('running-upmix', { bypass });
+      mountApp(root, createMockApi(start)).draw(start);
+      const line = root.querySelectorAll('.endpoint-card')[1]?.querySelector('.card-upmix');
+      expect(line?.querySelector('.card-upmix-reason')?.textContent).toBe(reason);
+      expect(line?.textContent).toBe(`업믹스: Example Upmixer${reason}`);
+      expect(line?.classList.contains('tone-off')).toBe(true);
+      expect(line?.classList.contains('tone-warning')).toBe(false);
+    });
+
+    it('the status card of a fallback stays a warning without a reason', () => {
+      draw('running-upmix-fallback');
+      const line = root.querySelectorAll('.endpoint-card')[1]?.querySelector('.card-upmix');
+      expect(line?.querySelector('.card-upmix-reason')).toBeNull();
+      expect(line?.classList.contains('tone-warning')).toBe(true);
+    });
+  });
+
+  it('the status cards name the running upmixer, warning when the original stereo plays', () => {
+    draw('running-upmix');
+    const line = () => root.querySelectorAll('.endpoint-card')[1]?.querySelector('.card-upmix');
+    expect(line()?.textContent).toBe('업믹스: Example Upmixer');
+    expect(line()?.classList.contains('tone-on')).toBe(true);
+    expect(root.querySelectorAll('.card-upmix')).toHaveLength(1);
+    draw('running-upmix-fallback');
+    expect(line()?.textContent).toBe('업믹스: Example Upmixer, 원래 스테레오를 재생');
+    expect(line()?.classList.contains('tone-warning')).toBe(true);
+    for (const name of ['running', 'ready-upmix', 'ready-upmix-failed']) {
+      draw(name);
+      expect(root.querySelector('.card-upmix'), name).toBeNull();
+    }
+  });
+});
+
+describe('the profile upmix switch', () => {
+  const sw = (kind: ProfileKind) => root.querySelector<HTMLButtonElement>(`[data-key="upmix-apply-${kind}"]`);
+  const tab = (kind: ProfileKind) => root.querySelector<HTMLButtonElement>(`[data-key="profile-tab-${kind}"]`);
+  function recording(start: Snapshot) {
+    const sent: Intent[] = [];
+    const inner = createMockApi(start);
+    const api: Api = { ...inner, dispatch: async (intent) => void sent.push(intent) };
+    mountApp(root, api, { tab: 'profile' }).draw(start);
+    return sent;
+  }
+
+  it('is not there while every upmixer is off', () => {
+    for (const name of ['ready', 'running', 'ready-headphones', 'ready-speakers']) {
+      draw(name, 'profile');
+      for (const kind of ['headphones', 'speakers'] as const) {
+        tab(kind)?.click();
+        expect(sw(kind), `${name} ${kind}`).toBeNull();
+      }
+    }
+  });
+
+  it('is a switch on each tab once an upmixer is on, showing that kind\'s value', () => {
+    draw('ready-speakers-upmix-off', 'profile');
+    expect(sw('speakers')?.getAttribute('role')).toBe('switch');
+    expect(sw('speakers')?.tagName).toBe('BUTTON');
+    expect(sw('speakers')?.getAttribute('aria-checked')).toBe('false');
+    expect(sw('speakers')?.textContent).toBe('업믹스 적용');
+    const hint = root.querySelector(`#${sw('speakers')?.getAttribute('aria-describedby')}`);
+    expect(hint?.textContent).toBe(ko.profile.upmixApplyHint);
+    // Off: the sound as it came, without delay, the plugin still loaded.
+    for (const phrase of ['끄면', '지연 없이', '그대로', '플러그인은 종료하지 않고 준비된 상태로']) expect(hint?.textContent).toContain(phrase);
+    expect(sw('headphones')).toBeNull();
+    tab('headphones')?.click();
+    expect(sw('headphones')?.getAttribute('aria-checked')).toBe('true');
+    expect(sw('speakers')).toBeNull();
+  });
+
+  it('sends set_upmix_apply with its kind and the other value', () => {
+    let sent = recording(fixture('ready-speakers-upmix-off'));
+    sw('speakers')?.click();
+    expect(sent).toEqual([{ kind: 'set_upmix_apply', value: { kind: 'speakers', on: true } }]);
+    sent = recording(fixture('ready-upmix'));
+    tab('headphones')?.click();
+    sw('headphones')?.click();
+    expect(sent).toEqual([{ kind: 'set_upmix_apply', value: { kind: 'headphones', on: false } }]);
+  });
+
+  it('stands where it goes while the change is in flight, locked', () => {
+    const start = fixture('ready-upmix');
+    mountApp(root, createMockApi(start, { hold: true }), { tab: 'profile' }).draw(start);
+    sw('speakers')?.click();
+    expect(sw('speakers')?.getAttribute('aria-checked')).toBe('false');
+    expect(sw('speakers')?.getAttribute('aria-busy')).toBe('true');
+    expect(sw('speakers')?.disabled).toBe(true);
+  });
+
+  it('is not locked by profile.toml', () => {
+    const start = fixture('ready-profile-file');
+    start.upmix = structuredClone(fixture('ready-upmix').upmix);
+    const sent = recording(start);
+    const kind = start.profile.kind;
+    expect(root.querySelector('.file-note')).not.toBeNull();
+    expect(sw(kind)?.disabled).toBe(false);
+    expect(sw(kind)?.getAttribute('aria-describedby')).not.toContain('profile-file-hint');
+    sw(kind)?.click();
+    expect(sent).toEqual([{ kind: 'set_upmix_apply', value: { kind, on: false } }]);
+  });
+});
+
+describe('the mock supervisor follows the upmix rules (ADR 0035)', () => {
+  const endpointOf = async (api: Api, endpoint: number) => {
+    const view = (await api.snapshot()).upmix.endpoints[endpoint];
+    if (view === undefined) throw new Error(`no endpoint ${endpoint}`);
+    return view;
+  };
+  const music = (api: Api) => endpointOf(api, 1);
+  const pass = (api: Api) => endpointOf(api, 2);
+
+  it('lets main, music and PASS choose, and refuses endpoint 3 and the first-party upmixer', async () => {
+    const start = fixture('ready');
+    const api = createMockApi(start);
+    expect(start.upmix.endpoints.map((endpoint) => endpoint.endpoint)).toEqual([0, 1, 2]);
+    for (const endpoint of [3, 4]) {
+      await expect(api.dispatch({ kind: 'set_upmixer', value: { endpoint, choice: 'plugin' } })).rejects.toEqual({
+        message: '이 입력은 업믹스하지 않습니다.',
+        next: 'none',
+      });
+    }
+    await expect(api.dispatch({ kind: 'choose_plugin', value: { endpoint: 3, path: 'C:\\a.vst3' } })).rejects.toMatchObject({
+      message: '이 입력은 업믹스하지 않습니다.',
+    });
+    await expect(api.dispatch({ kind: 'set_upmixer', value: { endpoint: 0, choice: 'first_party' } })).rejects.toEqual({
+      message: '앱 자체 업믹서는 아직 제공되지 않습니다.',
+      next: 'none',
+    });
+    expect((await api.snapshot()).upmix).toEqual(start.upmix);
+    expect((await api.snapshot()).error).toBeNull();
+
+    await api.dispatch({ kind: 'set_upmixer', value: { endpoint: 1, choice: 'plugin' } });
+    expect(await music(api)).toMatchObject({ choice: 'plugin', effective: 'plugin', plugin: null, state: { kind: 'stopped' } });
+    await api.dispatch({ kind: 'set_upmixer', value: { endpoint: 1, choice: 'off' } });
+    expect(await music(api)).toMatchObject({ choice: 'off', effective: 'off' });
+    expect((await api.snapshot()).upmix.endpoints[0]).toEqual(start.upmix.endpoints[0]);
+
+    // PASS: its own upmixer and plugin, the others untouched.
+    await api.dispatch({ kind: 'set_upmixer', value: { endpoint: 2, choice: 'plugin' } });
+    await api.dispatch({ kind: 'choose_plugin', value: { endpoint: 2, path: 'C:\\VST3\\Wide.vst3' } });
+    expect(await pass(api)).toMatchObject({ choice: 'plugin', effective: 'plugin', plugin: { name: 'Wide' } });
+    const { upmix, error } = await api.snapshot();
+    expect(upmix.endpoints.map((endpoint) => endpoint.endpoint)).toEqual([0, 1, 2]);
+    expect(upmix.endpoints[1]).toMatchObject({ choice: 'off', plugin: null });
+    expect(error).toBeNull();
+  });
+
+  it('starts the PASS upmixer with the engine and opens its editor while it runs', async () => {
+    const api = createMockApi(fixture('ready'), { upmixStartMs: 5 });
+    await api.dispatch({ kind: 'set_upmixer', value: { endpoint: 2, choice: 'plugin' } });
+    await api.dispatch({ kind: 'choose_plugin', value: { endpoint: 2, path: 'C:\\VST3\\Wide.vst3' } });
+    await api.dispatch({ kind: 'enable' });
+    expect((await pass(api)).state).toEqual({ kind: 'starting' });
+    await vi.waitFor(async () => expect((await pass(api)).state).toEqual({ kind: 'running' }));
+    expect((await pass(api)).latency_ms).toBe(23.3);
+    await api.dispatch({ kind: 'open_plugin_editor', value: 2 });
+    await expect(api.dispatch({ kind: 'open_plugin_editor', value: 1 })).rejects.toMatchObject({
+      message: '지금은 할 수 없는 동작입니다.',
+    });
+  });
+
+  it('scans a .vst3 or .dll as the test plugin and refuses anything else', async () => {
+    const api = createMockApi(fixture('ready'));
+    await expect(api.dispatch({ kind: 'choose_plugin', value: { endpoint: 1, path: 'C:\\VST\\readme.txt' } })).rejects.toEqual({
+      message: '업믹스 플러그인을 읽지 못했습니다: readme.txt',
+      next: 'none',
+    });
+    expect((await api.snapshot()).error?.message).toBe('업믹스 플러그인을 읽지 못했습니다: readme.txt');
+    expect((await music(api)).plugin).toBeNull();
+
+    const bundle = 'C:\\Program Files\\Common Files\\VST3\\Wide Stage.vst3\\';
+    await api.dispatch({ kind: 'choose_plugin', value: { endpoint: 1, path: bundle } });
+    expect(await music(api)).toMatchObject({
+      plugin: { path: bundle, format: 'vst3', name: 'Wide Stage', vendor: 'Example Audio' },
+      inputs: ['L', 'R'],
+      outputs: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'],
+      state: { kind: 'stopped' },
+      latency_ms: null,
+    });
+    expect((await api.snapshot()).error).toBeNull();
+    await api.dispatch({ kind: 'choose_plugin', value: { endpoint: 1, path: 'C:\\VSTPlugins\\Old Wide.DLL' } });
+    expect((await music(api)).plugin).toMatchObject({ format: 'vst2', name: 'Old Wide' });
+    // Choosing a plugin does not choose the VST upmixer.
+    expect((await music(api)).effective).toBe('off');
+  });
+
+  it('starts a chosen plugin while the engine runs, then runs it', async () => {
+    const api = createMockApi(fixture('running'), { upmixStartMs: 5 });
+    const seen: string[] = [];
+    await api.onSnapshot((snapshot) => seen.push(snapshot.upmix.endpoints[1]?.state.kind ?? 'none'));
+    await api.dispatch({ kind: 'set_upmixer', value: { endpoint: 1, choice: 'plugin' } });
+    // No plugin yet: nothing to start.
+    expect((await music(api)).state).toEqual({ kind: 'stopped' });
+    await api.dispatch({ kind: 'choose_plugin', value: { endpoint: 1, path: 'C:\\VST3\\Wide.vst3' } });
+    expect(await music(api)).toMatchObject({ state: { kind: 'starting' }, latency_ms: null });
+    await vi.waitFor(async () => expect((await music(api)).state).toEqual({ kind: 'running' }));
+    expect((await music(api)).latency_ms).toBe(23.3);
+    await vi.waitFor(() => expect(seen.at(-1)).toBe('running'));
+    expect(seen).toContain('starting');
+  });
+
+  it('holds a starting plugin when the start is frozen, as the gallery does', async () => {
+    const api = createMockApi(fixture('ready-upmix'), { upmixStartMs: null });
+    await api.dispatch({ kind: 'enable' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await music(api)).state).toEqual({ kind: 'starting' });
+  });
+
+  it('starts the upmixer with the engine and stops it with the engine', async () => {
+    const api = createMockApi(fixture('ready-upmix'), { upmixStartMs: 5 });
+    await api.dispatch({ kind: 'enable' });
+    expect((await music(api)).state).toEqual({ kind: 'starting' });
+    await vi.waitFor(async () => expect((await music(api)).state).toEqual({ kind: 'running' }));
+    await api.dispatch({ kind: 'disable' });
+    expect(await music(api)).toMatchObject({ state: { kind: 'stopped' }, latency_ms: null });
+  });
+
+  it('opens the editor only while the host is up', async () => {
+    await expect(createMockApi(fixture('ready-upmix')).dispatch({ kind: 'open_plugin_editor', value: 1 })).rejects.toEqual({
+      message: '지금은 할 수 없는 동작입니다.',
+      next: 'none',
+    });
+    await expect(createMockApi(fixture('ready-upmix-failed')).dispatch({ kind: 'open_plugin_editor', value: 1 })).rejects.toMatchObject({
+      message: '지금은 할 수 없는 동작입니다.',
+    });
+    await expect(createMockApi(fixture('running-upmix')).dispatch({ kind: 'open_plugin_editor', value: 0 })).rejects.toMatchObject({
+      message: '지금은 할 수 없는 동작입니다.',
+    });
+    await createMockApi(fixture('running-upmix')).dispatch({ kind: 'open_plugin_editor', value: 1 });
+    await createMockApi(fixture('running-upmix-fallback')).dispatch({ kind: 'open_plugin_editor', value: 1 });
+  });
+
+  it('keeps each kind\'s switch, and the host stays up while it is off', async () => {
+    const api = createMockApi(fixture('running-upmix'), { upmixStartMs: null });
+    await api.dispatch({ kind: 'set_upmix_apply', value: { kind: 'speakers', on: false } });
+    let snapshot = await api.snapshot();
+    expect(snapshot.upmix).toMatchObject({ headphones: true, speakers: false });
+    // Headphones are in use and still apply it.
+    expect(snapshot.upmix.endpoints[1]).toMatchObject({ state: { kind: 'running' }, bypass: null });
+    await api.dispatch({ kind: 'set_upmix_apply', value: { kind: 'headphones', on: false } });
+    snapshot = await api.snapshot();
+    // Off: the sound goes around it, and the host runs on.
+    expect(snapshot.upmix.endpoints[1]).toMatchObject({ state: { kind: 'running' }, bypass: 'kind_off', latency_ms: 23.3 });
+    // On again: straight back, without loading the plugin again.
+    await api.dispatch({ kind: 'set_upmix_apply', value: { kind: 'headphones', on: true } });
+    expect(await music(api)).toMatchObject({ state: { kind: 'running' }, bypass: null });
+    // Switching to speakers, which do not apply it, goes around it too.
+    await api.dispatch({ kind: 'set_profile_kind', value: 'speakers' });
+    expect(await music(api)).toMatchObject({ state: { kind: 'running' }, bypass: 'kind_off' });
+  });
+
+  it('starts the host with the engine even when the kind in use does not apply it', async () => {
+    const api = createMockApi(fixture('ready-speakers-upmix-off'), { upmixStartMs: 5 });
+    await api.dispatch({ kind: 'enable' });
+    expect(await music(api)).toMatchObject({ state: { kind: 'starting' }, bypass: null });
+    await vi.waitFor(async () => expect(await music(api)).toMatchObject({ state: { kind: 'running' }, bypass: 'kind_off' }));
+  });
+
+  it('takes every upmix intent while profile.toml decides the profile', async () => {
+    const api = createMockApi(fixture('ready-profile-file'));
+    await api.dispatch({ kind: 'set_upmixer', value: { endpoint: 1, choice: 'plugin' } });
+    await api.dispatch({ kind: 'choose_plugin', value: { endpoint: 1, path: 'C:\\VST3\\Wide.vst3' } });
+    await api.dispatch({ kind: 'set_upmix_apply', value: { kind: 'headphones', on: false } });
+    const { upmix, profile } = await api.snapshot();
+    expect(profile.from_file).toBe(true);
+    expect(upmix.headphones).toBe(false);
+    expect(upmix.endpoints[1]).toMatchObject({ effective: 'plugin', plugin: { name: 'Wide' } });
+  });
+
+  it('refuses upmix intents before the wizard is done', async () => {
+    const api = createMockApi(fixture('setup-choose-output'));
+    await expect(api.dispatch({ kind: 'set_upmixer', value: { endpoint: 1, choice: 'plugin' } })).rejects.toMatchObject({
+      message: '지금은 할 수 없는 동작입니다.',
+    });
+    await expect(api.dispatch({ kind: 'set_upmix_apply', value: { kind: 'speakers', on: false } })).rejects.toMatchObject({
+      message: '지금은 할 수 없는 동작입니다.',
+    });
+  });
+
+  it('keeps a failed plugin off for the session and says why in the language chosen', async () => {
+    const api = createMockApi(fixture('ready-upmix-failed'), { upmixStartMs: null });
+    await api.dispatch({ kind: 'enable' });
+    expect((await music(api)).state).toEqual(fixture('ready-upmix-failed').upmix.endpoints[1]?.state);
+    await api.dispatch({ kind: 'set_language', value: 'en' });
+    expect((await music(api)).state).toEqual(fixture('ready-upmix-failed', 'en').upmix.endpoints[1]?.state);
+    // A new plugin is a new start.
+    await api.dispatch({ kind: 'choose_plugin', value: { endpoint: 1, path: 'C:\\VST3\\Other.vst3' } });
+    expect((await music(api)).state).toEqual({ kind: 'starting' });
+  });
+
+  it('takes no choice of how stereo arrives', async () => {
+    const api = createMockApi(fixture('running-upmix'));
+    const old = { kind: 'set_upmix_sources', value: { endpoint: 1, sources: { pcm: false, bitstream: false } } };
+    // Not an intent any more: the bridge's guard turns it away before the supervisor.
+    expect(() => assertIntent(old)).toThrow('intent.kind');
+    expect((await api.snapshot()).upmix.endpoints.every((endpoint) => !('sources' in endpoint))).toBe(true);
+  });
+
+  describe('goes around a running upmixer as ADR 0035 says', () => {
+    const pcm = (channels: number, channel_mask: number): SourceFormat => ({
+      kind: 'pcm',
+      value: { channels, sample_rate: 48_000, bits_per_sample: 32, valid_bits: 32, sample_type: 'float', channel_mask },
+    });
+    const eac3 = (channels: number): SourceFormat => ({
+      kind: 'bitstream',
+      value: { codec: 'eac3', container_rate: 192_000, container_channels: 2, encoded_rate: 48_000, encoded_channels: channels },
+    });
+    /** The endpoint running the plugin while `format` plays: music in running-upmix, PASS in running-upmix-pass. */
+    function playing(endpoint: 1 | 2, format: SourceFormat | null) {
+      const start = fixture(endpoint === 1 ? 'running-upmix' : 'running-upmix-pass');
+      start.engine!.endpoints[endpoint]!.format = format;
+      return createMockApi(start, { upmixStartMs: null });
+    }
+    const apply = (on: boolean): Intent => ({ kind: 'set_upmix_apply', value: { kind: 'headphones', on } });
+
+    it.each<[string, SourceFormat, boolean]>([
+      ['mono PCM', pcm(1, 0x4), false],
+      ['stereo PCM', pcm(2, 0x3), false],
+      ['2.1 PCM', pcm(3, 0xb), false],
+      ['3.0 PCM', pcm(3, 0x7), true],
+      ['5.1 PCM', pcm(6, 0x3f), true],
+      ['7.1.4 PCM', pcm(12, 0), true],
+      ['a mono bitstream', eac3(1), false],
+      ['a 2.0 bitstream', eac3(2), false],
+      ['a 5.1 bitstream', eac3(6), true],
+      ['a 7.1 bitstream', eac3(8), true],
+    ])('%s', async (_name, format, surround) => {
+      // However it arrives, on the music endpoint or on PASS, the same rule.
+      for (const endpoint of [1, 2] as const) {
+        const api = playing(endpoint, format);
+        await api.dispatch(apply(true));
+        expect((await endpointOf(api, endpoint)).bypass, `endpoint ${endpoint}`).toBe(surround ? 'native_surround' : null);
+        // The kind in use not applying it comes first.
+        await api.dispatch(apply(false));
+        expect((await endpointOf(api, endpoint)).bypass, `endpoint ${endpoint}`).toBe('kind_off');
+      }
+    });
+
+    it('nothing playing goes around nothing, and a stopped upmixer has no reason', async () => {
+      const api = playing(2, null);
+      await api.dispatch(apply(true));
+      expect((await pass(api)).bypass).toBeNull();
+      await api.dispatch({ kind: 'disable' });
+      await api.dispatch(apply(false));
+      expect(await pass(api)).toMatchObject({ state: { kind: 'stopped' }, bypass: null });
+    });
+
+    it.each(['running-upmix', 'running-upmix-fallback', 'running-upmix-pass', 'running-upmix-native-surround'])(
+      'agrees with the %s fixture, all three endpoints',
+      async (name) => {
+        const start = fixture(name);
+        const api = createMockApi(start, { upmixStartMs: null });
+        // Any intent has the mock say its upmixers afresh; this one changes nothing.
+        await api.dispatch({ kind: 'set_upmix_apply', value: { kind: start.profile.kind, on: start.upmix[start.profile.kind] } });
+        expect((await api.snapshot()).upmix).toEqual(start.upmix);
+      },
+    );
+  });
+
+  it('draws the plugin it scanned, from the picker to the card', async () => {
+    const start = fixture('ready');
+    const api = createMockApi(start);
+    const app = mountApp(root, api, { tab: 'upmix' });
+    app.draw(start);
+    await api.onSnapshot(app.draw);
+    root.querySelector<HTMLInputElement>('[data-key="upmixer-1-plugin"]')?.click();
+    await vi.waitFor(() => expect(root.querySelector('[data-key="plugin-folder-1"]')).not.toBeNull());
+    await vi.waitFor(() => expect(root.querySelector<HTMLButtonElement>('[data-key="plugin-folder-1"]')?.disabled).toBe(false));
+    root.querySelector<HTMLButtonElement>('[data-key="plugin-folder-1"]')?.click();
+    await vi.waitFor(() => expect(root.querySelector('.upmix-plugin dl')?.textContent).toContain('Example Upmixer'));
+    expect(root.querySelector('.upmix-plugin')?.textContent).toContain('C:\\Program Files\\Common Files\\VST3\\Example Upmixer.vst3');
   });
 });

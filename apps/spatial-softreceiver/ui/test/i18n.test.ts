@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { Api } from '../src/api';
 import { mountApp } from '../src/app';
-import type { Language, Snapshot } from '../src/bindings';
+import type { Language, PluginView, Snapshot, UpmixBypass, UpmixState } from '../src/bindings';
 import { en as catalogEn, ko as catalogKo } from '../src/catalog';
 import { codecName } from '../src/format';
 import { fixture, fixtureNames } from '../src/fixtures';
@@ -11,7 +11,7 @@ import type { Tab } from '../src/screens/common';
 import { en, ko, setLanguage, text } from '../src/text';
 
 const HANGUL = /[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7af\ud7b0-\ud7ff\uffa0-\uffdc]/u;
-const TABS: Tab[] = ['status', 'profile', 'settings'];
+const TABS: Tab[] = ['status', 'profile', 'upmix', 'settings'];
 
 afterEach(() => {
   setLanguage('ko');
@@ -37,6 +37,12 @@ function uiOnly(snapshot: Snapshot): Snapshot {
   if (speakers.correction !== null) speakers.correction = { path: 'C:\\SOURCE_CORRECTION.yml', title: 'SOURCE_TITLE' };
   speakers.channels.forEach((channel) => { channel.name = `SOURCE_CHANNEL_${channel.channel}`; });
   clean.profile.directions.forEach((direction) => { direction.name = `SOURCE_DIRECTION_${direction.id}`; });
+  for (const endpoint of clean.upmix.endpoints) {
+    if (endpoint.plugin !== null) {
+      endpoint.plugin = { ...endpoint.plugin, path: `C:\\SOURCE_PLUGIN_${endpoint.endpoint}.vst3`, name: 'SOURCE_PLUGIN', vendor: 'SOURCE_VENDOR' };
+    }
+    if (endpoint.state.kind === 'failed') endpoint.state.value = 'SOURCE_UPMIX_FAILURE';
+  }
   if (clean.engine !== null) {
     if (clean.engine.fault !== null) clean.engine.fault.value = 'SOURCE_FAULT';
     clean.engine.directions.forEach((direction) => { direction.name = `SOURCE_DIRECTION_${direction.id}`; });
@@ -89,6 +95,11 @@ describe('i18n catalog contract', () => {
       'format.otherCodec': [['0x00001234']],
       'profile.angles': [[-30, 45]],
       'profile.mapObjectsMany': [[0], [1], [8]],
+      'status.upmix': [['Example Upmixer']],
+      'status.upmixFallback': [['Example Upmixer']],
+      'upmix.latency': [['12.5']],
+      'upmix.outputs': [['L R C LFE Ls Rs']],
+      'upmix.delayHint': [['23.3']],
       'settings.updateCurrent': [['0.13.0']],
       'settings.updateReady': [['0.14.0']],
     } satisfies Record<FunctionPaths<typeof ko>, unknown[][]>;
@@ -106,15 +117,22 @@ describe('i18n catalog contract', () => {
     setLanguage('en');
     expect(codecName({ other: 0x1234 })).toBe('Unknown codec 0x00001234');
     expect(en.profile.angles(-30, 45)).toContain('-30°');
-    expect(en.profile.mapObjectsOne).toBe('1 sound object');
+    expect(en.profile.mapObjectsOne).toBe('1 sound position');
   });
 
   it.each([
     [ko, catalogKo],
     [en, catalogEn],
   ])('projects generated screen leaves and sources shared names only from names', (projected, catalog) => {
-    const { endpoints, status, profile, ...screen } = catalog.screen;
-    const { product, endpoints: named, status: projectedStatus, profile: projectedProfile, ...rest } = projected;
+    const { endpoints, status, profile, upmix, ...screen } = catalog.screen;
+    const {
+      product,
+      endpoints: named,
+      status: projectedStatus,
+      profile: projectedProfile,
+      upmix: projectedUpmix,
+      ...rest
+    } = projected;
     expect(rest).toEqual(screen);
     for (const key of Object.keys(screen) as (keyof typeof screen)[]) {
       expect(rest[key], key).toBe(screen[key]);
@@ -128,6 +146,8 @@ describe('i18n catalog contract', () => {
       testOff: common.test_after_enable,
       needsBrir: catalog.supervisor.import_brir_first,
     });
+    expect(projectedUpmix).toEqual({ ...upmix, needsPlugin: catalog.supervisor.choose_plugin_first });
+    expect(upmix).not.toHaveProperty('needsPlugin');
     for (const key of ['powerOn', 'powerOff']) expect(status).not.toHaveProperty(key);
     for (const key of ['fromFile', 'testOff', 'needsBrir']) expect(profile).not.toHaveProperty(key);
     expect(product).toBe(catalog.names.product);
@@ -166,6 +186,42 @@ describe('English rendering', () => {
         expectEnglish(root);
       }
     }
+  });
+
+  it.each<UpmixBypass>(['native_surround', 'kind_off', 'rate_change'])(
+    'says why the sound goes around the upmixer (%s) in English on the upmix and status tabs',
+    (bypass) => {
+      const snapshot = uiOnly(fixture('running-upmix', 'en'));
+      snapshot.upmix.endpoints[1]!.bypass = bypass;
+      for (const tab of ['upmix', 'status'] as const) {
+        const { root } = mounted(snapshot, tab);
+        expectEnglish(root);
+        const reason = root.querySelector(tab === 'upmix' ? '.upmix-state-reason' : '.card-upmix-reason');
+        expect(reason?.textContent?.length, tab).toBeGreaterThan(0);
+      }
+    },
+  );
+
+  it('names the three cards, the (i), the delay, the reason and the plugin inputs in English', () => {
+    const snapshot = uiOnly(fixture('running-upmix-native-surround', 'en'));
+    const { root } = mounted(snapshot, 'upmix');
+    expectEnglish(root);
+    expect([...root.querySelectorAll('.upmix-card h2')].map((title) => title.textContent)).toEqual([
+      'Spatial SoftReceiver',
+      'Spatial SoftReceiver Music',
+      'Spatial SoftReceiver PASS',
+    ]);
+    const info = root.querySelector<HTMLButtonElement>('[data-key="upmix-info"]');
+    expect(info?.getAttribute('aria-label')).toBe('What is upmixed');
+    expect(root.querySelector('#upmix-info-tip')?.textContent).toBe('Upmixing applies to mono and stereo only.');
+    info?.focus();
+    expect(info?.closest('.info-tip-wrap')?.classList.contains('is-open')).toBe(true);
+    expectEnglish(root);
+    info?.blur();
+    expect(root.querySelector('#upmixer-2-delay')?.textContent).toBe('Upmixing delays this input by about 23.3\u00a0ms.');
+    expect(root.querySelector('.upmix-state-reason')?.textContent).toBe('Not mono or stereo, so not upmixed');
+    expect(root.textContent).toContain('InputsL R');
+    expect(root.textContent).not.toMatch(/native surround/i);
   });
 
   it.each(TABS)('switches the same mounted %s screen ko → en → ko, including live meters', (tab) => {
@@ -211,6 +267,76 @@ describe('English rendering', () => {
       }
     },
   );
+
+  /** The snapshot, then the music endpoint in every upmix state and the main one as a VST upmixer without a plugin. */
+  function upmixVariants(snapshot: Snapshot): Snapshot[] {
+    const states: UpmixState[] = [
+      { kind: 'stopped' },
+      { kind: 'starting' },
+      { kind: 'running' },
+      { kind: 'fallback' },
+      { kind: 'failed', value: 'SOURCE_UPMIX_FAILURE' },
+    ];
+    const plugin: PluginView = { path: 'C:\\SOURCE_PLUGIN.dll', format: 'vst2', name: 'SOURCE_PLUGIN', vendor: 'SOURCE_VENDOR' };
+    const variants = [snapshot];
+    for (const state of states) {
+      const next = structuredClone(snapshot);
+      Object.assign(next.upmix.endpoints[1]!, {
+        choice: 'plugin',
+        effective: 'plugin',
+        plugin,
+        state,
+        latency_ms: 12.5,
+        outputs: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'],
+      });
+      variants.push(next);
+    }
+    const bare = structuredClone(snapshot);
+    Object.assign(bare.upmix.endpoints[0]!, { choice: null, effective: 'plugin', plugin: null, state: { kind: 'stopped' }, latency_ms: null, outputs: [] });
+    bare.upmix.first_party_available = true;
+    bare.upmix.headphones = false;
+    bare.upmix.speakers = false;
+    variants.push(bare);
+    return variants;
+  }
+
+  it.each(fixtureNames.filter((name) => ['ready', 'running', 'faulted'].includes(fixture(name).phase.kind)))(
+    '%s has no Hangul on the upmix tab in any upmix state, nor on the status cards and profile switches', (name) => {
+      const start = uiOnly(fixture(name));
+      start.language = 'en';
+      for (const snapshot of upmixVariants(start)) {
+        const upmix = mounted(snapshot, 'upmix').root;
+        expect(upmix.querySelectorAll('.upmix-card')).toHaveLength(3);
+        expectEnglish(upmix);
+        expectEnglish(mounted(snapshot, 'status').root);
+        const { root } = mounted(snapshot, 'profile');
+        for (const kind of ['headphones', 'speakers'] as const) {
+          root.querySelector<HTMLButtonElement>(`[data-key="profile-tab-${kind}"]`)?.click();
+          expectEnglish(root);
+        }
+      }
+    },
+  );
+
+  it('uses English for the plugin pickers and sends the path as picked', async () => {
+    const snapshot = fixture('ready-upmix');
+    snapshot.language = 'en';
+    const api = createMockApi(snapshot);
+    const path = 'C:\\플러그인\\업믹서.vst3';
+    const pickFolder = vi.fn(async () => path);
+    const pickFile = vi.fn(async () => null);
+    const dispatch = vi.fn(async () => {});
+    const bridge: Api = { ...api, dispatch, shell: { ...api.shell, pickFolder, pickFile } };
+    const root = document.createElement('div');
+    document.body.replaceChildren(root);
+    mountApp(root, bridge, { tab: 'upmix' }).draw(snapshot);
+    root.querySelector<HTMLButtonElement>('[data-key="plugin-file-1"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-key="plugin-folder-1"]')?.click();
+    await Promise.resolve();
+    expect(pickFile).toHaveBeenCalledWith(en.upmix.fileDialog, { name: en.upmix.fileFilter, extensions: ['vst3', 'dll'] });
+    expect(pickFolder).toHaveBeenCalledWith(en.upmix.folderDialog);
+    expect(dispatch).toHaveBeenCalledWith({ kind: 'choose_plugin', value: { endpoint: 1, path } });
+  });
 
   it('reads translated navigation labels after switching tabs and opening the output list', () => {
     const snapshot = uiOnly(fixture('ready'));

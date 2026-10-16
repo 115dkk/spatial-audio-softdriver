@@ -22,11 +22,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use engine::{CorrectionProfile, LiveChange, OutputProfile, Prepared};
+use engine::{CorrectionProfile, LiveChange, OutputProfile, Prepared, UpmixStatus};
 use speakers::SpeakerProfile;
 use ssr_types::app::{
-    CorrectionView, HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase, ProfileKind,
-    ProfileView, SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
+    CorrectionView, HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase,
+    PluginChoice, PluginFormat, ProfileKind, ProfileView, SetupStep, Snapshot, SpeakerChannelView,
+    SpeakerLayout, SpeakersView, UpmixApply, UpmixerChoice, UpmixerSetting, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::{
@@ -37,6 +38,9 @@ use ssr_types::{
 use crate::restore_point::{self, RestorePoint};
 use crate::session::{Session, SessionError, SessionNotice};
 use crate::text::Message;
+use crate::upmix::{
+    PluginHost, PluginSetting, TickChanges, UPMIX_ENDPOINTS, UpmixSettings, Upmixers, plugin_format,
+};
 
 /// A running engine as the state machine sees it.
 pub trait EngineHandle {
@@ -54,6 +58,19 @@ pub trait EngineHandle {
     /// output can be retried without doing the slow preparation again.
     fn apply_retaining(&mut self, change: LiveChange) -> Result<(), (SessionError, LiveChange)>;
     fn stop(self: Box<Self>) -> Result<(), SessionError>;
+
+    /// The QPC frequency the engine runs with: an upmix stage handed to it
+    /// must be built for it ([`engine::UpmixStage::new`]). The engine's
+    /// default unless the handle says otherwise.
+    fn qpc_frequency(&self) -> u64 {
+        engine::StartOptions::default().qpc_frequency
+    }
+
+    /// The upmix stage of `endpoint` (0 to 2) as last handed over, read
+    /// without blocking the engine; `None` when the handle reports none.
+    fn upmix_status(&self, _endpoint: u16) -> Option<UpmixStatus> {
+        None
+    }
 }
 
 impl EngineHandle for Session {
@@ -78,6 +95,14 @@ impl EngineHandle for Session {
     /// Discards the report: the shell has no use for it yet.
     fn stop(self: Box<Self>) -> Result<(), SessionError> {
         Session::stop(*self).map(drop)
+    }
+
+    fn qpc_frequency(&self) -> u64 {
+        Session::qpc_frequency(self)
+    }
+
+    fn upmix_status(&self, endpoint: u16) -> Option<UpmixStatus> {
+        Session::upmix_status(self, endpoint)
     }
 }
 
@@ -219,7 +244,9 @@ impl From<ProfileSettingsFile> for ProfileSettings {
 /// rewrite the stored id (an output found again by its name). A `handle` that
 /// fails after such a rewrite leaves the old id persisted, which the name finds
 /// again next time. A profile intent changes the settings only when it
-/// succeeds, so a failed import or gain never reaches the file.
+/// succeeds, so a failed import or gain never reaches the file. A tick can
+/// change them too (a plugin's buses, learned when its host comes up), which
+/// [`Supervisor::take_tick_changes`] reports.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     /// `None` follows the language resolved by the shell from the OS.
@@ -230,6 +257,10 @@ pub struct Settings {
     pub output: Option<OutputChoice>,
     #[serde(default)]
     pub profile: ProfileSettings,
+    /// Each endpoint's upmixer and each kind's switch (ADR 0035). Settings
+    /// written before it load the defaults.
+    #[serde(default)]
+    pub upmix: UpmixSettings,
 }
 
 /// What this build needs from the PC.
@@ -310,6 +341,8 @@ pub struct Supervisor<H: Host, L: Launcher> {
     /// when a profile intent succeeds or the engine starts, so a snapshot
     /// never reads the disk for it.
     profile: ProfileView,
+    /// The upmixers' plugin hosts and their stages in the engine (ADR 0035).
+    upmix: Upmixers,
 }
 
 impl<H: Host, L: Launcher> fmt::Debug for Supervisor<H, L> {
@@ -329,8 +362,14 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// Looks at the host once and starts in Ready when the driver is installed
     /// without a problem (its exclusive policy not missing) and the settings
     /// name an output that is present, else in Setup(Welcome). Never takes the
-    /// roles here.
-    pub fn new(host: H, launcher: L, config: Config, settings: Settings) -> Self {
+    /// roles here. `plugins` runs the VST upmixers' hosts (ADR 0035).
+    pub fn new(
+        host: H,
+        launcher: L,
+        plugins: Box<dyn PluginHost>,
+        config: Config,
+        settings: Settings,
+    ) -> Self {
         let language = settings.language.unwrap_or(config.default_language);
         let mut supervisor = Self {
             host: RefCell::new(host),
@@ -348,6 +387,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             notes: Vec::new(),
             shell_notes: Vec::new(),
             profile: default_profile_view_for(language),
+            upmix: Upmixers::new(plugins),
         };
         supervisor.refresh_profile();
         let driver = supervisor.host.get_mut().driver();
@@ -406,7 +446,14 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// `FaultCleared` ends the wait with a note. A fault that outlasts
     /// [`Config::fault_grace`] (from its first notice, by `now`), or a poll
     /// error, stops the engine, gives the roles back and moves to Faulted.
+    ///
+    /// The upmixers' plugin hosts are polled here too (ADR 0035): a host that
+    /// came up gets its stage, one that crashed restarts or is turned off,
+    /// one whose endpoint changed rate restarts at the new rate, and hosts
+    /// let go are watched until they exit, in every phase.
+    /// [`Supervisor::take_tick_changes`] tells what that changed.
     pub fn tick(&mut self, now: Instant) -> Vec<SessionNotice> {
+        self.upmix.poll_retiring();
         let Some(running) = self.engine.as_mut() else {
             return Vec::new();
         };
@@ -457,7 +504,34 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             let error = self.message_error(message, NextAction::Retry);
             self.fault(error);
         }
+        if let Some(running) = self.engine.as_mut() {
+            let engine = running.handle.as_mut();
+            for notice in &notices {
+                if let SessionNotice::FormatChanged {
+                    endpoint,
+                    format,
+                    unsupported: None,
+                    ..
+                } = notice
+                {
+                    self.upmix.format_changed(
+                        engine,
+                        &mut self.settings.upmix,
+                        usize::from(*endpoint),
+                        format,
+                    );
+                }
+            }
+            self.upmix.poll(engine, &mut self.settings.upmix, now);
+        }
         notices
+    }
+
+    /// What the ticks changed on their own since the last call: an upmixer's
+    /// state (the shell then sends a snapshot) and the settings (a plugin's
+    /// buses learned; the shell then saves them).
+    pub fn take_tick_changes(&mut self) -> TickChanges {
+        self.upmix.take_changes()
     }
 
     /// The running engine asked for its output to be prepared again and has
@@ -565,6 +639,12 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             language_choice: self.settings.language,
             phase: self.phase.clone(),
             profile: self.profile.clone(),
+            upmix: self.upmix.view(
+                &self.settings.upmix,
+                self.engine.as_ref().map(|running| running.handle.as_ref()),
+                self.profile.kind,
+                language,
+            ),
             engine: self.engine_status(),
             outputs,
             chosen_output: self.settings.output.clone(),
@@ -655,6 +735,33 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.set_gain(db),
                 _ => return self.refused(),
             },
+            // A profile.toml locks none of the upmix intents (ADR 0035).
+            Intent::SetUpmixer(setting) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => return self.set_upmixer(setting),
+                _ => return self.refused(),
+            },
+            Intent::ChoosePlugin(choice) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => {
+                    return self.choose_plugin(choice);
+                }
+                _ => return self.refused(),
+            },
+            Intent::OpenPluginEditor(endpoint) => match self.phase {
+                Phase::Running if self.upmix.host_up(usize::from(endpoint)) => {
+                    match self.upmix.open_editor(usize::from(endpoint)) {
+                        Ok(()) => Ok(()),
+                        Err(_) => return self.refused(),
+                    }
+                }
+                _ => return self.refused(),
+            },
+            Intent::SetUpmixApply(apply) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => {
+                    self.set_upmix_apply(apply);
+                    Ok(())
+                }
+                _ => return self.refused(),
+            },
             Intent::TestDirection(id) => match self.phase {
                 Phase::Running => self.test_direction(id),
                 Phase::Ready | Phase::Faulted => {
@@ -721,6 +828,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 self.stop_engine();
                 self.restore();
                 self.phase = Phase::Quit;
+                self.upmix.drain();
                 Ok(())
             }
         };
@@ -937,6 +1045,13 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                     pending: None,
                 });
                 self.phase = Phase::Running;
+                if let Some(running) = self.engine.as_mut() {
+                    self.upmix.engine_started(
+                        running.handle.as_mut(),
+                        &mut self.settings.upmix,
+                        self.profile.kind,
+                    );
+                }
                 Ok(())
             }
             Err(error) => {
@@ -1011,9 +1126,11 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         self.error = Some(error);
     }
 
-    /// Stops the engine if it runs; its error is a note, not a failure.
+    /// Stops the engine if it runs, with the upmixers' hosts; its error is a
+    /// note, not a failure.
     fn stop_engine(&mut self) {
         self.reconnecting = None;
+        self.upmix.engine_stopped();
         if let Some(running) = self.engine.take()
             && let Err(error) = running.handle.stop()
         {
@@ -1290,6 +1407,11 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         }
         self.settings.profile = settings;
         self.profile = resolved.view;
+        // A kind change brings that kind's upmix switch (ADR 0035).
+        if let Some(running) = self.engine.as_mut() {
+            let on = self.settings.upmix.applies(self.profile.kind);
+            self.upmix.set_apply(running.handle.as_mut(), on);
+        }
         Ok(())
     }
 
@@ -1337,6 +1459,104 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             .handle
             .apply(LiveChange::TestTone(id));
         applied.map_err(|error| self.localized_error(live_error(error)))
+    }
+
+    /// Chooses `endpoint`'s upmixer. The PASS endpoint is the last that
+    /// upmixes, and the first-party upmixer is refused until it exists
+    /// (ADR 0020). A plugin choice without a plugin is kept; the screen asks
+    /// for one. Choosing again clears an earlier failure.
+    fn set_upmixer(&mut self, setting: UpmixerSetting) -> Outcome {
+        let endpoint = usize::from(setting.endpoint);
+        if endpoint >= UPMIX_ENDPOINTS {
+            return Outcome::Refused(
+                self.message_error(Message::EndpointCannotUpmix, NextAction::None),
+            );
+        }
+        if setting.choice == UpmixerChoice::FirstParty {
+            return Outcome::Refused(
+                self.message_error(Message::UpmixerUnavailable, NextAction::None),
+            );
+        }
+        self.settings.upmix.endpoints[endpoint].choice = Some(setting.choice);
+        self.upmix.chose(endpoint);
+        if let Some(running) = self.engine.as_mut() {
+            self.upmix
+                .sync(running.handle.as_mut(), &mut self.settings.upmix, endpoint);
+        }
+        Outcome::Done
+    }
+
+    /// Scans the chosen file or bundle and keeps its first class for
+    /// `endpoint`. A different plugin starts without the old one's saved
+    /// state. While the engine runs and the endpoint upmixes with a plugin,
+    /// its host starts again with the new one.
+    fn choose_plugin(&mut self, choice: PluginChoice) -> Outcome {
+        let endpoint = usize::from(choice.endpoint);
+        if endpoint >= UPMIX_ENDPOINTS {
+            return Outcome::Refused(
+                self.message_error(Message::EndpointCannotUpmix, NextAction::None),
+            );
+        }
+        let path = choice.path;
+        let file = path.file_name().map_or_else(
+            || display(&path),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let scan_failed = |detail: String| Message::PluginScanFailed { detail };
+        let Some(format) = plugin_format(&path) else {
+            return Outcome::Failed(self.message_error(scan_failed(file), NextAction::None));
+        };
+        let class = match self.upmix.scan(&path, format) {
+            Ok(classes) => classes.into_iter().next(),
+            Err(error) => {
+                return Outcome::Failed(
+                    self.message_error(scan_failed(error.to_string()), NextAction::None),
+                );
+            }
+        };
+        let Some(class) = class else {
+            return Outcome::Failed(self.message_error(scan_failed(file), NextAction::None));
+        };
+        let mut plugin = PluginSetting {
+            path,
+            format,
+            class: (format == PluginFormat::Vst3).then_some(class.id),
+            name: class.name,
+            vendor: class.vendor,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let stored = &mut self.settings.upmix.endpoints[endpoint].plugin;
+        match stored.as_ref() {
+            Some(old) if old.same_plugin(&plugin) => {
+                plugin.inputs.clone_from(&old.inputs);
+                plugin.outputs.clone_from(&old.outputs);
+            }
+            Some(_) => self.upmix.forget_state(endpoint),
+            None => {}
+        }
+        *stored = Some(plugin);
+        self.upmix.chose(endpoint);
+        if let Some(running) = self.engine.as_mut() {
+            let engine = running.handle.as_mut();
+            self.upmix.stop_host(Some(&mut *engine), endpoint);
+            self.upmix.sync(engine, &mut self.settings.upmix, endpoint);
+        }
+        Outcome::Done
+    }
+
+    /// Keeps an output kind's switch; the running engine takes it when that
+    /// kind is in use.
+    fn set_upmix_apply(&mut self, apply: UpmixApply) {
+        match apply.kind {
+            ProfileKind::Headphones => self.settings.upmix.headphones = apply.on,
+            ProfileKind::Speakers => self.settings.upmix.speakers = apply.on,
+        }
+        if apply.kind == self.profile.kind
+            && let Some(running) = self.engine.as_mut()
+        {
+            self.upmix.set_apply(running.handle.as_mut(), apply.on);
+        }
     }
 
     fn refused(&mut self) -> Outcome {
