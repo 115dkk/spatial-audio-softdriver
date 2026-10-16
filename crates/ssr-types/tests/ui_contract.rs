@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use specta::TypeCollection;
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use ssr_types::app::{
-    Intent, Language, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep,
-    Snapshot, UserError,
+    CorrectionView, HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase, ProfileKind,
+    ProfileView, SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::status::{
@@ -27,7 +27,7 @@ use ssr_types::status::{
 use ssr_types::{
     Arch, BitstreamCodec, BitstreamFormat, DeviceId, DirectionId, DirectionView, DriverState,
     EngineFault, EngineStatus, OutputError, OutputMode, PcmFormat, Platform, SampleType,
-    SceneObject, SecureBoot, SourceFormat,
+    SceneObject, SecureBoot, SourceFormat, Speaker,
 };
 
 const BLESS: &str = "SSR_UI_BLESS";
@@ -139,25 +139,56 @@ fn direction(id: u16, name: &str, azimuth_deg: f32, elevation_deg: f32) -> Direc
     }
 }
 
-fn stereo_profile(language: Language) -> ProfileView {
-    ProfileView {
-        kind: ProfileKind::Stereo,
-        name: match language {
-            Language::Ko => "Stereo",
-            Language::En => "Default stereo",
-        }
-        .to_owned(),
-        brir: None,
-        headphone_fir: None,
-        gain_db: 0.0,
-        directions: vec![
-            direction(0, "FL", 30.0, 0.0),
-            direction(1, "FR", -30.0, 0.0),
-        ],
-        from_file: false,
+/// A speaker layout as the supervisor shows it: every device channel.
+fn layout_channels(layout: SpeakerLayout) -> Vec<SpeakerChannelView> {
+    layout
+        .speakers()
+        .iter()
+        .enumerate()
+        .map(|(channel, speaker)| SpeakerChannelView {
+            name: speaker.name().to_owned(),
+            channel: u16::try_from(channel).unwrap(),
+            subwoofer: *speaker == Speaker::Lfe,
+        })
+        .collect()
+}
+
+fn speakers_view(layout: SpeakerLayout) -> SpeakersView {
+    SpeakersView {
+        layout: Some(layout),
+        correction: None,
+        channels: layout_channels(layout),
     }
 }
 
+/// The speakers of a layout as test-tone directions (the subwoofer is none).
+fn speaker_directions(layout: SpeakerLayout) -> Vec<DirectionView> {
+    layout
+        .speakers()
+        .iter()
+        .filter_map(|speaker| speaker.angles().map(|angles| (speaker.name(), angles)))
+        .enumerate()
+        .map(|(id, (name, (azimuth, elevation)))| {
+            direction(u16::try_from(id).unwrap(), name, azimuth, elevation)
+        })
+        .collect()
+}
+
+/// The first day's profile: speakers 2.0 without correction, the same sound
+/// as the old default stereo.
+fn stereo_profile(_language: Language) -> ProfileView {
+    ProfileView {
+        kind: ProfileKind::Speakers,
+        name: "2.0".to_owned(),
+        gain_db: 0.0,
+        directions: speaker_directions(SpeakerLayout::Stereo),
+        from_file: false,
+        headphones: HeadphonesView { brir: None },
+        speakers: speakers_view(SpeakerLayout::Stereo),
+    }
+}
+
+/// Headphones in use; the speaker settings stay for when speakers return.
 fn headphone_profile(language: Language) -> ProfileView {
     ProfileView {
         kind: ProfileKind::Headphones,
@@ -166,8 +197,6 @@ fn headphone_profile(language: Language) -> ProfileView {
             Language::En => "Living room 7.1.4 headphones",
         }
         .to_owned(),
-        brir: Some(r"C:\Users\me\BRIR\living-room".to_owned()),
-        headphone_fir: Some(r"C:\Users\me\hd650.wav".to_owned()),
         gain_db: -3.5,
         directions: vec![
             // 7.1.4 has eleven render directions: LFE is routed separately and
@@ -185,6 +214,79 @@ fn headphone_profile(language: Language) -> ProfileView {
             direction(10, "TBR", -150.0, 45.0),
         ],
         from_file: false,
+        headphones: HeadphonesView {
+            brir: Some(r"C:\Users\me\BRIR\living-room".to_owned()),
+        },
+        speakers: speakers_view(SpeakerLayout::Surround71),
+    }
+}
+
+/// Speakers 7.1.4 by layout, without correction.
+fn speaker_layout_profile(language: Language) -> ProfileView {
+    ProfileView {
+        kind: ProfileKind::Speakers,
+        name: "7.1.4".to_owned(),
+        gain_db: -6.0,
+        directions: speaker_directions(SpeakerLayout::Surround714),
+        from_file: false,
+        speakers: speakers_view(SpeakerLayout::Surround714),
+        ..headphone_profile(language)
+    }
+}
+
+/// The inputs of a SECS 2R 7.1.4 export with two subwoofers, as render
+/// directions: SECS's side surrounds `Ls/Rs` sit at the Windows side angles
+/// because the layout has back surrounds `Lb/Rb` (ADR 0034).
+const SECS_INPUTS: &[(&str, f32, f32)] = &[
+    ("L", 30.0, 0.0),
+    ("R", -30.0, 0.0),
+    ("C", 0.0, 0.0),
+    ("Ls", 90.0, 0.0),
+    ("Rs", -90.0, 0.0),
+    ("Lb", 150.0, 0.0),
+    ("Rb", -150.0, 0.0),
+    ("Tfl", 45.0, 45.0),
+    ("Tfr", -45.0, 45.0),
+    ("Tbl", 135.0, 45.0),
+    ("Tbr", -135.0, 45.0),
+];
+
+/// Speakers in use through an imported SECS 2R correction; the stored layout
+/// and the BRIR set stay for later.
+fn speaker_profile(language: Language) -> ProfileView {
+    let outputs = SECS_INPUTS
+        .iter()
+        .map(|(name, _, _)| (*name, false))
+        .chain([("SW1", true), ("SW2", true)]);
+    ProfileView {
+        kind: ProfileKind::Speakers,
+        name: "SECS 2 mixed (8.0 ms)".to_owned(),
+        gain_db: -6.0,
+        directions: SECS_INPUTS
+            .iter()
+            .enumerate()
+            .map(|(id, (name, azimuth, elevation))| {
+                direction(u16::try_from(id).unwrap(), name, *azimuth, *elevation)
+            })
+            .collect(),
+        from_file: false,
+        speakers: SpeakersView {
+            layout: Some(SpeakerLayout::Surround714),
+            correction: Some(CorrectionView {
+                path: r"C:\Users\me\Documents\SECS_export\2026-10-16 living room\configs\secs_mixed.yml"
+                    .to_owned(),
+                title: "SECS 2 mixed (8.0 ms)".to_owned(),
+            }),
+            channels: outputs
+                .enumerate()
+                .map(|(channel, (name, subwoofer))| SpeakerChannelView {
+                    name: name.to_owned(),
+                    channel: u16::try_from(channel).unwrap(),
+                    subwoofer,
+                })
+                .collect(),
+        },
+        ..headphone_profile(language)
     }
 }
 
@@ -196,11 +298,13 @@ fn profile_file(language: Language) -> ProfileView {
             Language::En => "Studio 7.1.4",
         }
         .to_owned(),
-        brir: Some(r"C:\Users\me\BRIR\studio\hesuvi.wav".to_owned()),
-        headphone_fir: None,
         gain_db: 0.0,
         directions: headphone_profile(language).directions,
         from_file: true,
+        headphones: HeadphonesView {
+            brir: Some(r"C:\Users\me\BRIR\studio\hesuvi.wav".to_owned()),
+        },
+        speakers: speakers_view(SpeakerLayout::Stereo),
     }
 }
 
@@ -584,6 +688,43 @@ fn snapshots(language: Language) -> Vec<(&'static str, Snapshot)> {
             },
         ),
         (
+            "ready-speakers",
+            Snapshot {
+                profile: speaker_profile(language),
+                ..ready.clone()
+            },
+        ),
+        (
+            "running-speakers",
+            Snapshot {
+                profile: speaker_profile(language),
+                // The engine plays the correction's inputs and opens its 13
+                // device channels direct (two subwoofers: no Windows mask).
+                engine: Some(EngineStatus {
+                    directions: speaker_profile(language).directions,
+                    output_channels: 13,
+                    output_channel_mask: 0,
+                    ..engine_status(language)
+                }),
+                roles_taken: true,
+                ..with_phase(ready.clone(), Phase::Running)
+            },
+        ),
+        (
+            "ready-layout-unsupported",
+            Snapshot {
+                profile: speaker_layout_profile(language),
+                error: Some(error(
+                    text(
+                        "고른 출력 장치가 독점 모드에서 7.1.4 배치(12채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
+                        "The selected output device does not support the 7.1.4 layout (12 channels) in exclusive mode. Choose another layout or output device.",
+                    ),
+                    NextAction::None,
+                )),
+                ..ready.clone()
+            },
+        ),
+        (
             "ready-profile-file",
             Snapshot {
                 profile: profile_file(language),
@@ -632,8 +773,14 @@ fn intents() -> Vec<Intent> {
         Intent::InstallDriver,
         Intent::Recheck,
         Intent::ChooseOutput(outputs(Language::Ko)[1].id.clone()),
+        Intent::SetProfileKind(ProfileKind::Headphones),
+        Intent::SetProfileKind(ProfileKind::Speakers),
         Intent::ImportBrir(PathBuf::from(r"C:\Users\me\BRIR\living-room")),
-        Intent::ImportHeadphoneFir(PathBuf::from(r"C:\Users\me\hd650.wav")),
+        Intent::SetSpeakerLayout(SpeakerLayout::Surround714),
+        Intent::ImportCorrection(PathBuf::from(
+            r"C:\Users\me\Documents\SECS_export\2026-10-16 living room\configs\secs_mixed.yml",
+        )),
+        Intent::ClearCorrection,
         Intent::SetGain(-3.5),
         Intent::TestDirection(DirectionId(7)),
         Intent::Enable,

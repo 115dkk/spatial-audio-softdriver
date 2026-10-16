@@ -37,3 +37,17 @@
 - `ImportBrir`, `ImportHeadphoneFir`, `SetGain`, `TestDirection`의 허용 위상과 오류 문장은 감독자가 정합니다. 실행 중인 게인과 시험 방향은 `EngineHandle::apply(LiveChange)`로 그대로 전달하며, 엔진의 거부(`SessionError::Rejected`)를 사용자 오류로 바꿉니다. 실행 중에 가져온 프로필은 감독자가 제어 스레드에서 준비해(실시간 스레드가 아님) `LiveChange::Prepared` 하나로 넘기고, 엔진이 받은 뒤에야 설정과 `ProfileView`, 다시 준비할 프로필을 바꿉니다. 준비나 전달이 실패하면 아무것도 바뀌지 않습니다.
 - 엔진이 `NeedsPrepared`를 내면(다시 연결한 출력의 배치가 바뀌는 등) 다시 준비하는 것도 감독자의 몫입니다. `Session`은 처음 받은 프로필밖에 모르므로 `EngineHandle::poll`에서는 그 알림을 넘기기만 합니다. 감독자는 실행 중인 엔진과 함께 지금 재생하는 프로필(띄운 프로필, 그 뒤 가져온 프로필, 그 뒤 받은 게인)을 쥐고, `tick`은 알림을 기억만 하며, 셸이 `needs_prepared`를 보고 `prepare_again`을 부릅니다. 큐가 차 있으면 준비한 출력을 보관하고 `PrepareRetry`를 내며, 다음 틱에는 준비 없이 전달만 다시 시도합니다. 전달되면 준비 결과의 방향으로 캐시를 갱신합니다. 프로필이 더는 준비되지 않으면(파일이 사라짐) 출력을 다시 세울 수 없으므로 엔진을 멈추고 역할을 되돌려 `Faulted`로 갑니다. 시험 방향은 캐시한 프로필의 방향 목록으로 검사합니다. 그 목록은 엔진에 마지막으로 넘긴 프로필의 것이고, 머리만 읽은 레이아웃이 준비한 레이아웃과 같으므로(ADR 0016의 2026-10-15 고침) 엔진이 큐에 든 마지막 `Prepared`로 하는 검사와 일치합니다. 진단 녹음은 구현 조각이 올 때까지 명시적으로 거부합니다.
 - 죽은 `SwitchProfile` 의도는 계약에서 없앴습니다. 프로필의 현재 값은 `Snapshot.profile`, 현재 출력 방향과 객체 지도는 `EngineStatus.directions`와 `EngineStatus.scene`이 유일한 근거입니다.
+
+## 2026-10-16 보탬 (두 출력 종류, ADR 0034)
+
+- `Settings.profile`은 출력 종류마다 설정을 따로 저장합니다.
+  - 쓰고 있는 종류 `kind`
+  - 헤드폰: BRIR 세트와 게인
+  - 스피커: 배치, SECS 2R 보정 파일, 게인
+
+  위 2026-10-15 보탬의 '헤드폰 FIR 경로'와 '기본 스테레오'는 없어졌습니다. 기본값은 FIR이 없는 스피커 2.0입니다. 이전 설정 파일은 다음과 같이 읽습니다.
+  - `brir`는 헤드폰 설정이 됩니다.
+  - `gain_db`는 그때 쓰던 종류(BRIR이 있으면 헤드폰)의 게인이 됩니다.
+  - `headphone_fir`는 버립니다.
+- 의도는 `SetProfileKind`, `ImportBrir`, `SetSpeakerLayout`, `ImportCorrection`, `ClearCorrection`입니다. `ImportHeadphoneFir`는 없앴습니다. 허용 위상은 `ImportBrir`와 같고, `profile.toml`이 있으면 다섯 다 거절합니다. 쓰고 있는 종류를 바꾸는 의도만 위의 실시간 교체 규칙(준비한 뒤 엔진이 받아야 저장)을 따릅니다. 쓰지 않는 종류의 설정은 검사한 뒤 저장만 합니다.
+- 스피커로 바꾸거나 쓰고 있는 스피커의 배치나 보정을 바꾸거나 스피커로 켤 때, 감독자는 `Host::supports_layout`으로 고른 출력 장치가 그 배치를 독점 모드로 받는지 묻습니다. 그래서 `Host` 포트에 이 질문 하나가 늘었습니다.

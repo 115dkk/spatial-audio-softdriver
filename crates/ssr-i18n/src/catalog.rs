@@ -180,11 +180,23 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "Stereo"]
-    pub fn default_profile_name(language: Language) -> &'static str {
+    #[doc = "보정 파일을 읽지 못했습니다: {detail}"]
+    pub fn correction_read_failed(language: Language, detail: impl core::fmt::Display) -> String {
         match language {
-            Language::Ko => "Stereo",
-            Language::En => "Default stereo",
+            Language::Ko => format!("보정 파일을 읽지 못했습니다: {detail}"),
+            Language::En => format!("The correction file could not be read: {detail}"),
+        }
+    }
+
+    #[doc = "고른 출력 장치가 독점 모드에서 보정 파일에 지정된 {channels}채널 출력을 지원하지 않습니다. 다른 출력 장치를 고르십시오."]
+    pub fn correction_unsupported(language: Language, channels: impl core::fmt::Display) -> String {
+        match language {
+            Language::Ko => format!(
+                "고른 출력 장치가 독점 모드에서 보정 파일에 지정된 {channels}채널 출력을 지원하지 않습니다. 다른 출력 장치를 고르십시오."
+            ),
+            Language::En => format!(
+                "The selected output device does not support the {channels}-channel output specified in the correction file in exclusive mode. Choose another output device."
+            ),
         }
     }
 
@@ -312,17 +324,6 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "헤드폰 FIR을 읽지 못했습니다: {detail}"]
-    pub fn headphone_fir_read_failed(
-        language: Language,
-        detail: impl core::fmt::Display,
-    ) -> String {
-        match language {
-            Language::Ko => format!("헤드폰 FIR을 읽지 못했습니다: {detail}"),
-            Language::En => format!("The headphone FIR could not be read: {detail}"),
-        }
-    }
-
     #[doc = "먼저 BRIR 세트를 가져오십시오."]
     pub fn import_brir_first(language: Language) -> &'static str {
         match language {
@@ -336,6 +337,22 @@ pub mod supervisor {
         match language {
             Language::Ko => "hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오.",
             Language::En => "Choose hesuvi.wav, hrir.wav, or a folder of per-direction WAV files.",
+        }
+    }
+
+    #[doc = "고른 출력 장치가 독점 모드에서 {layout} 배치({channels}채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오."]
+    pub fn layout_unsupported(
+        language: Language,
+        layout: impl core::fmt::Display,
+        channels: impl core::fmt::Display,
+    ) -> String {
+        match language {
+            Language::Ko => format!(
+                "고른 출력 장치가 독점 모드에서 {layout} 배치({channels}채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오."
+            ),
+            Language::En => format!(
+                "The selected output device does not support the {layout} layout ({channels} channels) in exclusive mode. Choose another layout or output device."
+            ),
         }
     }
 

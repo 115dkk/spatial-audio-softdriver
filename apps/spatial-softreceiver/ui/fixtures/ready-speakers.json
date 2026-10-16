@@ -1,0 +1,194 @@
+{
+  "language": "ko",
+  "language_choice": null,
+  "phase": {
+    "kind": "ready"
+  },
+  "profile": {
+    "kind": "speakers",
+    "name": "SECS 2 mixed (8.0 ms)",
+    "gain_db": -6.0,
+    "directions": [
+      {
+        "id": 0,
+        "name": "L",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "R",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 2,
+        "name": "C",
+        "azimuth_deg": 0.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 3,
+        "name": "Ls",
+        "azimuth_deg": 90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 4,
+        "name": "Rs",
+        "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "Lb",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "Rb",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 7,
+        "name": "Tfl",
+        "azimuth_deg": 45.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 8,
+        "name": "Tfr",
+        "azimuth_deg": -45.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 9,
+        "name": "Tbl",
+        "azimuth_deg": 135.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 10,
+        "name": "Tbr",
+        "azimuth_deg": -135.0,
+        "elevation_deg": 45.0
+      }
+    ],
+    "from_file": false,
+    "headphones": {
+      "brir": "C:\\Users\\me\\BRIR\\living-room"
+    },
+    "speakers": {
+      "layout": "7.1.4",
+      "correction": {
+        "path": "C:\\Users\\me\\Documents\\SECS_export\\2026-10-16 living room\\configs\\secs_mixed.yml",
+        "title": "SECS 2 mixed (8.0 ms)"
+      },
+      "channels": [
+        {
+          "name": "L",
+          "channel": 0,
+          "subwoofer": false
+        },
+        {
+          "name": "R",
+          "channel": 1,
+          "subwoofer": false
+        },
+        {
+          "name": "C",
+          "channel": 2,
+          "subwoofer": false
+        },
+        {
+          "name": "Ls",
+          "channel": 3,
+          "subwoofer": false
+        },
+        {
+          "name": "Rs",
+          "channel": 4,
+          "subwoofer": false
+        },
+        {
+          "name": "Lb",
+          "channel": 5,
+          "subwoofer": false
+        },
+        {
+          "name": "Rb",
+          "channel": 6,
+          "subwoofer": false
+        },
+        {
+          "name": "Tfl",
+          "channel": 7,
+          "subwoofer": false
+        },
+        {
+          "name": "Tfr",
+          "channel": 8,
+          "subwoofer": false
+        },
+        {
+          "name": "Tbl",
+          "channel": 9,
+          "subwoofer": false
+        },
+        {
+          "name": "Tbr",
+          "channel": 10,
+          "subwoofer": false
+        },
+        {
+          "name": "SW1",
+          "channel": 11,
+          "subwoofer": true
+        },
+        {
+          "name": "SW2",
+          "channel": 12,
+          "subwoofer": true
+        }
+      ]
+    }
+  },
+  "engine": null,
+  "outputs": [
+    {
+      "id": "{0.0.0.00000000}.{3f2504e0-4f89-11d3-9a0c-0305e82c3301}",
+      "name": "스피커 (Realtek(R) Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+      "name": "DENON AVR (NVIDIA High Definition Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d}",
+      "name": "헤드폰 (USB Audio DAC)"
+    }
+  ],
+  "chosen_output": {
+    "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+    "name": "DENON AVR (NVIDIA High Definition Audio)"
+  },
+  "driver": {
+    "kind": "installed",
+    "value": {
+      "problem_code": 0,
+      "service_running": true,
+      "exclusive_policy": "applied"
+    }
+  },
+  "platform": {
+    "os_build": 26100,
+    "arch": "x64",
+    "test_signing": true,
+    "secure_boot": "disabled"
+  },
+  "roles_taken": false,
+  "error": null,
+  "notes": []
+}

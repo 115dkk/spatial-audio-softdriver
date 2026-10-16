@@ -7,8 +7,6 @@
   "profile": {
     "kind": "headphones",
     "name": "거실 7.1.4 헤드폰",
-    "brir": "C:\\Users\\me\\BRIR\\living-room",
-    "headphone_fir": "C:\\Users\\me\\hd650.wav",
     "gain_db": -3.5,
     "directions": [
       {
@@ -78,7 +76,56 @@
         "elevation_deg": 45.0
       }
     ],
-    "from_file": false
+    "from_file": false,
+    "headphones": {
+      "brir": "C:\\Users\\me\\BRIR\\living-room"
+    },
+    "speakers": {
+      "layout": "7.1",
+      "correction": null,
+      "channels": [
+        {
+          "name": "L",
+          "channel": 0,
+          "subwoofer": false
+        },
+        {
+          "name": "R",
+          "channel": 1,
+          "subwoofer": false
+        },
+        {
+          "name": "C",
+          "channel": 2,
+          "subwoofer": false
+        },
+        {
+          "name": "LFE",
+          "channel": 3,
+          "subwoofer": true
+        },
+        {
+          "name": "Lrs",
+          "channel": 4,
+          "subwoofer": false
+        },
+        {
+          "name": "Rrs",
+          "channel": 5,
+          "subwoofer": false
+        },
+        {
+          "name": "Lss",
+          "channel": 6,
+          "subwoofer": false
+        },
+        {
+          "name": "Rss",
+          "channel": 7,
+          "subwoofer": false
+        }
+      ]
+    }
   },
   "engine": null,
   "outputs": [

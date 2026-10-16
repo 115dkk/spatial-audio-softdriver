@@ -134,7 +134,7 @@ describe('the mock speaks as the supervisor', () => {
     await expect(ready.dispatch({ kind: 'start_diagnostic_recording' })).rejects.toMatchObject({
       message: 'Diagnostic recording is coming in a later update.',
     });
-    await expect(ready.dispatch({ kind: 'import_headphone_fir', value: 'C:\\hd650.wav' })).rejects.toMatchObject({
+    await expect(ready.dispatch({ kind: 'set_profile_kind', value: 'headphones' })).rejects.toMatchObject({
       message: 'Import a BRIR set first.',
     });
     await expect(ready.dispatch({ kind: 'set_gain', value: 11 })).rejects.toMatchObject({
@@ -192,17 +192,18 @@ describe('the mock speaks as the supervisor', () => {
     expect((await api.snapshot()).error).toBeNull();
   });
 
-  it('follows the starting language for automatic and names the default stereo profile in it', async () => {
+  it('follows the starting language for automatic and names speakers by their layout or correction in any', async () => {
     const api = createMockApi(fixture('ready', 'en'));
-    expect((await api.snapshot()).profile.name).toBe('Default stereo');
+    expect((await api.snapshot()).profile.name).toBe('2.0');
     await api.dispatch({ kind: 'set_language', value: 'ko' });
     let snapshot = await api.snapshot();
     expect(snapshot).toMatchObject({ language: 'ko', language_choice: 'ko' });
-    expect(snapshot.profile.name).toBe('Stereo');
+    expect(snapshot.profile.name).toBe('2.0');
+    await api.dispatch({ kind: 'import_correction', value: 'C:\\SECS\\configs\\secs_mixed.yml' });
     await api.dispatch({ kind: 'set_language', value: null });
     snapshot = await api.snapshot();
     expect(snapshot).toMatchObject({ language: 'en', language_choice: null });
-    expect(snapshot.profile.name).toBe('Default stereo');
+    expect(snapshot.profile.name).toBe(fixture('ready-speakers', 'en').profile.name);
   });
 });
 

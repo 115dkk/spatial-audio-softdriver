@@ -49,6 +49,19 @@ export type ChainErrorMap = Partial<{ [key in string]: number }>
 export type ClockStatus = "trim" | "asrc"
 
 /**
+ * An imported SECS 2 / SECS 2R correction (ADR 0034).
+ */
+export type CorrectionView = {
+/**
+ * The CamillaDSP configuration file.
+ */
+path: string;
+/**
+ * The configuration's `title` (`"SECS 2 mixed (8.0 ms)"`).
+ */
+title: string }
+
+/**
  * The operating system's identifier of a render endpoint (the `IMMDevice`
  * id). It can change across reboots; the supervisor keeps the name as a
  * fallback.
@@ -207,13 +220,47 @@ dropped_events: number; clock: ClockStatus;
  */
 clock_ppm: number; fault: EngineFault | null }
 
+export type HeadphonesView = {
+/**
+ * Imported BRIR set (folder, hesuvi.wav, or hrir.wav).
+ */
+brir: string | null }
+
 export type Intent = { kind: "set_language"; value: Language | null } | { kind: "begin_setup" } | { kind: "install_driver" } |
 /**
  * Looks at the PC again after the user did something outside the app
  * (a reboot, test signing, a repair, a device plugged in at the output
  * step), or leaves the faulted state.
  */
-{ kind: "recheck" } | { kind: "choose_output"; value: DeviceId } | { kind: "import_brir"; value: string } | { kind: "import_headphone_fir"; value: string } | { kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
+{ kind: "recheck" } | { kind: "choose_output"; value: DeviceId } |
+/**
+ * Switches the output between headphones and speakers (ADR 0034).
+ * Headphones need an imported BRIR set.
+ */
+{ kind: "set_profile_kind"; value: ProfileKind } |
+/**
+ * Keeps the BRIR set for headphones; a running headphone output takes
+ * it live, while speakers in use stay as they are.
+ */
+{ kind: "import_brir"; value: string } |
+/**
+ * The layout speakers use while no correction is imported.
+ */
+{ kind: "set_speaker_layout"; value: SpeakerLayout } |
+/**
+ * Imports a room correction for the speakers: the CamillaDSP
+ * configuration SECS 2 or SECS 2R exports (ADR 0034). It decides the
+ * speakers, the device channels and all their processing.
+ */
+{ kind: "import_correction"; value: string } |
+/**
+ * Goes back to the stored speaker layout without correction.
+ */
+{ kind: "clear_correction" } |
+/**
+ * The gain of the output in use; each kind keeps its own.
+ */
+{ kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
 
 export type Language = "ko" | "en"
 
@@ -293,17 +340,52 @@ export type PolicyState =
  */
 "unknown"
 
-export type ProfileKind = "stereo" | "headphones" | "speakers"
+/**
+ * The two outputs a profile offers. One is in use at a time and each keeps
+ * its own settings, so switching back finds them as they were (ADR 0034).
+ */
+export type ProfileKind =
+/**
+ * Binaural over headphones through the imported BRIR set.
+ */
+"headphones" |
+/**
+ * The listener's speakers, each with an optional room-correction FIR.
+ */
+"speakers"
 
-export type ProfileView = { kind: ProfileKind; name: string;
+export type ProfileView = {
 /**
- * Imported BRIR set (folder, hesuvi.wav, or hrir.wav).
+ * The output in use: the one Enable starts, or the running engine plays.
  */
-brir: string | null; headphone_fir: string | null; gain_db: number; directions: DirectionView[];
+kind: ProfileKind;
 /**
- * The state directory's profile.toml takes precedence over import intents.
+ * The output in use by name: the BRIR set, the speaker layout (`"7.1.4"`),
+ * the imported correction's title, or the name `profile.toml` gives.
  */
-from_file: boolean }
+name: string;
+/**
+ * The gain of the output in use.
+ */
+gain_db: number;
+/**
+ * The directions of the output in use: the BRIR set's, or the speakers'
+ * (the subwoofer is not a direction).
+ */
+directions: DirectionView[];
+/**
+ * The state directory's profile.toml decides the output; the kind,
+ * import, layout and correction intents are refused.
+ */
+from_file: boolean;
+/**
+ * Headphone settings, kept while speakers are in use.
+ */
+headphones: HeadphonesView;
+/**
+ * Speaker settings, kept while headphones are in use.
+ */
+speakers: SpeakersView }
 
 /**
  * How PCM samples are stored.
@@ -375,6 +457,40 @@ error: UserError | null;
 notes: string[] }
 
 export type SourceFormat = { kind: "pcm"; value: PcmFormat } | { kind: "bitstream"; value: BitstreamFormat }
+
+export type SpeakerChannelView = {
+/**
+ * The speaker on this channel (`"L"`, `"Tfl"`), `"LFE"` for the layout's
+ * subwoofer, or the correction's output name (`"Lb"`, `"SW2"`).
+ */
+name: string;
+/**
+ * Zero-based device channel.
+ */
+channel: number; subwoofer: boolean }
+
+/**
+ * The speaker layouts the app offers: standard layouts with a Windows
+ * channel mask (ADR 0034). Any other layout takes a `profile.toml`
+ * (ADR 0030). The serialized form is the layout's name.
+ */
+export type SpeakerLayout = "2.0" | "2.1" | "4.0" | "5.1" | "7.1" | "5.1.2" | "5.1.4" | "7.1.2" | "7.1.4"
+
+export type SpeakersView = {
+/**
+ * The stored app layout, used while no correction is imported; `None`
+ * when a speaker `profile.toml` lays the speakers out its own way.
+ */
+layout: SpeakerLayout | null;
+/**
+ * The imported correction, which then decides the speakers.
+ */
+correction: CorrectionView | null;
+/**
+ * Every device channel that plays, in device order: the correction's
+ * outputs when one is imported, else the layout's speakers.
+ */
+channels: SpeakerChannelView[] }
 
 /**
  * What the output saw in the period that last found the crossing ring short,

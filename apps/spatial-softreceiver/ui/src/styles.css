@@ -1058,20 +1058,179 @@ input[type="checkbox"] {
   }
 }
 
-.profile-kind {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-}
-
 .path {
   overflow-wrap: anywhere;
   word-break: break-all;
 }
 
-.panel-note {
-  margin-top: 10px;
+/* The output panel: one tab per output kind, the kind in use badged, and
+   the open tab's settings ending in its footer (the switch, or the line
+   that says this kind is in use). */
+.output-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.output-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  margin-bottom: -1px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-control) var(--radius-control) 0 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.output-tab:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.output-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.output-tab:focus-visible {
+  outline-offset: -2px;
+}
+
+.in-use {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--size-xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.in-use::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.output-panel {
+  padding-top: 16px;
+}
+
+.output-panel:focus-visible {
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
+.facts.tab-facts {
+  margin: 0 0 12px;
+}
+
+.tab-section + .tab-section,
+.layout-field + .tab-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.tab-section-title {
+  margin-bottom: 6px;
+  font-size: var(--size-m);
+  font-weight: 600;
+}
+
+.tab-section .facts.tab-facts {
+  margin: 12px 0 0;
+}
+
+.tab-section .actions {
+  margin-top: 12px;
+}
+
+.tab-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.tab-footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.in-use-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.in-use-line .lamp {
+  background: var(--accent);
+}
+
+/* What each device channel plays: a short read-only table, as narrow as
+   its names, so even a 13-channel correction stays compact. */
+.channel-table {
+  width: 100%;
+  max-width: 320px;
+  margin-top: 8px;
+  border-collapse: collapse;
+  font-size: var(--size-s);
+}
+
+.channel-table th,
+.channel-table td {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+  font-weight: 400;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.channel-table thead th {
+  padding-top: 0;
+  color: var(--text-muted);
+  font-size: var(--size-xs);
+  font-weight: 500;
+}
+
+/* Numbers right-aligned under their right-aligned header. */
+.channel-table .channel-number {
+  width: 5.5em;
+  padding-right: 24px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.channel-table tbody .channel-name {
+  font-weight: 500;
+}
+
+/* The tag sits in the row's line, so a subwoofer row is as tall as the rest. */
+.channel-name .tag {
+  margin-left: 8px;
+  padding-block: 0;
+  line-height: 1.5;
 }
 
 .file-note {
@@ -1084,20 +1243,22 @@ input[type="checkbox"] {
   font-weight: 500;
 }
 
-.import + .import {
-  margin-top: 18px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
+.file-note-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  margin-bottom: 4px;
 }
 
-.import-title {
-  margin-bottom: 6px;
-  font-size: var(--size-m);
+.file-note .tag {
+  background: var(--surface);
+  color: var(--warning);
+}
+
+.file-note-name {
+  color: var(--text);
   font-weight: 600;
-}
-
-.import .actions {
-  margin-top: 12px;
 }
 
 .import-hint {

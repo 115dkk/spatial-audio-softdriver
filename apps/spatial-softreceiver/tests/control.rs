@@ -331,15 +331,22 @@ fn a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard() {
     bridge.dispatch(Intent::Enable).expect("the engine starts");
     assert_eq!(bridge.snapshot().phase, Phase::Running);
 
-    // The import may prepare for longer than the guard's stall limit: it is
-    // announced as not Running, and Running is said again right after, whether
-    // it succeeded or (as here, a file that is no BRIR set) failed.
-    for intent in [
-        Intent::ImportBrir("not-a-set.wav".into()),
-        Intent::ImportHeadphoneFir("absent.wav".into()),
+    // A profile change may prepare for longer than the guard's stall limit: it
+    // is announced as not Running, and Running is said again right after,
+    // whether it succeeds or (as with the invalid BRIR path) fails.
+    for (intent, succeeds) in [
+        (Intent::ImportBrir("not-a-set.wav".into()), false),
+        (
+            Intent::SetSpeakerLayout(ssr_types::app::SpeakerLayout::Surround51),
+            true,
+        ),
+        (
+            Intent::ImportCorrection("not-a-correction.yml".into()),
+            false,
+        ),
     ] {
         let before = recorder.heartbeats().len();
-        assert!(bridge.dispatch(intent).is_err());
+        assert_eq!(bridge.dispatch(intent).is_ok(), succeeds);
         let heartbeats = recorder.heartbeats();
         assert_eq!(heartbeats.len(), before + 2, "{heartbeats:?}");
         assert!(!heartbeats[before].running);

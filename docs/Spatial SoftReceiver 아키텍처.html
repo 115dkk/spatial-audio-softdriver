@@ -295,7 +295,7 @@ footer.sources ul { padding-left: 1.2em; }
           <dt>클럭 도메인</dt><dd>가상 장치의 클럭(소스 쪽)과 출력 장치의 클럭(DAC 쪽)입니다. 둘은 수백 ppm까지 어긋납니다.</dd>
           <dt>교차 링</dt><dd>두 클럭 도메인이 만나는 링입니다. 출력단 뒤에 있으므로 채널 수는 출력과 같습니다(헤드폰 2, 스피커는 스피커 수). 이 링의 수위가 지연과 클럭 보정의 기준입니다.</dd>
           <dt>트림</dt><dd>드라이버의 가상 DMA 속도를 ppm 단위로 조정하는 일입니다. 소스의 생산 속도를 DAC에 맞춥니다.</dd>
-          <dt>프로필</dt><dd>출력 하나를 정하는 설정입니다. 헤드폰 프로필은 BRIR 세트, 헤드폰 FIR, 게인을, 스피커 프로필은 스피커의 위치와 장치 채널, 저음 관리, 정렬, 룸 보정 FIR을 묶습니다. 출력 장치 선택자와 리미터는 둘에 같습니다.</dd>
+          <dt>프로필</dt><dd>출력 하나를 정하는 설정입니다. 헤드폰 프로필은 BRIR 세트와 게인을, 스피커 프로필은 스피커의 위치와 장치 채널, 저음 관리, 정렬, 룸 보정 FIR을 묶습니다. 헤드폰 보정은 BRIR에 들어 있으므로 따로 받지 않습니다(ADR 0034). 앱은 두 종류의 설정을 함께 저장하고 그 가운데 하나를 씁니다. 출력 장치 선택자와 리미터는 둘에 같습니다.</dd>
           <dt>출력 종류</dt><dd>헤드폰(BRIR로 양이 2채널)과 스피커(실제 스피커로 N채널) 가운데 하나입니다. 디코드와 믹서는 같이 쓰고 출력단만 다릅니다(ADR 0030).</dd>
           <dt>저음 관리</dt><dd>스피커 출력에서 크로스오버 아래의 저역과 LFE를 서브우퍼(없으면 정한 전대역 스피커)로 보내는 일입니다. AV 리시버의 같은 기능에 해당합니다.</dd>
           <dt>정렬</dt><dd>스피커 출력에서 스피커마다 거리에 맞춰 지연과 레벨을 거는 일입니다. 가장 먼 스피커에 맞춰 가까운 스피커를 늦춥니다.</dd>
@@ -528,7 +528,7 @@ footer.sources ul { padding-left: 1.2em; }
             <dt>해결</dt>
             <dd><code>brir::prepare</code>가 헤드폰 FIR을 각 BRIR에 미리 접습니다. 둘 다 선형 시불변이라 결과가 같습니다. 레이아웃에 없는 위치는 <code>render</code>의 VBAP가 이웃 방향에 나누므로 무음 채널이 필요 없고, LFE에 어떤 IR을 쓸지는 프로필의 정책으로 둡니다.</dd>
             <dt>얻는 것</dt>
-            <dd>실시간 연산에서 FIR 단계 하나가 빠지고, BRIR 세트에 관한 지식이 <code>brir</code> 한 곳에 모입니다. 천장 중앙에 놓인 객체도 소리를 잃지 않습니다. 게인과 리미터의 순서(+36 dB 뒤 −1 dBFS 리미터)는 그대로 지켜야 하므로 엔진의 마지막 단계에 남깁니다.</dd>
+            <dd>(2026-10-16: 헤드폰 FIR 접기는 ADR 0034가 거두었습니다. 헤드폰 보정은 BRIR을 만들 때 이미 들어갑니다.) 실시간 연산에서 FIR 단계 하나가 빠지고, BRIR 세트에 관한 지식이 <code>brir</code> 한 곳에 모입니다. 천장 중앙에 놓인 객체도 소리를 잃지 않습니다. 게인과 리미터의 순서(+36 dB 뒤 −1 dBFS 리미터)는 그대로 지켜야 하므로 엔진의 마지막 단계에 남깁니다.</dd>
           </dl>
           <div class="ba">
             <figure><figcaption>지금</figcaption>
@@ -559,7 +559,7 @@ footer.sources ul { padding-left: 1.2em; }
 │  ├─ decode/           MAT(클린룸) · DD+ JOC(eac3) · TrueHD(truehd) · PCM → SceneBlock
 │  ├─ render/           SceneBlock → 방향 피드 (VBAP, LFE)
 │  ├─ convolver/        피드 → 양이 신호 (주파수 영역 누적)     Copyright 2026 115dkk, MIT
-│  ├─ brir/             프로필 → PreparedBrir (레이아웃, 헤드폰 FIR 접기, 분할 스펙트럼)
+│  ├─ brir/             프로필 → PreparedBrir (레이아웃, LFE 정책, 앞 지연 자르기, 분할 스펙트럼)
 │  ├─ speakers/         스피커 프로필 → PreparedSpeakers (배치, 장치 채널, 저음 관리, 정렬, 룸 FIR)
 │  ├─ engine/           실시간 스레드, 시간선 믹서, 출력단(헤드폰·스피커), 교차 링, 클럭 전략, 지연 계측
 │  ├─ supervisor/       상태기계, 프로필 저장, 장치 선택자
@@ -717,7 +717,8 @@ pub trait OutputSink {
     <h3 style="margin-top:26px">supervisor와 화면 사이</h3>
     <pre class="code">pub enum Intent {
     BeginSetup, InstallDriver, ChooseOutput(DeviceSelector),
-    ImportBrir(PathBuf), ImportHeadphoneFir(PathBuf), SwitchProfile(ProfileId),
+    SetProfileKind(ProfileKind), ImportBrir(PathBuf),            // ADR 0034: 헤드폰 | 스피커
+    SetSpeakerLayout(SpeakerLayout), ImportCorrection(PathBuf), ClearCorrection,   // SECS 2R 보정
     SetGain(f32), TestDirection(DirectionId), Enable, Disable, StartDiagnosticRecording, Quit,
 }
 

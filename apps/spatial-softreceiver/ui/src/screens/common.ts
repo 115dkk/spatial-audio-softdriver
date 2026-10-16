@@ -1,7 +1,7 @@
 // What every screen gets from the app, and the pieces they share.
 
 import type { Shell, UpdateState } from '../api';
-import type { EngineStatus, Intent, Snapshot, UserError } from '../bindings';
+import type { EngineStatus, Intent, ProfileKind, Snapshot, UserError } from '../bindings';
 import { type Child, h } from '../dom';
 
 export type Tab = 'status' | 'profile' | 'settings';
@@ -11,6 +11,12 @@ export interface ViewState {
   tab: Tab;
   /** The output list under the status header is open. */
   outputsOpen: boolean;
+  /**
+   * The output kind whose settings the profile screen shows. `null` follows
+   * `snapshot.profile.kind`, so a reopened window shows the kind in use.
+   * Opening a tab sends nothing.
+   */
+  profileTab: ProfileKind | null;
   /** The error sentence the user closed; shown again once it changes. */
   dismissed: string | null;
   /**

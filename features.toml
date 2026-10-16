@@ -314,17 +314,15 @@ tests = [
   "brir::layout_reads_headers_only",
   "brir::layout_rejects_what_prepare_rejects_from_headers",
   "brir::directions_profile_keeps_file_order_and_angles",
-  "brir::headphone_fir_folding_equals_filtering_the_binaural_output",
-  "brir::fft_convolution_matches_direct_reference",
-  "brir::mono_headphone_fir_applies_to_both_ears",
   "brir::resampling_preserves_impulse_time_and_response_gain",
   "brir::common_leading_delay_is_trimmed_without_changing_relative_delays",
   "brir::leading_delay_before_margin_is_not_trimmed",
   "brir::profile_toml_resolves_paths_defaults_lfe_and_parses_route",
+  "brir::profile_toml_rejects_headphone_fir",
   "brir::bad_track_count_and_unknown_lfe_direction_are_errors",
   "brir::gains_and_lfe_route_become_linear",
 ]
-note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs; all loaders keep every declared direction, silent ones included, so the header-only brir::layout equals prepare's layout (ADR 0016, 2026-10-15 amendment); headphone FIR folded by one-shot FFT convolution at load (ADR 0016); rubato resampling with delay compensation; common leading delay trimmed to a 1 ms margin by default; no level normalisation"
+note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs; all loaders keep every declared direction, silent ones included, so the header-only brir::layout equals prepare's layout (ADR 0016, 2026-10-15 amendment); headphone correction belongs in the BRIR set (ADR 0034); rubato resampling with delay compensation; common leading delay trimmed to a 1 ms margin by default; no level normalisation"
 
 [[feature]]
 id = "brir.finding_bural_sets"
@@ -344,7 +342,6 @@ tests = [
   "brir::truncation_cuts_all_tracks_fades_and_preserves_the_start",
   "brir::invalid_truncation_parameters_are_rejected",
   "brir::angle_override_beats_preset_and_unknown_without_override_errors",
-  "brir::raw_measurement_named_as_headphone_file_is_rejected",
   "brir::profile_toml_loads_mapped_folder_angles_overrides_and_truncation",
   "brir::profile_toml_enforces_exactly_one_source_and_mapped_pair",
 ]
@@ -1169,6 +1166,30 @@ tests = [
 note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional one-output mono room FIR (subwoofers included, without a discarded second-ear FFT), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). ssr-live and ssr-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
 
 [[feature]]
+id = "output.secs_correction"
+kind = "pipeline"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "correction::allpass_and_peaking_match_closed_form_at_three_rates",
+  "correction::crossover_passbands_stopbands_and_processed_sines_match_transfer_function",
+  "correction::peaking_band_edges_and_allpass_phase_match_rbj",
+  "correction::input_metadata_defaults_linear_gain_and_filter_channels_are_supported",
+  "correction::standard_and_multi_sub_output_names_and_masks_follow_final_route_out",
+  "correction::route_out_names_only_identity_destinations_and_follows_reordering",
+  "correction::role_angle_table_and_surround_back_condition_are_complete",
+  "correction::resource_numerical_tail_and_nonfinite_limits_are_enforced",
+  "correction::synthetic_peq_fir_split_bus_allpass_delay_chain_matches_reference",
+  "correction::mimo_convolver_uses_share_fir_data_but_keep_independent_state",
+  "correction::flow_and_block_yaml_are_equivalent",
+  "correction::every_processing_variant_and_live_tail_do_not_allocate",
+  "engine::file_backed_correction_routes_impulse_and_test_tone",
+  "engine::correction_stage_routes_lfe_and_applies_profile_gain_before_limiter",
+  "engine::steady_state_correction_output_does_not_allocate",
+]
+note = "ADR 0034: the MIT correction crate reads the documented CamillaDSP v4 subset exported by SECS 2/2R, skips route_in, runs the final route_out and intervening filters and mixers with bounded, preallocated per-run state, f64 biquads and the shared partitioned convolver, and derives renderer directions and device masks from declared SECS output names. It accepts dB and linear gain plus documented channel/delay defaults, rejects oversized or non-finite graphs before processing, resets poisoned state without allocation, and exposes a bounded tail for engine finish. The engine feeds its speaker bed and LFE into this graph, then retains the profile gain and linked limiter."
+
+[[feature]]
 id = "app.shell"
 kind = "app"
 milestone = "M4"
@@ -1203,7 +1224,6 @@ tests = [
   "supervisor::every_message_renders_nonempty_and_distinct_in_both_languages",
   "supervisor::language_defaults_overrides_resets_and_rerenders_errors_in_every_phase",
   "supervisor::default_language_and_failed_profile_errors_follow_language_changes",
-  "supervisor::default_profile_name_follows_the_language_through_enable_and_gain",
   "ssr-types::typescript_bindings_match_the_types",
   "ssr-types::snapshot_fixtures_match_the_types",
   "supervisor::every_fixture_sentence_is_the_supervisors",
@@ -1249,15 +1269,30 @@ kind = "app"
 milestone = "M4"
 status = "implemented"
 tests = [
-  "supervisor::profile_intents_apply_persist_and_reject_by_phase",
+  "supervisor::profile_kinds_switch_live_and_keep_each_kinds_settings",
+  "supervisor::headphones_need_a_brir_set",
+  "supervisor::import_brir_while_speakers_play_only_stores_it",
+  "supervisor::speaker_layout_applies_live_only_to_the_kind_in_use",
+  "supervisor::import_correction_while_headphones_play_only_stores_it",
+  "supervisor::import_correction_while_speakers_play_applies_live",
+  "supervisor::clear_correction_returns_to_the_stored_layout_live",
+  "supervisor::an_unreadable_correction_is_refused_and_changes_nothing",
+  "supervisor::the_device_must_accept_the_correction_channels",
+  "supervisor::layout_changes_under_a_correction_are_stored_only",
+  "supervisor::the_correction_survives_a_restart_and_a_missing_file_becomes_a_note",
+  "supervisor::the_device_must_accept_the_speaker_layout",
+  "supervisor::each_kind_keeps_its_own_gain",
+  "supervisor::settings_from_before_kinds_migrate",
+  "supervisor::profile_file_refuses_correction_intents",
+  "supervisor::live_profile_changes_are_all_or_nothing",
   "supervisor::old_settings_without_profile_use_defaults",
-  "supervisor::live_changes_are_all_or_nothing",
   "supervisor::needs_prepared_rebuilds_the_profile_the_engine_plays_now",
   "supervisor::a_reprepare_is_built_once_retried_and_refreshes_the_direction_cache",
   "supervisor::watching_profile_file_presence_unlocks_and_relocks_imports",
   "spatial-softreceiver::a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard",
   "spatial-softreceiver::a_reprepare_after_needs_prepared_is_bracketed_by_heartbeats_for_the_guard",
 ]
+note = "Two independent output kinds: headphones keep an imported BRIR and speakers keep a standard layout or imported SECS 2/2R correction; each keeps its own gain and active changes are handed to the engine atomically (ADR 0034)."
 
 [[feature]]
 id = "engine.live_gain_and_test_tone"

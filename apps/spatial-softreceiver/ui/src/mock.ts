@@ -8,6 +8,7 @@
 import type { Api, Shell, Unlisten, UpdateState } from './api';
 import type {
   Arch,
+  CorrectionView,
   DirectionView,
   DriverState,
   EngineStatus,
@@ -16,10 +17,13 @@ import type {
   NextAction,
   OutputChoice,
   Platform,
+  ProfileKind,
   ProfileView,
   SceneObject,
   SecureBoot,
   Snapshot,
+  SpeakerChannelView,
+  SpeakerLayout,
   UserError,
 } from './bindings';
 import { en as catalogEn, ko as catalogKo } from './catalog';
@@ -96,8 +100,8 @@ const say = {
   outputIdChanged: (name: string): Message =>
     message(catalogKo.supervisor.output_id_changed(name), catalogEn.supervisor.output_id_changed(name)),
   importBrirFirst: message(catalogKo.supervisor.import_brir_first, catalogEn.supervisor.import_brir_first),
-  headphoneFirReadFailed: (detail: string): Message =>
-    message(catalogKo.supervisor.headphone_fir_read_failed(detail), catalogEn.supervisor.headphone_fir_read_failed(detail)),
+  correctionReadFailed: (detail: string): Message =>
+    message(catalogKo.supervisor.correction_read_failed(detail), catalogEn.supervisor.correction_read_failed(detail)),
   gainOutOfRange: message(catalogKo.supervisor.gain_out_of_range, catalogEn.supervisor.gain_out_of_range),
   directionMissing: message(catalogKo.supervisor.direction_missing, catalogEn.supervisor.direction_missing),
   storedOutputMissing: (name: string): Message =>
@@ -112,7 +116,6 @@ const say = {
     minBuild === 19041
       ? message(catalogKo.supervisor.os_requirement_19041, catalogEn.supervisor.os_requirement_19041)
       : message(catalogKo.supervisor.os_requirement(minBuild), catalogEn.supervisor.os_requirement(minBuild)),
-  defaultProfileName: message(catalogKo.supervisor.default_profile_name, catalogEn.supervisor.default_profile_name),
 } as const;
 
 /**
@@ -165,9 +168,11 @@ const GOOD_DRIVER: DriverState = {
 };
 
 const pickFolder: Shell['pickFolder'] = async () => 'C:\\Users\\me\\BRIR\\living-room';
-// The BRIR picker asks for hesuvi.wav or hrir.wav; the other for an FIR.
+// The BRIR picker asks for hesuvi.wav or hrir.wav; the other for a SECS correction.
 const pickFile: Shell['pickFile'] = async (_title, filter) =>
-  filter.name === text.profile.brirFilter ? 'C:\\Users\\me\\BRIR\\studio\\hesuvi.wav' : 'C:\\Users\\me\\hd650.wav';
+  filter.name === text.profile.brirFilter
+    ? 'C:\\Users\\me\\BRIR\\studio\\hesuvi.wav'
+    : 'C:\\Users\\me\\Documents\\SECS_export\\study\\configs\\secs_mixed.yml';
 
 /** A plain browser's shell: no autostart, no updater. */
 const browserShell: Shell = {
@@ -204,12 +209,73 @@ function standInShell(given: GalleryShell): Shell {
 const GAIN_MIN_DB = -20;
 const GAIN_MAX_DB = 10;
 
-/** What the supervisor keeps in Settings.profile. */
-interface ProfileSettings {
-  brir: string | null;
-  headphoneFir: string | null;
-  gainDb: number | null;
+/**
+ * `SpeakerLayout::speakers()` in crates/ssr-types/src/app.rs: each app layout's
+ * speakers in device-channel order, by `Speaker::name()`. `LFE` is the
+ * subwoofer. test/layouts.test.ts holds this to the Rust source.
+ */
+export const LAYOUT_SPEAKERS: Readonly<Record<SpeakerLayout, readonly string[]>> = {
+  '2.0': ['L', 'R'],
+  '2.1': ['L', 'R', 'LFE'],
+  '4.0': ['L', 'R', 'Ls', 'Rs'],
+  '5.1': ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'],
+  '7.1': ['L', 'R', 'C', 'LFE', 'Lrs', 'Rrs', 'Lss', 'Rss'],
+  '5.1.2': ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Tfl', 'Tfr'],
+  '5.1.4': ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Tfl', 'Tfr', 'Trl', 'Trr'],
+  '7.1.2': ['L', 'R', 'C', 'LFE', 'Lrs', 'Rrs', 'Lss', 'Rss', 'Tfl', 'Tfr'],
+  '7.1.4': ['L', 'R', 'C', 'LFE', 'Lrs', 'Rrs', 'Lss', 'Rss', 'Tfl', 'Tfr', 'Trl', 'Trr'],
+};
+
+/** The subwoofer's name; it is no direction (`Speaker::angles()` is None). */
+const SUBWOOFER = 'LFE';
+
+/**
+ * `Speaker::angles()` in crates/ssr-types/src/position.rs for the speakers the
+ * layouts use: nominal azimuth (positive left) and elevation, in degrees.
+ */
+export const SPEAKER_ANGLES: Readonly<Record<string, readonly [azimuth: number, elevation: number]>> = {
+  L: [30, 0],
+  R: [-30, 0],
+  C: [0, 0],
+  Ls: [110, 0],
+  Rs: [-110, 0],
+  Lrs: [150, 0],
+  Rrs: [-150, 0],
+  Lss: [90, 0],
+  Rss: [-90, 0],
+  Tfl: [45, 45],
+  Tfr: [-45, 45],
+  Trl: [135, 45],
+  Trr: [-135, 45],
+};
+
+/** The layout's device channels: one speaker each, in mask order. */
+export function speakerChannels(layout: SpeakerLayout): SpeakerChannelView[] {
+  return LAYOUT_SPEAKERS[layout].map((name, channel) => ({ name, channel, subwoofer: name === SUBWOOFER }));
 }
+
+/** The layout's directions: every speaker but the subwoofer, in channel order. */
+export function speakerDirections(layout: SpeakerLayout): DirectionView[] {
+  return LAYOUT_SPEAKERS[layout]
+    .filter((name) => name !== SUBWOOFER)
+    .map((name, id) => {
+      const [azimuth, elevation] = SPEAKER_ANGLES[name] ?? [0, 0];
+      return { id, name, azimuth_deg: azimuth, elevation_deg: elevation };
+    });
+}
+
+/** What the supervisor keeps in Settings.profile: each kind's own settings (ADR 0034). */
+interface ProfileSettings {
+  kind: ProfileKind;
+  brir: string | null;
+  /** The layout speakers use while no correction is imported. */
+  layout: SpeakerLayout;
+  correction: CorrectionView | null;
+  gainDb: Record<ProfileKind, number | null>;
+}
+
+/** A file name the mock takes for a CamillaDSP configuration. */
+const isYaml = (path: string) => /\.ya?ml$/i.test(path);
 
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
@@ -244,11 +310,22 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
   const engineTemplate: EngineStatus = start.engine ?? (borrowed('running').engine as EngineStatus);
   // The scene the meters move around the listener, from the fixture.
   const sceneTemplate: SceneObject[] = structuredClone(engineTemplate.scene);
+  const firstProfile = start.profile;
   const settings: ProfileSettings = {
-    brir: start.profile.from_file ? null : start.profile.brir,
-    headphoneFir: start.profile.from_file ? null : start.profile.headphone_fir,
-    gainDb: start.profile.gain_db,
+    kind: firstProfile.kind,
+    brir: firstProfile.headphones.brir,
+    layout: firstProfile.speakers.layout ?? '2.0',
+    correction: firstProfile.speakers.correction,
+    gainDb: {
+      headphones: firstProfile.kind === 'headphones' ? firstProfile.gain_db : null,
+      speakers: firstProfile.kind === 'speakers' ? firstProfile.gain_db : null,
+    },
   };
+  // The name the starting snapshot gives its BRIR set, kept while that set stays.
+  const brirNames = new Map<string, string>();
+  if (firstProfile.kind === 'headphones' && firstProfile.headphones.brir !== null && !firstProfile.from_file) {
+    brirNames.set(firstProfile.headphones.brir, firstProfile.name);
+  }
   // The kept error and the notes as Messages, so a language change renders
   // them again as the supervisor does (machine.rs re-renders its kept error
   // and its notes). The fixture's own sentences start them.
@@ -321,55 +398,106 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
     return borrowed('running').profile.directions;
   }
 
-  /** What resolve() in machine.rs makes of the settings (no profile.toml). */
-  function resolveProfile(next: ProfileSettings): ProfileView {
-    if (next.brir === null) {
-      return {
-        kind: 'stereo',
-        name: say.defaultProfileName[state.language],
-        brir: null,
-        headphone_fir: null,
-        gain_db: next.gainDb ?? 0,
-        directions: borrowed('ready').profile.directions,
-        from_file: false,
-      };
-    }
-    return {
-      kind: 'headphones',
-      name: brirName(next.brir),
-      brir: next.brir,
-      headphone_fir: next.headphoneFir,
-      gain_db: next.gainDb ?? 0,
-      directions: brirDirections(),
-      from_file: false,
-    };
+  /**
+   * What an imported correction reads as. The mock cannot read the YAML, so
+   * every file reads as the SECS export of the ready-speakers fixture: its
+   * title, its inputs as directions and its outputs as device channels.
+   */
+  function correctionShape(): { title: string; channels: SpeakerChannelView[]; directions: DirectionView[] } {
+    const { name, directions, speakers } = borrowed('ready-speakers').profile;
+    return { title: speakers.correction?.title ?? name, channels: speakers.channels, directions };
   }
 
-  /** change_profile: a running engine takes the new layout with it. */
-  function changeProfile(next: ProfileSettings): Outcome {
-    Object.assign(settings, next);
-    state.profile = resolveProfile(settings);
+  /**
+   * What resolve() in machine.rs makes of the settings (no profile.toml): the
+   * kind in use names the profile, its gain and its directions, and both
+   * kinds' settings are in the snapshot. A correction decides the speakers;
+   * without one the stored layout does.
+   */
+  function resolveProfile(): ProfileView {
+    const correction = settings.correction === null ? null : correctionShape();
+    const shared = {
+      gain_db: settings.gainDb[settings.kind] ?? 0,
+      from_file: false,
+      headphones: { brir: settings.brir },
+      speakers: {
+        layout: settings.layout,
+        correction: settings.correction,
+        channels: correction?.channels ?? speakerChannels(settings.layout),
+      },
+    };
+    if (settings.kind === 'headphones') {
+      // set_profile_kind keeps headphones from being chosen without a set.
+      const brir = settings.brir ?? '';
+      return { kind: 'headphones', name: brirNames.get(brir) ?? brirName(brir), directions: brirDirections(), ...shared };
+    }
+    if (settings.correction !== null && correction !== null) {
+      return { kind: 'speakers', name: settings.correction.title, directions: correction.directions, ...shared };
+    }
+    return { kind: 'speakers', name: settings.layout, directions: speakerDirections(settings.layout), ...shared };
+  }
+
+  /**
+   * The snapshot after a settings change. A change to the kind in use goes
+   * live (a running engine takes the new layout); a change to the other kind
+   * is only kept, so the engine's directions stay as they are.
+   */
+  function changeProfile(): Outcome {
+    state.profile = resolveProfile();
     if (state.engine !== null) state.engine.directions = structuredClone(state.profile.directions);
     return done;
   }
 
+  /** profile.toml decides the output: no kind, BRIR, layout or correction intent is taken. */
+  const fileWins = (): Outcome | null =>
+    state.profile.from_file ? failed(say.profileFileTakesPrecedence, 'none') : null;
+
+  function setProfileKind(kind: ProfileKind): Outcome {
+    const refusal = fileWins();
+    if (refusal !== null) return refusal;
+    if (kind === 'headphones' && settings.brir === null) return failed(say.importBrirFirst, 'none');
+    settings.kind = kind;
+    return changeProfile();
+  }
+
+  /** Keeps the set for headphones; it never switches the kind. */
   function importBrir(path: string): Outcome {
-    if (state.profile.from_file) return failed(say.profileFileTakesPrecedence, 'none');
+    const refusal = fileWins();
+    if (refusal !== null) return refusal;
     if (brirSource(path) === null) return failed(say.invalidBrirSource, 'none');
-    return changeProfile({ ...settings, brir: path });
+    settings.brir = path;
+    return changeProfile();
   }
 
-  function importHeadphoneFir(path: string): Outcome {
-    if (state.profile.from_file) return failed(say.profileFileTakesPrecedence, 'none');
-    if (settings.brir === null) return failed(say.importBrirFirst, 'none');
-    // The detail is the brir crate's; the mock can only name the file.
-    if (!fileName(path).toLowerCase().endsWith('.wav')) return failed(say.headphoneFirReadFailed(fileName(path)), 'none');
-    return changeProfile({ ...settings, headphoneFir: path });
+  function setSpeakerLayout(layout: SpeakerLayout): Outcome {
+    const refusal = fileWins();
+    if (refusal !== null) return refusal;
+    settings.layout = layout;
+    return changeProfile();
   }
 
+  /** Keeps the correction for speakers; it never switches the kind. */
+  function importCorrection(path: string): Outcome {
+    const refusal = fileWins();
+    if (refusal !== null) return refusal;
+    // The detail is the correction crate's; the mock can only name the file.
+    if (!isYaml(path)) return failed(say.correctionReadFailed(fileName(path)), 'none');
+    settings.correction = { path, title: correctionShape().title };
+    return changeProfile();
+  }
+
+  /** Back to the stored layout. */
+  function clearCorrection(): Outcome {
+    const refusal = fileWins();
+    if (refusal !== null) return refusal;
+    settings.correction = null;
+    return changeProfile();
+  }
+
+  /** The gain of the kind in use; the other kind keeps its own. */
   function setGain(db: number): Outcome {
     if (!Number.isFinite(db) || db < GAIN_MIN_DB || db > GAIN_MAX_DB) return failed(say.gainOutOfRange, 'none');
-    settings.gainDb = db;
+    settings.gainDb[state.profile.kind] = db;
     state.profile.gain_db = db;
     return done;
   }
@@ -495,14 +623,17 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
         // Automatic follows the language the mock started in.
         state.language_choice = intent.value;
         state.language = intent.value ?? systemLanguage;
-        if (state.profile.kind === 'stereo' && !state.profile.from_file) {
-          state.profile.name = say.defaultProfileName[state.language];
-        }
         return done;
+      case 'set_profile_kind':
+        return profileOpen ? setProfileKind(intent.value) : refused();
       case 'import_brir':
         return profileOpen ? importBrir(intent.value) : refused();
-      case 'import_headphone_fir':
-        return profileOpen ? importHeadphoneFir(intent.value) : refused();
+      case 'set_speaker_layout':
+        return profileOpen ? setSpeakerLayout(intent.value) : refused();
+      case 'import_correction':
+        return profileOpen ? importCorrection(intent.value) : refused();
+      case 'clear_correction':
+        return profileOpen ? clearCorrection() : refused();
       case 'set_gain':
         return profileOpen ? setGain(intent.value) : refused();
       case 'test_direction':

@@ -277,7 +277,6 @@ fn prepared_profile(directory: &Path) -> Box<Prepared> {
                 path: fr,
             },
         ]),
-        headphone_fir: None,
         gain_db: 0.0,
         limiter_ceiling_dbfs: 0.0,
         lfe: LfePolicy::Mute,

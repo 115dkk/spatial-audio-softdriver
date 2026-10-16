@@ -6,26 +6,43 @@
     "value": "choose_output"
   },
   "profile": {
-    "kind": "stereo",
-    "name": "Stereo",
-    "brir": null,
-    "headphone_fir": null,
+    "kind": "speakers",
+    "name": "2.0",
     "gain_db": 0.0,
     "directions": [
       {
         "id": 0,
-        "name": "FL",
+        "name": "L",
         "azimuth_deg": 30.0,
         "elevation_deg": 0.0
       },
       {
         "id": 1,
-        "name": "FR",
+        "name": "R",
         "azimuth_deg": -30.0,
         "elevation_deg": 0.0
       }
     ],
-    "from_file": false
+    "from_file": false,
+    "headphones": {
+      "brir": null
+    },
+    "speakers": {
+      "layout": "2.0",
+      "correction": null,
+      "channels": [
+        {
+          "name": "L",
+          "channel": 0,
+          "subwoofer": false
+        },
+        {
+          "name": "R",
+          "channel": 1,
+          "subwoofer": false
+        }
+      ]
+    }
   },
   "engine": null,
   "outputs": [
