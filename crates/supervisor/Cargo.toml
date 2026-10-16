@@ -16,6 +16,7 @@ ssr-i18n.workspace = true
 ssr-abi.workspace = true
 engine.workspace = true
 brir.workspace = true
+correction.workspace = true
 speakers.workspace = true
 rtrb.workspace = true
 serde.workspace = true

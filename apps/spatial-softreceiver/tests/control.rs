@@ -340,6 +340,10 @@ fn a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard() {
             Intent::SetSpeakerLayout(ssr_types::app::SpeakerLayout::Surround51),
             true,
         ),
+        (
+            Intent::ImportCorrection("not-a-correction.yml".into()),
+            false,
+        ),
     ] {
         let before = recorder.heartbeats().len();
         assert_eq!(bridge.dispatch(intent).is_ok(), succeeds);

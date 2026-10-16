@@ -1268,11 +1268,17 @@ tests = [
   "supervisor::headphones_need_a_brir_set",
   "supervisor::import_brir_while_speakers_play_only_stores_it",
   "supervisor::speaker_layout_applies_live_only_to_the_kind_in_use",
-  "supervisor::correction_intents_are_refused_until_the_crate_lands",
+  "supervisor::import_correction_while_headphones_play_only_stores_it",
+  "supervisor::import_correction_while_speakers_play_applies_live",
+  "supervisor::clear_correction_returns_to_the_stored_layout_live",
+  "supervisor::an_unreadable_correction_is_refused_and_changes_nothing",
+  "supervisor::the_device_must_accept_the_correction_channels",
+  "supervisor::layout_changes_under_a_correction_are_stored_only",
+  "supervisor::the_correction_survives_a_restart_and_a_missing_file_becomes_a_note",
   "supervisor::the_device_must_accept_the_speaker_layout",
   "supervisor::each_kind_keeps_its_own_gain",
   "supervisor::settings_from_before_kinds_migrate",
-  "supervisor::profile_file_refuses_kind_layout_and_correction_intents",
+  "supervisor::profile_file_refuses_correction_intents",
   "supervisor::live_profile_changes_are_all_or_nothing",
   "supervisor::old_settings_without_profile_use_defaults",
   "supervisor::needs_prepared_rebuilds_the_profile_the_engine_plays_now",
@@ -1281,7 +1287,7 @@ tests = [
   "spatial-softreceiver::a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard",
   "spatial-softreceiver::a_reprepare_after_needs_prepared_is_bracketed_by_heartbeats_for_the_guard",
 ]
-note = "Two independent output kinds: headphones keep an imported BRIR and speakers keep a standard layout; each keeps its own gain (ADR 0034). SECS 2/2R correction paths persist in settings but correction intents are refused until the correction crate lands."
+note = "Two independent output kinds: headphones keep an imported BRIR and speakers keep a standard layout or imported SECS 2/2R correction; each keeps its own gain and active changes are handed to the engine atomically (ADR 0034)."
 
 [[feature]]
 id = "engine.live_gain_and_test_tone"

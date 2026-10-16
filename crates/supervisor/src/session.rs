@@ -466,6 +466,7 @@ fn set_gain_db(profile: &mut OutputProfile, db: f32) {
     match profile {
         OutputProfile::Headphones(profile) => profile.gain_db = db,
         OutputProfile::Speakers(profile) => profile.gain_db = db,
+        OutputProfile::Correction(profile) => profile.gain_db = db,
     }
 }
 

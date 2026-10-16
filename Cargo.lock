@@ -4196,6 +4196,7 @@ version = "0.16.0"
 dependencies = [
  "assert_no_alloc",
  "brir",
+ "correction",
  "engine",
  "hound",
  "rtrb",

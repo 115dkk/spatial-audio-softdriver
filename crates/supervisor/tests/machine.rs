@@ -338,6 +338,11 @@ fn describe(profile: &OutputProfile) -> String {
                     .join(" ")
             )
         ),
+        OutputProfile::Correction(profile) => format!(
+            "correction {} {} dB",
+            profile.path.to_string_lossy(),
+            profile.gain_db
+        ),
     }
 }
 
@@ -1585,6 +1590,9 @@ impl Launcher for SessionLauncher {
                         OutputProfile::Headphones(profile.clone())
                     }
                     OutputProfile::Speakers(profile) => OutputProfile::Speakers(profile.clone()),
+                    OutputProfile::Correction(profile) => {
+                        OutputProfile::Correction(profile.clone())
+                    }
                 },
                 ..common::config()
             },
@@ -1777,6 +1785,52 @@ fn hesuvi(directory: &TestDirectory, folder: &str) -> std::path::PathBuf {
     path
 }
 
+fn secs_correction(
+    directory: &TestDirectory,
+    name: &str,
+    title: &str,
+    stereo: bool,
+) -> std::path::PathBuf {
+    let folder = directory.join(name);
+    std::fs::create_dir_all(&folder).unwrap();
+    write_wav(&folder.join("filter.wav"), &[vec![0.5, 0.0, 0.0]]);
+    let (description, channels, mapping) = if stereo {
+        (
+            "inputs 0 L, 1 R | outputs 0 L, 1 R | synthetic",
+            2,
+            "[{dest: 0, sources: [{channel: 0}]}, {dest: 1, sources: [{channel: 1}]}]",
+        )
+    } else {
+        (
+            "inputs 0 L, 1 R, 2 LFE | outputs 0 L, 1 R, 2 SW1 | synthetic",
+            3,
+            "[{dest: 0, sources: [{channel: 0}]}, {dest: 1, sources: [{channel: 1}]}, {dest: 2, sources: [{channel: 2}]}]",
+        )
+    };
+    let path = folder.join("correction.yml");
+    std::fs::write(
+        &path,
+        format!(
+            r#"title: "{title}"
+description: "{description}"
+devices:
+  samplerate: 48000
+  capture: {{channels: {channels}}}
+  playback: {{channels: {channels}}}
+filters:
+  room: {{type: Conv, parameters: {{type: Wav, filename: filter.wav, channel: 0}}}}
+mixers:
+  route_out: {{channels: {{in: {channels}, out: {channels}}}, mapping: {mapping}}}
+pipeline:
+  - {{type: Filter, channels: [0], names: [room]}}
+  - {{type: Mixer, name: route_out}}
+"#
+        ),
+    )
+    .unwrap();
+    path
+}
+
 fn view_names(snapshot: &ssr_types::app::Snapshot) -> Vec<String> {
     snapshot
         .profile
@@ -1896,20 +1950,174 @@ fn speaker_layout_applies_live_only_to_the_kind_in_use() {
 }
 
 #[test]
-fn correction_intents_are_refused_until_the_crate_lands() {
-    let (_shared, mut supervisor) = start(ready_pc(), dac_settings());
-    let before = supervisor.settings().clone();
+fn import_correction_while_headphones_play_only_stores_it() {
+    use ssr_types::app::ProfileKind;
 
+    let directory = TestDirectory::new("store-correction");
+    let room = brir_folder(&directory, "room", &["FL", "FR"]);
+    let correction = secs_correction(&directory, "secs", "Desk correction", false);
+    let (shared, mut supervisor) = running(ready_pc());
+    supervisor.handle(Intent::ImportBrir(room)).unwrap();
+    supervisor
+        .handle(Intent::SetProfileKind(ProfileKind::Headphones))
+        .unwrap();
+    shared.get().applied.clear();
+
+    supervisor
+        .handle(Intent::ImportCorrection(correction.clone()))
+        .unwrap();
+    assert_eq!(supervisor.settings().profile.kind, ProfileKind::Headphones);
     assert_eq!(
-        supervisor.handle(Intent::ImportCorrection("correction.yml".into())),
-        Err(not_allowed())
+        supervisor.settings().profile.speakers.correction,
+        Some(correction.clone())
+    );
+    let view = supervisor.snapshot().profile;
+    assert_eq!(view.kind, ProfileKind::Headphones);
+    assert_eq!(view.speakers.correction.unwrap().title, "Desk correction");
+    assert_eq!(
+        view.speakers
+            .channels
+            .iter()
+            .map(|channel| (channel.name.as_str(), channel.subwoofer))
+            .collect::<Vec<_>>(),
+        [("L", false), ("R", false), ("SW1", true)]
+    );
+    assert!(shared.get().applied.is_empty());
+}
+
+#[test]
+fn import_correction_while_speakers_play_applies_live() {
+    let directory = TestDirectory::new("live-correction");
+    let correction = secs_correction(&directory, "secs", "Desk correction", false);
+    let (shared, mut supervisor) = running(ready_pc());
+
+    supervisor
+        .handle(Intent::ImportCorrection(correction.clone()))
+        .unwrap();
+    assert_eq!(shared.get().applied, ["prepared Speakers 3ch [L R]"]);
+    assert_eq!(
+        supervisor.settings().profile.speakers.correction,
+        Some(correction)
+    );
+    let view = supervisor.snapshot().profile;
+    assert_eq!(view.name, "Desk correction");
+    assert_eq!(
+        view.directions
+            .iter()
+            .map(|direction| direction.name.as_str())
+            .collect::<Vec<_>>(),
+        ["L", "R"]
     );
     assert_eq!(
-        supervisor.handle(Intent::ClearCorrection),
-        Err(not_allowed())
+        view.speakers
+            .channels
+            .iter()
+            .map(|channel| (channel.name.as_str(), channel.channel, channel.subwoofer))
+            .collect::<Vec<_>>(),
+        [("L", 0, false), ("R", 1, false), ("SW1", 2, true)]
     );
-    assert_eq!(supervisor.settings(), &before);
-    assert_eq!(supervisor.snapshot().profile.speakers.correction, None);
+}
+
+#[test]
+fn clear_correction_returns_to_the_stored_layout_live() {
+    use ssr_types::app::SpeakerLayout;
+
+    let directory = TestDirectory::new("clear-correction");
+    let correction = secs_correction(&directory, "secs", "Desk correction", false);
+    let (shared, mut supervisor) = running(ready_pc());
+    supervisor
+        .handle(Intent::SetSpeakerLayout(SpeakerLayout::Surround51))
+        .unwrap();
+    supervisor
+        .handle(Intent::ImportCorrection(correction))
+        .unwrap();
+    shared.get().applied.clear();
+
+    supervisor.handle(Intent::ClearCorrection).unwrap();
+    assert_eq!(supervisor.settings().profile.speakers.correction, None);
+    assert_eq!(supervisor.snapshot().profile.name, "5.1");
+    assert_eq!(
+        shared.get().applied,
+        ["prepared Speakers 6ch [L R C Ls Rs]"]
+    );
+}
+
+#[test]
+fn an_unreadable_correction_is_refused_and_changes_nothing() {
+    let directory = TestDirectory::new("bad-correction");
+    let (shared, mut supervisor) = running(ready_pc());
+    let settings = supervisor.settings().clone();
+    let view = supervisor.snapshot().profile;
+
+    for path in [directory.join("missing.yml"), {
+        let path = secs_correction(&directory, "bad", "Bad", false);
+        let yaml = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, yaml.replace("channel: 0", "channel: 1")).unwrap();
+        path
+    }] {
+        let failed = supervisor
+            .handle(Intent::ImportCorrection(path))
+            .unwrap_err();
+        assert!(failed.message.starts_with("보정 파일을 읽지 못했습니다: "));
+        assert_eq!(failed.next, NextAction::None);
+        assert_eq!(supervisor.settings(), &settings);
+        assert_eq!(supervisor.snapshot().profile, view);
+        assert!(shared.get().applied.is_empty());
+    }
+}
+
+#[test]
+fn layout_changes_under_a_correction_are_stored_only() {
+    use ssr_types::app::SpeakerLayout;
+
+    let directory = TestDirectory::new("layout-under-correction");
+    let correction = secs_correction(&directory, "secs", "Desk", false);
+    let (shared, mut supervisor) = running(ready_pc());
+    supervisor
+        .handle(Intent::ImportCorrection(correction))
+        .unwrap();
+    shared.get().applied.clear();
+    shared.take_calls();
+
+    supervisor
+        .handle(Intent::SetSpeakerLayout(SpeakerLayout::Surround714))
+        .unwrap();
+    assert_eq!(
+        supervisor.settings().profile.speakers.layout,
+        SpeakerLayout::Surround714
+    );
+    assert_eq!(supervisor.snapshot().profile.name, "Desk");
+    assert!(shared.get().applied.is_empty());
+    assert!(shared.take_calls().is_empty());
+}
+
+#[test]
+fn the_correction_survives_a_restart_and_a_missing_file_becomes_a_note() {
+    let directory = TestDirectory::new("restart-correction");
+    let correction = secs_correction(&directory, "secs", "Desk", false);
+    let mut settings = dac_settings();
+    settings.profile.speakers.correction = Some(correction.clone());
+    let (_shared, supervisor) = start(ready_pc(), settings.clone());
+    assert_eq!(supervisor.snapshot().profile.name, "Desk");
+    assert_eq!(
+        supervisor
+            .snapshot()
+            .profile
+            .speakers
+            .correction
+            .unwrap()
+            .path,
+        correction.to_string_lossy()
+    );
+
+    std::fs::remove_file(&correction).unwrap();
+    let (shared, mut supervisor) = start(ready_pc(), settings);
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.profile.name, "correction");
+    assert_eq!(snapshot.profile.speakers.channels, []);
+    assert!(snapshot.notes[0].starts_with("보정 파일을 읽지 못했습니다: "));
+    assert!(supervisor.handle(Intent::Enable).is_err());
+    assert!(shared.take_calls().is_empty());
 }
 
 #[test]
@@ -1973,6 +2181,54 @@ fn the_device_must_accept_the_speaker_layout() {
         .handle(Intent::SetSpeakerLayout(SpeakerLayout::Surround714))
         .unwrap();
     supervisor.handle(Intent::Enable).unwrap();
+}
+
+#[test]
+fn the_device_must_accept_the_correction_channels() {
+    use ssr_types::app::ProfileKind;
+
+    let directory = TestDirectory::new("correction-probe");
+    let correction = secs_correction(&directory, "three", "Three", false);
+    let stereo = secs_correction(&directory, "stereo", "Stereo", true);
+
+    let mut world = ready_pc();
+    world.layout_support = Ok(false);
+    let (shared, mut supervisor) = start(world, dac_settings());
+    let unsupported = error(
+        "고른 출력 장치가 독점 모드에서 보정 파일에 지정된 3채널 출력을 지원하지 않습니다. 다른 출력 장치를 고르십시오.",
+        NextAction::None,
+    );
+    assert_eq!(
+        supervisor.handle(Intent::ImportCorrection(correction.clone())),
+        Err(unsupported.clone())
+    );
+    assert_eq!(shared.take_calls(), ["supports {dac} 3ch 0xb"]);
+    supervisor.handle(Intent::ImportCorrection(stereo)).unwrap();
+    assert!(shared.take_calls().is_empty());
+
+    let room = brir_folder(&directory, "room", &["FL", "FR"]);
+    supervisor.handle(Intent::ImportBrir(room)).unwrap();
+    supervisor
+        .handle(Intent::SetProfileKind(ProfileKind::Headphones))
+        .unwrap();
+    supervisor
+        .handle(Intent::ImportCorrection(correction.clone()))
+        .unwrap();
+    shared.take_calls();
+    assert_eq!(
+        supervisor.handle(Intent::SetProfileKind(ProfileKind::Speakers)),
+        Err(unsupported.clone())
+    );
+    assert_eq!(shared.take_calls(), ["supports {dac} 3ch 0xb"]);
+
+    let mut settings = dac_settings();
+    settings.profile.speakers.correction = Some(correction);
+    let mut world = ready_pc();
+    world.layout_support = Ok(false);
+    let (shared, mut supervisor) = start(world, settings);
+    assert_eq!(supervisor.handle(Intent::Enable), Err(unsupported));
+    assert_eq!(shared.take_calls(), ["supports {dac} 3ch 0xb"]);
+    assert_eq!(shared.get().roles, previous_roles());
 }
 
 #[test]
@@ -2047,7 +2303,7 @@ fn old_settings_without_profile_use_defaults() {
 }
 
 #[test]
-fn profile_file_refuses_kind_layout_and_correction_intents() {
+fn profile_file_refuses_correction_intents() {
     use ssr_types::app::{ProfileKind, SpeakerLayout};
 
     let directory = TestDirectory::new("profile-file-intents");
@@ -2087,11 +2343,11 @@ fn profile_file_refuses_kind_layout_and_correction_intents() {
     }
     assert_eq!(
         supervisor.handle(Intent::ImportCorrection("correction.yml".into())),
-        Err(not_allowed())
+        Err(file_wins.clone())
     );
     assert_eq!(
         supervisor.handle(Intent::ClearCorrection),
-        Err(not_allowed())
+        Err(file_wins.clone())
     );
     assert_eq!(supervisor.settings(), &settings);
 
@@ -2143,6 +2399,23 @@ fn live_profile_changes_are_all_or_nothing() {
     assert_eq!(supervisor.settings(), &settings);
     assert_eq!(supervisor.snapshot().profile, view);
     assert_eq!(supervisor.settings().profile.headphones.brir, Some(set));
+
+    supervisor
+        .handle(Intent::SetProfileKind(ProfileKind::Speakers))
+        .unwrap();
+    let correction = secs_correction(&directory, "correction", "Desk", false);
+    let settings = supervisor.settings().clone();
+    let view = supervisor.snapshot().profile;
+    shared.get().apply_errors.push_back(SessionError::Rejected);
+    assert_eq!(
+        supervisor.handle(Intent::ImportCorrection(correction)),
+        Err(error(
+            "엔진이 변경을 받지 못했습니다. 잠시 뒤 다시 시도하십시오.",
+            NextAction::Retry,
+        ))
+    );
+    assert_eq!(supervisor.settings(), &settings);
+    assert_eq!(supervisor.snapshot().profile, view);
 }
 
 #[test]
