@@ -120,6 +120,8 @@ pub enum PrepareError {
     Brir(#[from] brir::BrirError),
     #[error(transparent)]
     Speakers(#[from] speakers::SpeakerError),
+    #[error(transparent)]
+    Correction(#[from] correction::CorrectionError),
     #[error("max block {max_block} is not a multiple of output partition {partition}")]
     Block { max_block: usize, partition: usize },
     #[error("output device has {channels} channels; supported range is 1..={MAX_OUTPUT_CHANNELS}")]
@@ -132,10 +134,18 @@ pub enum OutputKind {
     Speakers,
 }
 
+#[derive(Clone, Debug)]
+pub struct CorrectionProfile {
+    pub path: PathBuf,
+    pub gain_db: f32,
+    pub limiter_ceiling_dbfs: f32,
+}
+
 #[derive(Debug)]
 pub enum OutputProfile {
     Headphones(brir::Profile),
     Speakers(speakers::SpeakerProfile),
+    Correction(CorrectionProfile),
 }
 
 impl OutputProfile {
@@ -149,6 +159,27 @@ impl OutputProfile {
             Self::Speakers(profile) => {
                 let prepared = speakers::prepare(profile, MIX_RATE, MIX_FRAMES)?;
                 Prepared::speakers(Arc::new(prepared), MIX_FRAMES)
+            }
+            Self::Correction(profile) => {
+                let correction = correction::load(&profile.path)?;
+                let layout = correction.layout()?;
+                let lfe_input = correction.lfe_input();
+                let inputs = correction.inputs.clone();
+                let output_layout = OutputLayout {
+                    channels: correction.device_channels as u16,
+                    channel_mask: correction.channel_mask,
+                };
+                let prepared = correction.prepare(MIX_RATE, MIX_FRAMES)?;
+                Prepared::correction(
+                    Arc::new(prepared),
+                    layout,
+                    inputs,
+                    lfe_input,
+                    output_layout,
+                    profile.gain_db,
+                    profile.limiter_ceiling_dbfs,
+                    MIX_FRAMES,
+                )
             }
         }
     }
@@ -226,6 +257,17 @@ enum PreparedOutput {
         speakers: Arc<PreparedSpeakers>,
         state: SpeakerOutput,
     },
+    Correction {
+        correction: Arc<correction::PreparedCorrection>,
+        state: correction::CorrectionState,
+        layout: Layout,
+        inputs: Vec<correction::Input>,
+        lfe_input: Option<usize>,
+        lfe_targets: Vec<usize>,
+        output_layout: OutputLayout,
+        gain: f32,
+        limiter_ceiling: f32,
+    },
 }
 
 #[derive(Debug)]
@@ -295,11 +337,70 @@ impl Prepared {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn correction(
+        correction: Arc<correction::PreparedCorrection>,
+        layout: Layout,
+        inputs: Vec<correction::Input>,
+        lfe_input: Option<usize>,
+        output_layout: OutputLayout,
+        gain_db: f32,
+        limiter_ceiling_dbfs: f32,
+        max_block: usize,
+    ) -> Result<Self, PrepareError> {
+        let channels = usize::from(output_layout.channels);
+        if !(1..=MAX_OUTPUT_CHANNELS).contains(&channels) {
+            return Err(PrepareError::OutputChannels { channels });
+        }
+        if !max_block.is_multiple_of(correction.partition()) {
+            return Err(PrepareError::Block {
+                max_block,
+                partition: correction.partition(),
+            });
+        }
+        let geometry = Arc::new(PanGeometry::new(&layout)?);
+        let feeds = Feeds::new(layout.len(), max_block);
+        let state = correction::CorrectionState::new(&correction, max_block);
+        let mut lfe_targets = inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, input)| input.name == "L" || input.name == "R")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if lfe_targets.is_empty() {
+            lfe_targets.extend(
+                inputs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, input)| input.angles.is_some())
+                    .map(|(index, _)| index),
+            );
+        }
+        Ok(Self {
+            output: PreparedOutput::Correction {
+                correction,
+                state,
+                layout,
+                inputs,
+                lfe_input,
+                lfe_targets,
+                output_layout,
+                gain: 10.0_f32.powf(gain_db / 20.0),
+                limiter_ceiling: 10.0_f32.powf(limiter_ceiling_dbfs / 20.0),
+            },
+            geometry,
+            max_block,
+            feeds,
+            samples: vec![0.0; channels * max_block],
+        })
+    }
+
     /// The output profile's directions, in feed order.
     pub fn direction_layout(&self) -> &Layout {
         match &self.output {
             PreparedOutput::Headphones { brir, .. } => &brir.layout,
             PreparedOutput::Speakers { speakers, .. } => &speakers.layout,
+            PreparedOutput::Correction { layout, .. } => layout,
         }
     }
 
@@ -328,13 +429,16 @@ impl Prepared {
         match &self.output {
             PreparedOutput::Headphones { .. } => 2,
             PreparedOutput::Speakers { speakers, .. } => speakers.device_channels,
+            PreparedOutput::Correction { output_layout, .. } => usize::from(output_layout.channels),
         }
     }
 
     pub fn kind(&self) -> OutputKind {
         match self.output {
             PreparedOutput::Headphones { .. } => OutputKind::Headphones,
-            PreparedOutput::Speakers { .. } => OutputKind::Speakers,
+            PreparedOutput::Speakers { .. } | PreparedOutput::Correction { .. } => {
+                OutputKind::Speakers
+            }
         }
     }
 
@@ -349,6 +453,7 @@ impl Prepared {
                 channels: speakers.device_channels as u16,
                 channel_mask: speakers.channel_mask,
             },
+            PreparedOutput::Correction { output_layout, .. } => *output_layout,
         }
     }
 
@@ -356,6 +461,7 @@ impl Prepared {
         match &self.output {
             PreparedOutput::Headphones { brir, .. } => brir.rate,
             PreparedOutput::Speakers { speakers, .. } => speakers.rate,
+            PreparedOutput::Correction { correction, .. } => correction.rate(),
         }
     }
 
@@ -363,6 +469,7 @@ impl Prepared {
         match &self.output {
             PreparedOutput::Headphones { brir, .. } => brir.partition,
             PreparedOutput::Speakers { speakers, .. } => speakers.partition,
+            PreparedOutput::Correction { correction, .. } => correction.partition(),
         }
     }
 
@@ -370,6 +477,11 @@ impl Prepared {
         match &self.output {
             PreparedOutput::Headphones { brir, .. } => (brir.gain, brir.limiter_ceiling),
             PreparedOutput::Speakers { speakers, .. } => (speakers.gain, speakers.limiter_ceiling),
+            PreparedOutput::Correction {
+                gain,
+                limiter_ceiling,
+                ..
+            } => (*gain, *limiter_ceiling),
         }
     }
 
@@ -377,6 +489,7 @@ impl Prepared {
         match &mut self.output {
             PreparedOutput::Headphones { binauralizer, .. } => binauralizer.reset(),
             PreparedOutput::Speakers { state, .. } => state.reset(),
+            PreparedOutput::Correction { state, .. } => state.reset(),
         }
     }
 }
@@ -1204,6 +1317,7 @@ impl Back {
             .is_none_or(|prepared| match &prepared.output {
                 PreparedOutput::Headphones { binauralizer, .. } => binauralizer.is_quiet(),
                 PreparedOutput::Speakers { state, .. } => state.is_quiet(),
+                PreparedOutput::Correction { state, .. } => state.is_quiet(),
             })
     }
 
@@ -1295,6 +1409,44 @@ impl Back {
                 samples,
                 &lfe_gain_at,
             ),
+            PreparedOutput::Correction {
+                correction,
+                state,
+                inputs,
+                lfe_input,
+                lfe_targets,
+                ..
+            } => {
+                let mut direction = 0;
+                for (input_index, input) in inputs.iter().enumerate() {
+                    if input.angles.is_some() {
+                        state
+                            .input(input_index, bed.frames)
+                            .copy_from_slice(prepared.feeds.channel(direction));
+                        direction += 1;
+                    }
+                }
+                if let Some(lfe) = bed.lfe {
+                    if let Some(input_index) = *lfe_input {
+                        let destination = state.input(input_index, bed.frames);
+                        for (frame, (output, sample)) in destination.iter_mut().zip(lfe).enumerate()
+                        {
+                            *output += *sample * lfe_gain_at(frame);
+                        }
+                    } else {
+                        let share = 10.0_f32.powf(10.0 / 20.0) / lfe_targets.len().max(1) as f32;
+                        for &input_index in lfe_targets.iter() {
+                            let destination = state.input(input_index, bed.frames);
+                            for (frame, (output, sample)) in
+                                destination.iter_mut().zip(lfe).enumerate()
+                            {
+                                *output += *sample * share * lfe_gain_at(frame);
+                            }
+                        }
+                    }
+                }
+                state.run(correction, bed.frames, samples);
+            }
         }
         if self.lfe_ramp_frames != 0 {
             debug_assert_eq!(bed.frames, MIX_FRAMES);
@@ -1922,7 +2074,9 @@ impl Chain {
                 PreparedOutput::Headphones { brir, .. } => {
                     brir.ir_frames.saturating_add(BRIR_TAIL_MARGIN_FRAMES)
                 }
-                PreparedOutput::Speakers { .. } => SPEAKER_TAIL_LIMIT_FRAMES,
+                PreparedOutput::Speakers { .. } | PreparedOutput::Correction { .. } => {
+                    SPEAKER_TAIL_LIMIT_FRAMES
+                }
             });
         self.finish = Some(FinishState {
             front: 0,
@@ -2585,6 +2739,125 @@ mod tests {
             );
             assert_eq!(muted, Some(expected), "{channels} channels, mask {mask:#x}");
         }
+    }
+
+    fn correction_prepared(yaml: &str, gain_db: f32, ceiling_dbfs: f32) -> Box<Prepared> {
+        let correction = correction::parse(yaml, Path::new(".")).unwrap();
+        let layout = correction.layout().unwrap();
+        let inputs = correction.inputs.clone();
+        let lfe_input = correction.lfe_input();
+        let output_layout = OutputLayout {
+            channels: correction.device_channels as u16,
+            channel_mask: correction.channel_mask,
+        };
+        let correction = Arc::new(correction.prepare(MIX_RATE, MIX_FRAMES).unwrap());
+        Box::new(
+            Prepared::correction(
+                correction,
+                layout,
+                inputs,
+                lfe_input,
+                output_layout,
+                gain_db,
+                ceiling_dbfs,
+                MIX_FRAMES,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn correction_yaml(inputs: &str, capture_channels: usize, pipeline: &str) -> String {
+        format!(
+            r#"
+name: Test correction
+description: "inputs {inputs} | outputs 0 L, 1 R | generated"
+devices:
+  samplerate: 48000
+  capture: {{channels: {capture_channels}}}
+  playback: {{channels: 2}}
+filters:
+  half: {{type: Gain, parameters: {{gain: -6.020599913, inverted: false}}}}
+mixers:
+  route_out:
+    channels: {{in: {capture_channels}, out: 2}}
+    mapping:
+      - {{dest: 0, sources: [{{channel: 0}}]}}
+      - {{dest: 1, sources: [{{channel: 1}}]}}
+pipeline:
+{pipeline}
+"#
+        )
+    }
+
+    fn process_correction_bed(
+        prepared: Box<Prepared>,
+        channels: &[f32],
+        directions: usize,
+        lfe: Option<&[f32]>,
+    ) -> Vec<f32> {
+        let mut chain = Chain::new(ChainConfig::default());
+        chain.set_prepared(prepared);
+        let bed = BedBlock {
+            epoch: 1,
+            rate: MIX_RATE,
+            frames: MIX_FRAMES,
+            source_qpc: 0,
+            directions,
+            channels,
+            lfe,
+            silent: false,
+            idle: false,
+        };
+        let mut rendered = Vec::new();
+        chain.process_bed(&bed, &mut |event| {
+            if let ChainEvent::Block(block) = event {
+                rendered.extend_from_slice(block.samples);
+            }
+        });
+        rendered
+    }
+
+    #[test]
+    fn correction_stage_routes_lfe_and_applies_profile_gain_before_limiter() {
+        let with_lfe = correction_yaml(
+            "0 L, 1 R, 2 LFE",
+            3,
+            "  - {type: Filter, channels: [0], names: [half]}\n  - {type: Mixer, name: route_out}",
+        );
+        let mut bed = vec![0.0; 2 * MIX_FRAMES];
+        bed[0] = 0.4;
+        bed[MIX_FRAMES] = 0.2;
+        let mut lfe = vec![0.0; MIX_FRAMES];
+        lfe[0] = 0.1;
+        let rendered = process_correction_bed(
+            correction_prepared(&with_lfe, -6.020_600_3, 0.0),
+            &bed,
+            2,
+            Some(&lfe),
+        );
+        assert!((rendered[0] - 0.1).abs() < 1.0e-5);
+        assert!((rendered[MIX_FRAMES] - 0.1).abs() < 1.0e-5);
+
+        let without_lfe = correction_yaml("0 L, 1 R", 2, "  - {type: Mixer, name: route_out}");
+        let silent = vec![0.0; 2 * MIX_FRAMES];
+        let rendered = process_correction_bed(
+            correction_prepared(&without_lfe, 0.0, 0.0),
+            &silent,
+            2,
+            Some(&lfe),
+        );
+        let expected = 0.1 * 10.0_f32.sqrt() / 2.0;
+        assert!((rendered[0] - expected).abs() < 1.0e-5);
+        assert!((rendered[MIX_FRAMES] - expected).abs() < 1.0e-5);
+
+        let loud = vec![2.0; 2 * MIX_FRAMES];
+        let rendered = process_correction_bed(
+            correction_prepared(&without_lfe, 0.0, -6.020_600_3),
+            &loud,
+            2,
+            None,
+        );
+        assert!(rendered.iter().all(|sample| sample.abs() <= 0.500_01));
     }
 
     #[test]

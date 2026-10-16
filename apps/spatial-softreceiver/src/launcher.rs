@@ -51,6 +51,9 @@ impl Launcher for WindowsLauncher {
                         OutputProfile::Headphones(profile.clone())
                     }
                     OutputProfile::Speakers(profile) => OutputProfile::Speakers(profile.clone()),
+                    OutputProfile::Correction(profile) => {
+                        OutputProfile::Correction(profile.clone())
+                    }
                 },
                 qpc_frequency,
                 mute: false,

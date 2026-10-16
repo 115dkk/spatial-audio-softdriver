@@ -90,6 +90,49 @@ fn speaker_prepared() -> Box<Prepared> {
     Box::new(Prepared::speakers(Arc::new(speakers), MIX_FRAMES).unwrap())
 }
 
+fn correction_prepared() -> Box<Prepared> {
+    let yaml = r#"
+description: "inputs 0 L, 1 R | outputs 0 L, 1 R | generated"
+devices:
+  samplerate: 48000
+  capture: {channels: 2}
+  playback: {channels: 2}
+filters:
+  gain: {type: Gain, parameters: {gain: -3, inverted: false}}
+mixers:
+  route_out:
+    channels: {in: 2, out: 2}
+    mapping:
+      - {dest: 0, sources: [{channel: 0}]}
+      - {dest: 1, sources: [{channel: 1}]}
+pipeline:
+  - {type: Filter, channels: [0, 1], names: [gain]}
+  - {type: Mixer, name: route_out}
+"#;
+    let correction = correction::parse(yaml, std::path::Path::new(".")).unwrap();
+    let layout = correction.layout().unwrap();
+    let inputs = correction.inputs.clone();
+    let lfe_input = correction.lfe_input();
+    let output_layout = ssr_types::OutputLayout {
+        channels: correction.device_channels as u16,
+        channel_mask: correction.channel_mask,
+    };
+    let prepared = Arc::new(correction.prepare(MIX_RATE, MIX_FRAMES).unwrap());
+    Box::new(
+        Prepared::correction(
+            prepared,
+            layout,
+            inputs,
+            lfe_input,
+            output_layout,
+            0.0,
+            0.0,
+            MIX_FRAMES,
+        )
+        .unwrap(),
+    )
+}
+
 fn geometry() -> PanGeometry {
     PanGeometry::new(&Layout::new(vec![Direction::new("front", 0.0, 0.0)]).unwrap()).unwrap()
 }
@@ -165,6 +208,31 @@ fn steady_state_speaker_output_does_not_allocate() {
                 panic!("expected an output block");
             };
             assert_eq!(block.channels, 4);
+        });
+    });
+}
+
+#[test]
+fn steady_state_correction_output_does_not_allocate() {
+    let mut format_record = vec![0; 256];
+    let mut writer = RecordWriter::new(&mut format_record);
+    assert!(writer.format_change(1, 0, &wave_format_bytes(&pcm_format(MIX_RATE))));
+    let length = writer.len();
+    format_record.truncate(length);
+    let data_record = pcm_record(1, MIX_FRAMES);
+
+    let mut chain = Chain::new(ChainConfig {
+        arrival_slack_frames: 0,
+        ..ChainConfig::default()
+    });
+    chain.set_prepared(correction_prepared());
+    chain.push_records(&format_record, &mut |_| {});
+    assert_no_alloc(|| {
+        chain.push_records(&data_record, &mut |event| {
+            let ChainEvent::Block(block) = event else {
+                panic!("expected an output block");
+            };
+            assert_eq!(block.channels, 2);
         });
     });
 }

@@ -22,11 +22,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use engine::{LiveChange, OutputProfile, Prepared};
+use engine::{CorrectionProfile, LiveChange, OutputProfile, Prepared};
 use speakers::SpeakerProfile;
 use ssr_types::app::{
-    HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase, ProfileKind, ProfileView,
-    SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
+    CorrectionView, HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase, ProfileKind,
+    ProfileView, SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::{
@@ -643,8 +643,14 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.set_speaker_layout(layout),
                 _ => return self.refused(),
             },
-            // ADR 0034: wired when the correction crate lands.
-            Intent::ImportCorrection(_) | Intent::ClearCorrection => return self.refused(),
+            Intent::ImportCorrection(path) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.import_correction(path),
+                _ => return self.refused(),
+            },
+            Intent::ClearCorrection => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.clear_correction(),
+                _ => return self.refused(),
+            },
             Intent::SetGain(db) => match self.phase {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.set_gain(db),
                 _ => return self.refused(),
@@ -910,14 +916,16 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         let resolved = resolve(&self.config, &self.settings.profile, self.language())
             .map_err(|error| self.localized_error(error))?;
         self.profile = resolved.view;
-        if let OutputProfile::Speakers(profile) = &resolved.profile {
-            self.check_layout(
+        match &resolved.profile {
+            OutputProfile::Speakers(profile) => self.check_layout(
                 &profile.name,
                 OutputLayout {
                     channels: u16::try_from(profile.device_channels).unwrap_or(u16::MAX),
                     channel_mask: profile.channel_mask,
                 },
-            )?;
+            )?,
+            OutputProfile::Correction(profile) => self.check_correction(profile)?,
+            OutputProfile::Headphones(_) => {}
         }
         self.take_roles(ours, output.id.clone())?;
         match self.launcher.launch(&output, &resolved.profile) {
@@ -1089,8 +1097,14 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             return Err(self.message_error(Message::ImportBrirFirst, NextAction::None));
         }
         if kind == ProfileKind::Speakers {
-            let layout = self.settings.profile.speakers.layout;
-            self.check_layout(layout.name(), layout.output_layout())?;
+            if let Some(path) = self.settings.profile.speakers.correction.clone() {
+                let correction =
+                    load_correction(&path).map_err(|error| self.localized_error(error))?;
+                self.check_correction_data(&correction)?;
+            } else {
+                let layout = self.settings.profile.speakers.layout;
+                self.check_layout(layout.name(), layout.output_layout())?;
+            }
         }
         let mut settings = self.settings.profile.clone();
         settings.kind = kind;
@@ -1126,7 +1140,11 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         }
         let mut settings = self.settings.profile.clone();
         settings.speakers.layout = layout;
-        if settings.kind == ProfileKind::Speakers {
+        if settings.speakers.correction.is_some() {
+            self.settings.profile = settings;
+            self.refresh_profile();
+            Ok(())
+        } else if settings.kind == ProfileKind::Speakers {
             self.check_layout(layout.name(), layout.output_layout())?;
             self.change_profile(settings)
         } else {
@@ -1134,6 +1152,84 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
             self.refresh_profile();
             Ok(())
         }
+    }
+
+    fn import_correction(&mut self, path: PathBuf) -> Result<(), UserError> {
+        if self.profile_file_active() {
+            return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
+        }
+        let correction = load_correction(&path).map_err(|error| self.localized_error(error))?;
+        if self.settings.profile.kind == ProfileKind::Speakers {
+            self.check_correction_data(&correction)?;
+        }
+        let mut settings = self.settings.profile.clone();
+        settings.speakers.correction = Some(path);
+        if settings.kind == ProfileKind::Speakers {
+            self.change_profile(settings)
+        } else {
+            self.settings.profile = settings;
+            self.refresh_profile();
+            Ok(())
+        }
+    }
+
+    fn clear_correction(&mut self) -> Result<(), UserError> {
+        if self.profile_file_active() {
+            return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
+        }
+        if self.settings.profile.speakers.correction.is_none() {
+            return Ok(());
+        }
+        let mut settings = self.settings.profile.clone();
+        settings.speakers.correction = None;
+        if settings.kind == ProfileKind::Speakers {
+            let layout = settings.speakers.layout;
+            self.check_layout(layout.name(), layout.output_layout())?;
+            self.change_profile(settings)
+        } else {
+            self.settings.profile = settings;
+            self.refresh_profile();
+            Ok(())
+        }
+    }
+
+    fn check_correction(&mut self, profile: &CorrectionProfile) -> Result<(), UserError> {
+        let correction =
+            load_correction(&profile.path).map_err(|error| self.localized_error(error))?;
+        self.check_correction_data(&correction)
+    }
+
+    fn check_correction_data(
+        &mut self,
+        correction: &correction::Correction,
+    ) -> Result<(), UserError> {
+        let layout = OutputLayout {
+            channels: u16::try_from(correction.device_channels).unwrap_or(u16::MAX),
+            channel_mask: correction.channel_mask,
+        };
+        if layout == OutputLayout::STEREO {
+            return Ok(());
+        }
+        let Some(output) = self
+            .settings
+            .output
+            .as_ref()
+            .map(|output| output.id.clone())
+        else {
+            return Ok(());
+        };
+        if matches!(
+            self.host.get_mut().supports_layout(&output, layout),
+            Ok(false)
+        ) {
+            return Err(self.message_error(
+                Message::CorrectionUnsupported {
+                    channels: layout.channels,
+                },
+                NextAction::None,
+            ));
+        }
+        Ok(())
     }
 
     fn check_layout(&mut self, name: &str, layout: OutputLayout) -> Result<(), UserError> {
@@ -1275,6 +1371,7 @@ fn set_gain_db(profile: &mut OutputProfile, db: f32) {
     match profile {
         OutputProfile::Headphones(profile) => profile.gain_db = db,
         OutputProfile::Speakers(profile) => profile.gain_db = db,
+        OutputProfile::Correction(profile) => profile.gain_db = db,
     }
 }
 
@@ -1325,6 +1422,7 @@ fn resolve(
                 }
                 speakers_view(profile, true, settings, None)
             }
+            OutputProfile::Correction(_) => unreachable!("profile.toml cannot select a correction"),
         };
         return Ok(Resolved { profile, view });
     }
@@ -1351,15 +1449,30 @@ fn resolve(
             })
         }
         ProfileKind::Speakers => {
-            let profile = speakers::layout_profile(
-                settings.speakers.layout,
-                settings.speakers.gain_db.unwrap_or(0.0),
-            );
-            let view = speakers_view(&profile, false, settings, Some(settings.speakers.layout));
-            Ok(Resolved {
-                profile: OutputProfile::Speakers(profile),
-                view,
-            })
+            if let Some(path) = &settings.speakers.correction {
+                let correction = load_correction(path)?;
+                let layout = correction.layout().map_err(correction_error)?;
+                let gain_db = settings.speakers.gain_db.unwrap_or(0.0);
+                let view = correction_profile_view(&correction, &layout, gain_db, settings);
+                Ok(Resolved {
+                    profile: OutputProfile::Correction(CorrectionProfile {
+                        path: path.clone(),
+                        gain_db,
+                        limiter_ceiling_dbfs: -1.0,
+                    }),
+                    view,
+                })
+            } else {
+                let profile = speakers::layout_profile(
+                    settings.speakers.layout,
+                    settings.speakers.gain_db.unwrap_or(0.0),
+                );
+                let view = speakers_view(&profile, false, settings, Some(settings.speakers.layout));
+                Ok(Resolved {
+                    profile: OutputProfile::Speakers(profile),
+                    view,
+                })
+            }
         }
     }
 }
@@ -1386,6 +1499,18 @@ fn unresolved_view(
     } else {
         settings.kind
     };
+    if let Some(path) = settings.speakers.correction.as_deref() {
+        view.speakers.correction = Some(CorrectionView {
+            path: display(path),
+            title: file_stem_name(path),
+        });
+        view.speakers.channels.clear();
+        if settings.kind == ProfileKind::Speakers && !from_file {
+            view.name = file_stem_name(path);
+            view.gain_db = settings.speakers.gain_db.unwrap_or(0.0);
+            view.directions.clear();
+        }
+    }
     if settings.kind == ProfileKind::Headphones && !from_file {
         view.name = settings
             .headphones
@@ -1461,7 +1586,54 @@ fn speakers_view(
     }
 }
 
+fn correction_profile_view(
+    correction: &correction::Correction,
+    layout: &Layout,
+    gain_db: f32,
+    settings: &ProfileSettings,
+) -> ProfileView {
+    let title = correction_title(correction);
+    ProfileView {
+        kind: ProfileKind::Speakers,
+        name: title.clone(),
+        gain_db,
+        directions: direction_views(layout),
+        from_file: false,
+        headphones: HeadphonesView {
+            brir: settings.headphones.brir.as_deref().map(display),
+        },
+        speakers: SpeakersView {
+            layout: Some(settings.speakers.layout),
+            correction: Some(CorrectionView {
+                path: display(&correction.path),
+                title,
+            }),
+            channels: correction_channels(correction),
+        },
+    }
+}
+
 fn stored_speakers_view(settings: &ProfileSettings) -> SpeakersView {
+    if let Some(path) = settings.speakers.correction.as_deref() {
+        return match correction::load(path) {
+            Ok(correction) => SpeakersView {
+                layout: Some(settings.speakers.layout),
+                correction: Some(CorrectionView {
+                    path: display(path),
+                    title: correction_title(&correction),
+                }),
+                channels: correction_channels(&correction),
+            },
+            Err(_) => SpeakersView {
+                layout: Some(settings.speakers.layout),
+                correction: Some(CorrectionView {
+                    path: display(path),
+                    title: file_stem_name(path),
+                }),
+                channels: Vec::new(),
+            },
+        };
+    }
     let profile = speakers::layout_profile(
         settings.speakers.layout,
         settings.speakers.gain_db.unwrap_or(0.0),
@@ -1471,6 +1643,19 @@ fn stored_speakers_view(settings: &ProfileSettings) -> SpeakersView {
         correction: None,
         channels: profile_channels(&profile),
     }
+}
+
+fn correction_channels(correction: &correction::Correction) -> Vec<SpeakerChannelView> {
+    correction
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(channel, output)| SpeakerChannelView {
+            name: output.name.clone().unwrap_or_else(|| "—".into()),
+            channel: u16::try_from(channel).unwrap_or(u16::MAX),
+            subwoofer: output.subwoofer,
+        })
+        .collect()
 }
 
 fn profile_channels(profile: &SpeakerProfile) -> Vec<SpeakerChannelView> {
@@ -1574,6 +1759,32 @@ fn brir_name(path: &Path) -> String {
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn file_stem_name(path: &Path) -> String {
+    path.file_stem()
+        .map_or_else(|| display(path), |name| name.to_string_lossy().into_owned())
+}
+
+fn correction_title(correction: &correction::Correction) -> String {
+    if correction.title.is_empty() {
+        file_stem_name(&correction.path)
+    } else {
+        correction.title.clone()
+    }
+}
+
+fn load_correction(path: &Path) -> Result<correction::Correction, LocalizedError> {
+    correction::load(path).map_err(correction_error)
+}
+
+fn correction_error(error: correction::CorrectionError) -> LocalizedError {
+    LocalizedError {
+        message: Message::CorrectionReadFailed {
+            detail: error.to_string(),
+        },
+        next: NextAction::None,
+    }
 }
 
 fn invalid_brir_error() -> LocalizedError {

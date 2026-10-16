@@ -1166,6 +1166,25 @@ tests = [
 note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional one-output mono room FIR (subwoofers included, without a discarded second-ear FFT), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). ssr-live and ssr-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
 
 [[feature]]
+id = "output.secs_correction"
+kind = "pipeline"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "correction::allpass_and_peaking_match_closed_form_at_three_rates",
+  "correction::butterworth_orders_have_the_corner_response",
+  "correction::linkwitz_riley_four_and_eight_sum_flat",
+  "correction::parses_roles_route_out_and_mask",
+  "correction::gain_delay_and_mixer_run_end_to_end",
+  "correction::flow_and_block_yaml_are_equivalent",
+  "correction::rejects_unknown_role_filter_and_subsample_delay",
+  "correction::correction_run_does_not_allocate",
+  "engine::correction_stage_routes_lfe_and_applies_profile_gain_before_limiter",
+  "engine::steady_state_correction_output_does_not_allocate",
+]
+note = "ADR 0034: the MIT correction crate reads the documented CamillaDSP v4 subset exported by SECS 2/2R, skips route_in, runs route_out and the intervening filters and mixers with preallocated per-run state, f64 biquads and the shared partitioned convolver, and derives renderer directions and device masks from SECS role names. The engine feeds its speaker bed and LFE into this graph, then retains the profile gain and linked limiter."
+
+[[feature]]
 id = "app.shell"
 kind = "app"
 milestone = "M4"
@@ -1249,11 +1268,17 @@ tests = [
   "supervisor::headphones_need_a_brir_set",
   "supervisor::import_brir_while_speakers_play_only_stores_it",
   "supervisor::speaker_layout_applies_live_only_to_the_kind_in_use",
-  "supervisor::correction_intents_are_refused_until_the_crate_lands",
+  "supervisor::import_correction_while_headphones_play_only_stores_it",
+  "supervisor::import_correction_while_speakers_play_applies_live",
+  "supervisor::clear_correction_returns_to_the_stored_layout_live",
+  "supervisor::an_unreadable_correction_is_refused_and_changes_nothing",
+  "supervisor::the_device_must_accept_the_correction_channels",
+  "supervisor::layout_changes_under_a_correction_are_stored_only",
+  "supervisor::the_correction_survives_a_restart_and_a_missing_file_becomes_a_note",
   "supervisor::the_device_must_accept_the_speaker_layout",
   "supervisor::each_kind_keeps_its_own_gain",
   "supervisor::settings_from_before_kinds_migrate",
-  "supervisor::profile_file_refuses_kind_layout_and_correction_intents",
+  "supervisor::profile_file_refuses_correction_intents",
   "supervisor::live_profile_changes_are_all_or_nothing",
   "supervisor::old_settings_without_profile_use_defaults",
   "supervisor::needs_prepared_rebuilds_the_profile_the_engine_plays_now",
@@ -1262,7 +1287,7 @@ tests = [
   "spatial-softreceiver::a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard",
   "spatial-softreceiver::a_reprepare_after_needs_prepared_is_bracketed_by_heartbeats_for_the_guard",
 ]
-note = "Two independent output kinds: headphones keep an imported BRIR and speakers keep a standard layout; each keeps its own gain (ADR 0034). SECS 2/2R correction paths persist in settings but correction intents are refused until the correction crate lands."
+note = "Two independent output kinds: headphones keep an imported BRIR and speakers keep a standard layout or imported SECS 2/2R correction; each keeps its own gain and active changes are handed to the engine atomically (ADR 0034)."
 
 [[feature]]
 id = "engine.live_gain_and_test_tone"
