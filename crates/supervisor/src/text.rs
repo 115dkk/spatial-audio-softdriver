@@ -33,7 +33,9 @@ pub enum Message {
     EngineStopFailed { detail: String },
     OutputIdChanged { name: String },
     ImportBrirFirst,
-    HeadphoneFirReadFailed { detail: String },
+    CorrectionReadFailed { detail: String },
+    CorrectionUnsupported { channels: u16 },
+    LayoutUnsupported { layout: String, channels: u16 },
     GainOutOfRange,
     DirectionMissing,
     StoredOutputMissing { name: String },
@@ -52,7 +54,6 @@ pub enum Message {
     RestoreFallback { role: Role, name: String },
     RestoreLeftToWindows { role: Role },
     RestoreRoleFailed { role: Role, detail: String },
-    DefaultProfileName,
 }
 
 impl Message {
@@ -119,8 +120,12 @@ impl Message {
             Self::EngineStopFailed { detail } => text::engine_stop_failed(language, detail),
             Self::OutputIdChanged { name } => text::output_id_changed(language, name),
             Self::ImportBrirFirst => text::import_brir_first(language).into(),
-            Self::HeadphoneFirReadFailed { detail } => {
-                text::headphone_fir_read_failed(language, detail)
+            Self::CorrectionReadFailed { detail } => text::correction_read_failed(language, detail),
+            Self::CorrectionUnsupported { channels } => {
+                text::correction_unsupported(language, channels)
+            }
+            Self::LayoutUnsupported { layout, channels } => {
+                text::layout_unsupported(language, layout, channels)
             }
             Self::GainOutOfRange => text::gain_out_of_range(language).into(),
             Self::DirectionMissing => text::direction_missing(language).into(),
@@ -155,7 +160,6 @@ impl Message {
             Self::RestoreRoleFailed { role, detail } => {
                 text::restore_role_failed(language, role_name(*role, language), detail)
             }
-            Self::DefaultProfileName => text::default_profile_name(language).into(),
         }
     }
 }

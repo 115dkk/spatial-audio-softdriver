@@ -53,8 +53,13 @@ fn every_message_renders_nonempty_and_distinct_in_both_languages() {
         },
         Message::OutputIdChanged { name: "DAC".into() },
         Message::ImportBrirFirst,
-        Message::HeadphoneFirReadFailed {
+        Message::CorrectionReadFailed {
             detail: "detail".into(),
+        },
+        Message::CorrectionUnsupported { channels: 12 },
+        Message::LayoutUnsupported {
+            layout: "7.1.4".into(),
+            channels: 12,
         },
         Message::GainOutOfRange,
         Message::DirectionMissing,
@@ -94,7 +99,6 @@ fn every_message_renders_nonempty_and_distinct_in_both_languages() {
             role: Role::Communications,
             detail: "detail".into(),
         },
-        Message::DefaultProfileName,
     ];
 
     for message in messages {

@@ -81,7 +81,6 @@ fn profile(source: BrirSource) -> Profile {
     Profile {
         name: "finding-bural".into(),
         brir: source,
-        headphone_fir: None,
         gain_db: 0.0,
         limiter_ceiling_dbfs: -1.0,
         lfe: LfePolicy::Mute,
@@ -491,21 +490,6 @@ fn angle_override_beats_preset_and_unknown_without_override_errors() {
 }
 
 #[test]
-fn raw_measurement_named_as_headphone_file_is_rejected() {
-    let directory = TestDirectory::new("measurement-fir");
-    let brir = directory.join("FL.wav");
-    let measurement = directory.join("headphone_measurement_LR.wav");
-    write_wav(&brir, 48_000, &[vec![1.0], vec![1.0]]);
-    write_wav(&measurement, 48_000, &[vec![1.0], vec![1.0]]);
-    let mut input = profile(BrirSource::Folder(directory.0.clone()));
-    input.headphone_fir = Some(measurement.clone());
-    assert!(matches!(
-        prepare(&input, 48_000, 64),
-        Err(BrirError::MeasurementFir { path }) if path == measurement
-    ));
-}
-
-#[test]
 fn profile_toml_loads_mapped_folder_angles_overrides_and_truncation() {
     let directory = TestDirectory::new("toml-new");
     let path = directory.join("profile.toml");
@@ -523,7 +507,6 @@ HFL = [30.0, 30.0]
 [brir]
 wav = "RBRIR_X_42ch.wav"
 map = "channels.csv"
-headphone_fir = "hp.wav"
 "#,
     )
     .unwrap();

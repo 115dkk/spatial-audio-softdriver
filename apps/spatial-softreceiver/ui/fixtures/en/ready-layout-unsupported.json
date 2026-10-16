@@ -182,7 +182,7 @@
   },
   "roles_taken": false,
   "error": {
-    "message": "The chosen output device does not accept the 7.1.4 layout (12 channels) in exclusive mode. Choose another layout or output device.",
+    "message": "The selected output device does not support the 7.1.4 layout (12 channels) in exclusive mode. Choose another layout or output device.",
     "next": "none"
   },
   "notes": []

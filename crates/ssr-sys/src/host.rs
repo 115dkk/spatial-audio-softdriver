@@ -49,7 +49,7 @@ use ssr_abi::setup_contract::{
 use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DefaultRoles, DeviceId, DeviceState, DriverState, Host, HostError, OutputDevice,
-    Platform, Role, SecureBoot, SetupOutcome, SetupTask,
+    OutputLayout, Platform, Role, SecureBoot, SetupOutcome, SetupTask,
 };
 use windows::{
     Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemCodeIntegrityInformation},
@@ -217,6 +217,37 @@ impl Host for WindowsHost {
         let policy: PolicyConfig = create_instance(&POLICY_CONFIG_CLIENT)
             .map_err(|error| HostError::Failed(format!("IPolicyConfig: {error}")))?;
         policy.set_default_endpoint(&device.0, endpoint_role(role))
+    }
+
+    fn supports_layout(
+        &mut self,
+        output: &DeviceId,
+        layout: OutputLayout,
+    ) -> Result<bool, HostError> {
+        let _com = ComGuard::new().map_err(|error| HostError::Failed(error.to_string()))?;
+        let enumerator = wasapi::DeviceEnumerator::new()
+            .map_err(|error| HostError::Failed(error.to_string()))?;
+        let devices = enumerator
+            .get_device_collection(&wasapi::Direction::Render)
+            .map_err(|error| HostError::Failed(error.to_string()))?;
+        for index in 0..devices
+            .get_nbr_devices()
+            .map_err(|error| HostError::Failed(error.to_string()))?
+        {
+            let device = devices
+                .get_device_at_index(index)
+                .map_err(|error| HostError::Failed(error.to_string()))?;
+            let id = device
+                .get_id()
+                .map_err(|error| HostError::Failed(error.to_string()))?;
+            if id == output.0 {
+                return Ok(crate::devices::supports_layout(&device, layout));
+            }
+        }
+        Err(HostError::Failed(format!(
+            "render endpoint {:?} was not found",
+            output.0
+        )))
     }
 
     fn run_setup(&mut self, task: &SetupTask) -> Result<SetupOutcome, HostError> {

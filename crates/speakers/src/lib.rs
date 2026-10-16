@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use convolver::FilterBank;
 use serde::Deserialize;
+use ssr_types::app::SpeakerLayout;
 use ssr_types::{Direction, Layout, Speaker};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,7 +452,56 @@ pub fn prepare(
     })
 }
 
-/// Loads a mono room FIR at `rate` into a one-output convolver bank.
+/// The speaker profile of an app layout (ADR 0034): every speaker full
+/// range at its nominal angles, the LFE channel a subwoofer, no alignment or
+/// room FIR.
+pub fn layout_profile(layout: SpeakerLayout, gain_db: f32) -> SpeakerProfile {
+    let output = layout.output_layout();
+    let mut speakers = Vec::new();
+    let mut subwoofers = Vec::new();
+    for (channel, &speaker) in layout.speakers().iter().enumerate() {
+        let name = speaker.name();
+        if speaker == Speaker::Lfe {
+            subwoofers.push(SubwooferConfig {
+                channel,
+                distance_m: None,
+                delay_ms: None,
+                trim_db: 0.0,
+                fir: None,
+            });
+        } else {
+            let (azimuth_deg, elevation_deg) = speaker
+                .angles()
+                .expect("an app layout's non-LFE speakers have nominal angles");
+            speakers.push(SpeakerConfig {
+                name: name.into(),
+                azimuth_deg,
+                elevation_deg,
+                channel,
+                distance_m: None,
+                delay_ms: None,
+                trim_db: 0.0,
+                range: SpeakerRange::Full,
+                crossover_hz: None,
+                fir: None,
+            });
+        }
+    }
+    SpeakerProfile {
+        name: layout.name().into(),
+        device_channels: usize::from(output.channels),
+        channel_mask: output.channel_mask,
+        gain_db,
+        limiter_ceiling_dbfs: -1.0,
+        crossover_hz: 80.0,
+        lfe_gain_db: 10.0,
+        speakers,
+        subwoofers,
+        bass_to: Vec::new(),
+    }
+}
+
+/// Loads a one-track room FIR at `rate` into a one-output convolver bank.
 fn prepare_fir(
     path: Option<&Path>,
     rate: u32,

@@ -716,8 +716,8 @@ fn snapshots(language: Language) -> Vec<(&'static str, Snapshot)> {
                 profile: speaker_layout_profile(language),
                 error: Some(error(
                     text(
-                        "고른 출력 장치가 7.1.4 배치(12채널)를 독점 모드로 받지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
-                        "The chosen output device does not accept the 7.1.4 layout (12 channels) in exclusive mode. Choose another layout or output device.",
+                        "고른 출력 장치가 독점 모드에서 7.1.4 배치(12채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
+                        "The selected output device does not support the 7.1.4 layout (12 channels) in exclusive mode. Choose another layout or output device.",
                     ),
                     NextAction::None,
                 )),

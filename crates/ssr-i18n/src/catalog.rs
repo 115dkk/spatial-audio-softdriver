@@ -200,14 +200,6 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "Stereo"]
-    pub fn default_profile_name(language: Language) -> &'static str {
-        match language {
-            Language::Ko => "Stereo",
-            Language::En => "Default stereo",
-        }
-    }
-
     #[doc = "진단 녹음은 다음 조각에서 옵니다."]
     pub fn diagnostic_recording_unavailable(language: Language) -> &'static str {
         match language {
@@ -329,17 +321,6 @@ pub mod supervisor {
         match language {
             Language::Ko => "게인은 -20 dB에서 +10 dB 사이입니다.",
             Language::En => "Gain must be between -20 dB and +10 dB.",
-        }
-    }
-
-    #[doc = "헤드폰 FIR을 읽지 못했습니다: {detail}"]
-    pub fn headphone_fir_read_failed(
-        language: Language,
-        detail: impl core::fmt::Display,
-    ) -> String {
-        match language {
-            Language::Ko => format!("헤드폰 FIR을 읽지 못했습니다: {detail}"),
-            Language::En => format!("The headphone FIR could not be read: {detail}"),
         }
     }
 

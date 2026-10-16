@@ -98,7 +98,6 @@ fn profile(files: Vec<DirectionFile>, gain_db: f32, ceiling_dbfs: f32) -> Profil
     Profile {
         name: "test".into(),
         brir: BrirSource::Directions(files),
-        headphone_fir: None,
         gain_db,
         limiter_ceiling_dbfs: ceiling_dbfs,
         lfe: LfePolicy::Mute,
