@@ -11,8 +11,9 @@
 //   group, in each language side by side.
 //
 // In a person's browser the running fixtures' meters move (the object map
-// turns); under automation (`navigator.webdriver`, the screenshots) they hold
-// still so every shot is the fixture as written.
+// turns) and a plugin host that starts comes up; under automation
+// (`navigator.webdriver`, the screenshots) both hold still so every shot is
+// the fixture as written.
 
 import { mountApp } from './app';
 import type { Language } from './bindings';
@@ -24,7 +25,7 @@ import type { Tab } from './screens/common';
 import table from '../e2e/gallery.json';
 
 type Scheme = 'light' | 'dark';
-type Step = { click: string } | { wait: string };
+type Step = { click: string } | { focus: string } | { wait: string };
 
 /** A scene as the table writes it; what it leaves out comes from `defaults`. */
 interface SceneEntry {
@@ -110,6 +111,11 @@ async function run(step: Step, scene: string): Promise<void> {
     const target = document.querySelector<HTMLElement>(step.click);
     if (target === null) throw new Error(`gallery scene ${scene}: nothing to click at ${step.click}`);
     target.click();
+  } else if ('focus' in step) {
+    // As the keyboard would: what opens on focus opens, with its focus ring.
+    const target = document.querySelector<HTMLElement>(step.focus);
+    if (target === null) throw new Error(`gallery scene ${scene}: nothing to focus at ${step.focus}`);
+    target.focus();
   } else {
     await waitFor(step.wait, scene);
   }
@@ -131,7 +137,13 @@ async function drawWindow(
   tab: Tab | null | undefined,
   options: { shell?: GalleryShell; hold?: boolean } = {},
 ) {
-  const api = createMockApi(fixture(name, lang), { meters: !navigator.webdriver, latencyMs: 400, ...options });
+  const still = navigator.webdriver;
+  const api = createMockApi(fixture(name, lang), {
+    meters: !still,
+    latencyMs: 400,
+    upmixStartMs: still ? null : 800,
+    ...options,
+  });
   const app = mountApp(root, api, tab === null || tab === undefined ? {} : { tab });
   app.draw(await api.snapshot());
   await api.onSnapshot(app.draw);

@@ -16,3 +16,10 @@ ssr-sys = 40
 # registry (driver parameter, service keys, endpoint entries), each call in
 # one wrapper in `win.rs`.
 ssr-setup-sys = 52
+# Plugin isolation: previous 84 + VST 3 module/COM calls and host callbacks (98),
+# less the temporary ring producer (1) that streamring's owned Publisher and
+# `RegionMemory for SharedRegion` replaced.
+# Part B budget; lead records the ADR 0022 addendum at integration.
+plughost-sys = 181
+# Test only: VST 2 (22) + VST 3 factory, component/controller/view and buffers (104).
+plughost-testplugin = 126

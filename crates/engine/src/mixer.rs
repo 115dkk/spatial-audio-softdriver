@@ -441,6 +441,9 @@ struct Lane {
     volume_transitions: [VolumeTransition; VOLUME_TRANSITIONS],
     volume_transition_len: usize,
     volume_transitions_coalesced: u64,
+    /// Counts the lane's restarts: starts, discontinuities and stops
+    /// ([`SceneMixer::lane_restarts`]).
+    restarts: u64,
 }
 
 impl Lane {
@@ -488,6 +491,7 @@ impl Lane {
             volume_transitions: [VolumeTransition::default(); VOLUME_TRANSITIONS],
             volume_transition_len: 0,
             volume_transitions_coalesced: 0,
+            restarts: 0,
         }
     }
 
@@ -582,6 +586,7 @@ impl Lane {
     }
 
     fn begin(&mut self, origin: u64) {
+        self.restarts = self.restarts.wrapping_add(1);
         self.state = LaneState::Active;
         self.origin = origin;
         self.transport = 0;
@@ -1417,6 +1422,7 @@ impl SceneMixer {
         }
         self.pending_lanes &= !(1_u32 << index);
         self.lanes[index].state = LaneState::Draining;
+        self.lanes[index].restarts = self.lanes[index].restarts.wrapping_add(1);
         // Drain at once only when no other lane is active. An active lane that
         // has not advanced yet usually has its first data a moment away (a
         // start record, then data); draining now would emit the partial
@@ -1473,6 +1479,7 @@ impl SceneMixer {
             self.lanes[index].begin(origin);
         } else {
             let lane = &mut self.lanes[index];
+            lane.restarts = lane.restarts.wrapping_add(1);
             lane.origin = origin;
             lane.transport = 0;
             lane.delay = None;
@@ -1568,6 +1575,15 @@ impl SceneMixer {
 
     pub fn now(&self) -> u64 {
         self.now
+    }
+
+    /// Counts an endpoint lane's restarts: every start, discontinuity and
+    /// stop, including the start a scene for an idle lane makes. A stage in
+    /// front of the lane (the upmix stage) compares it to restart with it.
+    pub fn lane_restarts(&self, endpoint: u16) -> u64 {
+        self.lanes
+            .get(endpoint as usize)
+            .map_or(0, |lane| lane.restarts)
     }
 
     pub(crate) fn lane_is_idle(&self, endpoint: u16) -> bool {

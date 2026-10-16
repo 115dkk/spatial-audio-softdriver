@@ -34,6 +34,10 @@ describe('fixtures match bindings.ts', () => {
         'clear_correction',
         'set_gain',
         'test_direction',
+        'set_upmixer',
+        'choose_plugin',
+        'open_plugin_editor',
+        'set_upmix_apply',
         'enable',
         'disable',
         'start_diagnostic_recording',
@@ -125,5 +129,76 @@ describe('the guards reject what bindings.ts does not allow', () => {
   it('an intent with the wrong value', () => {
     expect(() => assertIntent({ kind: 'set_gain', value: '-3' })).toThrow('intent.value');
     expect(() => assertIntent({ kind: 'enable', value: 1 })).toThrow('intent.value');
+    expect(() => assertIntent({ kind: 'set_upmixer', value: { endpoint: 1, choice: 'vst' } })).toThrow('intent.value.choice');
+    expect(() => assertIntent({ kind: 'choose_plugin', value: { endpoint: 1 } })).toThrow('intent.value.path');
+    expect(() => assertIntent({ kind: 'open_plugin_editor', value: '1' })).toThrow('intent.value');
+    expect(() => assertIntent({ kind: 'set_upmix_apply', value: { kind: 'stereo', on: true } })).toThrow('intent.value.kind');
+    // The choice of how stereo arrives is gone (ADR 0035, the 2026-10-16 correction).
+    expect(() => assertIntent({ kind: 'set_upmix_sources', value: { endpoint: 1, sources: { pcm: true, bitstream: true } } })).toThrow(
+      'intent.kind',
+    );
+    expect(() => assertIntent({ kind: 'set_upmixer', value: { endpoint: '2', choice: 'plugin' } })).toThrow('intent.value.endpoint');
+    expect(assertIntent({ kind: 'set_upmixer', value: { endpoint: 2, choice: 'plugin' } })).toEqual({
+      kind: 'set_upmixer',
+      value: { endpoint: 2, choice: 'plugin' },
+    });
+  });
+
+  it('an upmix state, plugin format or choice bindings.ts does not have', () => {
+    const music = () => {
+      const value = structuredClone(rawFixture('running-upmix')) as {
+        upmix: { endpoints: { state: unknown; plugin: { format: unknown }; effective: unknown }[] };
+      };
+      const endpoint = value.upmix.endpoints[1];
+      if (endpoint === undefined) throw new Error('running-upmix has a music endpoint');
+      return { value, endpoint };
+    };
+    let { value, endpoint } = music();
+    endpoint.state = { kind: 'paused' };
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[1].state.kind');
+    ({ value, endpoint } = music());
+    endpoint.state = { kind: 'failed' };
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[1].state.value');
+    ({ value, endpoint } = music());
+    endpoint.plugin.format = 'au';
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[1].plugin.format');
+    ({ value, endpoint } = music());
+    endpoint.effective = null;
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[1].effective');
+  });
+
+  it('a bypass, a choice of how stereo arrives or an input list bindings.ts does not have', () => {
+    const pass = () => {
+      const value = structuredClone(rawFixture('running-upmix-native-surround')) as {
+        upmix: { endpoints: Record<string, unknown>[] };
+      };
+      const endpoint = value.upmix.endpoints[2];
+      if (endpoint === undefined) throw new Error('running-upmix-native-surround has a PASS endpoint');
+      return { value, endpoint };
+    };
+    expect(assertSnapshot(pass().value).upmix.endpoints.map((endpoint) => endpoint.endpoint)).toEqual([0, 1, 2]);
+    expect(assertSnapshot(pass().value).upmix.endpoints[2]?.bypass).toBe('native_surround');
+    for (const bypass of ['kind_off', 'rate_change', null]) {
+      const { value, endpoint } = pass();
+      endpoint.bypass = bypass;
+      expect(assertSnapshot(value).upmix.endpoints[2]?.bypass).toBe(bypass);
+    }
+    for (const bypass of ['source_off', 'multichannel']) {
+      const { value, endpoint } = pass();
+      endpoint.bypass = bypass;
+      expect(() => assertSnapshot(value), bypass).toThrow('snapshot.upmix.endpoints[2].bypass');
+    }
+    let { value, endpoint } = pass();
+    delete endpoint.bypass;
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[2].bypass');
+    ({ value, endpoint } = pass());
+    endpoint.sources = { pcm: true, bitstream: true };
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[2].sources');
+    ({ value, endpoint } = pass());
+    endpoint.inputs = 'L R';
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[2].inputs');
+    ({ value, endpoint } = pass());
+    endpoint.inputs = ['L', 2];
+    expect(() => assertSnapshot(value)).toThrow('snapshot.upmix.endpoints[2].inputs[1]');
   });
 });

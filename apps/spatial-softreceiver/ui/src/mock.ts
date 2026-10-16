@@ -17,13 +17,21 @@ import type {
   NextAction,
   OutputChoice,
   Platform,
+  PluginFormat,
+  PluginView,
   ProfileKind,
   ProfileView,
   SceneObject,
   SecureBoot,
   Snapshot,
+  SourceFormat,
   SpeakerChannelView,
   SpeakerLayout,
+  UpmixBypass,
+  UpmixState,
+  UpmixView,
+  UpmixerChoice,
+  UpmixerSetting,
   UserError,
 } from './bindings';
 import { en as catalogEn, ko as catalogKo } from './catalog';
@@ -48,6 +56,11 @@ export interface MockOptions {
   shell?: GalleryShell;
   /** Every intent stays in flight for good, so a pending button can be seen. */
   hold?: boolean;
+  /**
+   * How long a plugin host takes from starting to running, in ms (default
+   * 600). `null` keeps it starting, so a picture holds still.
+   */
+  upmixStartMs?: number | null;
 }
 
 // ---- The supervisor's sentences --------------------------------------------
@@ -100,6 +113,10 @@ const say = {
   outputIdChanged: (name: string): Message =>
     message(catalogKo.supervisor.output_id_changed(name), catalogEn.supervisor.output_id_changed(name)),
   importBrirFirst: message(catalogKo.supervisor.import_brir_first, catalogEn.supervisor.import_brir_first),
+  endpointCannotUpmix: message(catalogKo.supervisor.endpoint_cannot_upmix, catalogEn.supervisor.endpoint_cannot_upmix),
+  upmixerUnavailable: message(catalogKo.supervisor.upmixer_unavailable, catalogEn.supervisor.upmixer_unavailable),
+  pluginScanFailed: (detail: string): Message =>
+    message(catalogKo.supervisor.plugin_scan_failed(detail), catalogEn.supervisor.plugin_scan_failed(detail)),
   correctionReadFailed: (detail: string): Message =>
     message(catalogKo.supervisor.correction_read_failed(detail), catalogEn.supervisor.correction_read_failed(detail)),
   gainOutOfRange: message(catalogKo.supervisor.gain_out_of_range, catalogEn.supervisor.gain_out_of_range),
@@ -138,6 +155,10 @@ function fixtureSentence(sentence: string): Message {
       const en = fixture(name, 'en');
       pair(ko.error?.message, en.error?.message);
       ko.notes.forEach((note, index) => pair(note, en.notes[index]));
+      ko.upmix.endpoints.forEach((endpoint, index) => {
+        const english = en.upmix.endpoints[index]?.state;
+        if (endpoint.state.kind === 'failed' && english?.kind === 'failed') pair(endpoint.state.value, english.value);
+      });
     }
   }
   // A sentence no fixture has (a snapshot made by hand) stays as written.
@@ -153,6 +174,15 @@ interface Said {
 type Outcome = { kind: 'done' } | ({ kind: 'failed' | 'refused' } & Said);
 
 const done: Outcome = { kind: 'done' };
+
+/** Intents that can turn the engine on or off or change the kind in use. */
+const PHASE_OR_KIND: ReadonlySet<Intent['kind']> = new Set<Intent['kind']>([
+  'enable',
+  'disable',
+  'quit',
+  'recheck',
+  'set_profile_kind',
+]);
 const failed = (message: Message, next: NextAction): Outcome => ({ kind: 'failed', message, next });
 const refused = (message: Message = say.notAllowed): Outcome => ({ kind: 'refused', message, next: 'none' });
 
@@ -167,12 +197,19 @@ const GOOD_DRIVER: DriverState = {
   value: { problem_code: 0, service_running: true, exclusive_policy: 'applied' },
 };
 
-const pickFolder: Shell['pickFolder'] = async () => 'C:\\Users\\me\\BRIR\\living-room';
-// The BRIR picker asks for hesuvi.wav or hrir.wav; the other for a SECS correction.
+// The upmix screen asks for a VST 3 bundle; the profile screen for a BRIR folder.
+const pickFolder: Shell['pickFolder'] = async (title) =>
+  title === text.upmix.folderDialog
+    ? 'C:\\Program Files\\Common Files\\VST3\\Example Upmixer.vst3'
+    : 'C:\\Users\\me\\BRIR\\living-room';
+// The BRIR picker asks for hesuvi.wav or hrir.wav, the plugin picker for a
+// .vst3 or .dll, and the other for a SECS correction.
 const pickFile: Shell['pickFile'] = async (_title, filter) =>
   filter.name === text.profile.brirFilter
     ? 'C:\\Users\\me\\BRIR\\studio\\hesuvi.wav'
-    : 'C:\\Users\\me\\Documents\\SECS_export\\study\\configs\\secs_mixed.yml';
+    : filter.name === text.upmix.fileFilter
+      ? 'C:\\Program Files\\VSTPlugins\\Example Upmixer.dll'
+      : 'C:\\Users\\me\\Documents\\SECS_export\\study\\configs\\secs_mixed.yml';
 
 /** A plain browser's shell: no autostart, no updater. */
 const browserShell: Shell = {
@@ -274,6 +311,65 @@ interface ProfileSettings {
   gainDb: Record<ProfileKind, number | null>;
 }
 
+/**
+ * machine.rs DEFAULT_UPMIXER: what an endpoint that never chose resolves to.
+ * Off until the first-party upmixer exists (ADR 0035).
+ */
+const DEFAULT_UPMIXER: UpmixerChoice = 'off';
+
+/** The mock's scan finds every plugin to be the test plugin: stereo in, 5.1 out (ADR 0035). */
+const PLUGIN_INPUTS: readonly string[] = ['L', 'R'];
+const PLUGIN_OUTPUTS: readonly string[] = ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'];
+const PLUGIN_VENDOR = 'Example Audio';
+/** Two 10 ms blocks, the plugin's own 1.3 ms and the 2 ms concealment (ADR 0035). */
+const PLUGIN_LATENCY_MS = 23.3;
+/** SPEAKER_LOW_FREQUENCY in a PCM channel mask. */
+const LFE_BIT = 0x8;
+
+/** The endpoints that choose an upmixer: main (0), music (1) and PASS (2) (ADR 0035, the 2026-10-16 correction). */
+const UPMIX_ENDPOINTS = 3;
+
+/**
+ * Whether the sound an endpoint plays now is native surround, which is never
+ * upmixed (ADR 0035): PCM with more than two channels besides LFE, or a
+ * bitstream that carries more than two. Mono and stereo are upmixed however
+ * they arrive. The supervisor judges by the decoded scene; the mock judges by
+ * the format the engine reports.
+ */
+function nativeSurround(format: SourceFormat): boolean {
+  if (format.kind === 'pcm') {
+    const { channels, channel_mask } = format.value;
+    const lfe = (channel_mask & LFE_BIT) !== 0 ? 1 : 0;
+    return channels - lfe > 2;
+  }
+  return format.value.encoded_channels > 2;
+}
+/** How long the mock's plugin host takes to start unless told otherwise. */
+const UPMIX_START_MS = 600;
+
+/** A `.vst3` bundle or file is VST 3, a `.dll` VST 2; anything else does not scan. */
+function pluginFormat(name: string): PluginFormat | null {
+  if (/\.vst3$/i.test(name)) return 'vst3';
+  if (/\.dll$/i.test(name)) return 'vst2';
+  return null;
+}
+
+/** What the supervisor keeps of an endpoint's upmixer, and what its host is doing. */
+interface UpmixSlot {
+  endpoint: number;
+  choice: UpmixerChoice | null;
+  plugin: PluginView | null;
+  inputs: string[];
+  outputs: string[];
+  state: Exclude<UpmixState['kind'], 'failed'>;
+  /** Off for this session, and why (said again in the language chosen). */
+  failed: Message | null;
+  latencyMs: number;
+  /** The host has the plugin loaded; it stays loaded while the kind in use does not apply upmixing (ADR 0035). */
+  loaded: boolean;
+  timer: ReturnType<typeof setTimeout> | undefined;
+}
+
 /** A file name the mock takes for a CamillaDSP configuration. */
 const isYaml = (path: string) => /\.ya?ml$/i.test(path);
 
@@ -326,6 +422,41 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
   if (firstProfile.kind === 'headphones' && firstProfile.headphones.brir !== null && !firstProfile.from_file) {
     brirNames.set(firstProfile.headphones.brir, firstProfile.name);
   }
+  // Each endpoint's upmixer, as the starting snapshot has it (an endpoint it
+  // leaves out never chose), and whether each kind applies them (ADR 0035).
+  const upmixSlots: UpmixSlot[] = Array.from({ length: UPMIX_ENDPOINTS }, (_, endpoint) => {
+    const view = start.upmix.endpoints.find((candidate) => candidate.endpoint === endpoint);
+    if (view === undefined) {
+      return {
+        endpoint,
+        choice: null,
+        plugin: null,
+        inputs: [],
+        outputs: [],
+        state: 'stopped',
+        failed: null,
+        latencyMs: PLUGIN_LATENCY_MS,
+        loaded: false,
+        timer: undefined,
+      };
+    }
+    return {
+      endpoint,
+      choice: view.choice,
+      plugin: view.plugin === null ? null : { ...view.plugin },
+      inputs: [...view.inputs],
+      outputs: [...view.outputs],
+      state: view.state.kind === 'failed' ? 'stopped' : view.state.kind,
+      failed: view.state.kind === 'failed' ? fixtureSentence(view.state.value) : null,
+      latencyMs: view.latency_ms ?? PLUGIN_LATENCY_MS,
+      loaded: view.state.kind === 'running' || view.state.kind === 'fallback',
+      timer: undefined,
+    };
+  });
+  const upmixApplies: Record<ProfileKind, boolean> = {
+    headphones: start.upmix.headphones,
+    speakers: start.upmix.speakers,
+  };
   // The kept error and the notes as Messages, so a language change renders
   // them again as the supervisor does (machine.rs re-renders its kept error
   // and its notes). The fixture's own sentences start them.
@@ -502,6 +633,131 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
     return done;
   }
 
+  const effective = (slot: UpmixSlot): UpmixerChoice => slot.choice ?? DEFAULT_UPMIXER;
+  const slotOf = (endpoint: number) => upmixSlots.find((slot) => slot.endpoint === endpoint);
+
+  /** Stops the slot's host: nothing loaded, no start under way. */
+  function unload(slot: UpmixSlot) {
+    clearTimeout(slot.timer);
+    slot.timer = undefined;
+    slot.loaded = false;
+  }
+
+  /** The host comes up after a moment, as `ssr-plughost` loads the plugin. */
+  function startHost(slot: UpmixSlot) {
+    slot.state = 'starting';
+    const ms = options.upmixStartMs === undefined ? UPMIX_START_MS : options.upmixStartMs;
+    if (ms === null || slot.timer !== undefined) return;
+    slot.timer = setTimeout(() => {
+      slot.timer = undefined;
+      if (slot.state !== 'starting') return;
+      slot.loaded = true;
+      slot.state = 'running';
+      slot.latencyMs = PLUGIN_LATENCY_MS;
+      publishUpmix();
+      emitLater();
+    }, ms);
+  }
+
+  /**
+   * What each upmixer does now: a VST upmixer with its plugin runs while the
+   * engine runs, whatever the kind in use's switch says. With the switch off
+   * the sound goes around it, without delay, and the host stays loaded, so
+   * turning it on again comes straight back (ADR 0035). A plugin that
+   * stopped three times stays off for the session.
+   */
+  function refreshUpmix() {
+    const running = state.phase.kind === 'running';
+    for (const slot of upmixSlots) {
+      if (effective(slot) !== 'plugin' || slot.plugin === null || slot.failed !== null || !running) {
+        unload(slot);
+        slot.state = 'stopped';
+      } else if (slot.loaded) {
+        if (slot.state !== 'fallback') slot.state = 'running';
+      } else {
+        startHost(slot);
+      }
+    }
+  }
+
+  /**
+   * Why the sound the endpoint plays now goes around its running upmixer:
+   * the kind in use does not apply it, before anything else, or the sound is
+   * native surround (ADR 0035). Null while it goes through, and while nothing
+   * plays. The mock's rate never changes.
+   */
+  function bypassOf(slot: UpmixSlot): UpmixBypass | null {
+    if (slot.state !== 'running' || slot.failed !== null) return null;
+    if (!upmixApplies[state.profile.kind]) return 'kind_off';
+    const format = state.engine?.endpoints[slot.endpoint]?.format ?? null;
+    return format !== null && nativeSurround(format) ? 'native_surround' : null;
+  }
+
+  /** Snapshot.upmix from the slots, in the snapshot's language. */
+  function publishUpmix() {
+    state.upmix = {
+      endpoints: upmixSlots.map((slot) => {
+        const live = slot.state === 'running' || slot.state === 'fallback';
+        const shown: UpmixState =
+          slot.failed !== null && effective(slot) === 'plugin'
+            ? { kind: 'failed', value: slot.failed[state.language] }
+            : { kind: slot.state };
+        return {
+          endpoint: slot.endpoint,
+          choice: slot.choice,
+          effective: effective(slot),
+          plugin: slot.plugin === null ? null : { ...slot.plugin },
+          state: shown,
+          bypass: shown.kind === 'failed' ? null : bypassOf(slot),
+          latency_ms: live && shown.kind !== 'failed' ? slot.latencyMs : null,
+          inputs: slot.plugin === null ? [] : [...slot.inputs],
+          outputs: slot.plugin === null ? [] : [...slot.outputs],
+        };
+      }),
+      headphones: upmixApplies.headphones,
+      speakers: upmixApplies.speakers,
+      first_party_available: state.upmix.first_party_available,
+    } satisfies UpmixView;
+  }
+
+  /** Main, music and PASS choose; the first-party upmixer is refused until it exists. */
+  function setUpmixer({ endpoint, choice }: UpmixerSetting): Outcome {
+    const slot = slotOf(endpoint);
+    if (slot === undefined) return refused(say.endpointCannotUpmix);
+    if (choice === 'first_party' && !state.upmix.first_party_available) return refused(say.upmixerUnavailable);
+    slot.choice = choice;
+    refreshUpmix();
+    return done;
+  }
+
+  /**
+   * Scans the plugin and keeps it for the endpoint. The mock cannot load a
+   * plugin: a .vst3 or .dll reads as the test plugin under its file's name.
+   */
+  function choosePlugin(endpoint: number, path: string): Outcome {
+    const slot = slotOf(endpoint);
+    if (slot === undefined) return refused(say.endpointCannotUpmix);
+    const name = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? path;
+    const format = pluginFormat(name);
+    if (format === null) return failed(say.pluginScanFailed(name), 'none');
+    // A new plugin is a new host, and no earlier failure carries over.
+    unload(slot);
+    slot.plugin = { path, format, name: name.replace(/\.(vst3|dll)$/i, ''), vendor: PLUGIN_VENDOR };
+    slot.inputs = [...PLUGIN_INPUTS];
+    slot.outputs = [...PLUGIN_OUTPUTS];
+    slot.failed = null;
+    slot.state = 'stopped';
+    refreshUpmix();
+    return done;
+  }
+
+  /** The editor is the host's own window, so the host must be up. */
+  function openPluginEditor(endpoint: number): Outcome {
+    const slot = slotOf(endpoint);
+    const up = slot !== undefined && slot.failed === null && (slot.state === 'running' || slot.state === 'fallback');
+    return up ? done : refused();
+  }
+
   function setupStep(step: Extract<Snapshot['phase'], { kind: 'setup' }>['value']) {
     state.phase = { kind: 'setup', value: step };
   }
@@ -636,6 +892,17 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
         return profileOpen ? clearCorrection() : refused();
       case 'set_gain':
         return profileOpen ? setGain(intent.value) : refused();
+      case 'set_upmixer':
+        return profileOpen ? setUpmixer(intent.value) : refused();
+      case 'choose_plugin':
+        return profileOpen ? choosePlugin(intent.value.endpoint, intent.value.path) : refused();
+      case 'open_plugin_editor':
+        return profileOpen ? openPluginEditor(intent.value) : refused();
+      case 'set_upmix_apply':
+        if (!profileOpen) return refused();
+        upmixApplies[intent.value.kind] = intent.value.on;
+        refreshUpmix();
+        return done;
       case 'test_direction':
         if (phase.kind === 'running') {
           return intent.value < state.profile.directions.length ? done : failed(say.directionMissing, 'none');
@@ -694,6 +961,9 @@ export function createMockApi(start: Snapshot, options: MockOptions = {}): Api {
       if (options.hold === true) return new Promise<void>(() => {});
       await wait();
       const outcome = apply(structuredClone(intent));
+      // A change of phase or of the kind in use starts or stops the upmixers.
+      if (outcome.kind === 'done' && PHASE_OR_KIND.has(intent.kind)) refreshUpmix();
+      publishUpmix();
       // Like the supervisor, a snapshot lists the host's outputs afresh; a
       // refusal changed nothing, so its snapshot stays the same.
       if (outcome.kind !== 'refused') state.outputs = structuredClone(host.outputs);

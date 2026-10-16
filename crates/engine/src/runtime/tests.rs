@@ -555,6 +555,8 @@ fn target_change_rejects_values_outside_crossing_capacity() {
         capture_events,
         output_events,
         retired,
+        upmix: RefCell::new(Default::default()),
+        qpc_frequency: DEFAULT_QPC_FREQUENCY,
         capture_thread: None,
         output_thread: None,
     };
@@ -579,6 +581,8 @@ fn lfe_gain_change_rejects_values_outside_the_supported_range() {
         capture_events,
         output_events,
         retired,
+        upmix: RefCell::new(Default::default()),
+        qpc_frequency: DEFAULT_QPC_FREQUENCY,
         capture_thread: None,
         output_thread: None,
     };
@@ -2650,6 +2654,8 @@ fn queue_engine(directions: Option<usize>) -> (Engine, Consumer<LiveChange>) {
         capture_events,
         output_events,
         retired,
+        upmix: RefCell::new(Default::default()),
+        qpc_frequency: DEFAULT_QPC_FREQUENCY,
         capture_thread: None,
         output_thread: None,
     };

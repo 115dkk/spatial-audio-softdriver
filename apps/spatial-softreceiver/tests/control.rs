@@ -151,7 +151,7 @@ fn startup_restore_notices_follow_language_without_losing_external_details() {
     let initial = bridge.snapshot();
     assert_eq!(initial.language, Ko);
     let korean_notes = vec![
-        format!("복원점을 읽지 못했습니다: {detail}"),
+        format!("기본 장치를 되돌리기 위해 저장한 정보를 읽지 못했습니다: {detail}"),
         "지난 실행의 기본 장치를 되돌리지 못했습니다.".to_owned(),
         diagnostic.render(Ko),
         external.to_owned(),
@@ -161,7 +161,7 @@ fn startup_restore_notices_follow_language_without_losing_external_details() {
 
     bridge.dispatch(Intent::SetLanguage(Some(En))).unwrap();
     let english_notes = vec![
-        format!("Could not read the restore point: {detail}"),
+        format!("Could not read the saved information for restoring the default devices: {detail}"),
         "Could not restore the default audio devices from the previous run.".to_owned(),
         diagnostic.render(En),
         external.to_owned(),

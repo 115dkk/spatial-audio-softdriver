@@ -76,11 +76,11 @@ pub mod common {
         }
     }
 
-    #[doc = "켠 뒤에 시험음을 낼 수 있습니다."]
+    #[doc = "켠 뒤에 시험용 신호를 재생할 수 있습니다."]
     pub fn test_after_enable(language: Language) -> &'static str {
         match language {
-            Language::Ko => "켠 뒤에 시험음을 낼 수 있습니다.",
-            Language::En => "Turn it on before playing a test tone.",
+            Language::Ko => "켠 뒤에 시험용 신호를 재생할 수 있습니다.",
+            Language::En => "Turn it on before playing a test signal.",
         }
     }
 
@@ -120,11 +120,11 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "다른 아키텍처"]
+    #[doc = "다른 종류의 PC"]
     pub fn arch_other(language: Language) -> &'static str {
         match language {
-            Language::Ko => "다른 아키텍처",
-            Language::En => "another architecture",
+            Language::Ko => "다른 종류의 PC",
+            Language::En => "a different type of PC",
         }
     }
 
@@ -136,15 +136,15 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "이 빌드는 {build}용이지만 이 PC는 {pc}입니다."]
+    #[doc = "이 버전은 {build} PC용이지만 이 PC는 {pc}입니다."]
     pub fn architecture_mismatch(
         language: Language,
         build: impl core::fmt::Display,
         pc: impl core::fmt::Display,
     ) -> String {
         match language {
-            Language::Ko => format!("이 빌드는 {build}용이지만 이 PC는 {pc}입니다."),
-            Language::En => format!("This build is for {build}, but this PC is {pc}."),
+            Language::Ko => format!("이 버전은 {build} PC용이지만 이 PC는 {pc}입니다."),
+            Language::En => format!("This version is for {build} PCs, but this PC is {pc}."),
         }
     }
 
@@ -161,6 +161,14 @@ pub mod supervisor {
         match language {
             Language::Ko => "캡처 장치와의 연결이 끊어졌습니다.",
             Language::En => "The capture device disconnected.",
+        }
+    }
+
+    #[doc = "먼저 업믹스 플러그인을 고르십시오."]
+    pub fn choose_plugin_first(language: Language) -> &'static str {
+        match language {
+            Language::Ko => "먼저 업믹스 플러그인을 고르십시오.",
+            Language::En => "Choose an upmixer plugin first.",
         }
     }
 
@@ -200,19 +208,19 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "진단 녹음은 다음 조각에서 옵니다."]
+    #[doc = "진단 기록 기능은 이후 업데이트에서 제공됩니다."]
     pub fn diagnostic_recording_unavailable(language: Language) -> &'static str {
         match language {
-            Language::Ko => "진단 녹음은 다음 조각에서 옵니다.",
-            Language::En => "Diagnostic recording is coming in a later update.",
+            Language::Ko => "진단 기록 기능은 이후 업데이트에서 제공됩니다.",
+            Language::En => "Diagnostic recording will be available in a later update.",
         }
     }
 
-    #[doc = "그 방향이 없습니다."]
+    #[doc = "선택한 방향을 찾을 수 없습니다."]
     pub fn direction_missing(language: Language) -> &'static str {
         match language {
-            Language::Ko => "그 방향이 없습니다.",
-            Language::En => "That direction does not exist.",
+            Language::Ko => "선택한 방향을 찾을 수 없습니다.",
+            Language::En => "The selected direction could not be found.",
         }
     }
 
@@ -244,23 +252,31 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "드라이버 서비스가 돌고 있지 않습니다. 복구를 실행하십시오."]
+    #[doc = "드라이버 서비스가 실행되고 있지 않습니다. 복구를 실행하십시오."]
     pub fn driver_service_stopped(language: Language) -> &'static str {
         match language {
-            Language::Ko => "드라이버 서비스가 돌고 있지 않습니다. 복구를 실행하십시오.",
+            Language::Ko => "드라이버 서비스가 실행되고 있지 않습니다. 복구를 실행하십시오.",
             Language::En => "The driver service is not running. Run repair.",
         }
     }
 
-    #[doc = "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오."]
+    #[doc = "Windows가 드라이버 서명을 확인하지 못했습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오."]
     pub fn driver_signature_rejected(language: Language) -> &'static str {
         match language {
             Language::Ko => {
-                "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오."
+                "Windows가 드라이버 서명을 확인하지 못했습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오."
             }
             Language::En => {
-                "Windows rejected the driver signature (problem code 52). Check test-signing mode, then reinstall the driver."
+                "Windows could not verify the driver signature (problem code 52). Check test-signing mode, then reinstall the driver."
             }
+        }
+    }
+
+    #[doc = "이 입력은 업믹스하지 않습니다."]
+    pub fn endpoint_cannot_upmix(language: Language) -> &'static str {
+        match language {
+            Language::Ko => "이 입력은 업믹스하지 않습니다.",
+            Language::En => "This input does not upmix.",
         }
     }
 
@@ -316,11 +332,11 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "게인은 -20 dB에서 +10 dB 사이입니다."]
+    #[doc = "출력 음량 조절 범위는 -20 dB에서 +10 dB까지입니다."]
     pub fn gain_out_of_range(language: Language) -> &'static str {
         match language {
-            Language::Ko => "게인은 -20 dB에서 +10 dB 사이입니다.",
-            Language::En => "Gain must be between -20 dB and +10 dB.",
+            Language::Ko => "출력 음량 조절 범위는 -20 dB에서 +10 dB까지입니다.",
+            Language::En => "Output volume adjustment must be between -20 dB and +10 dB.",
         }
     }
 
@@ -356,11 +372,15 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "주 엔드포인트가 보이지 않습니다. 드라이버 상태를 확인하십시오."]
+    #[doc = "게임과 일반 앱의 소리를 받는 가상 오디오 장치를 찾을 수 없습니다. 드라이버 상태를 확인하십시오."]
     pub fn main_endpoint_missing(language: Language) -> &'static str {
         match language {
-            Language::Ko => "주 엔드포인트가 보이지 않습니다. 드라이버 상태를 확인하십시오.",
-            Language::En => "The main endpoint is not available. Check the driver status.",
+            Language::Ko => {
+                "게임과 일반 앱의 소리를 받는 가상 오디오 장치를 찾을 수 없습니다. 드라이버 상태를 확인하십시오."
+            }
+            Language::En => {
+                "The virtual audio device for games and other apps could not be found. Check the driver status."
+            }
         }
     }
 
@@ -411,6 +431,34 @@ pub mod supervisor {
         match language {
             Language::Ko => "Spatial SoftReceiver 자신을 출력으로 고를 수 없습니다.",
             Language::En => "Spatial SoftReceiver cannot use itself as its output.",
+        }
+    }
+
+    #[doc = "업믹스 플러그인이 10분 안에 세 번 멈춰 이번 실행에서는 껐습니다: {name}"]
+    pub fn plugin_disabled(language: Language, name: impl core::fmt::Display) -> String {
+        match language {
+            Language::Ko => {
+                format!("업믹스 플러그인이 10분 안에 세 번 멈춰 이번 실행에서는 껐습니다: {name}")
+            }
+            Language::En => format!(
+                "The upmixer plugin stopped three times within 10 minutes, so it is off until the app restarts: {name}"
+            ),
+        }
+    }
+
+    #[doc = "이 플러그인은 업믹서가 아닙니다: {name}"]
+    pub fn plugin_not_upmixer(language: Language, name: impl core::fmt::Display) -> String {
+        match language {
+            Language::Ko => format!("이 플러그인은 업믹서가 아닙니다: {name}"),
+            Language::En => format!("This plugin is not an upmixer: {name}"),
+        }
+    }
+
+    #[doc = "업믹스 플러그인을 읽지 못했습니다: {detail}"]
+    pub fn plugin_scan_failed(language: Language, detail: impl core::fmt::Display) -> String {
+        match language {
+            Language::Ko => format!("업믹스 플러그인을 읽지 못했습니다: {detail}"),
+            Language::En => format!("The upmixer plugin could not be read: {detail}"),
         }
     }
 
@@ -505,14 +553,18 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "복원점을 지우지 못했습니다: {detail}"]
+    #[doc = "기본 장치를 되돌리기 위해 저장한 정보를 지우지 못했습니다: {detail}"]
     pub fn restore_point_remove_failed(
         language: Language,
         detail: impl core::fmt::Display,
     ) -> String {
         match language {
-            Language::Ko => format!("복원점을 지우지 못했습니다: {detail}"),
-            Language::En => format!("The restore point could not be removed: {detail}"),
+            Language::Ko => {
+                format!("기본 장치를 되돌리기 위해 저장한 정보를 지우지 못했습니다: {detail}")
+            }
+            Language::En => format!(
+                "The saved information for restoring the default devices could not be removed: {detail}"
+            ),
         }
     }
 
@@ -595,54 +647,68 @@ pub mod supervisor {
             Language::En => " Secure Boot is on and must be turned off first.",
         }
     }
+
+    #[doc = "앱 자체 업믹서는 아직 제공되지 않습니다."]
+    pub fn upmixer_unavailable(language: Language) -> &'static str {
+        match language {
+            Language::Ko => "앱 자체 업믹서는 아직 제공되지 않습니다.",
+            Language::En => "The app's own upmixer is not available yet.",
+        }
+    }
 }
 
 pub mod guard {
     use super::Language;
 
-    #[doc = "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다."]
+    #[doc = "지난번에 앱이 예기치 않게 종료되어 기본 오디오 장치를 되돌렸습니다."]
     pub fn marker_app_exited(language: Language) -> &'static str {
         match language {
-            Language::Ko => "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
+            Language::Ko => "지난번에 앱이 예기치 않게 종료되어 기본 오디오 장치를 되돌렸습니다.",
             Language::En => {
                 "The app exited unexpectedly. The default audio devices have been restored."
             }
         }
     }
 
-    #[doc = "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다."]
+    #[doc = "다시 시작한 뒤에도 소리 처리가 멈춰 기본 오디오 장치를 되돌렸습니다."]
     pub fn marker_restart_failed(language: Language) -> &'static str {
         match language {
-            Language::Ko => "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다.",
+            Language::Ko => "다시 시작한 뒤에도 소리 처리가 멈춰 기본 오디오 장치를 되돌렸습니다.",
             Language::En => {
-                "The engine stopped responding after restarting. The default audio devices have been restored."
+                "Audio processing stopped responding after restarting. The default audio devices have been restored."
             }
         }
     }
 
-    #[doc = "엔진이 멈춰 앱을 다시 시작했습니다."]
+    #[doc = "소리 처리가 멈춰 앱을 다시 시작했습니다."]
     pub fn marker_stall_restarted(language: Language) -> &'static str {
         match language {
-            Language::Ko => "엔진이 멈춰 앱을 다시 시작했습니다.",
-            Language::En => "The engine stopped responding, so the app was restarted.",
+            Language::Ko => "소리 처리가 멈춰 앱을 다시 시작했습니다.",
+            Language::En => "Audio processing stopped responding, so the app was restarted.",
         }
     }
 
-    #[doc = "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다."]
+    #[doc = "앱을 기본 오디오 장치로 사용하던 중 응답이 없어 이전 장치로 되돌렸습니다."]
     pub fn marker_stuck(language: Language) -> &'static str {
         match language {
-            Language::Ko => "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다.",
+            Language::Ko => {
+                "앱을 기본 오디오 장치로 사용하던 중 응답이 없어 이전 장치로 되돌렸습니다."
+            }
             Language::En => {
-                "The app stopped responding while holding the default audio devices. The defaults have been restored."
+                "The app stopped responding while it was the default audio device. The previous devices have been restored."
             }
         }
     }
 
-    #[doc = "복원점을 읽지 못했습니다: {error}"]
+    #[doc = "기본 장치를 되돌리기 위해 저장한 정보를 읽지 못했습니다: {error}"]
     pub fn restore_point_read_failed(language: Language, error: impl core::fmt::Display) -> String {
         match language {
-            Language::Ko => format!("복원점을 읽지 못했습니다: {error}"),
-            Language::En => format!("Could not read the restore point: {error}"),
+            Language::Ko => {
+                format!("기본 장치를 되돌리기 위해 저장한 정보를 읽지 못했습니다: {error}")
+            }
+            Language::En => format!(
+                "Could not read the saved information for restoring the default devices: {error}"
+            ),
         }
     }
 }
@@ -666,14 +732,18 @@ pub mod shell {
         }
     }
 
-    #[doc = "복원점을 읽지 못했습니다: {detail}"]
+    #[doc = "기본 장치를 되돌리기 위해 저장한 정보를 읽지 못했습니다: {detail}"]
     pub fn restore_point_read_failed(
         language: Language,
         detail: impl core::fmt::Display,
     ) -> String {
         match language {
-            Language::Ko => format!("복원점을 읽지 못했습니다: {detail}"),
-            Language::En => format!("Could not read the restore point: {detail}"),
+            Language::Ko => {
+                format!("기본 장치를 되돌리기 위해 저장한 정보를 읽지 못했습니다: {detail}")
+            }
+            Language::En => format!(
+                "Could not read the saved information for restoring the default devices: {detail}"
+            ),
         }
     }
 
@@ -709,11 +779,11 @@ pub mod shell {
         }
     }
 
-    #[doc = "이 빌드에는 업데이트 기능이 없습니다."]
+    #[doc = "이 버전에는 업데이트 기능이 없습니다."]
     pub fn update_not_built(language: Language) -> &'static str {
         match language {
-            Language::Ko => "이 빌드에는 업데이트 기능이 없습니다.",
-            Language::En => "This build has no updater.",
+            Language::Ko => "이 버전에는 업데이트 기능이 없습니다.",
+            Language::En => "This version has no update feature.",
         }
     }
 }

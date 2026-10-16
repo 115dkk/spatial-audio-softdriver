@@ -89,6 +89,9 @@ pub enum SessionNotice {
 
 pub struct Session {
     engine: engine::Engine,
+    /// The QPC frequency the engine runs with, which its upmix stages are
+    /// built for.
+    qpc_frequency: u64,
     profile: OutputProfile,
     pending_prepared: bool,
     output_kind: engine::OutputKind,
@@ -179,6 +182,7 @@ impl Session {
         } else {
             (tee, None)
         };
+        let qpc_frequency = config.qpc_frequency;
         let engine = engine::start_with(
             config.engine,
             capture,
@@ -195,6 +199,7 @@ impl Session {
         }
         Ok(Self {
             engine,
+            qpc_frequency,
             profile: config.profile,
             pending_prepared: false,
             output_kind,
@@ -277,6 +282,10 @@ impl Session {
                 self.figures.faults.push(format!("{fault:?}"));
                 notices.push(SessionNotice::Fault(fault));
             }
+            // The engine dropped a stage it let go of: the supervisor keeps
+            // no reference to it, and a plugin host's ring stays mapped
+            // while anything still holds it.
+            EngineEvent::UpmixerRetired { .. } => {}
         }
     }
 
@@ -308,6 +317,18 @@ impl Session {
         self.engine.status()
     }
 
+    /// The QPC frequency the engine runs with: what an
+    /// [`engine::UpmixStage`] for it must be built with.
+    pub fn qpc_frequency(&self) -> u64 {
+        self.qpc_frequency
+    }
+
+    /// The upmix stage of `endpoint` as last handed over
+    /// ([`engine::Engine::upmix_status`]).
+    pub fn upmix_status(&self, endpoint: u16) -> Option<engine::UpmixStatus> {
+        self.engine.upmix_status(endpoint)
+    }
+
     /// The session alone, as the screen would see it: Running, or Faulted
     /// with the fault as the error. The fields only the state machine knows
     /// keep their defaults.
@@ -322,6 +343,7 @@ impl Session {
             language_choice: None,
             phase,
             profile: crate::machine::default_profile_view(),
+            upmix: crate::upmix::default_upmix_view(),
             engine: Some(status),
             outputs: Vec::new(),
             chosen_output: None,

@@ -2,9 +2,9 @@
 
 import type { Shell, UpdateState } from '../api';
 import type { EngineStatus, Intent, ProfileKind, Snapshot, UserError } from '../bindings';
-import { type Child, h } from '../dom';
+import { type Child, h, svg } from '../dom';
 
-export type Tab = 'status' | 'profile' | 'settings';
+export type Tab = 'status' | 'profile' | 'upmix' | 'settings';
 
 /** View-only state: which tab is open and the like. Nothing Rust decides. */
 export interface ViewState {
@@ -40,6 +40,11 @@ export interface Context {
   readonly busy: boolean;
   /** The kind of the intent in flight. */
   readonly pending: Intent['kind'] | null;
+  /**
+   * The intent in flight, for controls that show what they are sending
+   * (which endpoint's upmixer, which way a switch goes).
+   */
+  readonly sending: Intent | null;
   readonly shell: Shell;
   /** Sends an intent unless one is already in flight. */
   send(intent: Intent, after?: (ok: boolean) => void): void;
@@ -134,6 +139,80 @@ export function button(
   );
 }
 
+/** The ids that describe a control, or null when none does. */
+export function described(...ids: (string | false | null)[]): string | null {
+  const present = ids.filter((id): id is string => typeof id === 'string');
+  return present.length === 0 ? null : present.join(' ');
+}
+
+/**
+ * A button that asks the shell for a file or a folder and sends the path
+ * picked; disabled while any intent is in flight or when `locked`.
+ */
+export function picker(
+  ctx: Context,
+  label: string,
+  key: string,
+  locked: boolean,
+  describedBy: string | null,
+  pick: () => Promise<string | null>,
+  send: (path: string) => void,
+): HTMLButtonElement {
+  const element = button(
+    label,
+    () => {
+      pick().then(
+        (path) => {
+          if (path !== null) send(path);
+        },
+        (reason: unknown) => ctx.report({ message: String(reason), next: 'none' }),
+      );
+    },
+    { key, disabled: ctx.busy || locked },
+  );
+  if (describedBy !== null) element.setAttribute('aria-describedby', describedBy);
+  return element;
+}
+
+export interface SwitchOptions {
+  /** Stable key so focus survives a redraw; also the element id. */
+  key: string;
+  /** Visible label; it is the switch's name. */
+  label: string;
+  /** On or off, as the switch shows it. */
+  on: boolean;
+  disabled: boolean;
+  /** The change is in flight. */
+  busy: boolean;
+  describedBy: string | null;
+  onToggle: (on: boolean) => void;
+}
+
+/**
+ * An on/off switch (`role="switch"`): a button, so Space and Enter toggle
+ * it, with the track and thumb drawn by the stylesheet and the label beside
+ * them inside the button, so the whole row is the target.
+ */
+export function switchControl(options: SwitchOptions): HTMLButtonElement {
+  return h(
+    'button',
+    {
+      type: 'button',
+      role: 'switch',
+      id: options.key,
+      class: 'switch',
+      'data-key': options.key,
+      'aria-checked': options.on ? 'true' : 'false',
+      'aria-busy': options.busy ? 'true' : null,
+      'aria-describedby': options.describedBy,
+      disabled: options.disabled,
+      onClick: () => options.onToggle(!options.on),
+    },
+    h('span', { class: 'switch-track', 'aria-hidden': 'true' }, h('span', { class: 'switch-thumb' })),
+    h('span', { class: 'switch-label' }, options.label),
+  );
+}
+
 /** A titled panel. */
 export function panel(title: string | null, children: Child[], className = ''): HTMLElement {
   return h(
@@ -142,4 +221,74 @@ export function panel(title: string | null, children: Child[], className = ''): 
     title === null ? null : h('h2', { class: 'panel-title' }, title),
     ...children,
   );
+}
+
+/** Tips closed with Escape, by key, so a redraw that gives the focus back does not open them again. */
+const closedTips = new Set<string>();
+
+/** The (i) drawn as a ring, a dot and a stem in the text colour. */
+function infoGlyph(): SVGSVGElement {
+  return svg(
+    'svg',
+    { class: 'info-tip-glyph', viewBox: '0 0 16 16', width: 16, height: 16, 'aria-hidden': 'true', focusable: 'false' },
+    svg('circle', { cx: 8, cy: 8, r: 6.75, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5 }),
+    svg('circle', { cx: 8, cy: 5, r: 1, fill: 'currentColor' }),
+    svg('path', { d: 'M8 7.5v4', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round' }),
+  );
+}
+
+/**
+ * An (i) button with one line of help. The line opens under it on hover and
+ * on focus, stays while the pointer moves onto it, and Escape closes it
+ * (WCAG 1.4.13). It is always in the DOM as the button's description
+ * (`role="tooltip"`), hidden from sight while closed, so a screen reader
+ * reads it either way. `key` keeps the focus across a redraw.
+ */
+export function infoTip(key: string, label: string, tip: string): HTMLElement {
+  const tipId = `${key}-tip`;
+  const trigger = h(
+    'button',
+    { type: 'button', class: 'info-tip', 'data-key': key, 'aria-label': label, 'aria-describedby': tipId },
+    infoGlyph(),
+  );
+  const wrap = h('span', { class: 'info-tip-wrap' }, trigger, h('span', { id: tipId, role: 'tooltip', class: 'info-tip-text' }, tip));
+  let hovered = false;
+  let focused = false;
+
+  const onKey = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    document.removeEventListener('keydown', onKey);
+    // A tip a redraw took away has nothing left to close.
+    if (!wrap.isConnected) return;
+    closedTips.add(key);
+    update();
+  };
+  function update() {
+    // Pointer and focus both gone: the next hover or focus opens it again.
+    if (!hovered && !focused) closedTips.delete(key);
+    const open = (hovered || focused) && !closedTips.has(key);
+    wrap.classList.toggle('is-open', open);
+    if (open) document.addEventListener('keydown', onKey);
+    else document.removeEventListener('keydown', onKey);
+  }
+
+  trigger.addEventListener('focus', () => {
+    focused = true;
+    update();
+  });
+  trigger.addEventListener('blur', () => {
+    // Taken away by a redraw: the new button takes the focus over.
+    if (!trigger.isConnected) return;
+    focused = false;
+    update();
+  });
+  wrap.addEventListener('mouseenter', () => {
+    hovered = true;
+    update();
+  });
+  wrap.addEventListener('mouseleave', () => {
+    hovered = false;
+    update();
+  });
+  return wrap;
 }

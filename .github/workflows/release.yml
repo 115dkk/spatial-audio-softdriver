@@ -209,8 +209,8 @@ jobs:
           name: driver-kit
           path: kit
 
-      - name: Build the app, the guard and the setup tool
-        run: cargo build --release --locked -p spatial-softreceiver --features spatial-softreceiver/updater -p ssr-guard -p ssr-setup
+      - name: Build the app, the guard, the setup tool and the plugin host
+        run: cargo build --release --locked -p spatial-softreceiver --features spatial-softreceiver/updater -p ssr-guard -p ssr-setup -p ssr-plughost
 
       - name: Stage the app folder
         shell: pwsh
@@ -230,7 +230,9 @@ jobs:
             Copy-Item (Join-Path $package.FullName $name) stage/
           }
           Rename-Item stage/kit.json driver-kit.json
-          Copy-Item target/release/spatial-softreceiver.exe, target/release/ssr-guard.exe, target/release/ssr-setup.exe, LICENSE stage/
+          # The plugin host runs each VST upmixer in its own process (ADR 0021);
+          # the repository's test plugin is never staged.
+          Copy-Item target/release/spatial-softreceiver.exe, target/release/ssr-guard.exe, target/release/ssr-setup.exe, target/release/ssr-plughost.exe, LICENSE stage/
           # The toasts' icon (ssr_sys::toast::register reads it beside the app).
           Copy-Item apps/spatial-softreceiver/icons/icon.ico stage/spatial-softreceiver.ico
           Copy-Item docs/profiles/*.toml stage/profiles/

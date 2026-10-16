@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use ssr_types::app::{Language, NextAction, Snapshot};
+use ssr_types::app::{Language, NextAction, Snapshot, UpmixState};
 use ssr_types::{OutputError, SecureBoot};
 use supervisor::machine::Config;
 use supervisor::text::Message;
@@ -28,6 +28,13 @@ const NAMES: &[&str] = &[
     "ready-speakers",
     "running-speakers",
     "ready-layout-unsupported",
+    "ready-upmix",
+    "running-upmix",
+    "running-upmix-fallback",
+    "running-upmix-pass",
+    "running-upmix-native-surround",
+    "ready-upmix-failed",
+    "ready-speakers-upmix-off",
     "ready-profile-file",
     "ready-brir-unreadable",
     "ready-start-failed",
@@ -38,6 +45,8 @@ struct Expected {
     error: Option<(Message, NextAction)>,
     notes: Vec<Message>,
     default_profile: bool,
+    /// The endpoint whose upmixer failed, and the sentence it shows.
+    upmix_failed: Option<(u16, Message)>,
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -49,6 +58,7 @@ fn expected(name: &str, output_name: &str) -> Expected {
         error: None,
         notes: Vec::new(),
         default_profile: true,
+        upmix_failed: None,
     };
     match name {
         "setup-welcome"
@@ -103,14 +113,13 @@ fn expected(name: &str, output_name: &str) -> Expected {
             ..none()
         },
         "running" => Expected {
-            error: None,
             notes: vec![Message::Reconnected],
             default_profile: false,
+            ..none()
         },
         "running-reconnecting" => Expected {
-            error: None,
-            notes: Vec::new(),
             default_profile: false,
+            ..none()
         },
         "faulted" => Expected {
             error: Some((
@@ -125,8 +134,25 @@ fn expected(name: &str, output_name: &str) -> Expected {
         "ready-headphones"
         | "ready-speakers"
         | "running-speakers"
-        | "ready-profile-file" => Expected {
+        | "ready-profile-file"
+        | "running-upmix"
+        | "running-upmix-fallback"
+        | "running-upmix-pass"
+        | "running-upmix-native-surround"
+        | "ready-speakers-upmix-off" => Expected {
             default_profile: false,
+            ..none()
+        },
+        "ready-upmix" => none(),
+        // What the supervisor shows after the watch's third failure in ten
+        // minutes (ADR 0021).
+        "ready-upmix-failed" => Expected {
+            upmix_failed: Some((
+                1,
+                Message::PluginDisabled {
+                    name: "Example Upmixer".to_owned(),
+                },
+            )),
             ..none()
         },
         "ready-layout-unsupported" => Expected {
@@ -222,6 +248,23 @@ fn every_fixture_sentence_is_the_supervisors() {
             assert_eq!(snapshot.notes, expected_notes, "{name}");
             if expected.default_profile {
                 assert_eq!(snapshot.profile.name, "2.0", "{name}");
+            }
+            for view in &snapshot.upmix.endpoints {
+                let failed = match &view.state {
+                    UpmixState::Failed(sentence) => Some(sentence.as_str()),
+                    _ => None,
+                };
+                let wanted = expected
+                    .upmix_failed
+                    .as_ref()
+                    .filter(|(endpoint, _)| *endpoint == view.endpoint)
+                    .map(|(_, message)| message.render(language));
+                assert_eq!(
+                    failed,
+                    wanted.as_deref(),
+                    "{name} endpoint {}",
+                    view.endpoint
+                );
             }
         }
     }

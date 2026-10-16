@@ -101,6 +101,38 @@ unsupported: UnsupportedReason | null;
  */
 chain_errors: ChainErrorMap }
 
+export type EndpointUpmixView = {
+/**
+ * Endpoint number: 0 main, 1 music, 2 PASS.
+ */
+endpoint: number;
+/**
+ * The saved choice; `None` follows the default (ADR 0035).
+ */
+choice: UpmixerChoice | null;
+/**
+ * What the choice resolves to now, the default included.
+ */
+effective: UpmixerChoice; plugin: PluginView | null; state: UpmixState;
+/**
+ * Set while the upmixer runs but the sound playing now goes around it.
+ */
+bypass: UpmixBypass | null;
+/**
+ * The upmix path's added latency while it runs: two blocks, the
+ * plugin's own latency and the 2 ms concealment (ADR 0035).
+ */
+latency_ms: number | null;
+/**
+ * The plugin's input speakers by name (`"L"`, `"R"`, ...); the stereo is
+ * placed onto them first.
+ */
+inputs: string[];
+/**
+ * The plugin's output speakers by name (`"L"`, `"C"`, `"LFE"`, ...).
+ */
+outputs: string[] }
+
 /**
  * Why the engine stopped making sound on its own.
  */
@@ -260,7 +292,26 @@ export type Intent = { kind: "set_language"; value: Language | null } | { kind: 
 /**
  * The gain of the output in use; each kind keeps its own.
  */
-{ kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
+{ kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } |
+/**
+ * Chooses an endpoint's upmixer (ADR 0035). `FirstParty` is refused
+ * until the first-party upmixer exists (ADR 0020).
+ */
+{ kind: "set_upmixer"; value: UpmixerSetting } |
+/**
+ * Chooses the VST upmixer plugin of an endpoint: a `.vst3` bundle or a
+ * VST 2 `.dll`. The supervisor scans it before keeping it.
+ */
+{ kind: "choose_plugin"; value: PluginChoice } |
+/**
+ * Opens the plugin's editor window of an endpoint (its host process's
+ * own top-level window).
+ */
+{ kind: "open_plugin_editor"; value: number } |
+/**
+ * Whether an output kind applies upmixing (ADR 0035); on by default.
+ */
+{ kind: "set_upmix_apply"; value: UpmixApply } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
 
 export type Language = "ko" | "en"
 
@@ -315,6 +366,26 @@ export type Phase = { kind: "setup"; value: SetupStep } | { kind: "ready" } | { 
  * What the machine learns about the PC once per run.
  */
 export type Platform = { os_build: number; arch: Arch; test_signing: boolean; secure_boot: SecureBoot }
+
+/**
+ * [`Intent::ChoosePlugin`].
+ */
+export type PluginChoice = { endpoint: number; path: string }
+
+export type PluginFormat = "vst2" | "vst3"
+
+/**
+ * A chosen upmixer plugin.
+ */
+export type PluginView = {
+/**
+ * The `.vst3` bundle or `.dll`.
+ */
+path: string; format: PluginFormat;
+/**
+ * The plugin's own name and vendor, as it reports them.
+ */
+name: string; vendor: string }
 
 /**
  * Whether our endpoints carry the exclusive-mode policy of ADR 0028: two
@@ -437,7 +508,7 @@ language: Language;
  * The saved choice behind `language`: `None` follows the Windows display
  * language. The settings screen's selector shows this, not the result.
  */
-language_choice: Language | null; phase: Phase; profile: ProfileView; engine: EngineStatus | null;
+language_choice: Language | null; phase: Phase; profile: ProfileView; upmix: UpmixView; engine: EngineStatus | null;
 /**
  * Outputs the user may choose: active, and never our own endpoints.
  */
@@ -528,6 +599,99 @@ since_block_ms: number }
  * Why an entrance's current source format cannot be decoded.
  */
 export type UnsupportedReason = "format" | "source_rate" | "direct_layout"
+
+/**
+ * [`Intent::SetUpmixApply`].
+ */
+export type UpmixApply = { kind: ProfileKind; on: boolean }
+
+/**
+ * Why an endpoint's sound plays as it came while its upmixer runs.
+ */
+export type UpmixBypass =
+/**
+ * The source playing now is native surround (more than two channels
+ * besides LFE, or objects); it is never upmixed.
+ */
+"native_surround" |
+/**
+ * The output kind in use does not apply upmixing.
+ */
+"kind_off" |
+/**
+ * The source's sample rate changed; the upmixer is being set up for it.
+ */
+"rate_change"
+
+/**
+ * What an endpoint's upmixer is doing.
+ */
+export type UpmixState =
+/**
+ * Not running: upmixing is off for this endpoint, the output kind in use
+ * does not apply it, or the engine is off.
+ */
+{ kind: "stopped" } |
+/**
+ * The plugin host is starting or loading the plugin.
+ */
+{ kind: "starting" } | { kind: "running" } |
+/**
+ * The plugin missed blocks or is restarting; the upmixer's input plays,
+ * delayed the same (ADR 0021, ADR 0035).
+ */
+{ kind: "fallback" } |
+/**
+ * Off for this session; the sentence says why.
+ */
+{ kind: "failed"; value: string }
+
+export type UpmixView = {
+/**
+ * The main, music and PASS endpoints, in endpoint order.
+ */
+endpoints: EndpointUpmixView[];
+/**
+ * Whether headphones apply upmixing (on by default).
+ */
+headphones: boolean;
+/**
+ * Whether speakers apply upmixing (on by default).
+ */
+speakers: boolean;
+/**
+ * The first-party upmixer exists in this build. False until ADR 0020's
+ * conditions are met; the screen then shows it as not yet built.
+ */
+first_party_available: boolean }
+
+/**
+ * The upmixers an endpoint's sound may go through (ADR 0035).
+ */
+export type UpmixerChoice =
+/**
+ * The first-party upmixer (ADR 0020). Not built yet; it becomes the
+ * default once it is.
+ */
+"first_party" |
+/**
+ * A VST 2 or VST 3 upmixer plugin in its own host process (ADR 0021).
+ */
+"plugin" |
+/**
+ * No upmixing.
+ */
+"off"
+
+/**
+ * [`Intent::SetUpmixer`].
+ */
+export type UpmixerSetting = {
+/**
+ * Endpoint number: 0 main, 1 music, 2 PASS (ADR 0035, the 2026-10-16
+ * correction).
+ */
+endpoint: number; choice: UpmixerChoice }
 
 /**
  * An error the screen shows as is: the sentence and the next action.

@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use engine::adapters::NullOpener;
-use engine::{LiveChange, OutputProfile};
+use engine::{LiveChange, MatrixUpmixer, OutputProfile, UpmixMonitor, UpmixStatus, Upmixer};
 use ssr_types::app::{Intent, Language, NextAction, OutputChoice, Phase, SetupStep, UserError};
 use ssr_types::ports::PolicyState;
 use ssr_types::{
@@ -23,7 +23,8 @@ use ssr_types::{
 use supervisor::machine::Config;
 use supervisor::restore_point::{self, RestorePoint, RestorePointError};
 use supervisor::{
-    EngineHandle, Launcher, Session, SessionError, SessionNotice, Settings, Supervisor,
+    EngineHandle, Launcher, PluginClass, PluginEvent, PluginHost, PluginHostError, PluginInstance,
+    PluginSetting, Session, SessionError, SessionNotice, Settings, Supervisor,
 };
 
 const OURS: &str = "{ours-main}";
@@ -58,7 +59,33 @@ struct World {
     engine_directions: Vec<DirectionView>,
     /// The recoverable fault the running engine reports in its status.
     engine_fault: Option<EngineFault>,
+    /// The status readers of the upmix stages the running engine took.
+    stages: [Option<UpmixMonitor>; 3],
+    /// Upmix statuses the running engine reports instead of its stages'.
+    upmix_status: [Option<UpmixStatus>; 3],
+    plugins: PluginScript,
     calls: Vec<String>,
+}
+
+/// What the fake plugin host does, and the log of what it was asked.
+#[derive(Default)]
+struct PluginScript {
+    /// What the next scans return, in order; an empty queue finds one class.
+    scans: VecDeque<Result<Vec<PluginClass>, PluginHostError>>,
+    /// The next starts fail with these, in order.
+    start_errors: VecDeque<PluginHostError>,
+    /// Hosts come up with as many outputs as inputs (5.1 to 5.1).
+    not_upmixer: bool,
+    /// Hosts come up only when told to: a start (or restart) gives no
+    /// upmixer until a scripted `Running` is polled.
+    slow: bool,
+    /// What each endpoint's host reports on its next poll.
+    events: [VecDeque<PluginEvent>; 3],
+    /// The plugin latency of hosts that start from now on.
+    latency: usize,
+    /// Every scan, start, restart, editor, shutdown, exit and forgotten
+    /// state, in order.
+    log: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -224,6 +251,27 @@ impl EngineHandle for FakeEngine {
             ),
             LiveChange::Gain(db) => format!("gain {db}"),
             LiveChange::TestTone(direction) => format!("test {}", direction.0),
+            LiveChange::Upmixer {
+                endpoint,
+                stage: Some(stage),
+            } => {
+                let status = stage.status();
+                world.stages[usize::from(endpoint)] = Some(stage.monitor());
+                format!(
+                    "upmixer {endpoint} {} Hz [{}] -> [{}]",
+                    status.rate,
+                    names(&status.inputs),
+                    names(&status.outputs)
+                )
+            }
+            LiveChange::Upmixer {
+                endpoint,
+                stage: None,
+            } => {
+                world.stages[usize::from(endpoint)] = None;
+                format!("upmixer {endpoint} off")
+            }
+            LiveChange::UpmixApply(on) => format!("upmix apply {on}"),
             other => format!("{other:?}"),
         };
         world.applied.push(described);
@@ -231,8 +279,191 @@ impl EngineHandle for FakeEngine {
     }
 
     fn stop(self: Box<Self>) -> Result<(), SessionError> {
-        self.0.get().calls.push("stop engine".into());
+        let mut world = self.0.get();
+        world.calls.push("stop engine".into());
+        world.stages = Default::default();
         Ok(())
+    }
+
+    fn upmix_status(&self, endpoint: u16) -> Option<UpmixStatus> {
+        let world = self.0.get();
+        let endpoint = usize::from(endpoint);
+        world.upmix_status.get(endpoint)?.clone().or_else(|| {
+            Some(
+                world.stages[endpoint]
+                    .as_ref()
+                    .map_or_else(UpmixStatus::not_installed, UpmixMonitor::status),
+            )
+        })
+    }
+}
+
+fn names(speakers: &[ssr_types::Speaker]) -> String {
+    speakers
+        .iter()
+        .map(|speaker| speaker.name())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The plugin host port over the world's [`PluginScript`].
+struct FakePlugins(Shared);
+
+impl PluginHost for FakePlugins {
+    fn scan(
+        &mut self,
+        path: &std::path::Path,
+        format: ssr_types::app::PluginFormat,
+    ) -> Result<Vec<PluginClass>, PluginHostError> {
+        let mut world = self.0.get();
+        world
+            .plugins
+            .log
+            .push(format!("scan {} {format:?}", path.display()));
+        world.plugins.scans.pop_front().unwrap_or_else(|| {
+            Ok(vec![PluginClass {
+                id: [7; 16],
+                name: "Example Upmixer".into(),
+                vendor: "Example Audio".into(),
+            }])
+        })
+    }
+
+    fn start(
+        &mut self,
+        endpoint: u16,
+        plugin: &PluginSetting,
+        rate: u32,
+    ) -> Result<Box<dyn PluginInstance>, PluginHostError> {
+        let mut world = self.0.get();
+        world
+            .plugins
+            .log
+            .push(format!("start {endpoint} {} {rate}", plugin.name));
+        if let Some(error) = world.plugins.start_errors.pop_front() {
+            return Err(error);
+        }
+        let mut instance = FakeInstance {
+            world: self.0.clone(),
+            endpoint,
+            rate,
+            latency: world.plugins.latency,
+            upmixer: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            stopping: false,
+        };
+        if !world.plugins.slow {
+            instance.come_up(&world.plugins);
+        }
+        Ok(Box::new(instance))
+    }
+
+    fn forget_state(&mut self, endpoint: u16) {
+        self.0.get().plugins.log.push(format!("forget {endpoint}"));
+    }
+}
+
+/// One host of the fake plugin host: [`MatrixUpmixer::stereo_to_5_1`].
+struct FakeInstance {
+    world: Shared,
+    endpoint: u16,
+    rate: u32,
+    latency: usize,
+    upmixer: Option<Box<dyn Upmixer>>,
+    inputs: Vec<ssr_types::Speaker>,
+    outputs: Vec<ssr_types::Speaker>,
+    stopping: bool,
+}
+
+impl FakeInstance {
+    fn come_up(&mut self, script: &PluginScript) {
+        let upmixer = MatrixUpmixer::stereo_to_5_1(self.rate, self.latency);
+        self.inputs = upmixer.inputs().to_vec();
+        self.outputs = upmixer.outputs().to_vec();
+        if script.not_upmixer {
+            self.inputs.clone_from(&self.outputs);
+        }
+        self.upmixer = Some(Box::new(upmixer));
+    }
+
+    /// The world, borrowed through a clone of the handle so `self` stays free.
+    fn script(&self) -> Shared {
+        self.world.clone()
+    }
+}
+
+impl PluginInstance for FakeInstance {
+    fn take_upmixer(&mut self) -> Option<Box<dyn Upmixer>> {
+        self.upmixer.take()
+    }
+
+    fn inputs(&self) -> &[ssr_types::Speaker] {
+        &self.inputs
+    }
+
+    fn outputs(&self) -> &[ssr_types::Speaker] {
+        &self.outputs
+    }
+
+    fn latency_frames(&self) -> usize {
+        self.latency
+    }
+
+    fn poll(&mut self, _now_ms: u64) -> Vec<PluginEvent> {
+        let shared = self.script();
+        let mut world = shared.get();
+        if self.stopping {
+            world.plugins.log.push(format!("exited {}", self.endpoint));
+            return vec![PluginEvent::Exited];
+        }
+        let events: Vec<_> = world.plugins.events[usize::from(self.endpoint)]
+            .drain(..)
+            .collect();
+        for event in &events {
+            match event {
+                PluginEvent::Running if self.upmixer.is_none() => self.come_up(&world.plugins),
+                PluginEvent::LatencyChanged(frames) => self.latency = *frames,
+                _ => {}
+            }
+        }
+        events
+    }
+
+    fn restart(&mut self, rate: u32) -> Result<(), PluginHostError> {
+        let shared = self.script();
+        let mut world = shared.get();
+        world
+            .plugins
+            .log
+            .push(format!("restart {} {rate}", self.endpoint));
+        if let Some(error) = world.plugins.start_errors.pop_front() {
+            return Err(error);
+        }
+        self.rate = rate;
+        self.upmixer = None;
+        if !world.plugins.slow {
+            self.come_up(&world.plugins);
+        }
+        Ok(())
+    }
+
+    fn open_editor(&mut self) -> Result<(), PluginHostError> {
+        self.world
+            .get()
+            .plugins
+            .log
+            .push(format!("editor {}", self.endpoint));
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        self.stopping = true;
+        self.world
+            .get()
+            .plugins
+            .log
+            .push(format!("shutdown {}", self.endpoint));
     }
 }
 
@@ -305,6 +536,12 @@ fn ready_pc() -> World {
         layout_support: Ok(true),
         engine_directions: Vec::new(),
         engine_fault: None,
+        stages: Default::default(),
+        upmix_status: Default::default(),
+        plugins: PluginScript {
+            latency: 64,
+            ..PluginScript::default()
+        },
         calls: Vec::new(),
     }
 }
@@ -369,6 +606,7 @@ fn dac_settings() -> Settings {
         language: None,
         output: Some(dac_choice()),
         profile: Default::default(),
+        upmix: Default::default(),
     }
 }
 
@@ -379,6 +617,7 @@ fn start(world: World, settings: Settings) -> (Shared, Machine) {
     let supervisor = Supervisor::new(
         FakeHost(shared.clone()),
         FakeLauncher(shared.clone()),
+        Box::new(FakePlugins(shared.clone())),
         this_build(),
         settings,
     );
@@ -680,7 +919,7 @@ fn problem_code_52_names_test_signing() {
     assert_eq!(
         supervisor.handle(Intent::BeginSetup),
         Err(error(
-            "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). \
+            "Windows가 드라이버 서명을 확인하지 못했습니다(문제 코드 52). \
              시험서명 모드를 확인한 뒤 다시 설치하십시오.",
             NextAction::Retry
         ))
@@ -720,7 +959,7 @@ fn a_driver_problem_asks_for_a_repair() {
     assert_eq!(
         supervisor.handle(Intent::Recheck),
         Err(error(
-            "드라이버 서비스가 돌고 있지 않습니다. 복구를 실행하십시오.",
+            "드라이버 서비스가 실행되고 있지 않습니다. 복구를 실행하십시오.",
             NextAction::Retry
         ))
     );
@@ -816,7 +1055,7 @@ fn another_architecture_is_unsupported() {
     assert_eq!(
         supervisor.handle(Intent::BeginSetup),
         Err(error(
-            "이 빌드는 x64용이지만 이 PC는 Arm64입니다.",
+            "이 버전은 x64 PC용이지만 이 PC는 Arm64입니다.",
             NextAction::None
         ))
     );
@@ -828,7 +1067,7 @@ fn another_architecture_is_unsupported() {
     assert_eq!(
         supervisor.handle(Intent::Recheck),
         Err(error(
-            "이 빌드는 x64용이지만 이 PC는 다른 아키텍처입니다.",
+            "이 버전은 x64 PC용이지만 이 PC는 다른 종류의 PC입니다.",
             NextAction::None
         ))
     );
@@ -846,6 +1085,7 @@ fn a_changed_device_id_is_found_by_name_and_remembered() {
                 name: DAC_NAME.into(),
             }),
             profile: Default::default(),
+            upmix: Default::default(),
         },
     );
     let note = format!("출력 장치의 식별자가 바뀌어 이름으로 다시 찾았습니다: {DAC_NAME}");
@@ -1264,7 +1504,10 @@ fn a_recoverable_fault_keeps_running_until_the_engine_reconnects() {
 #[test]
 fn a_reconnect_notice_does_not_clear_an_unrelated_failure() {
     let (shared, mut supervisor) = running(ready_pc());
-    let existing = error("게인은 -20 dB에서 +10 dB 사이입니다.", NextAction::None);
+    let existing = error(
+        "출력 음량 조절 범위는 -20 dB에서 +10 dB까지입니다.",
+        NextAction::None,
+    );
     assert_eq!(
         supervisor.handle(Intent::SetGain(11.0)),
         Err(existing.clone())
@@ -1403,7 +1646,10 @@ fn a_refused_intent_keeps_the_step_explanation() {
     assert_eq!(supervisor.handle(Intent::SetGain(-3.0)), Err(not_allowed()));
     assert_eq!(
         supervisor.handle(Intent::StartDiagnosticRecording),
-        Err(error("진단 녹음은 다음 조각에서 옵니다.", NextAction::None))
+        Err(error(
+            "진단 기록 기능은 이후 업데이트에서 제공됩니다.",
+            NextAction::None
+        ))
     );
     let snapshot = supervisor.snapshot();
     assert_eq!(snapshot.phase, Phase::Setup(SetupStep::Unsupported));
@@ -1429,11 +1675,11 @@ fn unlisted_and_refused_intents_leave_the_state_alone() {
     for (intent, refusal) in [
         (
             Intent::StartDiagnosticRecording,
-            "진단 녹음은 다음 조각에서 옵니다.",
+            "진단 기록 기능은 이후 업데이트에서 제공됩니다.",
         ),
         (
             Intent::TestDirection(ssr_types::DirectionId(0)),
-            "켠 뒤에 시험음을 낼 수 있습니다.",
+            "켠 뒤에 시험용 신호를 재생할 수 있습니다.",
         ),
     ] {
         assert_eq!(
@@ -1478,7 +1724,7 @@ fn a_hidden_main_endpoint_refuses_to_enable() {
     assert_eq!(
         supervisor.handle(Intent::Enable),
         Err(error(
-            "주 엔드포인트가 보이지 않습니다. 드라이버 상태를 확인하십시오.",
+            "게임과 일반 앱의 소리를 받는 가상 오디오 장치를 찾을 수 없습니다. 드라이버 상태를 확인하십시오.",
             NextAction::Retry
         ))
     );
@@ -1519,6 +1765,7 @@ fn new_starts_at_welcome_otherwise() {
             name: "Old DAC".into(),
         }),
         profile: Default::default(),
+        upmix: Default::default(),
     };
     let unplugged = |mut world: World| {
         world
@@ -1613,6 +1860,7 @@ fn a_real_session_runs_behind_the_engine_handle() {
     let mut supervisor = Supervisor::new(
         FakeHost(shared.clone()),
         SessionLauncher,
+        Box::new(FakePlugins(shared.clone())),
         this_build(),
         dac_settings(),
     );
@@ -2321,6 +2569,7 @@ fn profile_file_refuses_correction_intents() {
     let mut supervisor = Supervisor::new(
         FakeHost(shared.clone()),
         FakeLauncher(shared.clone()),
+        Box::new(FakePlugins(shared.clone())),
         Config {
             profile_file: Some(file),
             ..this_build()
@@ -2465,7 +2714,7 @@ fn a_test_tone_is_checked_against_the_profile_the_engine_was_last_given() {
         .unwrap();
     assert_eq!(
         supervisor.handle(Intent::TestDirection(DirectionId(2))),
-        Err(error("그 방향이 없습니다.", NextAction::None))
+        Err(error("선택한 방향을 찾을 수 없습니다.", NextAction::None))
     );
 
     // A seven-direction set handed to the engine: its directions are good
@@ -2481,7 +2730,7 @@ fn a_test_tone_is_checked_against_the_profile_the_engine_was_last_given() {
         .unwrap();
     assert_eq!(
         supervisor.handle(Intent::TestDirection(DirectionId(7))),
-        Err(error("그 방향이 없습니다.", NextAction::None))
+        Err(error("선택한 방향을 찾을 수 없습니다.", NextAction::None))
     );
     let applied = shared.get().applied.clone();
     assert_eq!(applied.len(), 3, "{applied:?}");
@@ -2674,7 +2923,8 @@ fn watching_profile_file_presence_unlocks_and_relocks_imports() {
     let shared = Shared::new(ready_pc());
     let mut supervisor = Supervisor::new(
         FakeHost(shared.clone()),
-        FakeLauncher(shared),
+        FakeLauncher(shared.clone()),
+        Box::new(FakePlugins(shared.clone())),
         Config {
             profile_file: Some(file.clone()),
             ..this_build()
@@ -2818,7 +3068,8 @@ fn default_language_and_failed_profile_errors_follow_language_changes() {
     let shared = Shared::new(ready_pc());
     let mut supervisor = Supervisor::new(
         FakeHost(shared.clone()),
-        FakeLauncher(shared),
+        FakeLauncher(shared.clone()),
+        Box::new(FakePlugins(shared.clone())),
         config,
         dac_settings(),
     );
@@ -2838,5 +3089,936 @@ fn default_language_and_failed_profile_errors_follow_language_changes() {
     assert_eq!(
         supervisor.snapshot().error.unwrap().message,
         "hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오."
+    );
+}
+
+// ---- Upmixers (ADR 0035 with its 2026-10-16 correction, ADR 0021) ----
+
+const PLUGIN: &str = r"C:\Program Files\Common Files\VST3\Example Upmixer.vst3";
+
+fn choose_plugin(endpoint: u16) -> Intent {
+    Intent::ChoosePlugin(ssr_types::app::PluginChoice {
+        endpoint,
+        path: PLUGIN.into(),
+    })
+}
+
+fn set_upmixer(endpoint: u16, choice: ssr_types::app::UpmixerChoice) -> Intent {
+    Intent::SetUpmixer(ssr_types::app::UpmixerSetting { endpoint, choice })
+}
+
+fn set_apply(kind: ssr_types::app::ProfileKind, on: bool) -> Intent {
+    Intent::SetUpmixApply(ssr_types::app::UpmixApply { kind, on })
+}
+
+fn take_log(shared: &Shared) -> Vec<String> {
+    std::mem::take(&mut shared.get().plugins.log)
+}
+
+fn take_applied(shared: &Shared) -> Vec<String> {
+    std::mem::take(&mut shared.get().applied)
+}
+
+/// What the fake host's upmixer becomes in the engine at `rate`.
+fn stage(endpoint: u16, rate: u32) -> String {
+    format!("upmixer {endpoint} {rate} Hz [L R] -> [L R C LFE Ls Rs]")
+}
+
+/// Ready on the DAC with every endpoint explicitly off but `endpoint`, which
+/// upmixes with the example plugin; the logs start empty.
+fn ready_with_plugin(world: World, endpoint: u16) -> (Shared, Machine) {
+    use ssr_types::app::UpmixerChoice;
+
+    let (shared, mut supervisor) = start(world, dac_settings());
+    for other in 0..3 {
+        supervisor
+            .handle(set_upmixer(other, UpmixerChoice::Off))
+            .unwrap();
+    }
+    supervisor.handle(choose_plugin(endpoint)).unwrap();
+    supervisor
+        .handle(set_upmixer(endpoint, UpmixerChoice::Plugin))
+        .unwrap();
+    take_log(&shared);
+    shared.take_calls();
+    (shared, supervisor)
+}
+
+/// [`ready_with_plugin`], then enabled: the host is up and its stage in the
+/// engine; the logs start empty.
+fn running_with_plugin(world: World, endpoint: u16) -> (Shared, Machine) {
+    let (shared, mut supervisor) = ready_with_plugin(world, endpoint);
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        take_log(&shared),
+        [format!("start {endpoint} Example Upmixer 48000")]
+    );
+    assert_eq!(take_applied(&shared), [stage(endpoint, 48_000)]);
+    shared.take_calls();
+    supervisor.take_tick_changes();
+    (shared, supervisor)
+}
+
+/// `ui_contract.rs`'s `plugin_upmix`: `endpoint` goes through the example
+/// plugin (stereo to 5.1, 64 frames of latency), the others are explicitly
+/// off. The fixtures round the latency to 23.3 ms.
+fn fixture_upmix(endpoint: usize, state: ssr_types::app::UpmixState) -> ssr_types::app::UpmixView {
+    use ssr_types::app::{
+        EndpointUpmixView, PluginFormat, PluginView, UpmixState, UpmixView, UpmixerChoice,
+    };
+
+    let running = matches!(state, UpmixState::Running | UpmixState::Fallback);
+    let mut endpoints: Vec<_> = (0..3)
+        .map(|endpoint| EndpointUpmixView {
+            endpoint,
+            choice: Some(UpmixerChoice::Off),
+            effective: UpmixerChoice::Off,
+            plugin: None,
+            state: UpmixState::Stopped,
+            bypass: None,
+            latency_ms: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        })
+        .collect();
+    let view = &mut endpoints[endpoint];
+    view.choice = Some(UpmixerChoice::Plugin);
+    view.effective = UpmixerChoice::Plugin;
+    view.plugin = Some(PluginView {
+        path: PLUGIN.to_owned(),
+        format: PluginFormat::Vst3,
+        name: "Example Upmixer".to_owned(),
+        vendor: "Example Audio".to_owned(),
+    });
+    view.state = state;
+    view.latency_ms = running.then_some(23.3);
+    view.inputs = ["L", "R"].map(str::to_owned).to_vec();
+    view.outputs = ["L", "R", "C", "LFE", "Ls", "Rs"]
+        .map(str::to_owned)
+        .to_vec();
+    UpmixView {
+        endpoints,
+        headphones: true,
+        speakers: true,
+        first_party_available: false,
+    }
+}
+
+/// The snapshot's upmix view with each latency checked against `ms` and
+/// rounded as the fixtures write it.
+fn upmix_shape(supervisor: &Machine, ms: f32) -> ssr_types::app::UpmixView {
+    let mut view = supervisor.snapshot().upmix;
+    for endpoint in &mut view.endpoints {
+        if let Some(latency) = endpoint.latency_ms {
+            assert!((latency - ms).abs() < 1e-3, "{latency} ms, not {ms} ms");
+            endpoint.latency_ms = Some(23.3);
+        }
+    }
+    view
+}
+
+/// Two blocks, 64 frames and 2 ms at 48 kHz.
+const LATENCY_MS: f32 = (960.0 + 64.0 + 96.0) / 48.0;
+
+fn stereo_pcm(rate: u32) -> ssr_types::SourceFormat {
+    ssr_types::SourceFormat::Pcm(ssr_types::PcmFormat {
+        channels: 2,
+        sample_rate: rate,
+        bits_per_sample: 32,
+        valid_bits: 32,
+        sample_type: ssr_types::SampleType::Float,
+        channel_mask: 0x3,
+    })
+}
+
+fn format_changed(endpoint: u16, format: ssr_types::SourceFormat) -> SessionNotice {
+    SessionNotice::FormatChanged {
+        endpoint,
+        epoch: 1,
+        format,
+        unsupported: None,
+    }
+}
+
+#[test]
+fn upmix_settings_default_and_older_files_migrate() {
+    use ssr_types::app::{PluginFormat, ProfileKind, UpmixerChoice};
+    use supervisor::upmix::{DEFAULT_UPMIXER, EndpointUpmixSettings, UpmixSettings};
+
+    assert_eq!(DEFAULT_UPMIXER, UpmixerChoice::Off);
+    let defaults = UpmixSettings::default();
+    assert!(defaults.headphones && defaults.speakers);
+    assert!(
+        defaults
+            .endpoints
+            .iter()
+            .all(|endpoint| *endpoint == EndpointUpmixSettings::default())
+    );
+    assert!(defaults.applies(ProfileKind::Headphones) && defaults.applies(ProfileKind::Speakers));
+    assert_eq!(defaults.effective(2), UpmixerChoice::Off);
+
+    // Settings written before ADR 0035 have no upmix at all.
+    let old: Settings = serde_json::from_str(
+        r#"{"language":"ko","output":{"id":"{dac}","name":"DAC"},"profile":{"kind":"speakers"}}"#,
+    )
+    .unwrap();
+    assert_eq!(old.upmix, UpmixSettings::default());
+    // A partial table keeps what it says and defaults the rest.
+    let partial: Settings = serde_json::from_str(
+        r#"{"upmix":{"speakers":false,"endpoints":[{"choice":"plugin"},{},{}]}}"#,
+    )
+    .unwrap();
+    assert!(partial.upmix.headphones);
+    assert!(!partial.upmix.speakers);
+    assert_eq!(
+        partial.upmix.endpoints[0].choice,
+        Some(UpmixerChoice::Plugin)
+    );
+    assert_eq!(partial.upmix.endpoints[1], EndpointUpmixSettings::default());
+    // A plugin stored before its buses were known loads without them.
+    let plugin: Settings = serde_json::from_str(
+        r#"{"upmix":{"endpoints":[{},{"choice":"plugin","plugin":{"path":"C:\\up.dll","format":"vst2","name":"Up","vendor":"V"}},{}]}}"#,
+    )
+    .unwrap();
+    let stored = plugin.upmix.endpoints[1].plugin.as_ref().unwrap();
+    assert_eq!(stored.format, PluginFormat::Vst2);
+    assert_eq!(stored.class, None);
+    assert!(stored.inputs.is_empty() && stored.outputs.is_empty());
+
+    // What the supervisor writes reads back the same.
+    let (_shared, mut supervisor) = start(ready_pc(), dac_settings());
+    supervisor.handle(choose_plugin(2)).unwrap();
+    supervisor
+        .handle(set_upmixer(2, UpmixerChoice::Plugin))
+        .unwrap();
+    supervisor
+        .handle(set_apply(ProfileKind::Headphones, false))
+        .unwrap();
+    let json = serde_json::to_string(supervisor.settings()).unwrap();
+    let read: Settings = serde_json::from_str(&json).unwrap();
+    assert_eq!(&read, supervisor.settings());
+    assert_eq!(
+        read.upmix.endpoints[2].plugin.as_ref().unwrap().class,
+        Some([7; 16])
+    );
+    assert!(!read.upmix.headphones);
+}
+
+#[test]
+fn upmix_intents_refuse_endpoint_three_the_first_party_upmixer_and_the_wizard() {
+    use ssr_types::app::{Language, ProfileKind, UpmixerChoice};
+    use supervisor::text::Message;
+
+    let cannot = error(
+        &Message::EndpointCannotUpmix.render(Language::Ko),
+        NextAction::None,
+    );
+    let (shared, mut supervisor) = start(ready_pc(), dac_settings());
+    assert_eq!(
+        supervisor.handle(set_upmixer(3, UpmixerChoice::Plugin)),
+        Err(cannot.clone())
+    );
+    assert_eq!(supervisor.handle(choose_plugin(3)), Err(cannot.clone()));
+    assert_eq!(
+        supervisor.handle(set_upmixer(0, UpmixerChoice::FirstParty)),
+        Err(error(
+            &Message::UpmixerUnavailable.render(Language::Ko),
+            NextAction::None
+        ))
+    );
+    assert_eq!(
+        supervisor.handle(Intent::OpenPluginEditor(0)),
+        Err(not_allowed())
+    );
+    // Refusals change nothing and leave no error behind.
+    assert_eq!(supervisor.settings(), &dac_settings());
+    assert_eq!(supervisor.snapshot().error, None);
+    assert!(take_log(&shared).is_empty());
+
+    // The wizard comes first.
+    let (_shared, mut supervisor) = start(ready_pc(), Settings::default());
+    for intent in [
+        set_upmixer(0, UpmixerChoice::Plugin),
+        choose_plugin(0),
+        Intent::OpenPluginEditor(0),
+        set_apply(ProfileKind::Speakers, false),
+    ] {
+        assert_eq!(supervisor.handle(intent), Err(not_allowed()));
+    }
+    assert_eq!(supervisor.settings(), &Settings::default());
+}
+
+#[test]
+fn choose_plugin_scans_and_refuses_what_it_cannot_read() {
+    use ssr_types::app::{Language, PluginFormat, UpmixerChoice};
+    use supervisor::text::Message;
+
+    let scan_failed = |detail: &str| {
+        error(
+            &Message::PluginScanFailed {
+                detail: detail.into(),
+            }
+            .render(Language::Ko),
+            NextAction::None,
+        )
+    };
+    let (shared, mut supervisor) = start(ready_pc(), dac_settings());
+
+    // Neither a .vst3 nor a .dll: no scan at all.
+    let refused = supervisor.handle(Intent::ChoosePlugin(ssr_types::app::PluginChoice {
+        endpoint: 1,
+        path: "C:/Plugins/upmixer.exe".into(),
+    }));
+    assert_eq!(refused, Err(scan_failed("upmixer.exe")));
+    assert_eq!(supervisor.snapshot().error, refused.err());
+    assert!(take_log(&shared).is_empty());
+
+    // The scan's own error, and a file without a class.
+    shared
+        .get()
+        .plugins
+        .scans
+        .push_back(Err(PluginHostError::Failed(
+            "LoadLibrary failed (193)".into(),
+        )));
+    assert_eq!(
+        supervisor.handle(choose_plugin(1)),
+        Err(scan_failed("LoadLibrary failed (193)"))
+    );
+    shared.get().plugins.scans.push_back(Ok(Vec::new()));
+    // The file's name (on Linux a backslash path has no separators).
+    let name = std::path::Path::new(PLUGIN)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(supervisor.handle(choose_plugin(1)), Err(scan_failed(&name)));
+    assert_eq!(supervisor.settings(), &dac_settings());
+
+    // A VST 2 .dll keeps no class; a .vst3 keeps the first.
+    shared.get().plugins.scans.push_back(Ok(vec![
+        PluginClass {
+            id: [1; 16],
+            name: "First".into(),
+            vendor: "Vendor".into(),
+        },
+        PluginClass {
+            id: [2; 16],
+            name: "Second".into(),
+            vendor: "Vendor".into(),
+        },
+    ]));
+    supervisor.handle(choose_plugin(1)).unwrap();
+    assert_eq!(supervisor.snapshot().error, None);
+    let stored = supervisor.settings().upmix.endpoints[1]
+        .plugin
+        .clone()
+        .unwrap();
+    assert_eq!(
+        (stored.format, stored.class, stored.name.as_str()),
+        (PluginFormat::Vst3, Some([1; 16]), "First")
+    );
+    supervisor
+        .handle(Intent::ChoosePlugin(ssr_types::app::PluginChoice {
+            endpoint: 0,
+            path: r"C:\VstPlugins\Upmix.DLL".into(),
+        }))
+        .unwrap();
+    let stored = supervisor.settings().upmix.endpoints[0]
+        .plugin
+        .clone()
+        .unwrap();
+    assert_eq!((stored.format, stored.class), (PluginFormat::Vst2, None));
+    assert_eq!(
+        take_log(&shared),
+        [
+            format!("scan {PLUGIN} Vst3"),
+            format!("scan {PLUGIN} Vst3"),
+            format!("scan {PLUGIN} Vst3"),
+            r"scan C:\VstPlugins\Upmix.DLL Vst2".to_owned(),
+        ]
+    );
+    // Choosing a plugin is not choosing to upmix with it.
+    assert_eq!(supervisor.settings().upmix.effective(1), UpmixerChoice::Off);
+}
+
+#[test]
+fn a_plugin_choice_starts_the_host_and_installs_the_stage_while_running() {
+    use ssr_types::app::{UpmixState, UpmixerChoice};
+
+    // Chosen while Ready: nothing starts until the engine runs.
+    let (shared, mut supervisor) = ready_with_plugin(ready_pc(), 1);
+    let mut view = fixture_upmix(1, UpmixState::Stopped);
+    view.endpoints[1].inputs.clear();
+    view.endpoints[1].outputs.clear();
+    assert_eq!(
+        supervisor.snapshot().upmix,
+        view,
+        "the buses are unknown before a run"
+    );
+
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(take_log(&shared), ["start 1 Example Upmixer 48000"]);
+    assert_eq!(take_applied(&shared), [stage(1, 48_000)]);
+    assert_eq!(
+        upmix_shape(&supervisor, LATENCY_MS),
+        fixture_upmix(1, UpmixState::Running)
+    );
+    let stored = supervisor.settings().upmix.endpoints[1]
+        .plugin
+        .clone()
+        .unwrap();
+    assert_eq!(stored.inputs, ["L", "R"]);
+    assert_eq!(stored.outputs, ["L", "R", "C", "LFE", "Ls", "Rs"]);
+
+    // A quiet tick changes nothing.
+    supervisor.tick(Instant::now());
+    assert!(take_log(&shared).is_empty());
+    assert!(take_applied(&shared).is_empty());
+
+    // Turned off while running: the stage leaves and the host stops.
+    supervisor
+        .handle(set_upmixer(1, UpmixerChoice::Off))
+        .unwrap();
+    assert_eq!(take_applied(&shared), ["upmixer 1 off"]);
+    assert_eq!(take_log(&shared), ["shutdown 1"]);
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["exited 1"]);
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Stopped
+    );
+
+    // Chosen while running: a plugin first, then the choice.
+    let (shared, mut supervisor) = running(ready_pc());
+    supervisor.handle(choose_plugin(0)).unwrap();
+    assert_eq!(take_log(&shared), [format!("scan {PLUGIN} Vst3")]);
+    supervisor
+        .handle(set_upmixer(0, UpmixerChoice::Plugin))
+        .unwrap();
+    assert_eq!(take_log(&shared), ["start 0 Example Upmixer 48000"]);
+    assert_eq!(take_applied(&shared), [stage(0, 48_000)]);
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[0].state,
+        UpmixState::Running
+    );
+
+    // Another plugin on the same endpoint: its own state, a new host.
+    shared.get().plugins.scans.push_back(Ok(vec![PluginClass {
+        id: [9; 16],
+        name: "Other Upmixer".into(),
+        vendor: "Other".into(),
+    }]));
+    supervisor.handle(choose_plugin(0)).unwrap();
+    assert_eq!(
+        take_log(&shared),
+        [
+            format!("scan {PLUGIN} Vst3"),
+            "forget 0".to_owned(),
+            "shutdown 0".to_owned(),
+            "start 0 Other Upmixer 48000".to_owned(),
+        ]
+    );
+    assert_eq!(take_applied(&shared), ["upmixer 0 off", &stage(0, 48_000)]);
+}
+
+#[test]
+fn each_kind_keeps_its_switch_and_the_engine_takes_the_one_in_use() {
+    use ssr_types::app::{ProfileKind, UpmixBypass, UpmixState};
+
+    // Speakers off before the engine starts: it starts without upmixing.
+    let (shared, mut supervisor) = ready_with_plugin(ready_pc(), 1);
+    supervisor
+        .handle(set_apply(ProfileKind::Speakers, false))
+        .unwrap();
+    assert!(!supervisor.settings().upmix.speakers);
+    assert!(take_applied(&shared).is_empty());
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(
+        take_applied(&shared),
+        ["upmix apply false".to_owned(), stage(1, 48_000)]
+    );
+    assert_eq!(take_log(&shared), ["start 1 Example Upmixer 48000"]);
+    // The host stays up; the sound goes around it.
+    let view = supervisor.snapshot().upmix;
+    assert!(!view.speakers && view.headphones);
+    assert_eq!(view.endpoints[1].state, UpmixState::Running);
+    assert_eq!(view.endpoints[1].bypass, Some(UpmixBypass::KindOff));
+
+    // The other kind's switch is only kept.
+    supervisor
+        .handle(set_apply(ProfileKind::Headphones, false))
+        .unwrap();
+    assert!(take_applied(&shared).is_empty());
+    supervisor
+        .handle(set_apply(ProfileKind::Speakers, true))
+        .unwrap();
+    assert_eq!(take_applied(&shared), ["upmix apply true"]);
+    assert_eq!(supervisor.snapshot().upmix.endpoints[1].bypass, None);
+
+    // Switching kinds brings the other kind's switch.
+    let directory = TestDirectory::new("upmix-kinds");
+    let studio = hesuvi(&directory, "studio");
+    supervisor.handle(Intent::ImportBrir(studio)).unwrap();
+    take_applied(&shared);
+    supervisor
+        .handle(Intent::SetProfileKind(ProfileKind::Headphones))
+        .unwrap();
+    let applied = take_applied(&shared);
+    assert_eq!(applied.len(), 2, "{applied:?}");
+    assert!(applied[0].starts_with("prepared Headphones"), "{applied:?}");
+    assert_eq!(applied[1], "upmix apply false");
+    supervisor
+        .handle(Intent::SetProfileKind(ProfileKind::Speakers))
+        .unwrap();
+    assert_eq!(take_applied(&shared)[1], "upmix apply true");
+    // None of it touched the host.
+    assert_eq!(take_log(&shared), Vec::<String>::new());
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Running
+    );
+}
+
+#[test]
+fn a_full_change_queue_hands_stages_and_switches_over_on_the_next_tick() {
+    use ssr_types::app::{ProfileKind, UpmixState};
+
+    let (shared, mut supervisor) = ready_with_plugin(ready_pc(), 1);
+    shared.get().apply_errors.push_back(SessionError::Rejected);
+    supervisor.handle(Intent::Enable).unwrap();
+    assert!(take_applied(&shared).is_empty());
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Starting
+    );
+    supervisor.tick(Instant::now());
+    assert_eq!(take_applied(&shared), [stage(1, 48_000)]);
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Running
+    );
+
+    shared.get().apply_errors.push_back(SessionError::Rejected);
+    supervisor
+        .handle(set_apply(ProfileKind::Speakers, false))
+        .unwrap();
+    assert!(take_applied(&shared).is_empty());
+    supervisor.tick(Instant::now());
+    assert_eq!(take_applied(&shared), ["upmix apply false"]);
+
+    shared.get().apply_errors.push_back(SessionError::Rejected);
+    supervisor
+        .handle(set_upmixer(1, ssr_types::app::UpmixerChoice::Off))
+        .unwrap();
+    assert!(take_applied(&shared).is_empty());
+    supervisor.tick(Instant::now());
+    assert_eq!(take_applied(&shared), ["upmixer 1 off"]);
+    supervisor.tick(Instant::now());
+    assert!(take_applied(&shared).is_empty());
+}
+
+#[test]
+fn a_rate_change_restarts_the_host_at_the_new_rate() {
+    use ssr_types::app::{UpmixState, UpmixerChoice};
+    use ssr_types::{PcmFormat, SampleType, SourceFormat};
+
+    let (shared, mut supervisor) = running_with_plugin(ready_pc(), 1);
+    // The same rate, or another endpoint: nothing.
+    shared.get().engine_polls.push_back(Ok(vec![
+        format_changed(1, stereo_pcm(48_000)),
+        format_changed(0, stereo_pcm(44_100)),
+    ]));
+    supervisor.tick(Instant::now());
+    assert!(take_log(&shared).is_empty());
+    assert!(take_applied(&shared).is_empty());
+
+    shared
+        .get()
+        .engine_polls
+        .push_back(Ok(vec![format_changed(1, stereo_pcm(96_000))]));
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["restart 1 96000"]);
+    assert_eq!(take_applied(&shared), [stage(1, 96_000)]);
+    let view = &supervisor.snapshot().upmix.endpoints[1];
+    assert_eq!(view.state, UpmixState::Running);
+    let latency = view.latency_ms.unwrap();
+    assert!(
+        (latency - (1920.0 + 64.0 + 192.0) / 96.0).abs() < 1e-3,
+        "{latency}"
+    );
+
+    // Native-surround PCM is never upmixed, and an unsupported format plays
+    // nothing: neither moves the host.
+    let surround = SourceFormat::Pcm(PcmFormat {
+        channels: 6,
+        sample_rate: 44_100,
+        bits_per_sample: 16,
+        valid_bits: 16,
+        sample_type: SampleType::Int,
+        channel_mask: 0x3f,
+    });
+    shared.get().engine_polls.push_back(Ok(vec![
+        format_changed(1, surround),
+        SessionNotice::FormatChanged {
+            endpoint: 1,
+            epoch: 2,
+            format: stereo_pcm(88_200),
+            unsupported: Some(ssr_types::UnsupportedReason::Format),
+        },
+    ]));
+    supervisor.tick(Instant::now());
+    assert!(take_log(&shared).is_empty());
+
+    // A host started later starts at the endpoint's rate.
+    supervisor.handle(choose_plugin(0)).unwrap();
+    supervisor
+        .handle(set_upmixer(0, UpmixerChoice::Plugin))
+        .unwrap();
+    assert_eq!(
+        take_log(&shared),
+        [
+            format!("scan {PLUGIN} Vst3"),
+            "start 0 Example Upmixer 44100".to_owned()
+        ]
+    );
+    assert_eq!(take_applied(&shared), [stage(0, 44_100)]);
+}
+
+#[test]
+fn a_respawn_reinstalls_the_stage_and_a_new_latency_restarts_the_host() {
+    use ssr_types::app::UpmixState;
+
+    let (shared, mut supervisor) = running_with_plugin(ready_pc(), 1);
+    // The host died: the engine plays the fallback while the watch waits.
+    shared.get().plugins.events[1].push_back(PluginEvent::Fallback(true));
+    supervisor.tick(Instant::now());
+    assert!(supervisor.take_tick_changes().snapshot);
+    assert_eq!(
+        upmix_shape(&supervisor, LATENCY_MS),
+        fixture_upmix(1, UpmixState::Fallback)
+    );
+    shared.get().plugins.events[1].push_back(PluginEvent::NeedsRespawn);
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["restart 1 48000"]);
+    assert_eq!(take_applied(&shared), [stage(1, 48_000)]);
+    assert_eq!(
+        upmix_shape(&supervisor, LATENCY_MS),
+        fixture_upmix(1, UpmixState::Running)
+    );
+
+    // A new plugin latency: a new host and a stage with the new delay.
+    shared.get().plugins.events[1].push_back(PluginEvent::LatencyChanged(128));
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["restart 1 48000"]);
+    assert_eq!(take_applied(&shared), [stage(1, 48_000)]);
+    let latency = supervisor.snapshot().upmix.endpoints[1].latency_ms.unwrap();
+    assert!(
+        (latency - (960.0 + 128.0 + 96.0) / 48.0).abs() < 1e-3,
+        "{latency}"
+    );
+
+    // Blocks the engine misses read as the fallback too.
+    let installed = shared.get().stages[1].as_ref().unwrap().status();
+    shared.get().upmix_status[1] = Some(engine::UpmixStatus {
+        upmixing: true,
+        mode: engine::UpmixMode::Fallback,
+        ..installed
+    });
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Fallback
+    );
+}
+
+#[test]
+fn a_disabled_plugin_stays_failed_until_chosen_again() {
+    use ssr_types::app::{Language, UpmixState, UpmixerChoice};
+    use supervisor::text::Message;
+
+    let (shared, mut supervisor) = running_with_plugin(ready_pc(), 1);
+    shared.get().plugins.events[1].push_back(PluginEvent::Disabled);
+    supervisor.tick(Instant::now());
+    assert!(supervisor.take_tick_changes().snapshot);
+    assert_eq!(take_log(&shared), ["shutdown 1"]);
+    assert_eq!(take_applied(&shared), ["upmixer 1 off"]);
+    let failed = UpmixState::Failed(
+        Message::PluginDisabled {
+            name: "Example Upmixer".into(),
+        }
+        .render(Language::Ko),
+    );
+    assert_eq!(
+        supervisor.snapshot().upmix,
+        fixture_upmix(1, failed.clone())
+    );
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["exited 1"]);
+
+    // Off and on again keeps it off for this session.
+    supervisor.handle(Intent::Disable).unwrap();
+    supervisor.handle(Intent::Enable).unwrap();
+    assert!(take_log(&shared).is_empty());
+    supervisor.handle(Intent::Disable).unwrap();
+    // The fixture `ready-upmix-failed`.
+    assert_eq!(
+        supervisor.snapshot().upmix,
+        fixture_upmix(1, failed.clone())
+    );
+    // In English too.
+    supervisor
+        .handle(Intent::SetLanguage(Some(Language::En)))
+        .unwrap();
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Failed(
+            "The upmixer plugin stopped three times within 10 minutes, so it is off until the app restarts: Example Upmixer".into()
+        )
+    );
+
+    // Choosing again clears it.
+    supervisor
+        .handle(set_upmixer(1, UpmixerChoice::Plugin))
+        .unwrap();
+    assert_eq!(
+        supervisor.snapshot().upmix,
+        fixture_upmix(1, UpmixState::Stopped)
+    );
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(take_log(&shared), ["start 1 Example Upmixer 48000"]);
+}
+
+#[test]
+fn a_host_that_fails_to_start_or_is_no_upmixer_fails_with_its_sentence() {
+    use ssr_types::app::{Language, UpmixState, UpmixerChoice};
+    use supervisor::text::Message;
+
+    let mut world = ready_pc();
+    world
+        .plugins
+        .start_errors
+        .push_back(PluginHostError::Failed("the host did not say Hello".into()));
+    let (shared, mut supervisor) = ready_with_plugin(world, 1);
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(take_log(&shared), ["start 1 Example Upmixer 48000"]);
+    assert!(take_applied(&shared).is_empty());
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Failed(
+            Message::PluginScanFailed {
+                detail: "the host did not say Hello".into()
+            }
+            .render(Language::Ko)
+        )
+    );
+    // The engine still runs.
+    assert_eq!(supervisor.snapshot().phase, Phase::Running);
+
+    shared.get().plugins.not_upmixer = true;
+    supervisor
+        .handle(set_upmixer(1, UpmixerChoice::Plugin))
+        .unwrap();
+    assert_eq!(
+        take_log(&shared),
+        ["start 1 Example Upmixer 48000", "shutdown 1"]
+    );
+    assert!(take_applied(&shared).is_empty());
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Failed(
+            Message::PluginNotUpmixer {
+                name: "Example Upmixer".into()
+            }
+            .render(Language::Ko)
+        )
+    );
+
+    // A host that comes up later and then fails reports it from a poll.
+    shared.get().plugins.not_upmixer = false;
+    shared.get().plugins.slow = true;
+    supervisor
+        .handle(set_upmixer(1, UpmixerChoice::Plugin))
+        .unwrap();
+    take_log(&shared);
+    shared.get().plugins.events[1].push_back(PluginEvent::StartFailed("timed out".into()));
+    supervisor.tick(Instant::now());
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Failed(
+            Message::PluginScanFailed {
+                detail: "timed out".into()
+            }
+            .render(Language::Ko)
+        )
+    );
+}
+
+#[test]
+fn a_slow_host_is_starting_until_it_reports_running() {
+    use ssr_types::app::UpmixState;
+
+    let mut world = ready_pc();
+    world.plugins.slow = true;
+    let (shared, mut supervisor) = ready_with_plugin(world, 1);
+    supervisor.handle(Intent::Enable).unwrap();
+    assert_eq!(take_log(&shared), ["start 1 Example Upmixer 48000"]);
+    assert!(take_applied(&shared).is_empty());
+    assert_eq!(
+        supervisor.snapshot().upmix.endpoints[1].state,
+        UpmixState::Starting
+    );
+    // The editor waits for the host.
+    assert_eq!(
+        supervisor.handle(Intent::OpenPluginEditor(1)),
+        Err(not_allowed())
+    );
+    supervisor.take_tick_changes();
+
+    supervisor.tick(Instant::now());
+    assert_eq!(supervisor.take_tick_changes(), Default::default());
+    shared.get().plugins.events[1].push_back(PluginEvent::Running);
+    supervisor.tick(Instant::now());
+    assert_eq!(take_applied(&shared), [stage(1, 48_000)]);
+    let changes = supervisor.take_tick_changes();
+    assert!(changes.snapshot, "the screen hears of it");
+    assert!(changes.settings, "the buses were learned");
+    assert_eq!(
+        upmix_shape(&supervisor, LATENCY_MS),
+        fixture_upmix(1, UpmixState::Running)
+    );
+    supervisor.handle(Intent::OpenPluginEditor(1)).unwrap();
+    assert_eq!(take_log(&shared), ["editor 1"]);
+    assert_eq!(
+        supervisor.handle(Intent::OpenPluginEditor(0)),
+        Err(not_allowed())
+    );
+    assert_eq!(
+        supervisor.handle(Intent::OpenPluginEditor(7)),
+        Err(not_allowed())
+    );
+}
+
+#[test]
+fn stopping_the_engine_shuts_every_host_down() {
+    use ssr_types::app::{UpmixState, UpmixerChoice};
+
+    let (shared, mut supervisor) = running_with_plugin(ready_pc(), 0);
+    supervisor.handle(choose_plugin(2)).unwrap();
+    supervisor
+        .handle(set_upmixer(2, UpmixerChoice::Plugin))
+        .unwrap();
+    take_log(&shared);
+    take_applied(&shared);
+
+    supervisor.handle(Intent::Disable).unwrap();
+    assert_eq!(take_log(&shared), ["shutdown 0", "shutdown 2"]);
+    // The stages went with the engine; nothing is handed to it.
+    assert!(take_applied(&shared).is_empty());
+    assert!(
+        supervisor
+            .snapshot()
+            .upmix
+            .endpoints
+            .iter()
+            .all(|view| view.state == UpmixState::Stopped && view.latency_ms.is_none())
+    );
+    // Ready keeps polling them until they exit.
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["exited 0", "exited 2"]);
+    supervisor.tick(Instant::now());
+    assert!(take_log(&shared).is_empty());
+
+    // Quit waits for them before the app ends; a fault stops them too.
+    supervisor.handle(Intent::Enable).unwrap();
+    take_log(&shared);
+    supervisor.handle(Intent::Quit).unwrap();
+    assert_eq!(
+        take_log(&shared),
+        ["shutdown 0", "shutdown 2", "exited 0", "exited 2"]
+    );
+}
+
+#[test]
+fn an_engine_fault_shuts_the_hosts_down() {
+    let (shared, mut supervisor) = running_with_plugin(ready_pc(), 1);
+    shared
+        .get()
+        .engine_polls
+        .push_back(Err(SessionError::Rejected));
+    supervisor.tick(Instant::now());
+    assert_eq!(supervisor.snapshot().phase, Phase::Faulted);
+    assert_eq!(take_log(&shared), ["shutdown 1"]);
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["exited 1"]);
+}
+
+#[test]
+fn pass_upmixes_like_the_other_endpoints() {
+    use ssr_types::app::{UpmixBypass, UpmixState};
+
+    let (shared, mut supervisor) = running_with_plugin(ready_pc(), 2);
+    // The fixture `running-upmix-pass`.
+    assert_eq!(
+        upmix_shape(&supervisor, LATENCY_MS),
+        fixture_upmix(2, UpmixState::Running)
+    );
+    // The fixture `running-upmix-native-surround`: the engine says why.
+    let installed = shared.get().stages[2].as_ref().unwrap().status();
+    shared.get().upmix_status[2] = Some(engine::UpmixStatus {
+        bypass: Some(UpmixBypass::NativeSurround),
+        ..installed
+    });
+    let mut expected = fixture_upmix(2, UpmixState::Running);
+    expected.endpoints[2].bypass = Some(UpmixBypass::NativeSurround);
+    assert_eq!(upmix_shape(&supervisor, LATENCY_MS), expected);
+
+    shared
+        .get()
+        .engine_polls
+        .push_back(Ok(vec![format_changed(2, stereo_pcm(192_000))]));
+    supervisor.tick(Instant::now());
+    assert_eq!(take_log(&shared), ["restart 2 192000"]);
+    assert_eq!(take_applied(&shared), [stage(2, 192_000)]);
+    supervisor.handle(Intent::OpenPluginEditor(2)).unwrap();
+    assert_eq!(take_log(&shared), ["editor 2"]);
+}
+
+#[test]
+fn a_profile_file_locks_no_upmix_intent() {
+    use ssr_types::app::{ProfileKind, UpmixerChoice};
+
+    let directory = TestDirectory::new("profile-file-upmix");
+    brir_folder(&directory, "set", &["FL", "FR"]);
+    let file = directory.join("profile.toml");
+    std::fs::write(
+        &file,
+        "name = \"desk\"\ngain_db = 0.0\nlimiter_ceiling_dbfs = -1.0\n\n[brir]\nfolder = \"set\"\n",
+    )
+    .unwrap();
+    let shared = Shared::new(ready_pc());
+    let mut supervisor = Supervisor::new(
+        FakeHost(shared.clone()),
+        FakeLauncher(shared.clone()),
+        Box::new(FakePlugins(shared.clone())),
+        Config {
+            profile_file: Some(file),
+            ..this_build()
+        },
+        dac_settings(),
+    );
+    supervisor.handle(Intent::Enable).unwrap();
+    // The file's headphones are the kind in use.
+    assert_eq!(supervisor.snapshot().profile.kind, ProfileKind::Headphones);
+    supervisor.handle(choose_plugin(1)).unwrap();
+    supervisor
+        .handle(set_upmixer(1, UpmixerChoice::Plugin))
+        .unwrap();
+    supervisor
+        .handle(set_apply(ProfileKind::Headphones, false))
+        .unwrap();
+    supervisor.handle(Intent::OpenPluginEditor(1)).unwrap();
+    assert_eq!(
+        take_applied(&shared),
+        [stage(1, 48_000), "upmix apply false".to_owned()]
     );
 }

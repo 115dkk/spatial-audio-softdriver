@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ui = join(root, 'apps', 'spatial-softreceiver', 'ui');
-const TABS = new Set(['status', 'profile', 'settings']);
+const TABS = new Set(['status', 'profile', 'upmix', 'settings']);
 const SCHEMES = new Set(['light', 'dark']);
 /** The app speaks exactly these; the gallery shows every screen in both. */
 const LANGUAGES = ['ko', 'en'];

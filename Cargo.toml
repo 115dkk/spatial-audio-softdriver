@@ -29,6 +29,7 @@ ssr-types = { path = "crates/ssr-types" }
 ssr-i18n = { path = "crates/ssr-i18n" }
 ssr-abi = { path = "crates/ssr-abi" }
 bitstream = { path = "crates/bitstream" }
+streamring = { path = "crates/streamring" }
 decode = { path = "crates/decode" }
 render = { path = "crates/render" }
 convolver = { path = "crates/convolver" }
@@ -40,6 +41,10 @@ supervisor = { path = "crates/supervisor" }
 ssr-guard = { path = "apps/ssr-guard" }
 ssr-sys = { path = "crates/ssr-sys" }
 ssr-setup-sys = { path = "crates/ssr-setup-sys" }
+plughost-proto = { path = "crates/plughost-proto" }
+plughost-sys = { path = "crates/plughost-sys" }
+plughost = { path = "crates/plughost" }
+vst3 = "=0.3.0"
 
 windows = { version = "0.62", features = [
     "Data_Xml_Dom",
@@ -55,6 +60,13 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
     "Win32_System_Performance",
     "Win32_System_Registry",
     "Win32_System_Threading",

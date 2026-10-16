@@ -7,7 +7,7 @@ import { en as catalogEn, ko as catalogKo, type Catalog } from './catalog';
 type Screen = Catalog['screen'];
 type Common = Catalog['common'];
 type Supervisor = Catalog['supervisor'];
-type Text = Omit<Screen, 'endpoints' | 'chainErrorKinds' | 'status' | 'profile'> & {
+type Text = Omit<Screen, 'endpoints' | 'chainErrorKinds' | 'status' | 'profile' | 'upmix'> & {
   product: Catalog['names']['product'];
   endpoints: (Screen['endpoints'][number] & { name: string })[];
   chainErrorKinds: Screen['chainErrorKinds'] & Record<string, string | undefined>;
@@ -17,6 +17,7 @@ type Text = Omit<Screen, 'endpoints' | 'chainErrorKinds' | 'status' | 'profile'>
     testOff: Common['test_after_enable'];
     needsBrir: Supervisor['import_brir_first'];
   };
+  upmix: Screen['upmix'] & { needsPlugin: Supervisor['choose_plugin_first'] };
 };
 
 function project(catalog: Catalog): Text {
@@ -34,6 +35,8 @@ function project(catalog: Catalog): Text {
       // sentence; the screen says it before the button is pressed.
       needsBrir: supervisor.import_brir_first,
     },
+    // A VST upmixer without its plugin: the supervisor's own sentence.
+    upmix: { ...screen.upmix, needsPlugin: supervisor.choose_plugin_first },
     endpoints: [
       { ...screen.endpoints[0]!, name: names.endpoint_main },
       { ...screen.endpoints[1]!, name: names.endpoint_music },

@@ -9,8 +9,10 @@
 //! * every intent is handled, the settings are saved when it succeeds, the
 //!   result is sent back, and a fresh snapshot goes out whatever the result
 //!   (a failure's sentence is in the snapshot);
-//! * every tick (33 ms) the engine is polled; notices or a new phase send a
-//!   snapshot, and while Running the engine status goes out as meters (30 Hz).
+//! * every tick (33 ms) the engine is polled; notices, a new phase or an
+//!   upmixer that changed state send a snapshot, settings the tick changed (a
+//!   plugin's buses learned) are saved, and while Running the engine status
+//!   goes out as meters (30 Hz).
 //!   When the engine asked for its output again, the tick prepares it
 //!   between a not-Running heartbeat and a fresh one, as a running profile
 //!   import does (ADR 0033);
@@ -40,9 +42,11 @@ use ssr_guard::marker::{self, Marker};
 use ssr_types::app::{Heartbeat, Intent, Language, NextAction, Phase, Snapshot, UserError};
 use ssr_types::{EngineStatus, Host};
 use supervisor::machine::Config;
+use supervisor::upmix::PluginHost;
 use supervisor::{Launcher, Settings, Supervisor};
 
 use crate::log;
+use crate::plugin_host::UnavailablePluginHost;
 
 // The first shell note owns the startup notices' lifetime under the supervisor's
 // clearing rules. External text is retained separately, never parsed as a token.
@@ -232,10 +236,44 @@ where
 }
 
 /// Like [`spawn_with_marker`], retaining startup diagnostics for rendering in
-/// each snapshot's language without repeating the restoration itself.
+/// each snapshot's language without repeating the restoration itself. No
+/// plugin can be hosted ([`UnavailablePluginHost`]).
 pub fn spawn_with_startup<H, L, E, S>(
     host: H,
     launcher: L,
+    config: Config,
+    control: ControlConfig,
+    store: S,
+    emitter: E,
+    initial: (Vec<Note>, Option<Marker>),
+) -> (Bridge, JoinHandle<()>)
+where
+    H: Host + Send + 'static,
+    L: Launcher + Send + 'static,
+    E: Emitter,
+    S: SettingsStore,
+{
+    spawn_with_plugins(
+        host,
+        launcher,
+        Box::new(UnavailablePluginHost),
+        config,
+        control,
+        store,
+        emitter,
+        initial,
+    )
+}
+
+/// Like [`spawn_with_startup`], with the port that runs the VST upmixers'
+/// hosts (ADR 0035): the shell passes
+/// [`crate::plugin_host::platform_plugin_host`].
+// The supervisor's three ports, its configuration and the thread's own four.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_plugins<H, L, E, S>(
+    host: H,
+    launcher: L,
+    plugins: Box<dyn PluginHost + Send>,
     config: Config,
     control: ControlConfig,
     store: S,
@@ -255,7 +293,7 @@ where
     let thread = thread::Builder::new()
         .name("ssr-control".to_owned())
         .spawn(move || {
-            let mut supervisor = Supervisor::new(host, launcher, config, store.load());
+            let mut supervisor = Supervisor::new(host, launcher, plugins, config, store.load());
             if !initial_notes.is_empty() || marker.is_some() {
                 supervisor.note(STARTUP_NOTES.to_owned());
             }
@@ -368,6 +406,8 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
         // stall limit. Announce the step as not Running, as Disable does, so
         // the guard counts its silence against the 15 s takeover limit
         // instead of restarting the app; a fresh line follows the step.
+        // Choosing an upmixer plugin scans it in a one-shot plugin host,
+        // which may take as long as the plugin's own loading (ADR 0021).
         let long_step = *self.supervisor.phase() == Phase::Running
             && matches!(
                 intent,
@@ -376,6 +416,7 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
                     | Intent::SetSpeakerLayout(_)
                     | Intent::ImportCorrection(_)
                     | Intent::ClearCorrection
+                    | Intent::ChoosePlugin(_)
             );
         if long_step || matches!(intent, Intent::Disable | Intent::Quit) {
             // Disable and Quit stop the engine and give the roles back in one
@@ -426,11 +467,15 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
                 self.heartbeat();
             }
         }
+        let changes = self.supervisor.take_tick_changes();
+        if changes.settings {
+            self.store.save(self.supervisor.settings());
+        }
         let phase = self.supervisor.phase();
         if *phase != before {
             log::line(&format!("control: {before:?} -> {phase:?}"));
         }
-        if !notices.is_empty() || *phase != before {
+        if !notices.is_empty() || *phase != before || changes.snapshot {
             self.publish();
         }
         if *self.supervisor.phase() == Phase::Running
@@ -556,6 +601,7 @@ fn quit_snapshot(language: Language) -> Snapshot {
         language_choice: None,
         phase: Phase::Quit,
         profile: supervisor::machine::default_profile_view_for(language),
+        upmix: supervisor::default_upmix_view(),
         engine: None,
         outputs: Vec::new(),
         chosen_output: None,

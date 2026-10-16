@@ -743,6 +743,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "com-scrape-types"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ce183b975b8fc736a20919c4002717255fbd867df575c792aeefa9a56a73ad0"
+
+[[package]]
 name = "combine"
 version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1278,6 +1284,7 @@ dependencies = [
  "speakers",
  "ssr-abi",
  "ssr-types",
+ "streamring",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
 ]
@@ -3030,6 +3037,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "plughost"
+version = "0.17.0"
+dependencies = [
+ "clap",
+ "plughost-proto",
+ "plughost-sys",
+ "streamring",
+ "thiserror 2.0.21",
+ "vst3",
+]
+
+[[package]]
+name = "plughost-proto"
+version = "0.17.0"
+
+[[package]]
+name = "plughost-sys"
+version = "0.17.0"
+dependencies = [
+ "streamring",
+ "thiserror 2.0.21",
+ "vst3",
+ "windows",
+]
+
+[[package]]
+name = "plughost-testplugin"
+version = "0.17.0"
+dependencies = [
+ "plughost-sys",
+ "vst3",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3942,6 +3983,8 @@ name = "spatial-softreceiver"
 version = "0.17.0"
 dependencies = [
  "engine",
+ "plughost",
+ "plughost-proto",
  "serde",
  "serde_json",
  "speakers",
@@ -4066,6 +4109,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssr-plughost"
+version = "0.17.0"
+dependencies = [
+ "plughost",
+]
+
+[[package]]
 name = "ssr-policy"
 version = "0.17.0"
 dependencies = [
@@ -4147,6 +4197,13 @@ name = "static_vcruntime"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff7589a1859b09232522bb9edf076ca7fcf14ded96685d3fa629db73023ffbb7"
+
+[[package]]
+name = "streamring"
+version = "0.17.0"
+dependencies = [
+ "assert_no_alloc",
+]
 
 [[package]]
 name = "strength_reduce"
@@ -5215,6 +5272,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "vst3"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e31e3fe7a6f028ded8c5a9984cf283319e6dc63572c9b71da1d4ee9d71d3b6bf"
+dependencies = [
+ "com-scrape-types",
 ]
 
 [[package]]

@@ -6,14 +6,17 @@ use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use brir::PreparedBrir;
 use convolver::FilterBank;
 use engine::{
-    Chain, ChainConfig, ChainEvent, MIX_FRAMES, MIX_RATE, MixerConfig, Prepared, SceneMixer,
+    Chain, ChainConfig, ChainEvent, MIX_FRAMES, MIX_RATE, MatrixUpmixer, MixerConfig, Prepared,
+    RingUpmixer, SceneMixer, UpmixStage,
 };
 use render::PanGeometry;
 use ssr_abi::{RECORD_FLAG_DISCONTINUITY, Record, RecordWriter, wave_format_bytes};
+use ssr_types::app::UpmixBypass;
 use ssr_types::{
     BitstreamCodec, BitstreamFormat, Direction, Layout, MAX_OBJECTS, Object, PcmFormat, Position,
     SampleType, SceneBlock, SourceFormat,
 };
+use streamring::{Consumer, Geometry, InProcessEvent, Producer, RegionBuf};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -460,4 +463,199 @@ fn discontinuity_pcm_path_does_not_allocate() {
             &mut |_| {},
         );
     });
+}
+
+fn stereo_data(endpoint: u16, epoch: u32, pcm: &[u8], qpc: u64) -> Record<'_> {
+    Record::Data {
+        endpoint,
+        epoch,
+        flags: 0,
+        pos: 0,
+        qpc,
+        qpc_written: 0,
+        bytes: pcm,
+    }
+}
+
+#[test]
+fn upmix_stages_do_not_allocate() {
+    const QPC: u64 = 10_000_000;
+    let upmix_stage = |endpoint: u16, upmixer: Box<dyn engine::Upmixer>| {
+        Some(Box::new(UpmixStage::new(endpoint, upmixer, QPC).unwrap()))
+    };
+    // Endpoint 1's upmixer is a ring whose host runs on this thread between
+    // records, outside the guard.
+    let geometry = Geometry {
+        lanes: 1,
+        input_channels: 2,
+        output_channels: 6,
+        max_frames: MIX_FRAMES as u32,
+        sample_rate: MIX_RATE,
+        latency_bound_frames: MIX_RATE,
+    };
+    let storage = Arc::new(RegionBuf::new(geometry).unwrap());
+    let ready = InProcessEvent::new();
+    let mut producer = Producer::new(storage.region(), [None, None], &ready);
+    producer.announce(geometry, 1).unwrap();
+    let publisher = producer.publisher().unwrap();
+    let mut consumer = Consumer::new(storage.region(), &ready, [None, None]);
+    consumer.validate_and_ready(2).unwrap();
+    let mut slot = vec![0.0; geometry.samples_per_slot()];
+    let mut host_matrix = MatrixUpmixer::stereo_to_5_1(MIX_RATE, 0);
+    let mut host_result = vec![0.0; 6 * MIX_FRAMES];
+    let mut host = |consumer: &Consumer<'_>| {
+        while let Some(sequence) = consumer.next_published(0) {
+            consumer.slot_mut(0, sequence, &mut slot, |samples| {
+                host_matrix.matrix_block(&samples[..2 * MIX_FRAMES], &mut host_result);
+                samples.copy_from_slice(&host_result);
+            });
+            consumer.complete(0, sequence);
+        }
+    };
+    let ring = RingUpmixer::new(
+        Box::new(Arc::clone(&storage)),
+        Box::new(InProcessEvent::new()),
+        publisher,
+        MatrixUpmixer::STEREO.to_vec(),
+        MatrixUpmixer::OUTPUTS_5_1.to_vec(),
+        0,
+    )
+    .unwrap();
+
+    let mut chain = Chain::with_qpc_frequency(
+        ChainConfig {
+            arrival_slack_frames: 0,
+            ..ChainConfig::default()
+        },
+        QPC,
+    );
+    chain.set_prepared(prepared());
+    let mut worker = chain.take_decode_worker().unwrap();
+    // Endpoint 0's matrix misses blocks 3 to 5 and 9 and returns NaN for 7.
+    let matrix = MatrixUpmixer::stereo_to_5_1(MIX_RATE, 37)
+        .with_misses(&[3, 4, 5, 9])
+        .with_nan(7);
+    assert!(
+        chain
+            .set_upmixer(0, upmix_stage(0, Box::new(matrix)))
+            .is_none()
+    );
+    assert!(
+        chain
+            .set_upmixer(1, upmix_stage(1, Box::new(ring)))
+            .is_none()
+    );
+    let mut spare = upmix_stage(0, Box::new(MatrixUpmixer::stereo_lfe_to_5_1(MIX_RATE, 480)));
+
+    let mut pcm = vec![0_u8; MIX_FRAMES * 2 * 4];
+    for (index, sample) in pcm.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        *sample = (((index % 97) as f32 - 48.0) / 200.0).to_le_bytes();
+    }
+    let block_ticks = MIX_FRAMES as u64 * QPC / u64::from(MIX_RATE);
+    let mut qpc = 1_000_000;
+    let mut retired = Vec::with_capacity(4);
+    for block in 0..40 {
+        assert_no_alloc(|| {
+            if block == 0 {
+                for endpoint in [0, 1] {
+                    chain.push_record(
+                        Record::FormatChange {
+                            endpoint,
+                            epoch: 1,
+                            repeat: false,
+                            qpc,
+                            format: pcm_format(MIX_RATE),
+                        },
+                        &mut |_| {},
+                    );
+                }
+            }
+            qpc += block_ticks;
+            match block {
+                // The output kind's switch, off and on while both play.
+                20 => chain.set_upmix_apply(false),
+                24 => chain.set_upmix_apply(true),
+                // Another upmixer replaces endpoint 0's while it plays.
+                30 => {
+                    if let Some(old) = chain.set_upmixer(0, spare.take()) {
+                        retired.push(old);
+                    }
+                }
+                _ => {}
+            }
+            chain.push_record(stereo_data(0, 1, &pcm, qpc), &mut |_| {});
+            chain.push_record(stereo_data(1, 1, &pcm, qpc), &mut |_| {});
+        });
+        host(&consumer);
+    }
+    assert_eq!(retired.len(), 1);
+    let replaced = retired[0].status();
+    // Blocks count from each restart: 3, 4, 5 and 9 before the switch went
+    // off, then 3 and 4 again before the swap.
+    assert_eq!(replaced.missed_blocks, 6);
+    assert_eq!(replaced.nonfinite_samples, 6 * MIX_FRAMES as u64);
+    let ring_status = chain.upmix_status(1).unwrap();
+    assert!(ring_status.upmixing && ring_status.delivered_blocks > 20);
+
+    // A 5.1 E-AC-3 stream on the ring's endpoint: transparent, placed from
+    // the decode thread's deliveries.
+    let fixture = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../decode/tests/fixtures/ddp/tones-5.1.eac3"),
+    )
+    .unwrap();
+    let mut bursts = Vec::new();
+    for frame in 1..4 {
+        let mut burst = Vec::new();
+        bitstream::frame_burst(
+            bitstream::DataType::Eac3,
+            &fixture[frame * 2560..(frame + 1) * 2560],
+            24_576,
+            &mut burst,
+        );
+        bursts.push(burst);
+    }
+    let eac3 = SourceFormat::Bitstream(BitstreamFormat {
+        codec: BitstreamCodec::Eac3,
+        container_rate: 192_000,
+        container_channels: 2,
+        encoded_rate: MIX_RATE,
+        encoded_channels: 6,
+    });
+    let burst_ticks = 1_536 * QPC / u64::from(MIX_RATE);
+    for (index, burst) in bursts.iter().enumerate() {
+        assert_no_alloc(|| {
+            if index == 0 {
+                chain.push_record(
+                    Record::FormatChange {
+                        endpoint: 1,
+                        epoch: 2,
+                        repeat: false,
+                        qpc,
+                        format: eac3,
+                    },
+                    &mut |_| {},
+                );
+            }
+            qpc += burst_ticks;
+            chain.push_record(
+                Record::Data {
+                    endpoint: 1,
+                    epoch: 2,
+                    flags: 0,
+                    pos: 0,
+                    qpc,
+                    qpc_written: 0,
+                    bytes: burst,
+                },
+                &mut |_| {},
+            );
+            chain.push_record(stereo_data(0, 1, &pcm, qpc), &mut |_| {});
+        });
+        while worker.run_one() {}
+        assert_no_alloc(|| chain.idle(qpc, &mut |_| {}));
+    }
+    let surround = chain.upmix_status(1).unwrap();
+    assert_eq!(surround.bypass, Some(UpmixBypass::NativeSurround));
+    assert!(chain.upmix_status(0).unwrap().upmixing);
 }

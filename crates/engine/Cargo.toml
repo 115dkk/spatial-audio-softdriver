@@ -25,6 +25,7 @@ hound.workspace = true
 bitstream.workspace = true
 rtrb.workspace = true
 rubato.workspace = true
+streamring.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

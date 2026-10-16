@@ -44,6 +44,52 @@
       ]
     }
   },
+  "upmix": {
+    "endpoints": [
+      {
+        "endpoint": 0,
+        "choice": null,
+        "effective": "off",
+        "plugin": null,
+        "state": {
+          "kind": "stopped"
+        },
+        "bypass": null,
+        "latency_ms": null,
+        "inputs": [],
+        "outputs": []
+      },
+      {
+        "endpoint": 1,
+        "choice": null,
+        "effective": "off",
+        "plugin": null,
+        "state": {
+          "kind": "stopped"
+        },
+        "bypass": null,
+        "latency_ms": null,
+        "inputs": [],
+        "outputs": []
+      },
+      {
+        "endpoint": 2,
+        "choice": null,
+        "effective": "off",
+        "plugin": null,
+        "state": {
+          "kind": "stopped"
+        },
+        "bypass": null,
+        "latency_ms": null,
+        "inputs": [],
+        "outputs": []
+      }
+    ],
+    "headphones": true,
+    "speakers": true,
+    "first_party_available": false
+  },
   "engine": null,
   "outputs": [],
   "chosen_output": null,
@@ -63,7 +109,7 @@
   },
   "roles_taken": false,
   "error": {
-    "message": "Windows rejected the driver signature (problem code 52). Check test-signing mode, then reinstall the driver.",
+    "message": "Windows could not verify the driver signature (problem code 52). Check test-signing mode, then reinstall the driver.",
     "next": "retry"
   },
   "notes": []

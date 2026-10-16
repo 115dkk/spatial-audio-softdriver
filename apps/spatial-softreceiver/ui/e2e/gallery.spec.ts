@@ -15,7 +15,7 @@ import { expect, type Page, test } from '@playwright/test';
 
 type Language = 'ko' | 'en';
 type Scheme = 'light' | 'dark';
-type Tab = 'status' | 'profile' | 'settings';
+type Tab = 'status' | 'profile' | 'upmix' | 'settings';
 
 interface SceneEntry {
   name: string;
@@ -84,7 +84,7 @@ test('the scene table covers every fixture, both languages and every main tab', 
     if (main !== (scene.tab !== null)) misplaced.push(`${scene.name} (${phase}, tab ${scene.tab})`);
   }
   expect(misplaced, 'scenes whose tab does not fit their phase').toEqual([]);
-  expect([...tabs].sort()).toEqual(['profile', 'settings', 'status']);
+  expect([...tabs].sort()).toEqual(['profile', 'settings', 'status', 'upmix']);
 });
 
 /** The checks every picture must pass, before and after it is taken. */

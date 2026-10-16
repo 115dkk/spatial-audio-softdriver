@@ -42,7 +42,7 @@ describe('the mock bridge', () => {
   it('rejects a refused intent with its UserError and keeps it out of the snapshot', async () => {
     const api = createMockApi(fixture('ready'));
     await expect(api.dispatch({ kind: 'test_direction', value: 0 })).rejects.toEqual({
-      message: '켠 뒤에 시험음을 낼 수 있습니다.',
+      message: '켠 뒤에 시험용 신호를 재생할 수 있습니다.',
       next: 'none',
     });
     await expect(api.dispatch({ kind: 'begin_setup' })).rejects.toMatchObject({ next: 'none' });
@@ -105,7 +105,7 @@ describe('the mock speaks as the supervisor', () => {
     start.platform = { os_build: 26100, arch: 'arm64', test_signing: true, secure_boot: 'disabled' };
     const api = createMockApi(start);
     await expect(api.dispatch({ kind: 'begin_setup' })).rejects.toEqual({
-      message: 'This build is for x64, but this PC is Arm64.',
+      message: 'This version is for x64 PCs, but this PC is Arm64.',
       next: 'none',
     });
     expect((await api.snapshot()).phase).toEqual({ kind: 'setup', value: 'unsupported' });
@@ -119,12 +119,12 @@ describe('the mock speaks as the supervisor', () => {
     });
     expect((await running.snapshot()).error?.message).toBe('Turn it off before changing the output.');
     await expect(running.dispatch({ kind: 'test_direction', value: 99 })).rejects.toMatchObject({
-      message: 'That direction does not exist.',
+      message: 'The selected direction could not be found.',
     });
 
     const ready = createMockApi(fixture('ready', 'en'));
     await expect(ready.dispatch({ kind: 'test_direction', value: 0 })).rejects.toEqual({
-      message: 'Turn it on before playing a test tone.',
+      message: 'Turn it on before playing a test signal.',
       next: 'none',
     });
     await expect(ready.dispatch({ kind: 'begin_setup' })).rejects.toEqual({
@@ -132,15 +132,15 @@ describe('the mock speaks as the supervisor', () => {
       next: 'none',
     });
     await expect(ready.dispatch({ kind: 'start_diagnostic_recording' })).rejects.toMatchObject({
-      message: 'Diagnostic recording is coming in a later update.',
+      message: 'Diagnostic recording will be available in a later update.',
     });
     await expect(ready.dispatch({ kind: 'set_profile_kind', value: 'headphones' })).rejects.toMatchObject({
       message: 'Import a BRIR set first.',
     });
     await expect(ready.dispatch({ kind: 'set_gain', value: 11 })).rejects.toMatchObject({
-      message: 'Gain must be between -20 dB and +10 dB.',
+      message: 'Output volume adjustment must be between -20 dB and +10 dB.',
     });
-    expect((await ready.snapshot()).error?.message).toBe('Gain must be between -20 dB and +10 dB.');
+    expect((await ready.snapshot()).error?.message).toBe('Output volume adjustment must be between -20 dB and +10 dB.');
   });
 
   it('adds no note of its own when it turns on, and clears the old ones', async () => {
@@ -181,12 +181,12 @@ describe('the mock speaks as the supervisor', () => {
   it('says a kept error again in the language chosen, as the supervisor does', async () => {
     const api = createMockApi(fixture('ready'));
     await expect(api.dispatch({ kind: 'set_gain', value: 12 })).rejects.toMatchObject({
-      message: '게인은 -20 dB에서 +10 dB 사이입니다.',
+      message: '출력 음량 조절 범위는 -20 dB에서 +10 dB까지입니다.',
     });
     await api.dispatch({ kind: 'set_language', value: 'en' });
     const snapshot = await api.snapshot();
     expect(snapshot.language).toBe('en');
-    expect(snapshot.error).toEqual({ message: 'Gain must be between -20 dB and +10 dB.', next: 'none' });
+    expect(snapshot.error).toEqual({ message: 'Output volume adjustment must be between -20 dB and +10 dB.', next: 'none' });
     // Any other success clears it.
     await api.dispatch({ kind: 'set_gain', value: -3 });
     expect((await api.snapshot()).error).toBeNull();

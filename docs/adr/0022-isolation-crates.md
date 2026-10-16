@@ -33,3 +33,21 @@ ADR 0002는 손으로 쓰는 unsafe를 `ssr-sys` 하나에 모았습니다. ADR 
 ## 2026-10-15 덧붙임
 
 ADR 0032가 격리 크레이트 `ssr-setup-sys`(관리자 작업, `apps/ssr-setup`만 링크)를 더하고 `ssr-sys`의 예산을 40까지 올렸습니다. 실제 숫자는 `unsafe-budget.toml`에 있습니다.
+
+## 2026-10-16 덧붙임: 플러그인 호스트의 격리 크레이트 둘
+
+ADR 0035가 `hostvst` 계열의 이름을 `plughost` 계열로 바꿨습니다. 그 첫 PR에서 격리 크레이트 둘을 더하고 숫자를 정합니다. 숫자는 `unsafe-budget.toml`의 셈법을 따릅니다. 주석·문자열을 뺀 `unsafe` 낱말 수입니다.
+
+| 크레이트 | 예산 | 담는 것 | 링크하는 곳 |
+| --- | --- | --- | --- |
+| `plughost-sys` | 181 | 공유 메모리 매핑과 원자 슬라이스(한 곳), 이벤트, 잡 객체로 묶은 자식 프로세스, 익명 파이프, MMCSS, DLL 적재, 편집기 창, VST 2 ABI(Xaymar vst2sdk의 클린룸 헤더, BSD-3-Clause, 그 고지를 파일 머리에 둠), VST 3 COM(`vst3` 0.3.0, MIT 또는 Apache-2.0) | `plughost`만, `[target.'cfg(windows)'.dependencies]`로 |
+| `plughost-testplugin` | 126 | 시험 전용 플러그인 DLL. VST 2 진입점과 VST 3 팩토리를 함께 내보내는 스테레오 → 5.1 업믹서이고, 상태로 고르는 죽음·멈춤·NaN 변형을 가짐 | 아무도 링크하지 않음. CI가 빌드해 `ssr-plughost`에 적재시키며, 설치본과 릴리스에 싣지 않음 |
+
+- **VST 3이 숫자를 키웠습니다.** COM 인터페이스는 호출과 구현 양쪽에서 `unsafe` 메서드 선언이 낱말로 셈에 듭니다.
+  - 시험용 플러그인의 VST 3 쪽만 104입니다. 그 가운데 51은 COM 메서드 선언이고, 블록은 50입니다.
+  - 블록마다 `// SAFETY:`를 둡니다.
+- **Windows 의존성 게이트를 허용 목록으로 바꿨습니다.** 허용 목록은 `ssr-sys`, `ssr-setup-sys`, `plughost-sys`입니다.
+- **링크 규칙도 `ssr-policy`가 검사합니다.**
+  - `plughost-sys`는 `plughost`와 시험용 플러그인만 링크합니다.
+  - `plughost`는 앱만 링크합니다.
+  - `streamring`과 `plughost-*`는 `ssr-*`에 의존하지 않습니다.

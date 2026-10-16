@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 use specta::TypeCollection;
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use ssr_types::app::{
-    CorrectionView, HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase, ProfileKind,
-    ProfileView, SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
+    CorrectionView, EndpointUpmixView, HeadphonesView, Intent, Language, NextAction, OutputChoice,
+    Phase, PluginChoice, PluginFormat, PluginView, ProfileKind, ProfileView, SetupStep, Snapshot,
+    SpeakerChannelView, SpeakerLayout, SpeakersView, UpmixApply, UpmixBypass, UpmixState,
+    UpmixView, UpmixerChoice, UpmixerSetting, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::status::{
@@ -308,12 +310,72 @@ fn profile_file(language: Language) -> ProfileView {
     }
 }
 
+/// No upmixer chosen anywhere: both endpoints follow the default, which is
+/// off until the first-party upmixer exists (ADR 0035).
+fn default_upmix() -> UpmixView {
+    UpmixView {
+        endpoints: (0..3)
+            .map(|endpoint| EndpointUpmixView {
+                endpoint,
+                choice: None,
+                effective: UpmixerChoice::Off,
+                plugin: None,
+                state: UpmixState::Stopped,
+                bypass: None,
+                latency_ms: None,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            })
+            .collect(),
+        headphones: true,
+        speakers: true,
+        first_party_available: false,
+    }
+}
+
+/// A made-up VST 3 upmixer that takes stereo and returns 5.1.
+fn example_plugin() -> PluginView {
+    PluginView {
+        path: r"C:\Program Files\Common Files\VST3\Example Upmixer.vst3".to_owned(),
+        format: PluginFormat::Vst3,
+        name: "Example Upmixer".to_owned(),
+        vendor: "Example Audio".to_owned(),
+    }
+}
+
+/// The music endpoint goes through the example plugin; the others are
+/// explicitly off.
+fn music_upmix(state: UpmixState) -> UpmixView {
+    plugin_upmix(1, state)
+}
+
+/// `endpoint` goes through the example plugin; the others are explicitly off.
+fn plugin_upmix(endpoint: usize, state: UpmixState) -> UpmixView {
+    let mut upmix = default_upmix();
+    for view in &mut upmix.endpoints {
+        view.choice = Some(UpmixerChoice::Off);
+    }
+    let running = matches!(state, UpmixState::Running | UpmixState::Fallback);
+    let music = &mut upmix.endpoints[endpoint];
+    music.choice = Some(UpmixerChoice::Plugin);
+    music.effective = UpmixerChoice::Plugin;
+    music.plugin = Some(example_plugin());
+    music.state = state;
+    music.latency_ms = running.then_some(23.3);
+    music.inputs = ["L", "R"].map(str::to_owned).to_vec();
+    music.outputs = ["L", "R", "C", "LFE", "Ls", "Rs"]
+        .map(str::to_owned)
+        .to_vec();
+    upmix
+}
+
 fn blank(language: Language, phase: Phase) -> Snapshot {
     Snapshot {
         language,
         language_choice: None,
         phase,
         profile: stereo_profile(language),
+        upmix: default_upmix(),
         engine: None,
         outputs: Vec::new(),
         chosen_output: None,
@@ -328,6 +390,47 @@ fn blank(language: Language, phase: Phase) -> Snapshot {
 fn with_phase(mut snapshot: Snapshot, phase: Phase) -> Snapshot {
     snapshot.phase = phase;
     snapshot
+}
+
+/// The running engine with the music endpoint playing `format`.
+fn engine_with_music(language: Language, format: SourceFormat) -> EngineStatus {
+    let mut engine = engine_status(language);
+    engine.endpoints[1].format = Some(format);
+    engine
+}
+
+/// The running engine with the PASS endpoint playing `format`, not muted.
+fn engine_with_pass(language: Language, format: SourceFormat) -> EngineStatus {
+    let mut engine = engine_status(language);
+    let pass = &mut engine.endpoints[2];
+    pass.format = Some(format);
+    pass.muted = false;
+    pass.unsupported = None;
+    pass.chain_errors = ChainErrorCounts::default();
+    engine
+}
+
+/// Stereo PCM at 48 kHz: what the example upmixer takes.
+fn stereo_pcm() -> SourceFormat {
+    SourceFormat::Pcm(PcmFormat {
+        channels: 2,
+        sample_rate: 48_000,
+        bits_per_sample: 32,
+        valid_bits: 32,
+        sample_type: SampleType::Float,
+        channel_mask: 0x3,
+    })
+}
+
+/// An E-AC-3 stream with `channels` encoded channels.
+fn eac3(channels: u32) -> SourceFormat {
+    SourceFormat::Bitstream(BitstreamFormat {
+        codec: BitstreamCodec::Eac3,
+        container_rate: 192_000,
+        container_channels: 2,
+        encoded_rate: 48_000,
+        encoded_channels: channels,
+    })
 }
 
 fn engine_status(language: Language) -> EngineStatus {
@@ -564,8 +667,8 @@ fn snapshots(language: Language) -> Vec<(&'static str, Snapshot)> {
                 }),
                 error: Some(error(
                     text(
-                        "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오.",
-                        "Windows rejected the driver signature (problem code 52). Check test-signing mode, then reinstall the driver.",
+                        "Windows가 드라이버 서명을 확인하지 못했습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오.",
+                        "Windows could not verify the driver signature (problem code 52). Check test-signing mode, then reinstall the driver.",
                     ),
                     NextAction::Retry,
                 )),
@@ -725,6 +828,81 @@ fn snapshots(language: Language) -> Vec<(&'static str, Snapshot)> {
             },
         ),
         (
+            "ready-upmix",
+            Snapshot {
+                upmix: music_upmix(UpmixState::Stopped),
+                ..ready.clone()
+            },
+        ),
+        (
+            "running-upmix",
+            Snapshot {
+                profile: headphone_profile(language),
+                upmix: music_upmix(UpmixState::Running),
+                engine: Some(engine_with_music(language, stereo_pcm())),
+                roles_taken: true,
+                ..with_phase(ready.clone(), Phase::Running)
+            },
+        ),
+        (
+            "running-upmix-fallback",
+            Snapshot {
+                profile: headphone_profile(language),
+                upmix: music_upmix(UpmixState::Fallback),
+                engine: Some(engine_with_music(language, stereo_pcm())),
+                roles_taken: true,
+                ..with_phase(ready.clone(), Phase::Running)
+            },
+        ),
+        (
+            "running-upmix-pass",
+            Snapshot {
+                profile: headphone_profile(language),
+                upmix: plugin_upmix(2, UpmixState::Running),
+                engine: Some(engine_with_pass(language, eac3(2))),
+                roles_taken: true,
+                ..with_phase(ready.clone(), Phase::Running)
+            },
+        ),
+        (
+            "running-upmix-native-surround",
+            Snapshot {
+                profile: headphone_profile(language),
+                upmix: {
+                    let mut upmix = plugin_upmix(2, UpmixState::Running);
+                    upmix.endpoints[2].bypass = Some(UpmixBypass::NativeSurround);
+                    upmix
+                },
+                engine: Some(engine_with_pass(language, eac3(6))),
+                roles_taken: true,
+                ..with_phase(ready.clone(), Phase::Running)
+            },
+        ),
+        (
+            "ready-upmix-failed",
+            Snapshot {
+                upmix: music_upmix(UpmixState::Failed(
+                    text(
+                        "업믹스 플러그인이 10분 안에 세 번 멈춰 이번 실행에서는 껐습니다: Example Upmixer",
+                        "The upmixer plugin stopped three times within 10 minutes, so it is off until the app restarts: Example Upmixer",
+                    )
+                    .to_owned(),
+                )),
+                ..ready.clone()
+            },
+        ),
+        (
+            "ready-speakers-upmix-off",
+            Snapshot {
+                profile: speaker_profile(language),
+                upmix: UpmixView {
+                    speakers: false,
+                    ..music_upmix(UpmixState::Stopped)
+                },
+                ..ready.clone()
+            },
+        ),
+        (
             "ready-profile-file",
             Snapshot {
                 profile: profile_file(language),
@@ -783,6 +961,23 @@ fn intents() -> Vec<Intent> {
         Intent::ClearCorrection,
         Intent::SetGain(-3.5),
         Intent::TestDirection(DirectionId(7)),
+        Intent::SetUpmixer(UpmixerSetting {
+            endpoint: 1,
+            choice: UpmixerChoice::Plugin,
+        }),
+        Intent::SetUpmixer(UpmixerSetting {
+            endpoint: 0,
+            choice: UpmixerChoice::Off,
+        }),
+        Intent::ChoosePlugin(PluginChoice {
+            endpoint: 1,
+            path: PathBuf::from(r"C:\Program Files\Common Files\VST3\Example Upmixer.vst3"),
+        }),
+        Intent::OpenPluginEditor(1),
+        Intent::SetUpmixApply(UpmixApply {
+            kind: ProfileKind::Speakers,
+            on: false,
+        }),
         Intent::Enable,
         Intent::Disable,
         Intent::StartDiagnosticRecording,

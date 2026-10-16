@@ -1,9 +1,9 @@
 // The status screen (ready, running, faulted): the power switch, the chosen
-// output, one card per entrance and, while running, the meter column. The
-// cards and meters are built once per snapshot and then only their text nodes
-// change, 30 times a second.
+// output, one card per entrance (with its upmixer while one runs) and, while
+// running, the meter column. The cards and meters are built once per snapshot
+// and then only their text nodes change, 30 times a second.
 
-import type { EndpointStatus, EngineStatus } from '../bindings';
+import type { EndpointStatus, EndpointUpmixView, EngineStatus } from '../bindings';
 import { h, liveText } from '../dom';
 import {
   chainErrorEntries,
@@ -19,6 +19,7 @@ import {
   oneDecimal,
 } from '../format';
 import { text } from '../text';
+import { bypassReason } from './upmix';
 import { type Context, type Drawn, type Live, button, intentButton } from './common';
 import { powerState } from './nav';
 import { outputList } from './wizard';
@@ -92,7 +93,32 @@ interface Card {
   update(endpoint: EndpointStatus | null): void;
 }
 
-function endpointCard(index: number): Card {
+/**
+ * The entrance's upmixer while its host is up: the plugin's name, a warning
+ * tone when the original stereo plays in its place, and, in words under the
+ * name, why the sound playing now goes around it (the lamp unlit).
+ */
+function upmixLine(upmix: EndpointUpmixView | undefined): HTMLElement | null {
+  if (upmix === undefined || upmix.plugin === null) return null;
+  const { kind } = upmix.state;
+  if (kind !== 'running' && kind !== 'fallback') return null;
+  const fallback = kind === 'fallback';
+  const bypass = kind === 'running' ? upmix.bypass : null;
+  const tone = fallback ? 'warning' : bypass !== null ? 'off' : 'on';
+  return h(
+    'p',
+    { class: `card-upmix small tone-${tone}` },
+    h('span', { class: 'lamp', 'aria-hidden': 'true' }),
+    h(
+      'span',
+      { class: 'card-upmix-text' },
+      h('span', null, fallback ? text.status.upmixFallback(upmix.plugin.name) : text.status.upmix(upmix.plugin.name)),
+      bypass === null ? null : h('span', { class: 'card-upmix-reason' }, bypassReason(bypass)),
+    ),
+  );
+}
+
+function endpointCard(index: number, upmix: EndpointUpmixView | undefined): Card {
   const s = text.status;
   const names = text.endpoints[index] ?? { name: `${index}`, purpose: '' };
   const format = liveText();
@@ -122,6 +148,7 @@ function endpointCard(index: number): Card {
     { class: 'panel endpoint-card' },
     h('header', { class: 'card-head' }, h('h3', { class: 'card-title' }, names.name), h('p', { class: 'muted small' }, names.purpose)),
     h('div', null, h('p', { class: 'card-format' }, format.node), carrierLine),
+    upmixLine(upmix),
     unsupportedLine,
     rows,
     errors,
@@ -214,7 +241,12 @@ function meterColumn(): { element: HTMLElement; update(engine: EngineStatus): vo
 export function status(ctx: Context, engineNow: EngineStatus | null): Drawn {
   const s = text.status;
   const running = ctx.snapshot.phase.kind === 'running';
-  const cards = Array.from({ length: SHOWN_ENDPOINTS }, (_, index) => endpointCard(index));
+  const cards = Array.from({ length: SHOWN_ENDPOINTS }, (_, index) =>
+    endpointCard(
+      index,
+      ctx.snapshot.upmix.endpoints.find((endpoint) => endpoint.endpoint === index),
+    ),
+  );
   const grid = h(
     'section',
     { class: 'entrances', 'aria-label': s.entrances },

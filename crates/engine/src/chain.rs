@@ -36,6 +36,7 @@ use crate::mixer::{
     SceneMixer,
 };
 use crate::test_tone::TestTonePlayer;
+use crate::upmix::{UpmixLanes, UpmixStage, UpmixStatus, place_scene};
 
 const DEFAULT_LFE_GAIN: f32 = 1.0;
 pub const SPEAKER_TAIL_LIMIT_FRAMES: usize = 6 * MIX_RATE as usize;
@@ -95,7 +96,7 @@ impl Default for ChainConfig {
     }
 }
 
-fn supported_source_rate(rate: u32) -> bool {
+pub(crate) fn supported_source_rate(rate: u32) -> bool {
     matches!(
         rate,
         44_100 | MIX_RATE | 88_200 | 96_000 | 176_400 | 192_000
@@ -968,16 +969,19 @@ enum Placement {
     },
 }
 
-/// Places a finished burst job's scenes into `endpoint`'s lane, with the
-/// epoch its burst was queued in. A job whose decode failed is placed too: its
-/// delivery carries the error, returned after the capture-side checks of what
-/// was decoded before it. Does not allocate: the job's frames are only
-/// borrowed.
+/// Places a finished burst job's scenes into `endpoint`'s lane, through its
+/// upmix stage, with the epoch its burst was queued in. A job whose decode
+/// failed is placed too: its delivery carries the error, returned after the
+/// capture-side checks of what was decoded before it. `before_restart` runs
+/// before a restart the upmix stage asks for (see [`place_scene`]). Does not
+/// allocate: the job's frames are only borrowed.
 fn place_decoded(
     decoders: &mut Decoders,
     mixer: &mut SceneMixer,
+    upmix: &mut UpmixLanes,
     geometry: Option<&PanGeometry>,
     job: &DecodeJob,
+    before_restart: &mut dyn FnMut(&mut SceneMixer),
 ) -> Placement {
     let decoded_ok = job.result().is_ok();
     if let Err(error) = job.result()
@@ -994,7 +998,7 @@ fn place_decoded(
     let endpoint = job.endpoint();
     let mut scene_rate_error = None;
     let result = decoders.place_deferred(job.decoded(), job.qpc(), job.epoch(), &mut |scene| {
-        if let Err(rate) = mixer.push_scene(endpoint, scene, geometry) {
+        if let Err(rate) = place_scene(upmix, mixer, endpoint, scene, geometry, before_restart) {
             scene_rate_error = Some(rate);
         }
     });
@@ -1013,8 +1017,9 @@ fn place_decoded(
 /// Hands one complete burst of a codec that decodes on the decode thread to
 /// the queue, tagged with the lane's generation and clock. An inline worker
 /// runs the job and its scenes are placed at once, where a synchronous decode
-/// put them. Returns the error to report; the caller then restarts the lane as
-/// for any decode error (a new generation has started here).
+/// put them, through the upmix stage (`before_restart` as for
+/// [`place_decoded`]). Returns the error to report; the caller then restarts
+/// the lane as for any decode error (a new generation has started here).
 #[allow(clippy::too_many_arguments)]
 fn submit_deferred_burst(
     decoders: &mut Decoders,
@@ -1022,12 +1027,14 @@ fn submit_deferred_burst(
     queue: &mut DecodeQueue,
     inline_worker: &mut Option<DecodeWorker>,
     mixer: &mut SceneMixer,
+    upmix: &mut UpmixLanes,
     geometry: Option<&PanGeometry>,
     endpoint: u16,
     epoch: u32,
     codec: DeferredCodec,
     burst: &bitstream::Burst<'_>,
     qpc: u64,
+    before_restart: &mut dyn FnMut(&mut SceneMixer),
 ) -> Option<ChainError> {
     let (data_type, wrong_route) = match codec {
         DeferredCodec::Ddp => (
@@ -1071,7 +1078,7 @@ fn submit_deferred_burst(
             "an inline delivery is placed where its burst is queued"
         );
         if let Placement::Failed { error, reset_front } =
-            place_decoded(decoders, mixer, geometry, job)
+            place_decoded(decoders, mixer, upmix, geometry, job, before_restart)
         {
             failure = Some((error, reset_front));
         }
@@ -1475,6 +1482,9 @@ pub struct Chain {
     config: ChainConfig,
     fronts: Box<[Front]>,
     mixer: SceneMixer,
+    /// The upmix stages of endpoints 0 to 2 (ADR 0035). Every scene those
+    /// lanes place goes through [`place_scene`].
+    upmix: UpmixLanes,
     back: Back,
     /// The installed set's panning geometry, held apart from `back` so lanes
     /// can pan while the back end renders. Replaced in `set_prepared` before
@@ -1522,6 +1532,7 @@ impl Chain {
                 qpc_frequency,
                 endpoint_mask: config.endpoints.mask(),
             }),
+            upmix: UpmixLanes::new(),
             back: Back::new(),
             qpc_frequency,
             skipped_records: 0,
@@ -1568,6 +1579,41 @@ impl Chain {
         submit_front_reset(&mut self.decode_queue, &mut self.inline_worker, endpoint);
     }
 
+    /// Installs (`Some`) or removes (`None`) the upmix stage of `endpoint`
+    /// (0 to 2) and returns the old one, which the caller drops off the
+    /// real-time thread. For another endpoint, or a stage built for another
+    /// endpoint, `stage` comes straight back and nothing changes.
+    /// While the lane plays and the old stage was upmixing or the new one
+    /// will, the lane restarts at once, as at a format change. Never
+    /// allocates.
+    pub fn set_upmixer(
+        &mut self,
+        endpoint: u16,
+        stage: Option<Box<UpmixStage>>,
+    ) -> Option<Box<UpmixStage>> {
+        self.upmix.install(&mut self.mixer, endpoint, stage)
+    }
+
+    /// The output kind's "apply upmixing" switch (ADR 0035), resolved for the
+    /// kind in use; on by default. Off, every stage is transparent; a lane
+    /// that plays restarts when its stage changes between upmixing and
+    /// transparent. Never allocates.
+    pub fn set_upmix_apply(&mut self, on: bool) {
+        self.upmix.set_apply(&mut self.mixer, on);
+    }
+
+    /// The upmix stage of `endpoint` (0 to 2; `None` for others). Copies
+    /// the speaker lists: not for the real-time thread.
+    pub fn upmix_status(&self, endpoint: u16) -> Option<UpmixStatus> {
+        self.upmix.status(endpoint)
+    }
+
+    /// Restarts of `endpoint`'s mixer lane so far: starts, stops and
+    /// discontinuities, including those an upmix stage asks for.
+    pub fn lane_restarts(&self, endpoint: u16) -> u64 {
+        self.mixer.lane_restarts(endpoint)
+    }
+
     /// Ends a lane: places what its decoders still hold, resets its front and
     /// stops it.
     fn stop_lane(&mut self, index: usize, endpoint: u16, out: &mut dyn FnMut(ChainEvent<'_>)) {
@@ -1576,6 +1622,7 @@ impl Chain {
         self.reset_front(index, endpoint);
         let (mixer, back) = (&mut self.mixer, &mut self.back);
         mixer.lane_stop(endpoint, &mut |scene| back.process(scene, out));
+        self.upmix.stopped(endpoint);
     }
 
     /// Runs a stop that is waiting for the lane's in-flight deliveries now:
@@ -1619,6 +1666,7 @@ impl Chain {
         let Self {
             fronts,
             mixer,
+            upmix,
             decode_queue,
             geometry,
             suppressed_errors,
@@ -1646,9 +1694,15 @@ impl Chain {
                 }
                 return;
             }
-            if let Placement::Failed { error, reset_front } =
-                place_decoded(&mut front.decoders, mixer, geometry, job)
-            {
+            // The lane's transport moved when the burst's bytes arrived.
+            if let Placement::Failed { error, reset_front } = place_decoded(
+                &mut front.decoders,
+                mixer,
+                upmix,
+                geometry,
+                job,
+                &mut |_| {},
+            ) {
                 front.deferred.restart();
                 if reset_front {
                     resets |= 1_u32 << endpoint;
@@ -2438,11 +2492,12 @@ impl Chain {
     }
 
     fn flush_front(&mut self, index: usize, endpoint: u16, out: &mut dyn FnMut(ChainEvent<'_>)) {
-        let (fronts, mixer) = (&mut self.fronts, &mut self.mixer);
+        let (fronts, upmix, mixer) = (&mut self.fronts, &mut self.upmix, &mut self.mixer);
         let geometry = self.geometry.as_deref();
         let mut scene_rate_error = None;
         let result = fronts[index].decoders.flush(&mut |scene| {
-            if let Err(rate) = mixer.push_scene(endpoint, scene, geometry) {
+            // The stream ends here: no transport is pending.
+            if let Err(rate) = place_scene(upmix, mixer, endpoint, scene, geometry, &mut |_| {}) {
                 scene_rate_error = Some(rate);
             }
         });
@@ -2479,6 +2534,7 @@ impl Chain {
         let Self {
             fronts,
             mixer,
+            upmix,
             back,
             decode_queue,
             inline_worker,
@@ -2496,7 +2552,10 @@ impl Chain {
             let mut scene_rate_error = None;
             let decoders = &mut fronts[index].decoders;
             let mut place = |scene: &SceneBlock<'_>| {
-                if let Err(rate) = mixer.push_scene(endpoint, scene, geometry) {
+                // A PCM epoch's shape is fixed, so its stage never restarts
+                // the lane mid-chunk; the transport moves after placement.
+                if let Err(rate) = place_scene(upmix, mixer, endpoint, scene, geometry, &mut |_| {})
+                {
                     scene_rate_error = Some(rate);
                 }
             };
@@ -2538,6 +2597,7 @@ impl Chain {
         let Self {
             fronts,
             mixer,
+            upmix,
             back,
             decode_queue,
             inline_worker,
@@ -2580,6 +2640,17 @@ impl Chain {
                         / u128::from(byte_rate);
                     chunk_end_qpc.saturating_sub(ticks.min(u128::from(u64::MAX)) as u64)
                 };
+                // An upmix stage restarts the lane when the decoded shape
+                // flips between stereo and surround. As for an error below,
+                // this chunk's transport goes to the old lane generation first.
+                let mut advance_first = |mixer: &mut SceneMixer| {
+                    if !transport_advanced {
+                        mixer.advance(endpoint, transport_frames, &mut |scene| {
+                            back.process(scene, out)
+                        });
+                        transport_advanced = true;
+                    }
+                };
                 let error = if let Some(codec) = decoders.deferred() {
                     submit_deferred_burst(
                         decoders,
@@ -2587,17 +2658,21 @@ impl Chain {
                         decode_queue,
                         inline_worker,
                         mixer,
+                        upmix,
                         geometry,
                         endpoint,
                         epoch,
                         codec,
                         &burst,
                         burst_qpc,
+                        &mut advance_first,
                     )
                 } else {
                     let mut scene_rate_error = None;
                     let result = decoders.push_burst(&burst, burst_qpc, &mut |scene| {
-                        if let Err(rate) = mixer.push_scene(endpoint, scene, geometry) {
+                        if let Err(rate) =
+                            place_scene(upmix, mixer, endpoint, scene, geometry, &mut advance_first)
+                        {
                             scene_rate_error = Some(rate);
                         }
                     });

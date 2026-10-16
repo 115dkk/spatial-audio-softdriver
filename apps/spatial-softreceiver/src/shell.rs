@@ -52,6 +52,7 @@ use crate::control::{self, Bridge, ControlConfig, Note};
 use crate::launcher::WindowsLauncher;
 use crate::log::{self, Log};
 use crate::paths::{self, Args};
+use crate::plugin_host;
 use crate::settings::JsonSettingsFile;
 use crate::tray::{self, Toggle};
 use crate::update::{UpdateState, Updater};
@@ -220,6 +221,7 @@ fn setup(
     let marker = consume_guard_marker(&state_dir);
     let host = windows_host(&state_dir);
     let launcher = WindowsLauncher;
+    let plugins = plugin_host::platform_plugin_host(&exe_dir(), &state_dir);
     let store = JsonSettingsFile::in_dir(&state_dir);
 
     let open = MenuItem::with_id(app, MENU_OPEN, tray::open(language), true, None::<&str>)?;
@@ -245,9 +247,10 @@ fn setup(
         heartbeat_enabled: args.guarded,
         heartbeat_broken: AtomicBool::new(false),
     };
-    let (bridge, control) = control::spawn_with_startup(
+    let (bridge, control) = control::spawn_with_plugins(
         host,
         launcher,
+        plugins,
         Config {
             default_language,
             profile_file: Some(paths::profile_file(&state_dir)),
@@ -661,13 +664,18 @@ fn consume_guard_marker(state_dir: &Path) -> Option<ssr_guard::marker::Marker> {
     Some(marker)
 }
 
-/// The host adapter with `ssr-setup.exe` beside this executable.
-fn windows_host(state_dir: &Path) -> WindowsHost {
-    let exe_dir = std::env::current_exe()
+/// The app executable's directory, where `ssr-setup.exe` and
+/// `ssr-plughost.exe` ship beside it.
+fn exe_dir() -> PathBuf {
+    std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .unwrap_or_default();
-    WindowsHost::new(paths::setup_exe(&exe_dir), state_dir.to_path_buf())
+        .unwrap_or_default()
+}
+
+/// The host adapter with `ssr-setup.exe` beside this executable.
+fn windows_host(state_dir: &Path) -> WindowsHost {
+    WindowsHost::new(paths::setup_exe(&exe_dir()), state_dir.to_path_buf())
 }
 
 /// `--smoke`: waits for the screen's first `snapshot` command, then quits with

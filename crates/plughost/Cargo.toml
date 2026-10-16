@@ -1,0 +1,21 @@
+[package]
+name = "plughost"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+streamring.workspace = true
+plughost-proto.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+vst3.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+plughost-sys.workspace = true

@@ -974,7 +974,7 @@ fn check_dependency_table(
     violations: &mut Vec<String>,
 ) {
     const WINDOWS_PACKAGES: [&str; 4] = ["windows", "windows-sys", "windows-core", "wasapi"];
-    const WINDOWS_CRATES: [&str; 2] = ["ssr-sys", "ssr-setup-sys"];
+    const WINDOWS_CRATES: [&str; 3] = ["ssr-sys", "ssr-setup-sys", "plughost-sys"];
 
     for (alias, specification) in dependencies {
         let package = dependency_package(alias, specification, workspace_packages);
@@ -982,11 +982,23 @@ fn check_dependency_table(
             && !WINDOWS_CRATES.contains(&krate.name.as_str())
         {
             violations.push(format!(
-                "{} (crate {}, [{section}] dependency '{}'): package '{}' may only be used by an isolation crate (ssr-sys, ssr-setup-sys)",
+                "{} (crate {}, [{section}] dependency '{}'): package '{}' may only be used by an isolation crate (ssr-sys, ssr-setup-sys, plughost-sys)",
                 relative_path(&krate.manifest),
                 krate.name,
                 alias,
                 package
+            ));
+        }
+        if package == "plughost-sys"
+            && !(krate.name == "plughost-testplugin"
+                || krate.name == "plughost" && section == "target.'cfg(windows)'.dependencies")
+        {
+            violations.push(format!("{}: plughost-sys may only be linked by plughost under cfg(windows), or the test plugin", relative_path(&krate.manifest)));
+        }
+        if package == "plughost" && !krate.is_app {
+            violations.push(format!(
+                "{}: only apps may link plughost",
+                relative_path(&krate.manifest)
             ));
         }
         if package == "ssr-setup-sys" && krate.name != "ssr-setup" {
@@ -1015,6 +1027,50 @@ fn check_dependency_table(
             ));
         }
     }
+}
+
+#[test]
+fn plughost_link_rules_reject_wrong_owners_and_unconditional_links() {
+    let krate = FirstPartyCrate {
+        name: "plughost".into(),
+        dir: repo_root().join("crates/plughost"),
+        manifest: repo_root().join("crates/plughost/Cargo.toml"),
+        is_app: false,
+    };
+    let manifest: toml::Value =
+        toml::from_str("[dependencies]\nplughost-sys = { workspace = true }\n").unwrap();
+    let dependencies = manifest["dependencies"].as_table().unwrap();
+    let packages = workspace_dependency_packages();
+    let mut violations = Vec::new();
+    check_dependency_table(
+        &krate,
+        "dependencies",
+        dependencies,
+        &packages,
+        &mut violations,
+    );
+    assert_eq!(violations.len(), 1);
+    violations.clear();
+    check_dependency_table(
+        &krate,
+        "target.'cfg(windows)'.dependencies",
+        dependencies,
+        &packages,
+        &mut violations,
+    );
+    assert!(violations.is_empty());
+    let wrong = FirstPartyCrate {
+        name: "engine".into(),
+        ..krate
+    };
+    check_dependency_table(
+        &wrong,
+        "target.'cfg(windows)'.dependencies",
+        dependencies,
+        &packages,
+        &mut violations,
+    );
+    assert_eq!(violations.len(), 1);
 }
 
 #[test]
@@ -1061,6 +1117,61 @@ fn windows_code_stays_in_ssr_sys() {
     assert!(
         violations.is_empty(),
         "Windows dependency policy violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn streamring_and_plughost_crates_stay_independent_of_ssr_crates() {
+    const DEPENDENCY_SECTIONS: [&str; 3] =
+        ["dependencies", "dev-dependencies", "build-dependencies"];
+
+    let workspace_packages = workspace_dependency_packages();
+    let mut violations = Vec::new();
+
+    for krate in first_party_crates().into_iter().filter(|krate| {
+        krate.name == "streamring"
+            || krate.name == "plughost"
+            || krate.name == "ssr-plughost"
+            || krate.name.starts_with("plughost-")
+    }) {
+        let manifest = read_toml(&krate.manifest);
+        let mut check = |section: &str, dependencies: &toml::Table| {
+            for (alias, specification) in dependencies {
+                let package = dependency_package(alias, specification, &workspace_packages);
+                if package.starts_with("ssr-") {
+                    violations.push(format!(
+                        "{} (crate {}, [{section}] dependency '{}'): independent protocol crates may not depend on '{}' (ADR 0021)",
+                        relative_path(&krate.manifest),
+                        krate.name,
+                        alias,
+                        package
+                    ));
+                }
+            }
+        };
+
+        for section in DEPENDENCY_SECTIONS {
+            if let Some(dependencies) = manifest.get(section).and_then(toml::Value::as_table) {
+                check(section, dependencies);
+            }
+        }
+        if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+            for (target, target_manifest) in targets {
+                for section in DEPENDENCY_SECTIONS {
+                    if let Some(dependencies) =
+                        target_manifest.get(section).and_then(toml::Value::as_table)
+                    {
+                        check(&format!("target.'{target}'.{section}"), dependencies);
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "independent protocol crate dependency violations:\n{}",
         violations.join("\n")
     );
 }

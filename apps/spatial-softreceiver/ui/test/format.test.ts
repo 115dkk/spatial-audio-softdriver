@@ -66,7 +66,7 @@ describe('names and numbers', () => {
   it('turns unsupported reasons into sentences', () => {
     expect(describeUnsupported('format')).toBe('지원하지 않는 형식입니다.');
     expect(describeUnsupported('source_rate')).toBe('48 kHz로 바꿀 수 없는 표본율입니다.');
-    expect(describeUnsupported('direct_layout')).toBe('이 채널 수에는 직접 배치가 없습니다.');
+    expect(describeUnsupported('direct_layout')).toBe('이 채널 수에 맞는 스피커 위치가 정해져 있지 않습니다.');
   });
 
   it('rounds to one decimal without a negative zero', () => {
@@ -85,7 +85,7 @@ describe('names and numbers', () => {
     const map = { corrupt_payload: 2, missing_direct_layout: 41, decoder_behind: 0, future_kind: 1 };
     expect(chainErrorTotal(map)).toBe(44);
     expect(chainErrorEntries(map)).toEqual([
-      { kind: 'missing_direct_layout', label: '직접 배치 없음', count: 41 },
+      { kind: 'missing_direct_layout', label: '채널별 스피커 위치가 정해져 있지 않음', count: 41 },
       { kind: 'corrupt_payload', label: '깨진 데이터', count: 2 },
       { kind: 'future_kind', label: 'future_kind', count: 1 },
     ]);

@@ -10,6 +10,8 @@
 //! * [`settings`]: `settings.json` in the state directory.
 //! * [`paths`]: the state directory, `ssr-setup.exe`, and the command line.
 //! * [`log`]: `app.log` in the state directory.
+//! * [`plugin_host`]: the supervisor's plugin host port, `ssr-plughost.exe`
+//!   on Windows (ADR 0035).
 //! * `launcher` (Windows): starts the engine on the driver ring and WASAPI.
 //! * `shell` (Windows): the Tauri wiring: commands, events, tray, window.
 //! * `update` (Windows): Velopack's install hooks and the update check.
@@ -17,6 +19,7 @@
 pub mod control;
 pub mod log;
 pub mod paths;
+pub mod plugin_host;
 pub mod settings;
 pub mod tray;
 
