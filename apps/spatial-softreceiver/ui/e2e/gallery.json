@@ -61,11 +61,30 @@
     { "name": "running-reconnecting", "group": "status", "title": "출력에 다시 연결하는 중", "fixture": "running-reconnecting", "tab": "status" },
     { "name": "faulted", "group": "status", "title": "다시 연결하지 못해 멈춤", "fixture": "faulted", "tab": "status" },
 
-    { "name": "ready-profile", "group": "profile", "title": "스테레오(BRIR 없음)", "fixture": "ready", "tab": "profile" },
-    { "name": "ready-headphones-profile", "group": "profile", "title": "헤드폰 프로필, 꺼짐", "fixture": "ready-headphones", "tab": "profile" },
+    { "name": "ready-profile", "group": "profile", "title": "스피커 2.0, 처음 상태", "fixture": "ready", "tab": "profile" },
+    {
+      "name": "ready-profile-headphones-tab",
+      "group": "profile",
+      "title": "헤드폰 탭, BRIR 없음",
+      "fixture": "ready",
+      "tab": "profile",
+      "steps": [{ "click": "[data-key=\"profile-tab-headphones\"]" }, { "wait": "#profile-panel-headphones" }]
+    },
+    { "name": "ready-headphones-profile", "group": "profile", "title": "헤드폰 사용 중, 꺼짐", "fixture": "ready-headphones", "tab": "profile" },
+    {
+      "name": "ready-headphones-speakers-tab",
+      "group": "profile",
+      "title": "헤드폰 사용 중, 스피커 탭(7.1 배치가 남아 있음)",
+      "fixture": "ready-headphones",
+      "tab": "profile",
+      "steps": [{ "click": "[data-key=\"profile-tab-speakers\"]" }, { "wait": "#profile-panel-speakers" }]
+    },
+    { "name": "ready-speakers-profile", "group": "profile", "title": "스피커, SECS 2R 보정", "fixture": "ready-speakers", "tab": "profile" },
+    { "name": "ready-layout-unsupported", "group": "profile", "title": "스피커 7.1.4, 장치가 배치를 받지 않음", "fixture": "ready-layout-unsupported", "tab": "profile" },
+    { "name": "running-speakers-profile", "group": "profile", "title": "켜짐, SECS 보정 객체 지도", "fixture": "running-speakers", "tab": "profile" },
     { "name": "ready-profile-file", "group": "profile", "title": "profile.toml이 정한 프로필", "fixture": "ready-profile-file", "tab": "profile" },
     { "name": "ready-brir-unreadable", "group": "profile", "title": "BRIR 세트를 읽지 못함", "fixture": "ready-brir-unreadable", "tab": "profile" },
-    { "name": "running-profile", "group": "profile", "title": "켜짐, 객체 지도", "fixture": "running", "tab": "profile" },
+    { "name": "running-profile", "group": "profile", "title": "켜짐, 헤드폰 객체 지도", "fixture": "running", "tab": "profile" },
     { "name": "faulted-profile", "group": "profile", "title": "멈춘 상태의 프로필", "fixture": "faulted", "tab": "profile" },
 
     { "name": "ready-settings", "group": "settings", "title": "설정(업데이트 없음)", "fixture": "ready", "tab": "settings" },
@@ -92,6 +111,7 @@
     { "name": "running-720x480", "group": "window", "title": "상태, 720×480", "fixture": "running", "tab": "status", "size": [720, 480], "schemes": ["light"] },
     { "name": "running-profile-960x640", "group": "window", "title": "프로필, 960×640", "fixture": "running", "tab": "profile", "size": [960, 640], "schemes": ["light"] },
     { "name": "running-profile-720x480", "group": "window", "title": "프로필, 720×480", "fixture": "running", "tab": "profile", "size": [720, 480], "schemes": ["light"] },
+    { "name": "ready-speakers-profile-720x480", "group": "window", "title": "스피커 보정 프로필, 720×480", "fixture": "ready-speakers", "tab": "profile", "size": [720, 480], "schemes": ["light"] },
     { "name": "ready-settings-720x480", "group": "window", "title": "설정, 720×480", "fixture": "ready", "tab": "settings", "size": [720, 480], "schemes": ["light"] },
     { "name": "setup-choose-output-720x480", "group": "window", "title": "출력 고르기, 720×480", "fixture": "setup-choose-output", "tab": null, "size": [720, 480], "schemes": ["light"] }
   ]

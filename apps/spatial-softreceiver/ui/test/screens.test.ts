@@ -4,8 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Api } from '../src/api';
 import { mountApp } from '../src/app';
-import type { EngineStatus, Intent, Snapshot } from '../src/bindings';
+import type { EngineStatus, Intent, ProfileKind, Snapshot } from '../src/bindings';
 import { fixture, fixtureNames } from '../src/fixtures';
+import { SPEAKER_LAYOUTS } from '../src/guard';
 import { createMockApi } from '../src/mock';
 import type { Tab } from '../src/screens/common';
 import { MAP_POOL } from '../src/screens/objectmap';
@@ -133,13 +134,14 @@ describe('what each state says', () => {
     expect(root.querySelector('#power-state')?.textContent).toContain('멈춤');
   });
 
-  it('the profile screen offers every profile intent', () => {
+  it('the profile screen opens on the speakers of the first day', () => {
     draw('ready', 'profile');
-    expect(textOf()).toContain('스테레오 기본');
-    expect(textOf()).toContain('BRIR 세트를 가져오기 전에는 스테레오 스피커 패닝으로 냅니다.');
+    expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('스피커사용 중');
+    expect(textOf()).toContain('지금 스피커로 듣고 있습니다.');
     expect(textOf()).toContain('객체 지도');
     expect(textOf()).not.toContain('다음 조각');
-    expect(buttons()).toEqual(expect.arrayContaining(['폴더 고르기', 'hesuvi.wav / hrir.wav 고르기', 'FIR 파일 고르기']));
+    expect(buttons()).toEqual(expect.arrayContaining(['헤드폰', '스피커사용 중', '보정 파일 고르기']));
+    expect(root.querySelector<HTMLSelectElement>('[data-key="speaker-layout"]')?.disabled).toBe(false);
     expect(root.querySelectorAll('[data-intent="test_direction"]')).toHaveLength(2);
     const slider = root.querySelector<HTMLInputElement>('input[type="range"]');
     expect(slider?.min).toBe('-20');
@@ -533,21 +535,280 @@ describe('sending intents', () => {
 });
 
 describe('the profile screen', () => {
-  const pickers = () => ({
-    folder: root.querySelector<HTMLButtonElement>('[data-key="brir-folder"]'),
-    file: root.querySelector<HTMLButtonElement>('[data-key="brir-file"]'),
-    fir: root.querySelector<HTMLButtonElement>('[data-key="fir"]'),
-  });
+  const byKey = <T extends HTMLElement = HTMLButtonElement>(key: string) =>
+    root.querySelector<T>(`[data-key="${key}"]`);
+  const tab = (kind: ProfileKind) => byKey(`profile-tab-${kind}`);
+  const openTab = () => root.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.dataset.key;
+  const badged = () => root.querySelector('.in-use')?.closest('[role="tab"]')?.getAttribute('data-key');
   const tones = () => [...root.querySelectorAll<HTMLButtonElement>('[data-intent="test_direction"]')];
+  const describedBy = (element: Element | null) => element?.getAttribute('aria-describedby')?.split(' ') ?? [];
+  /** The screen over a bridge that only records what it is asked to send. */
+  function recording(start: Snapshot, shell: Partial<Api['shell']> = {}) {
+    const sent: Intent[] = [];
+    const inner = createMockApi(start);
+    const api: Api = { ...inner, shell: { ...inner.shell, ...shell }, dispatch: async (intent) => void sent.push(intent) };
+    const app = mountApp(root, api, { tab: 'profile' });
+    app.draw(start);
+    return { app, sent };
+  }
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-  it('names the profile the supervisor resolved', () => {
+  it('opens the tab of the kind in use and badges that kind', () => {
+    draw('ready', 'profile');
+    expect(openTab()).toBe('profile-tab-speakers');
+    expect(badged()).toBe('profile-tab-speakers');
+    expect(root.querySelector('#profile-panel-speakers')?.getAttribute('aria-labelledby')).toBe('profile-tab-speakers');
+    expect(root.querySelector('#profile-panel-headphones')).toBeNull();
+    expect(tab('speakers')?.getAttribute('aria-controls')).toBe('profile-panel-speakers');
+    expect(tab('speakers')?.tabIndex).toBe(0);
+    expect(tab('headphones')?.tabIndex).toBe(-1);
+
+    draw('ready-headphones', 'profile');
+    expect(openTab()).toBe('profile-tab-headphones');
+    expect(badged()).toBe('profile-tab-headphones');
+    expect(root.querySelectorAll('.in-use')).toHaveLength(1);
+    expect(textOf()).toContain('지금 헤드폰으로 듣고 있습니다.');
+    expect(textOf()).toContain(fixture('ready-headphones').profile.headphones.brir ?? 'no BRIR in fixture');
+  });
+
+  it('switches tabs on a click without sending anything, and keeps the tab across snapshots', () => {
+    const { app, sent } = recording(fixture('ready'));
+    tab('headphones')?.click();
+    expect(openTab()).toBe('profile-tab-headphones');
+    expect(root.querySelector('#profile-panel-headphones')).not.toBeNull();
+    // The badge stays on the kind in use; only the view moved.
+    expect(badged()).toBe('profile-tab-speakers');
+    app.draw(fixture('ready'));
+    expect(openTab()).toBe('profile-tab-headphones');
+    tab('speakers')?.click();
+    expect(openTab()).toBe('profile-tab-speakers');
+    expect(sent).toEqual([]);
+  });
+
+  it('moves between the tabs with the arrow, Home and End keys', () => {
+    const { sent } = recording(fixture('ready'));
+    const press = (key: string) =>
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    tab('speakers')?.focus();
+    press('ArrowRight');
+    expect(openTab()).toBe('profile-tab-headphones');
+    expect((document.activeElement as HTMLElement | null)?.dataset.key).toBe('profile-tab-headphones');
+    press('ArrowRight');
+    expect(openTab()).toBe('profile-tab-speakers');
+    press('ArrowLeft');
+    expect(openTab()).toBe('profile-tab-headphones');
+    press('End');
+    expect(openTab()).toBe('profile-tab-speakers');
+    press('Home');
+    expect(openTab()).toBe('profile-tab-headphones');
+    expect((document.activeElement as HTMLElement | null)?.dataset.key).toBe('profile-tab-headphones');
+    expect(sent).toEqual([]);
+  });
+
+  it('the switch buttons send the kind of their tab', () => {
+    const headphones = recording(fixture('ready-headphones'));
+    expect(byKey('use-headphones')).toBeNull();
+    tab('speakers')?.click();
+    expect(byKey('use-speakers')?.textContent).toBe('스피커로 듣기');
+    expect(byKey('use-speakers')?.classList.contains('primary')).toBe(true);
+    byKey('use-speakers')?.click();
+    expect(headphones.sent).toEqual([{ kind: 'set_profile_kind', value: 'speakers' }]);
+
+    const speakers = recording(fixture('ready-speakers'));
+    expect(byKey('use-speakers')).toBeNull();
+    expect(textOf()).toContain('지금 스피커로 듣고 있습니다.');
+    tab('headphones')?.click();
+    expect(byKey('use-headphones')?.disabled).toBe(false);
+    byKey('use-headphones')?.click();
+    expect(speakers.sent).toEqual([{ kind: 'set_profile_kind', value: 'headphones' }]);
+  });
+
+  it('says it is switching while the kind is in flight', () => {
+    const start = fixture('ready-headphones');
+    const api = createMockApi(start, { hold: true });
+    mountApp(root, api, { tab: 'profile' }).draw(start);
+    tab('speakers')?.click();
+    byKey('use-speakers')?.click();
+    expect(byKey('use-speakers')?.textContent).toBe('바꾸는 중');
+    expect(byKey('use-speakers')?.getAttribute('aria-busy')).toBe('true');
+    expect(byKey('use-speakers')?.disabled).toBe(true);
+    expect(byKey('speaker-layout')?.disabled).toBe(true);
+    expect(byKey('correction-import')?.disabled).toBe(true);
+    // A tab is view state; it still opens.
+    expect(tab('headphones')?.disabled).toBe(false);
+  });
+
+  it('keeps headphones off until a BRIR set is in, and says why', () => {
+    draw('ready', 'profile');
+    tab('headphones')?.click();
+    const use = byKey('use-headphones');
+    expect(use?.disabled).toBe(true);
+    expect(describedBy(use)).toContain('use-headphones-hint');
+    expect(root.querySelector('#use-headphones-hint')?.textContent).toBe('먼저 BRIR 세트를 가져오십시오.');
+    expect(root.querySelector('.tab-facts')?.textContent).toBe('BRIR 세트없음');
+    expect(byKey('brir-folder')?.disabled).toBe(false);
+    expect(byKey('brir-file')?.disabled).toBe(false);
+  });
+
+  it('lists the nine layouts in contract order and sends the one chosen', () => {
+    const { sent } = recording(fixture('ready'));
+    const select = byKey<HTMLSelectElement>('speaker-layout');
+    if (select === null) throw new Error('no layout select');
+    expect(root.querySelector(`label[for="${select.id}"]`)?.textContent).toBe('스피커 배치');
+    expect([...select.options].map((option) => option.value)).toEqual(Object.keys(SPEAKER_LAYOUTS));
+    expect(select.querySelector('option[selected]')?.getAttribute('value')).toBe('2.0');
+    select.value = '5.1.4';
+    select.dispatchEvent(new Event('change'));
+    expect(sent).toEqual([{ kind: 'set_speaker_layout', value: '5.1.4' }]);
+  });
+
+  it('shows the stored layout of the kind not in use', () => {
+    draw('ready-headphones', 'profile');
+    tab('speakers')?.click();
+    const select = byKey<HTMLSelectElement>('speaker-layout');
+    expect(select?.querySelector('option[selected]')?.getAttribute('value')).toBe('7.1');
+    expect(select?.disabled).toBe(false);
+    const rows = [...root.querySelectorAll('.channel-table tbody tr')].map((row) => row.textContent);
+    expect(rows).toEqual(['1L', '2R', '3C', '4LFE서브우퍼', '5Lrs', '6Rrs', '7Lss', '8Rss']);
+    expect(byKey('correction-clear')).toBeNull();
+    expect(textOf()).toContain('파일없음');
+  });
+
+  it('picks a CamillaDSP configuration and sends import_correction', async () => {
+    const picked: unknown[][] = [];
+    const path = 'C:\\SECS\\configs\\secs_mixed.yml';
+    const { sent } = recording(fixture('ready'), {
+      pickFile: async (...args) => {
+        picked.push(args);
+        return path;
+      },
+    });
+    byKey('correction-import')?.click();
+    await settle();
+    expect(picked).toEqual([['SECS 2R 보정 파일', { name: 'CamillaDSP 설정', extensions: ['yml', 'yaml'] }]]);
+    expect(sent).toEqual([{ kind: 'import_correction', value: path }]);
+  });
+
+  it('lets a correction decide the speakers, locks the layout and clears it', () => {
+    const start = fixture('ready-speakers');
+    const correction = start.profile.speakers.correction;
+    if (correction === null) throw new Error('ready-speakers has a correction');
+    const { sent } = recording(start);
+    const select = byKey<HTMLSelectElement>('speaker-layout');
+    expect(select?.disabled).toBe(true);
+    expect(describedBy(select)).toContain('layout-hint');
+    expect(root.querySelector('#layout-hint')?.textContent).toBe(
+      '보정 파일이 스피커를 정합니다. 보정을 지우면 이 배치로 돌아갑니다.',
+    );
+    expect(textOf()).toContain(correction.path);
+    expect(textOf()).toContain(correction.title);
+    const numbers = [...root.querySelectorAll('.channel-table tbody td')].map((cell) => cell.textContent);
+    expect(numbers).toEqual(start.profile.speakers.channels.map((channel) => String(channel.channel + 1)));
+    const subwoofers = [...root.querySelectorAll('.channel-table tbody th')]
+      .filter((cell) => cell.querySelector('.tag') !== null)
+      .map((cell) => cell.firstChild?.textContent);
+    expect(subwoofers).toEqual(['SW1', 'SW2']);
+    byKey('correction-clear')?.click();
+    expect(sent).toEqual([{ kind: 'clear_correction' }]);
+  });
+
+  it('locks every kind, import, layout and correction control while profile.toml wins', () => {
+    const start = fixture('ready-profile-file');
+    recording(start);
+    const note = root.querySelector('.file-note');
+    expect(root.querySelectorAll('.file-note')).toHaveLength(1);
+    expect(note?.querySelector('.tag')?.textContent).toBe('profile.toml');
+    expect(note?.textContent).toContain(start.profile.name);
+    expect(root.querySelector('#profile-file-hint')?.textContent).toBe(
+      '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.',
+    );
+    // The badge marks the file's kind.
+    expect(badged()).toBe('profile-tab-headphones');
+    for (const key of ['brir-folder', 'brir-file']) {
+      expect(byKey(key)?.disabled, key).toBe(true);
+      expect(describedBy(byKey(key)), key).toContain('profile-file-hint');
+    }
+    tab('speakers')?.click();
+    for (const key of ['use-speakers', 'speaker-layout', 'correction-import']) {
+      expect(byKey(key)?.disabled, key).toBe(true);
+      expect(describedBy(byKey(key)), key).toContain('profile-file-hint');
+    }
+    // The gain is still the listener's.
+    expect(byKey<HTMLInputElement>('gain')?.disabled).toBe(false);
+
+    // A speaker profile.toml lays the speakers out its own way.
+    const speakerFile = fixture('ready-profile-file');
+    speakerFile.profile.kind = 'speakers';
+    speakerFile.profile.speakers.layout = null;
+    speakerFile.profile.speakers.correction = { path: 'C:\\SECS\\a.yml', title: 'A' };
+    recording(speakerFile);
+    expect(badged()).toBe('profile-tab-speakers');
+    expect(byKey<HTMLSelectElement>('speaker-layout')?.querySelector('option[selected]')?.textContent).toBe(
+      'profile.toml의 배치',
+    );
+    expect(byKey('speaker-layout')?.disabled).toBe(true);
+    expect(byKey('correction-clear')?.disabled).toBe(true);
+    tab('headphones')?.click();
+    expect(byKey('use-headphones')?.disabled).toBe(true);
+    expect(root.querySelector('#use-headphones-hint')).toBeNull();
+
+    // Without the file the same controls are free.
+    draw('ready-headphones', 'profile');
+    expect(root.querySelector('.file-note')).toBeNull();
+    expect(byKey('brir-folder')?.disabled).toBe(false);
+    tab('speakers')?.click();
+    for (const key of ['use-speakers', 'speaker-layout', 'correction-import']) expect(byKey(key)?.disabled, key).toBe(false);
+  });
+
+  it('says once, near the footer, that a change while on takes seconds', () => {
     draw('running', 'profile');
-    const { profile } = fixture('running');
-    expect(textOf()).toContain('헤드폰');
-    expect(textOf()).toContain(profile.name);
-    expect(textOf()).toContain(profile.brir ?? 'no BRIR in fixture');
-    expect(textOf()).toContain(profile.headphone_fir ?? 'no FIR in fixture');
-    expect(textOf()).not.toContain('BRIR 세트를 가져오기 전에는');
+    expect(root.querySelectorAll('#profile-running-hint')).toHaveLength(1);
+    expect(root.querySelector('.tab-footer #profile-running-hint')?.textContent).toBe(
+      '켜져 있을 때 바꾸면 엔진을 다시 준비하므로 몇 초 걸립니다.',
+    );
+    expect(describedBy(byKey('brir-folder'))).toContain('profile-running-hint');
+    tab('speakers')?.click();
+    expect(root.querySelectorAll('#profile-running-hint')).toHaveLength(1);
+    expect(describedBy(byKey('use-speakers'))).toContain('profile-running-hint');
+    draw('ready', 'profile');
+    expect(root.querySelector('#profile-running-hint')).toBeNull();
+  });
+
+  it('imports a BRIR set without switching, then switches to headphones', async () => {
+    const start = fixture('ready');
+    const api = createMockApi(start);
+    const picked: string[] = [];
+    const shell = {
+      ...api.shell,
+      pickFolder: async (title: string) => {
+        picked.push(title);
+        return 'C:\\BRIR\\living-room';
+      },
+      pickFile: async (title: string, filter: { name: string; extensions: string[] }) => {
+        picked.push(`${title} (${filter.extensions.join(',')})`);
+        return 'C:\\BRIR\\studio\\hesuvi.wav';
+      },
+    };
+    const app = mountApp(root, { ...api, shell }, { tab: 'profile' });
+    app.draw(start);
+    await api.onSnapshot(app.draw);
+    tab('headphones')?.click();
+
+    byKey('brir-folder')?.click();
+    await vi.waitFor(() => expect(textOf()).toContain('C:\\BRIR\\living-room'));
+    await vi.waitFor(() => expect(byKey('brir-file')?.disabled).toBe(false));
+    byKey('brir-file')?.click();
+    await vi.waitFor(() => expect(textOf()).toContain('C:\\BRIR\\studio\\hesuvi.wav'));
+    expect(picked).toEqual(['BRIR 세트 폴더', 'hesuvi.wav 또는 hrir.wav (wav)']);
+    // Still the speakers: an import never switches the kind.
+    expect(badged()).toBe('profile-tab-speakers');
+    expect(tones()).toHaveLength(2);
+
+    await vi.waitFor(() => expect(byKey('use-headphones')?.disabled).toBe(false));
+    byKey('use-headphones')?.click();
+    await vi.waitFor(() => expect(badged()).toBe('profile-tab-headphones'));
+    expect(textOf()).toContain('지금 헤드폰으로 듣고 있습니다.');
+    expect(tones()).toHaveLength(fixture('running').profile.directions.length);
   });
 
   it('offers one test tone per direction of the profile, by name', () => {
@@ -607,68 +868,11 @@ describe('the profile screen', () => {
 
   it('locks the test tones until the engine runs', () => {
     draw('ready', 'profile');
-    expect(tones().map((tone) => tone.textContent)).toEqual(['FL', 'FR']);
+    expect(tones().map((tone) => tone.textContent)).toEqual(['L', 'R']);
     expect(tones().every((tone) => tone.disabled)).toBe(true);
     expect(root.querySelector('#test-hint')?.textContent).toBe('켠 뒤에 시험음을 낼 수 있습니다.');
     draw('running', 'profile');
     expect(root.querySelector('#test-hint')).toBeNull();
-  });
-
-  it('locks every import while profile.toml wins', () => {
-    const snapshot = fixture('running');
-    snapshot.profile.from_file = true;
-    mountApp(root, createMockApi(snapshot), { tab: 'profile' }).draw(snapshot);
-    for (const picker of Object.values(pickers())) {
-      expect(picker?.disabled).toBe(true);
-      expect(picker?.getAttribute('aria-describedby')).toBe('import-file-hint');
-    }
-    expect(root.querySelector('#import-file-hint')?.textContent).toBe(
-      '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.',
-    );
-    // Without the file the same profile imports freely.
-    draw('running', 'profile');
-    for (const picker of Object.values(pickers())) expect(picker?.disabled).toBe(false);
-    expect(root.querySelector('#import-file-hint')).toBeNull();
-  });
-
-  it('locks the FIR import until a BRIR set is in', () => {
-    draw('ready', 'profile');
-    expect(pickers().folder?.disabled).toBe(false);
-    expect(pickers().file?.disabled).toBe(false);
-    expect(pickers().fir?.disabled).toBe(true);
-    expect(root.querySelector('#fir-hint')?.textContent).toBe('먼저 BRIR 세트를 가져오십시오.');
-  });
-
-  it('imports a BRIR set from a folder or from hesuvi.wav, then a FIR', async () => {
-    const start = fixture('ready');
-    const api = createMockApi(start);
-    const picked: string[] = [];
-    const shell = {
-      ...api.shell,
-      pickFolder: async (title: string) => {
-        picked.push(title);
-        return 'C:\\BRIR\\living-room';
-      },
-      pickFile: async (title: string, filter: { name: string; extensions: string[] }) => {
-        picked.push(`${title} (${filter.extensions.join(',')})`);
-        return filter.name === 'BRIR WAV' ? 'C:\\BRIR\\studio\\hesuvi.wav' : 'C:\\EQ\\hd650.wav';
-      },
-    };
-    const app = mountApp(root, { ...api, shell }, { tab: 'profile' });
-    app.draw(start);
-    await api.onSnapshot(app.draw);
-
-    pickers().folder?.click();
-    await vi.waitFor(() => expect(textOf()).toContain('C:\\BRIR\\living-room'));
-    await vi.waitFor(() => expect(pickers().file?.disabled).toBe(false));
-    pickers().file?.click();
-    await vi.waitFor(() => expect(textOf()).toContain('C:\\BRIR\\studio\\hesuvi.wav'));
-    expect(textOf()).toContain('studio');
-    await vi.waitFor(() => expect(pickers().fir?.disabled).toBe(false));
-    pickers().fir?.click();
-    await vi.waitFor(() => expect(textOf()).toContain('C:\\EQ\\hd650.wav'));
-    expect(picked).toEqual(['BRIR 세트 폴더', 'hesuvi.wav 또는 hrir.wav (wav)', '헤드폰 FIR 파일 (wav)']);
-    expect(tones()).toHaveLength(fixture('running').profile.directions.length);
   });
 
   it('the gain slider shows the snapshot gain', () => {
@@ -765,7 +969,7 @@ describe('the object map', () => {
     const app = draw('ready', 'profile');
     expect(shown()).toHaveLength(0);
     const names = [...root.querySelectorAll('.map-label')].map((label) => label.textContent);
-    expect(names).toEqual(['FL', 'FR']);
+    expect(names).toEqual(['L', 'R']);
     expect(textOf()).toContain('켜면 소리 객체가 보입니다.');
     app.updateMeters(runningEngine());
     expect(shown()).toHaveLength(0);
@@ -775,31 +979,107 @@ describe('the object map', () => {
 describe('the mock supervisor follows the profile rules', () => {
   const runningScene = () => fixture('running').engine?.scene ?? [];
 
-  it('needs a BRIR set before a headphone FIR', async () => {
+  const fromFile = '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.';
+
+  it('needs a BRIR set before headphones, and an import never switches the kind', async () => {
     const api = createMockApi(fixture('ready'));
-    await expect(api.dispatch({ kind: 'import_headphone_fir', value: 'C:\\hd650.wav' })).rejects.toMatchObject({
+    await expect(api.dispatch({ kind: 'set_profile_kind', value: 'headphones' })).rejects.toMatchObject({
       message: '먼저 BRIR 세트를 가져오십시오.',
     });
+    expect((await api.snapshot()).profile.kind).toBe('speakers');
     await api.dispatch({ kind: 'import_brir', value: 'C:\\BRIR\\living-room' });
-    await api.dispatch({ kind: 'import_headphone_fir', value: 'C:\\hd650.wav' });
-    const { profile } = await api.snapshot();
-    expect(profile).toMatchObject({
-      kind: 'headphones',
-      name: 'living-room',
-      brir: 'C:\\BRIR\\living-room',
-      headphone_fir: 'C:\\hd650.wav',
-      from_file: false,
+    let { profile } = await api.snapshot();
+    expect(profile).toMatchObject({ kind: 'speakers', name: '2.0', headphones: { brir: 'C:\\BRIR\\living-room' } });
+    await api.dispatch({ kind: 'set_profile_kind', value: 'headphones' });
+    ({ profile } = await api.snapshot());
+    expect(profile).toMatchObject({ kind: 'headphones', name: 'living-room', from_file: false });
+    expect(profile.directions).toEqual(fixture('running').profile.directions);
+    // The speakers keep their settings behind the headphones.
+    expect(profile.speakers).toEqual(fixture('ready').profile.speakers);
+  });
+
+  it('keeps a gain for each kind', async () => {
+    const api = createMockApi(fixture('ready'));
+    await api.dispatch({ kind: 'set_gain', value: -6 });
+    await api.dispatch({ kind: 'import_brir', value: 'C:\\BRIR\\living-room' });
+    await api.dispatch({ kind: 'set_profile_kind', value: 'headphones' });
+    expect((await api.snapshot()).profile.gain_db).toBe(0);
+    await api.dispatch({ kind: 'set_gain', value: 4 });
+    await api.dispatch({ kind: 'set_profile_kind', value: 'speakers' });
+    expect((await api.snapshot()).profile.gain_db).toBe(-6);
+    await api.dispatch({ kind: 'set_profile_kind', value: 'headphones' });
+    expect((await api.snapshot()).profile.gain_db).toBe(4);
+  });
+
+  it('changes the stored layout live only while speakers are in use', async () => {
+    const start = fixture('running');
+    const api = createMockApi(start);
+    await api.dispatch({ kind: 'set_speaker_layout', value: '5.1' });
+    let snapshot = await api.snapshot();
+    expect(snapshot.profile.kind).toBe('headphones');
+    expect(snapshot.profile.speakers.layout).toBe('5.1');
+    expect(snapshot.profile.speakers.channels.map((channel) => channel.name)).toEqual(['L', 'R', 'C', 'LFE', 'Ls', 'Rs']);
+    expect(snapshot.profile.directions).toEqual(start.profile.directions);
+    expect(snapshot.engine?.directions).toEqual(start.engine?.directions);
+
+    await api.dispatch({ kind: 'set_profile_kind', value: 'speakers' });
+    snapshot = await api.snapshot();
+    expect(snapshot.profile.name).toBe('5.1');
+    expect(snapshot.profile.directions.map((direction) => [direction.name, direction.azimuth_deg])).toEqual([
+      ['L', 30],
+      ['R', -30],
+      ['C', 0],
+      ['Ls', 110],
+      ['Rs', -110],
+    ]);
+    expect(snapshot.engine?.directions).toEqual(snapshot.profile.directions);
+  });
+
+  it('imports a correction that decides the speakers, and clears it back to the layout', async () => {
+    const secs = fixture('ready-speakers').profile;
+    const api = createMockApi(fixture('ready'));
+    const path = 'C:\\SECS\\configs\\secs_mixed.yml';
+    await api.dispatch({ kind: 'import_correction', value: path });
+    let { profile } = await api.snapshot();
+    expect(profile.speakers).toEqual({ layout: '2.0', correction: { path, title: secs.name }, channels: secs.speakers.channels });
+    expect(profile.name).toBe(secs.name);
+    expect(profile.directions).toEqual(secs.directions);
+
+    await api.dispatch({ kind: 'clear_correction' });
+    ({ profile } = await api.snapshot());
+    expect(profile).toMatchObject({ name: '2.0', speakers: fixture('ready').profile.speakers });
+
+    await expect(api.dispatch({ kind: 'import_correction', value: 'C:\\SECS\\filters\\L.wav' })).rejects.toMatchObject({
+      message: '보정 파일을 읽지 못했습니다: L.wav',
     });
   });
 
-  it('refuses imports while profile.toml wins', async () => {
-    const start = fixture('ready');
-    start.profile.from_file = true;
+  it('keeps a correction for speakers while headphones play on', async () => {
+    const start = fixture('running');
     const api = createMockApi(start);
-    await expect(api.dispatch({ kind: 'import_brir', value: 'C:\\BRIR\\living-room' })).rejects.toMatchObject({
-      message: '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.',
-    });
-    expect((await api.snapshot()).profile.brir).toBeNull();
+    await api.dispatch({ kind: 'import_correction', value: 'C:\\SECS\\configs\\secs_mixed.yml' });
+    const snapshot = await api.snapshot();
+    expect(snapshot.profile).toMatchObject({ kind: 'headphones', name: start.profile.name });
+    expect(snapshot.profile.speakers.correction?.path).toBe('C:\\SECS\\configs\\secs_mixed.yml');
+    expect(snapshot.engine?.directions).toEqual(start.engine?.directions);
+  });
+
+  it('refuses every kind, import, layout and correction intent while profile.toml wins', async () => {
+    const start = fixture('ready-profile-file');
+    const api = createMockApi(start);
+    const intents: Intent[] = [
+      { kind: 'set_profile_kind', value: 'speakers' },
+      { kind: 'import_brir', value: 'C:\\BRIR\\living-room' },
+      { kind: 'set_speaker_layout', value: '5.1' },
+      { kind: 'import_correction', value: 'C:\\SECS\\configs\\secs_mixed.yml' },
+      { kind: 'clear_correction' },
+    ];
+    for (const intent of intents) {
+      await expect(api.dispatch(intent), intent.kind).rejects.toMatchObject({ message: fromFile });
+    }
+    expect((await api.snapshot()).profile).toEqual(start.profile);
+    await api.dispatch({ kind: 'set_gain', value: -2 });
+    expect((await api.snapshot()).profile.gain_db).toBe(-2);
   });
 
   it('keeps the gain in range and in the snapshot', async () => {

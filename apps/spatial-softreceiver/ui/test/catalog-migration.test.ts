@@ -110,14 +110,15 @@ describe('mock generated supervisor compositions', () => {
     await api.dispatch({ kind: 'enable' });
     expect((await api.snapshot()).notes).toEqual([s.output_id_changed(start.outputs[0]!.name)]);
     await api.dispatch({ kind: 'import_brir', value: 'C:\\measurements\\room' });
-    await expect(api.dispatch({ kind: 'import_headphone_fir', value: 'C:\\data\\untouched.flac' })).rejects.toEqual({
-      message: s.headphone_fir_read_failed('untouched.flac'), next: 'none',
+    await api.dispatch({ kind: 'set_profile_kind', value: 'headphones' });
+    await expect(api.dispatch({ kind: 'import_correction', value: 'C:\\data\\untouched.flac' })).rejects.toEqual({
+      message: s.correction_read_failed('untouched.flac'), next: 'none',
     });
     await api.dispatch({ kind: 'set_language', value: other });
     const changed = await api.snapshot();
-    expect(changed.error?.message).toBe(translated.headphone_fir_read_failed('untouched.flac'));
+    expect(changed.error?.message).toBe(translated.correction_read_failed('untouched.flac'));
     expect(changed.notes).toEqual([translated.output_id_changed(start.outputs[0]!.name)]);
     expect(changed.profile.name).toBe('room');
-    expect(changed.profile.brir).toBe('C:\\measurements\\room');
+    expect(changed.profile.headphones.brir).toBe('C:\\measurements\\room');
   });
 });

@@ -47,6 +47,7 @@ export function mountApp(root: HTMLElement, api: Api, options: AppOptions = {}):
   const view: ViewState = {
     tab: options.tab ?? 'status',
     outputsOpen: false,
+    profileTab: null,
     dismissed: null,
     gainSending: null,
     autostart: null,
