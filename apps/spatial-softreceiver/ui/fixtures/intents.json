@@ -41,18 +41,11 @@
     "value": "7.1.4"
   },
   {
-    "kind": "set_room_fir",
-    "value": {
-      "speaker": "Tfl",
-      "path": "C:\\Users\\me\\RoomEQ\\living-room\\TFL.wav"
-    }
+    "kind": "import_correction",
+    "value": "C:\\Users\\me\\Documents\\SECS_export\\2026-10-16 living room\\configs\\secs_mixed.yml"
   },
   {
-    "kind": "set_room_fir",
-    "value": {
-      "speaker": "LFE",
-      "path": null
-    }
+    "kind": "clear_correction"
   },
   {
     "kind": "set_gain",

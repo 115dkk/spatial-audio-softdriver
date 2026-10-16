@@ -49,6 +49,19 @@ export type ChainErrorMap = Partial<{ [key in string]: number }>
 export type ClockStatus = "trim" | "asrc"
 
 /**
+ * An imported SECS 2 / SECS 2R correction (ADR 0034).
+ */
+export type CorrectionView = {
+/**
+ * The CamillaDSP configuration file.
+ */
+path: string;
+/**
+ * The configuration's `title` (`"SECS 2 mixed (8.0 ms)"`).
+ */
+title: string }
+
+/**
  * The operating system's identifier of a render endpoint (the `IMMDevice`
  * id). It can change across reboots; the supervisor keeps the name as a
  * fallback.
@@ -229,11 +242,21 @@ export type Intent = { kind: "set_language"; value: Language | null } | { kind: 
  * Keeps the BRIR set for headphones; a running headphone output takes
  * it live, while speakers in use stay as they are.
  */
-{ kind: "import_brir"; value: string } | { kind: "set_speaker_layout"; value: SpeakerLayout } |
+{ kind: "import_brir"; value: string } |
 /**
- * Sets (`Some`) or clears (`None`) one speaker's room-correction FIR.
+ * The layout speakers use while no correction is imported.
  */
-{ kind: "set_room_fir"; value: RoomFir } |
+{ kind: "set_speaker_layout"; value: SpeakerLayout } |
+/**
+ * Imports a room correction for the speakers: the CamillaDSP
+ * configuration SECS 2 or SECS 2R exports (ADR 0034). It decides the
+ * speakers, the device channels and all their processing.
+ */
+{ kind: "import_correction"; value: string } |
+/**
+ * Goes back to the stored speaker layout without correction.
+ */
+{ kind: "clear_correction" } |
 /**
  * The gain of the output in use; each kind keeps its own.
  */
@@ -338,7 +361,7 @@ export type ProfileView = {
 kind: ProfileKind;
 /**
  * The output in use by name: the BRIR set, the speaker layout (`"7.1.4"`),
- * or the name `profile.toml` gives.
+ * the imported correction's title, or the name `profile.toml` gives.
  */
 name: string;
 /**
@@ -352,7 +375,7 @@ gain_db: number;
 directions: DirectionView[];
 /**
  * The state directory's profile.toml decides the output; the kind,
- * import, layout and FIR intents are refused.
+ * import, layout and correction intents are refused.
  */
 from_file: boolean;
 /**
@@ -363,21 +386,6 @@ headphones: HeadphonesView;
  * Speaker settings, kept while headphones are in use.
  */
 speakers: SpeakersView }
-
-/**
- * One speaker's room-correction FIR ([`Intent::SetRoomFir`]).
- */
-export type RoomFir = {
-/**
- * A speaker of the current layout by its name in
- * [`SpeakersView::channels`] (`"L"`, `"Tfl"`, `"LFE"` for the subwoofer).
- */
-speaker: string;
-/**
- * A WAV: one track, or one track per device channel (ADR 0034). `None`
- * clears the speaker's FIR.
- */
-path: string | null }
 
 /**
  * How PCM samples are stored.
@@ -452,17 +460,14 @@ export type SourceFormat = { kind: "pcm"; value: PcmFormat } | { kind: "bitstrea
 
 export type SpeakerChannelView = {
 /**
- * The speaker's name (`"L"`, `"Tfl"`), or `"LFE"` for a subwoofer.
+ * The speaker on this channel (`"L"`, `"Tfl"`), `"LFE"` for the layout's
+ * subwoofer, or the correction's output name (`"Lb"`, `"SW2"`).
  */
 name: string;
 /**
  * Zero-based device channel.
  */
-channel: number; subwoofer: boolean;
-/**
- * The room-correction FIR, if any.
- */
-room_fir: string | null }
+channel: number; subwoofer: boolean }
 
 /**
  * The speaker layouts the app offers: standard layouts with a Windows
@@ -473,12 +478,17 @@ export type SpeakerLayout = "2.0" | "2.1" | "4.0" | "5.1" | "7.1" | "5.1.2" | "5
 
 export type SpeakersView = {
 /**
- * The app layout; `None` when a speaker `profile.toml` lays the speakers
- * out its own way.
+ * The stored app layout, used while no correction is imported; `None`
+ * when a speaker `profile.toml` lays the speakers out its own way.
  */
 layout: SpeakerLayout | null;
 /**
- * Every device channel of the layout, in device order.
+ * The imported correction, which then decides the speakers.
+ */
+correction: CorrectionView | null;
+/**
+ * Every device channel that plays, in device order: the correction's
+ * outputs when one is imported, else the layout's speakers.
  */
 channels: SpeakerChannelView[] }
 

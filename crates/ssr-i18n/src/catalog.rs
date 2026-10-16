@@ -180,6 +180,26 @@ pub mod supervisor {
         }
     }
 
+    #[doc = "보정 파일을 읽지 못했습니다: {detail}"]
+    pub fn correction_read_failed(language: Language, detail: impl core::fmt::Display) -> String {
+        match language {
+            Language::Ko => format!("보정 파일을 읽지 못했습니다: {detail}"),
+            Language::En => format!("The correction file could not be read: {detail}"),
+        }
+    }
+
+    #[doc = "고른 출력 장치가 보정 파일의 {channels}채널 출력을 독점 모드로 받지 않습니다. 다른 출력 장치를 고르십시오."]
+    pub fn correction_unsupported(language: Language, channels: impl core::fmt::Display) -> String {
+        match language {
+            Language::Ko => format!(
+                "고른 출력 장치가 보정 파일의 {channels}채널 출력을 독점 모드로 받지 않습니다. 다른 출력 장치를 고르십시오."
+            ),
+            Language::En => format!(
+                "The chosen output device does not accept the correction file's {channels}-channel output in exclusive mode. Choose another output device."
+            ),
+        }
+    }
+
     #[doc = "Stereo"]
     pub fn default_profile_name(language: Language) -> &'static str {
         match language {
@@ -559,27 +579,11 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "룸 보정 FIR을 읽지 못했습니다: {detail}"]
-    pub fn room_fir_read_failed(language: Language, detail: impl core::fmt::Display) -> String {
-        match language {
-            Language::Ko => format!("룸 보정 FIR을 읽지 못했습니다: {detail}"),
-            Language::En => format!("The room-correction FIR could not be read: {detail}"),
-        }
-    }
-
     #[doc = "설치 도우미: {detail}"]
     pub fn setup_helper(language: Language, detail: impl core::fmt::Display) -> String {
         match language {
             Language::Ko => format!("설치 도우미: {detail}"),
             Language::En => format!("Setup helper: {detail}"),
-        }
-    }
-
-    #[doc = "지금 스피커 배치에는 {name} 스피커가 없습니다."]
-    pub fn speaker_not_in_layout(language: Language, name: impl core::fmt::Display) -> String {
-        match language {
-            Language::Ko => format!("지금 스피커 배치에는 {name} 스피커가 없습니다."),
-            Language::En => format!("The current speaker layout has no {name} speaker."),
         }
     }
 

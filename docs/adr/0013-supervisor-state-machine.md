@@ -43,11 +43,11 @@
 - `Settings.profile`은 출력 종류마다 설정을 따로 저장합니다.
   - 쓰고 있는 종류 `kind`
   - 헤드폰: BRIR 세트와 게인
-  - 스피커: 배치, 스피커 이름별 룸 보정 FIR, 게인
+  - 스피커: 배치, SECS 2R 보정 파일, 게인
 
   위 2026-10-15 보탬의 '헤드폰 FIR 경로'와 '기본 스테레오'는 없어졌습니다. 기본값은 FIR이 없는 스피커 2.0입니다. 이전 설정 파일은 다음과 같이 읽습니다.
   - `brir`는 헤드폰 설정이 됩니다.
   - `gain_db`는 그때 쓰던 종류(BRIR이 있으면 헤드폰)의 게인이 됩니다.
   - `headphone_fir`는 버립니다.
-- 의도는 `SetProfileKind`, `ImportBrir`, `SetSpeakerLayout`, `SetRoomFir`입니다. `ImportHeadphoneFir`는 없앴습니다. 허용 위상은 `ImportBrir`와 같고, `profile.toml`이 있으면 넷 다 거절합니다. 쓰고 있는 종류를 바꾸는 의도만 위의 실시간 교체 규칙(준비한 뒤 엔진이 받아야 저장)을 따릅니다. 쓰지 않는 종류의 설정은 검사한 뒤 저장만 합니다.
-- 스피커로 바꾸거나 스피커 배치를 바꾸거나 스피커로 켤 때, 감독자는 `Host::supports_layout`으로 고른 출력 장치가 그 배치를 독점 모드로 받는지 묻습니다. 그래서 `Host` 포트에 이 질문 하나가 늘었습니다.
+- 의도는 `SetProfileKind`, `ImportBrir`, `SetSpeakerLayout`, `ImportCorrection`, `ClearCorrection`입니다. `ImportHeadphoneFir`는 없앴습니다. 허용 위상은 `ImportBrir`와 같고, `profile.toml`이 있으면 다섯 다 거절합니다. 쓰고 있는 종류를 바꾸는 의도만 위의 실시간 교체 규칙(준비한 뒤 엔진이 받아야 저장)을 따릅니다. 쓰지 않는 종류의 설정은 검사한 뒤 저장만 합니다.
+- 스피커로 바꾸거나 쓰고 있는 스피커의 배치나 보정을 바꾸거나 스피커로 켤 때, 감독자는 `Host::supports_layout`으로 고른 출력 장치가 그 배치를 독점 모드로 받는지 묻습니다. 그래서 `Host` 포트에 이 질문 하나가 늘었습니다.

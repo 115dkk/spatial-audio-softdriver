@@ -718,7 +718,7 @@ pub trait OutputSink {
     <pre class="code">pub enum Intent {
     BeginSetup, InstallDriver, ChooseOutput(DeviceSelector),
     SetProfileKind(ProfileKind), ImportBrir(PathBuf),            // ADR 0034: 헤드폰 | 스피커
-    SetSpeakerLayout(SpeakerLayout), SetRoomFir(RoomFir),
+    SetSpeakerLayout(SpeakerLayout), ImportCorrection(PathBuf), ClearCorrection,   // SECS 2R 보정
     SetGain(f32), TestDirection(DirectionId), Enable, Disable, StartDiagnosticRecording, Quit,
 }
 
