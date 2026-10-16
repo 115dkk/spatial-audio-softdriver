@@ -314,17 +314,15 @@ tests = [
   "brir::layout_reads_headers_only",
   "brir::layout_rejects_what_prepare_rejects_from_headers",
   "brir::directions_profile_keeps_file_order_and_angles",
-  "brir::headphone_fir_folding_equals_filtering_the_binaural_output",
-  "brir::fft_convolution_matches_direct_reference",
-  "brir::mono_headphone_fir_applies_to_both_ears",
   "brir::resampling_preserves_impulse_time_and_response_gain",
   "brir::common_leading_delay_is_trimmed_without_changing_relative_delays",
   "brir::leading_delay_before_margin_is_not_trimmed",
   "brir::profile_toml_resolves_paths_defaults_lfe_and_parses_route",
+  "brir::profile_toml_rejects_headphone_fir",
   "brir::bad_track_count_and_unknown_lfe_direction_are_errors",
   "brir::gains_and_lfe_route_become_linear",
 ]
-note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs; all loaders keep every declared direction, silent ones included, so the header-only brir::layout equals prepare's layout (ADR 0016, 2026-10-15 amendment); headphone FIR folded by one-shot FFT convolution at load (ADR 0016); rubato resampling with delay compensation; common leading delay trimmed to a 1 ms margin by default; no level normalisation"
+note = "Impulcifer hesuvi.wav and hrir.wav, per-direction WAVs; all loaders keep every declared direction, silent ones included, so the header-only brir::layout equals prepare's layout (ADR 0016, 2026-10-15 amendment); headphone correction belongs in the BRIR set (ADR 0034); rubato resampling with delay compensation; common leading delay trimmed to a 1 ms margin by default; no level normalisation"
 
 [[feature]]
 id = "brir.finding_bural_sets"
@@ -344,7 +342,6 @@ tests = [
   "brir::truncation_cuts_all_tracks_fades_and_preserves_the_start",
   "brir::invalid_truncation_parameters_are_rejected",
   "brir::angle_override_beats_preset_and_unknown_without_override_errors",
-  "brir::raw_measurement_named_as_headphone_file_is_rejected",
   "brir::profile_toml_loads_mapped_folder_angles_overrides_and_truncation",
   "brir::profile_toml_enforces_exactly_one_source_and_mapped_pair",
 ]
@@ -1203,7 +1200,6 @@ tests = [
   "supervisor::every_message_renders_nonempty_and_distinct_in_both_languages",
   "supervisor::language_defaults_overrides_resets_and_rerenders_errors_in_every_phase",
   "supervisor::default_language_and_failed_profile_errors_follow_language_changes",
-  "supervisor::default_profile_name_follows_the_language_through_enable_and_gain",
   "ssr-types::typescript_bindings_match_the_types",
   "ssr-types::snapshot_fixtures_match_the_types",
   "supervisor::every_fixture_sentence_is_the_supervisors",
@@ -1249,15 +1245,24 @@ kind = "app"
 milestone = "M4"
 status = "implemented"
 tests = [
-  "supervisor::profile_intents_apply_persist_and_reject_by_phase",
+  "supervisor::profile_kinds_switch_live_and_keep_each_kinds_settings",
+  "supervisor::headphones_need_a_brir_set",
+  "supervisor::import_brir_while_speakers_play_only_stores_it",
+  "supervisor::speaker_layout_applies_live_only_to_the_kind_in_use",
+  "supervisor::correction_intents_are_refused_until_the_crate_lands",
+  "supervisor::the_device_must_accept_the_speaker_layout",
+  "supervisor::each_kind_keeps_its_own_gain",
+  "supervisor::settings_from_before_kinds_migrate",
+  "supervisor::profile_file_refuses_kind_layout_and_correction_intents",
+  "supervisor::live_profile_changes_are_all_or_nothing",
   "supervisor::old_settings_without_profile_use_defaults",
-  "supervisor::live_changes_are_all_or_nothing",
   "supervisor::needs_prepared_rebuilds_the_profile_the_engine_plays_now",
   "supervisor::a_reprepare_is_built_once_retried_and_refreshes_the_direction_cache",
   "supervisor::watching_profile_file_presence_unlocks_and_relocks_imports",
   "spatial-softreceiver::a_running_profile_import_is_bracketed_by_heartbeats_for_the_guard",
   "spatial-softreceiver::a_reprepare_after_needs_prepared_is_bracketed_by_heartbeats_for_the_guard",
 ]
+note = "Two independent output kinds: headphones keep an imported BRIR and speakers keep a standard layout; each keeps its own gain (ADR 0034). SECS 2/2R correction paths persist in settings but correction intents are refused until the correction crate lands."
 
 [[feature]]
 id = "engine.live_gain_and_test_tone"

@@ -1,16 +1,14 @@
 #![forbid(unsafe_code)]
 
 //! `brir::layout` reads headers only and equals `prepare`'s layout, silent
-//! directions included (ADR 0016, 2026-10-15 amendment);
-//! `brir::check_headphone_fir` accepts exactly what `prepare` can fold.
+//! directions included (ADR 0016, 2026-10-15 amendment).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use brir::{
-    AnglePreset, BrirError, BrirSource, DirectionFile, LfePolicy, Profile, check_headphone_fir,
-    layout, prepare,
+    AnglePreset, BrirError, BrirSource, DirectionFile, LfePolicy, Profile, layout, prepare,
 };
 use hound::{SampleFormat, WavSpec, WavWriter};
 use ssr_types::{Direction, LayoutError};
@@ -96,7 +94,6 @@ fn profile(source: BrirSource) -> Profile {
     Profile {
         name: "layout".into(),
         brir: source,
-        headphone_fir: None,
         gain_db: 0.0,
         limiter_ceiling_dbfs: -1.0,
         lfe: LfePolicy::Mute,
@@ -417,79 +414,4 @@ fn layout_rejects_what_prepare_rejects_from_headers() {
         from_headers,
         BrirError::Layout(LayoutError::Empty)
     ));
-}
-
-#[test]
-fn headphone_fir_check_accepts_one_or_two_readable_tracks() {
-    let directory = TestDirectory::new("fir");
-    let mono = directory.join("mono.wav");
-    write_wav(&mono, 44_100, &[vec![1.0, 0.5]]);
-    let stereo = directory.join("stereo.wav");
-    write_wav_as(&stereo, 48_000, &stereo_impulse(), 16, SampleFormat::Int);
-    check_headphone_fir(&mono).unwrap();
-    check_headphone_fir(&stereo).unwrap();
-
-    // What passes the check is what prepare folds.
-    let set = directory.join("FL.wav");
-    write_wav(&set, 48_000, &stereo_impulse());
-    for fir in [mono, stereo] {
-        let mut input = profile(BrirSource::Directions(vec![DirectionFile {
-            name: "FL".into(),
-            azimuth_deg: 30.0,
-            elevation_deg: 0.0,
-            path: set.clone(),
-        }]));
-        input.headphone_fir = Some(fir);
-        prepare(&input, 48_000, 64).unwrap();
-    }
-}
-
-#[test]
-fn headphone_fir_check_rejects_measurements_and_unreadable_files() {
-    let directory = TestDirectory::new("fir-bad");
-
-    let measurement = directory.join("Headphones_measurement_LR.wav");
-    write_wav(&measurement, 48_000, &stereo_impulse());
-    assert!(matches!(
-        check_headphone_fir(&measurement),
-        Err(BrirError::MeasurementFir { .. })
-    ));
-
-    let three = directory.join("three.wav");
-    write_wav(&three, 48_000, &impulse_tracks(3, 8));
-    let error = check_headphone_fir(&three).unwrap_err();
-    assert!(
-        error.to_string().contains("one or two tracks, got 3"),
-        "{error}"
-    );
-
-    let text = directory.join("text.wav");
-    fs::write(&text, "RIFF but not really").unwrap();
-    assert!(check_headphone_fir(&text).is_err());
-
-    assert!(check_headphone_fir(directory.join("absent.wav")).is_err());
-
-    let eight_bit = directory.join("eight.wav");
-    write_wav_as(&eight_bit, 48_000, &[vec![0.5, 0.25]], 8, SampleFormat::Int);
-    assert!(
-        check_headphone_fir(&eight_bit)
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported 8-bit")
-    );
-
-    let truncated = directory.join("truncated.wav");
-    write_wav(&truncated, 48_000, &[vec![0.5; 4_096], vec![0.25; 4_096]]);
-    let bytes = fs::read(&truncated).unwrap();
-    fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
-    assert!(check_headphone_fir(&truncated).is_err());
-
-    let empty = directory.join("empty.wav");
-    write_wav_as(&empty, 48_000, &[Vec::new()], 32, SampleFormat::Float);
-    assert!(
-        check_headphone_fir(&empty)
-            .unwrap_err()
-            .to_string()
-            .contains("no samples")
-    );
 }

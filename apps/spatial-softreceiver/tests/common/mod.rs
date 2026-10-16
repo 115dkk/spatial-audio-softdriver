@@ -13,7 +13,7 @@ use ssr_types::app::{Heartbeat, OutputChoice, Snapshot};
 use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DefaultRoles, DeviceId, DeviceState, DriverState, EngineStatus, Host, HostError,
-    OutputDevice, Platform, Role, SecureBoot, SetupOutcome, SetupTask,
+    OutputDevice, OutputLayout, Platform, Role, SecureBoot, SetupOutcome, SetupTask,
 };
 use supervisor::machine::Config;
 use supervisor::{EngineHandle, Launcher, SessionError, SessionNotice, Settings};
@@ -108,6 +108,14 @@ impl Host for FakeHost {
         world.calls.push(format!("set {role:?} {}", device.0));
         world.roles.set(role, Some(device.clone()));
         Ok(())
+    }
+
+    fn supports_layout(
+        &mut self,
+        _output: &DeviceId,
+        _layout: OutputLayout,
+    ) -> Result<bool, HostError> {
+        Ok(true)
     }
 
     fn run_setup(&mut self, task: &SetupTask) -> Result<SetupOutcome, HostError> {

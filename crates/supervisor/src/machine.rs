@@ -18,7 +18,6 @@
 //! calls, which a UI thread's single-threaded apartment cannot.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -27,7 +26,7 @@ use engine::{LiveChange, OutputProfile, Prepared};
 use speakers::SpeakerProfile;
 use ssr_types::app::{
     HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase, ProfileKind, ProfileView,
-    RoomFir, SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
+    SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::{
@@ -154,7 +153,7 @@ pub struct HeadphoneSettings {
 #[serde(default)]
 pub struct SpeakerSettings {
     pub layout: SpeakerLayout,
-    pub room_fir: BTreeMap<String, PathBuf>,
+    pub correction: Option<PathBuf>,
     pub gain_db: Option<f32>,
 }
 
@@ -162,7 +161,7 @@ impl Default for SpeakerSettings {
     fn default() -> Self {
         Self {
             layout: SpeakerLayout::Stereo,
-            room_fir: BTreeMap::new(),
+            correction: None,
             gain_db: None,
         }
     }
@@ -644,10 +643,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.set_speaker_layout(layout),
                 _ => return self.refused(),
             },
-            Intent::SetRoomFir(room_fir) => match self.phase {
-                Phase::Ready | Phase::Running | Phase::Faulted => self.set_room_fir(room_fir),
-                _ => return self.refused(),
-            },
+            // ADR 0034: wired when the correction crate lands.
+            Intent::ImportCorrection(_) | Intent::ClearCorrection => return self.refused(),
             Intent::SetGain(db) => match self.phase {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.set_gain(db),
                 _ => return self.refused(),
@@ -1139,59 +1136,22 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         }
     }
 
-    fn set_room_fir(&mut self, room_fir: RoomFir) -> Result<(), UserError> {
-        if self.profile_file_active() {
-            return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
-        }
-        let layout = self.settings.profile.speakers.layout;
-        let Some(channel) = layout
-            .speakers()
-            .iter()
-            .position(|speaker| speaker.name() == room_fir.speaker)
-        else {
-            return Err(self.message_error(
-                Message::SpeakerNotInLayout {
-                    name: room_fir.speaker,
-                },
-                NextAction::None,
-            ));
-        };
-        if let Some(path) = room_fir.path.as_deref()
-            && let Err(error) = speakers::check_room_fir(path, channel)
-        {
-            return Err(self.message_error(
-                Message::RoomFirReadFailed {
-                    detail: error.to_string(),
-                },
-                NextAction::None,
-            ));
-        }
-        let mut settings = self.settings.profile.clone();
-        match room_fir.path {
-            Some(path) => {
-                settings.speakers.room_fir.insert(room_fir.speaker, path);
-            }
-            None => {
-                settings.speakers.room_fir.remove(&room_fir.speaker);
-            }
-        }
-        if settings.kind == ProfileKind::Speakers {
-            self.change_profile(settings)
-        } else {
-            self.settings.profile = settings;
-            self.refresh_profile();
-            Ok(())
-        }
-    }
-
     fn check_layout(&mut self, name: &str, layout: OutputLayout) -> Result<(), UserError> {
         if layout == OutputLayout::STEREO {
             return Ok(());
         }
-        let Some(output) = self.settings.output.as_ref().map(|output| output.id.clone()) else {
+        let Some(output) = self
+            .settings
+            .output
+            .as_ref()
+            .map(|output| output.id.clone())
+        else {
             return Ok(());
         };
-        if matches!(self.host.get_mut().supports_layout(&output, layout), Ok(false)) {
+        if matches!(
+            self.host.get_mut().supports_layout(&output, layout),
+            Ok(false)
+        ) {
             return Err(self.message_error(
                 Message::LayoutUnsupported {
                     layout: name.into(),
@@ -1308,11 +1268,7 @@ const GAIN_MAX_DB: f32 = 10.0;
 
 /// The profile without a `profile.toml`: app speaker layout 2.0.
 pub fn default_profile() -> OutputProfile {
-    OutputProfile::Speakers(speakers::layout_profile(
-        SpeakerLayout::Stereo,
-        &BTreeMap::new(),
-        0.0,
-    ))
+    OutputProfile::Speakers(speakers::layout_profile(SpeakerLayout::Stereo, 0.0))
 }
 
 fn set_gain_db(profile: &mut OutputProfile, db: f32) {
@@ -1374,20 +1330,13 @@ fn resolve(
     }
     match settings.kind {
         ProfileKind::Headphones => {
-            let path = settings
-                .headphones
-                .brir
-                .as_ref()
-                .ok_or_else(|| LocalizedError {
-                    message: Message::ImportBrirFirst,
-                    next: NextAction::None,
-                })?;
+            let path = settings.headphones.brir.as_ref().ok_or(LocalizedError {
+                message: Message::ImportBrirFirst,
+                next: NextAction::None,
+            })?;
             let source = brir_source(path).ok_or_else(invalid_brir_error)?;
-            let mut profile = imported_brir_profile(
-                path,
-                source,
-                settings.headphones.gain_db.unwrap_or(0.0),
-            );
+            let mut profile =
+                imported_brir_profile(path, source, settings.headphones.gain_db.unwrap_or(0.0));
             let layout = brir::layout(&profile).map_err(brir_error)?;
             if layout.find("FC").is_some() {
                 profile.lfe = brir::LfePolicy::Direction {
@@ -1404,15 +1353,9 @@ fn resolve(
         ProfileKind::Speakers => {
             let profile = speakers::layout_profile(
                 settings.speakers.layout,
-                &settings.speakers.room_fir,
                 settings.speakers.gain_db.unwrap_or(0.0),
             );
-            let view = speakers_view(
-                &profile,
-                false,
-                settings,
-                Some(settings.speakers.layout),
-            );
+            let view = speakers_view(&profile, false, settings, Some(settings.speakers.layout));
             Ok(Resolved {
                 profile: OutputProfile::Speakers(profile),
                 view,
@@ -1430,7 +1373,6 @@ fn unresolved_view(
     let from_file = profile_file(config).is_some();
     let profile = speakers::layout_profile(
         settings.speakers.layout,
-        &settings.speakers.room_fir,
         settings.speakers.gain_db.unwrap_or(0.0),
     );
     let mut view = speakers_view(
@@ -1513,6 +1455,7 @@ fn speakers_view(
         },
         speakers: SpeakersView {
             layout,
+            correction: None,
             channels: profile_channels(profile),
         },
     }
@@ -1521,11 +1464,11 @@ fn speakers_view(
 fn stored_speakers_view(settings: &ProfileSettings) -> SpeakersView {
     let profile = speakers::layout_profile(
         settings.speakers.layout,
-        &settings.speakers.room_fir,
         settings.speakers.gain_db.unwrap_or(0.0),
     );
     SpeakersView {
         layout: Some(settings.speakers.layout),
+        correction: None,
         channels: profile_channels(&profile),
     }
 }
@@ -1538,17 +1481,34 @@ fn profile_channels(profile: &SpeakerProfile) -> Vec<SpeakerChannelView> {
             name: speaker.name.clone(),
             channel: u16::try_from(speaker.channel).unwrap_or(u16::MAX),
             subwoofer: false,
-            room_fir: speaker.fir.as_deref().map(display),
         })
-        .chain(profile.subwoofers.iter().map(|subwoofer| SpeakerChannelView {
-            name: "LFE".into(),
-            channel: u16::try_from(subwoofer.channel).unwrap_or(u16::MAX),
-            subwoofer: true,
-            room_fir: subwoofer.fir.as_deref().map(display),
-        }))
+        .chain(
+            profile
+                .subwoofers
+                .iter()
+                .map(|subwoofer| SpeakerChannelView {
+                    name: "LFE".into(),
+                    channel: u16::try_from(subwoofer.channel).unwrap_or(u16::MAX),
+                    subwoofer: true,
+                }),
+        )
         .collect();
     channels.sort_by_key(|channel| channel.channel);
     channels
+}
+
+fn imported_brir_profile(path: &Path, brir: brir::BrirSource, gain_db: f32) -> brir::Profile {
+    brir::Profile {
+        name: brir_name(path),
+        brir,
+        gain_db,
+        limiter_ceiling_dbfs: -1.0,
+        lfe: brir::LfePolicy::Mute,
+        angles: brir::AnglePreset::Standard,
+        angle_overrides: Vec::new(),
+        truncate: None,
+        trim_leading_delay: true,
+    }
 }
 
 fn brir_path(source: &brir::BrirSource) -> Option<String> {

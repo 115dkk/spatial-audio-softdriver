@@ -122,7 +122,6 @@ fn profile(source: BrirSource) -> Profile {
     Profile {
         name: "test".into(),
         brir: source,
-        headphone_fir: None,
         gain_db: 0.0,
         limiter_ceiling_dbfs: -1.0,
         lfe: LfePolicy::Mute,
@@ -354,66 +353,6 @@ fn directions_profile_keeps_file_order_and_angles() {
 }
 
 #[test]
-fn headphone_fir_folding_equals_filtering_the_binaural_output() {
-    let directory = TestDirectory::new("fir-fold");
-    let brir_path = directory.join("direction.wav");
-    let fir_path = directory.join("headphone.wav");
-    let left_ir = vec![0.75, -0.25, 0.125];
-    let right_ir = vec![-0.5, 0.2, 0.1, -0.05];
-    let left_fir = vec![0.8, 0.1, -0.05];
-    let right_fir = vec![0.7, -0.2];
-    write_wav(&brir_path, 48_000, &[left_ir.clone(), right_ir.clone()]);
-    write_wav(&fir_path, 48_000, &[left_fir.clone(), right_fir.clone()]);
-    let source = BrirSource::Directions(vec![DirectionFile {
-        name: "X".into(),
-        azimuth_deg: 0.0,
-        elevation_deg: 0.0,
-        path: brir_path,
-    }]);
-    let without = prepare(&profile(source.clone()), 48_000, 64).unwrap();
-    let mut with_profile = profile(source);
-    with_profile.headphone_fir = Some(fir_path);
-    let with = prepare(&with_profile, 48_000, 64).unwrap();
-    let frames = 64;
-    let without_output = render_impulses(&without, frames);
-    let with_output = render_impulses(&with, frames);
-    for (ear, fir) in [left_fir, right_fir].iter().enumerate() {
-        let mut filtered = vec![0.0; frames];
-        for frame in 0..frames {
-            for tap in 0..=frame.min(fir.len() - 1) {
-                filtered[frame] += without_output[ear][frame - tap] * fir[tap];
-            }
-        }
-        for (actual, expected) in with_output[ear].iter().zip(filtered) {
-            assert!((actual - expected).abs() < 2.0e-6);
-        }
-    }
-}
-
-#[test]
-fn mono_headphone_fir_applies_to_both_ears() {
-    let directory = TestDirectory::new("mono-fir");
-    let brir_path = directory.join("direction.wav");
-    let fir_path = directory.join("headphone.wav");
-    let fir = vec![0.75, -0.25, 0.125];
-    write_wav(&brir_path, 48_000, &[vec![1.0], vec![0.5]]);
-    write_wav(&fir_path, 48_000, std::slice::from_ref(&fir));
-    let mut input = profile(BrirSource::Directions(vec![DirectionFile {
-        name: "X".into(),
-        azimuth_deg: 0.0,
-        elevation_deg: 0.0,
-        path: brir_path,
-    }]));
-    input.headphone_fir = Some(fir_path);
-    let prepared = prepare(&input, 48_000, 64).unwrap();
-    let output = render_impulses(&prepared, 64);
-    for (frame, sample) in fir.iter().enumerate() {
-        assert!((output[0][frame] - sample).abs() < 2.0e-6);
-        assert!((output[1][frame] - sample * 0.5).abs() < 2.0e-6);
-    }
-}
-
-#[test]
 fn resampling_preserves_impulse_time_and_response_gain() {
     // An impulse response keeps its frequency response across rates, so its
     // DC gain (the sum of its taps) stays put while its peak does not.
@@ -460,7 +399,6 @@ limiter_ceiling_dbfs = -2.0
 
 [brir]
 hesuvi = "sets/hesuvi.wav"
-headphone_fir = "filters/headphone.wav"
 "#,
     )
     .unwrap();
@@ -468,10 +406,6 @@ headphone_fir = "filters/headphone.wav"
     assert_eq!(
         loaded.brir,
         BrirSource::Hesuvi(directory.join("sets/hesuvi.wav"))
-    );
-    assert_eq!(
-        loaded.headphone_fir,
-        Some(directory.join("filters/headphone.wav"))
     );
     assert_eq!(loaded.lfe, LfePolicy::Mute);
     assert!(loaded.trim_leading_delay);
@@ -504,6 +438,31 @@ gain_db = -6.0
             gain_db: -6.0
         }
     );
+}
+
+#[test]
+fn profile_toml_rejects_headphone_fir() {
+    let directory = TestDirectory::new("obsolete-headphone-fir");
+    let profile_path = directory.join("profile.toml");
+    fs::write(
+        &profile_path,
+        r#"
+name = "obsolete"
+limiter_ceiling_dbfs = -1.0
+
+[brir]
+hesuvi = "hesuvi.wav"
+headphone_fir = "headphones.wav"
+"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        load_profile(&profile_path),
+        Err(BrirError::Profile { path, detail })
+            if path == profile_path
+                && detail == "headphone_fir is no longer supported: headphone correction belongs in the BRIR set (Impulcifer); for room correction use a speaker profile's per-speaker fir (ADR 0034)"
+    ));
 }
 
 #[test]

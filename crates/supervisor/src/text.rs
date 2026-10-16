@@ -33,8 +33,8 @@ pub enum Message {
     EngineStopFailed { detail: String },
     OutputIdChanged { name: String },
     ImportBrirFirst,
-    RoomFirReadFailed { detail: String },
-    SpeakerNotInLayout { name: String },
+    CorrectionReadFailed { detail: String },
+    CorrectionUnsupported { channels: u16 },
     LayoutUnsupported { layout: String, channels: u16 },
     GainOutOfRange,
     DirectionMissing,
@@ -120,8 +120,10 @@ impl Message {
             Self::EngineStopFailed { detail } => text::engine_stop_failed(language, detail),
             Self::OutputIdChanged { name } => text::output_id_changed(language, name),
             Self::ImportBrirFirst => text::import_brir_first(language).into(),
-            Self::RoomFirReadFailed { detail } => text::room_fir_read_failed(language, detail),
-            Self::SpeakerNotInLayout { name } => text::speaker_not_in_layout(language, name),
+            Self::CorrectionReadFailed { detail } => text::correction_read_failed(language, detail),
+            Self::CorrectionUnsupported { channels } => {
+                text::correction_unsupported(language, channels)
+            }
             Self::LayoutUnsupported { layout, channels } => {
                 text::layout_unsupported(language, layout, channels)
             }

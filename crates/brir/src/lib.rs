@@ -1230,4 +1230,3 @@ fn trim_common_leading_delay(irs: &mut [[Vec<f32>; 2]], rate: u32) -> usize {
     }
     trim
 }
-

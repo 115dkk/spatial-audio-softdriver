@@ -371,7 +371,11 @@ impl<H: Host, L: Launcher, E: Emitter, S: SettingsStore> ControlThread<H, L, E, 
         let long_step = *self.supervisor.phase() == Phase::Running
             && matches!(
                 intent,
-                Intent::ImportBrir(_) | Intent::ImportHeadphoneFir(_)
+                Intent::ImportBrir(_)
+                    | Intent::SetProfileKind(_)
+                    | Intent::SetSpeakerLayout(_)
+                    | Intent::ImportCorrection(_)
+                    | Intent::ClearCorrection
             );
         if long_step || matches!(intent, Intent::Disable | Intent::Quit) {
             // Disable and Quit stop the engine and give the roles back in one

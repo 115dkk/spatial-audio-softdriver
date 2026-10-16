@@ -25,6 +25,9 @@ const NAMES: &[&str] = &[
     "running-reconnecting",
     "faulted",
     "ready-headphones",
+    "ready-speakers",
+    "running-speakers",
+    "ready-layout-unsupported",
     "ready-profile-file",
     "ready-brir-unreadable",
     "ready-start-failed",
@@ -119,7 +122,21 @@ fn expected(name: &str, output_name: &str) -> Expected {
             )),
             ..none()
         },
-        "ready-headphones" | "ready-profile-file" => Expected {
+        "ready-headphones"
+        | "ready-speakers"
+        | "running-speakers"
+        | "ready-profile-file" => Expected {
+            default_profile: false,
+            ..none()
+        },
+        "ready-layout-unsupported" => Expected {
+            error: Some((
+                Message::LayoutUnsupported {
+                    layout: "7.1.4".into(),
+                    channels: 12,
+                },
+                NextAction::None,
+            )),
             default_profile: false,
             ..none()
         },
@@ -204,11 +221,7 @@ fn every_fixture_sentence_is_the_supervisors() {
                 .collect();
             assert_eq!(snapshot.notes, expected_notes, "{name}");
             if expected.default_profile {
-                assert_eq!(
-                    snapshot.profile.name,
-                    Message::DefaultProfileName.render(language),
-                    "{name}"
-                );
+                assert_eq!(snapshot.profile.name, "2.0", "{name}");
             }
         }
     }
