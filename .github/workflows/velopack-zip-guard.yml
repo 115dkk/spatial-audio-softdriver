@@ -1,0 +1,135 @@
+# The self-removing guard behind deny.toml's exception for the yanked zip
+# 8.6.0 (.github/scripts/velopack_zip_guard.py has the reasoning).
+#
+# Every hour it proves again that the newest velopack cannot be built with an
+# unyanked zip. The run in which that proof fails:
+#   1. moves velopack to that release and updates Cargo.lock,
+#   2. removes the exception from deny.toml and deletes the guard script,
+#   3. checks that cargo-deny passes without the exception,
+#   4. pushes auto/velopack-zip-guard, opens the pull request and runs ci.yml
+#      on it (a push or pull request made with the Actions token starts no
+#      workflow by itself, a dispatch does),
+#   5. disables this workflow.
+# A push with the Actions token may not change .github/workflows, so this file
+# and ci.yml's proof step stay; both run only while the script exists, which
+# the pull request deletes. Merging stays a person's call: a merge to master is
+# a release (ADR 0017).
+
+name: velopack-zip-guard
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: velopack-zip-guard
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: zip 8.6.0 exception still stands, or velopack is updated
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      BRANCH: auto/velopack-zip-guard
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prove the exception still stands
+        id: proof
+        if: hashFiles('.github/scripts/velopack_zip_guard.py') != ''
+        run: |
+          set +e
+          python3 .github/scripts/velopack_zip_guard.py check
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "heal=false" >> "$GITHUB_OUTPUT" ;;
+            3) echo "heal=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
+          esac
+
+      # A run after the branch went up (before this workflow was disabled, or a
+      # manual dispatch) only makes sure the workflow is off.
+      - name: The update is not pushed yet
+        id: fresh
+        if: steps.proof.outputs.heal == 'true'
+        run: |
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
+            echo "$BRANCH is already pushed."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ./.github/actions/rust-toolchain
+        if: steps.fresh.outputs.fresh == 'true'
+
+      - uses: taiki-e/install-action@v2
+        if: steps.fresh.outputs.fresh == 'true'
+        with:
+          tool: cargo-deny
+
+      - name: Update velopack, remove the exception and the guard script
+        if: steps.fresh.outputs.fresh == 'true'
+        env:
+          VELOPACK: ${{ steps.proof.outputs.velopack }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/velopack_zip_guard.py heal --velopack "$VELOPACK"
+          cargo update -p velopack
+          # The same velopack may now take an unyanked zip 8.6.x instead.
+          if grep -q '^name = "zip"' Cargo.lock; then cargo update -p zip; fi
+          cargo deny --all-features check
+          git diff --stat
+
+      - name: Push, open the pull request and run CI on it
+        if: steps.fresh.outputs.fresh == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VELOPACK: ${{ steps.proof.outputs.velopack }}
+          ZIP: ${{ steps.proof.outputs.zip }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add -A
+          title="fix: velopack ${VELOPACK}로 올리고 zip 8.6.0 회수 예외를 지운다"
+          git commit -q -m "$title" -m "velopack ${VELOPACK}이 회수되지 않은 zip(${ZIP})으로 빌드되므로 deny.toml의 zip 8.6.0 예외와 그 감시 스크립트를 지운다. ${RUN}"
+          git push origin "$BRANCH"
+          body=$(cat <<EOF
+          velopack-zip-guard가 만든 PR입니다([실행](${RUN})).
+
+          - velopack ${VELOPACK}이 회수되지 않은 zip ${ZIP}으로 빌드됩니다. deny.toml의 zip 8.6.0 예외가 더는 필요 없습니다.
+          - velopack 요구를 ${VELOPACK}로 올리고 \`Cargo.lock\`을 갱신했습니다. 예외 없이 \`cargo deny check\`가 통과했습니다.
+          - 감시 스크립트(\`.github/scripts/velopack_zip_guard.py\`)와 그 시험을 지웠습니다. 이것으로 ci.yml의 증명 단계와 \`velopack-zip-guard.yml\`이 꺼지고, 워크플로는 이 실행이 비활성화했습니다.
+          - Actions 토큰은 워크플로 파일을 바꿀 수 없어서 \`velopack-zip-guard.yml\`과 ci.yml의 증명 단계는 남았습니다. 둘 다 스크립트가 없으면 돌지 않으며, 이 PR이나 다음 PR에서 지워도 됩니다.
+          - CI는 이 실행이 \`ci.yml\`을 직접 띄웠습니다. 머지는 릴리스이므로 사람이 정합니다(ADR 0017).
+          EOF
+          )
+          # Repository settings may not let Actions open pull requests; an
+          # issue that links the branch does the same job then.
+          if ! url=$(gh pr create --base master --head "$BRANCH" --title "$title" --body "$body"); then
+            url=$(gh issue create --title "$title" --body "$body
+
+          PR을 열 권한이 없어 이슈로 알립니다. [브랜치 비교](https://github.com/${REPO}/compare/master...${BRANCH}?expand=1)에서 PR을 여십시오.")
+          fi
+          echo "$url"
+          gh workflow run ci.yml --ref "$BRANCH"
+
+      - name: Disable this workflow
+        if: steps.proof.outputs.heal == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable velopack-zip-guard.yml

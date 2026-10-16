@@ -41,6 +41,20 @@ ignore = true
 # only where this workspace can act on them.
 unmaintained = "workspace"
 yanked = "deny"
+# velopack-zip-guard: begin
+# zip's maintainer yanked every release but the newest after three extraction
+# advisories (GHSA-4v9h-p7m9-rh26, GHSA-vv5m-jxxh-4627, GHSA-4684-h2q9-2vcp,
+# all in ZipArchive::extract, which velopack does not call: it reads entries
+# with by_index and writes files and links itself). velopack, the updater,
+# needs zip ^8.6. The exception holds only while the newest velopack cannot be
+# built with an unyanked zip: .github/scripts/velopack_zip_guard.py proves it
+# in ci.yml's cargo-deny job, and velopack-zip-guard.yml proves it every hour.
+# The hour it fails, that workflow updates velopack, removes this block and
+# the script, opens the pull request and disables itself.
+ignore = [
+    { crate = "zip@8.6.0", reason = "yanked; the newest velopack needs zip ^8.6 and no unyanked version matches (velopack_zip_guard.py)" },
+]
+# velopack-zip-guard: end
 
 [bans]
 multiple-versions = "warn"
