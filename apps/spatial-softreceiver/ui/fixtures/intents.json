@@ -25,12 +25,34 @@
     "value": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}"
   },
   {
+    "kind": "set_profile_kind",
+    "value": "headphones"
+  },
+  {
+    "kind": "set_profile_kind",
+    "value": "speakers"
+  },
+  {
     "kind": "import_brir",
     "value": "C:\\Users\\me\\BRIR\\living-room"
   },
   {
-    "kind": "import_headphone_fir",
-    "value": "C:\\Users\\me\\hd650.wav"
+    "kind": "set_speaker_layout",
+    "value": "7.1.4"
+  },
+  {
+    "kind": "set_room_fir",
+    "value": {
+      "speaker": "Tfl",
+      "path": "C:\\Users\\me\\RoomEQ\\living-room\\TFL.wav"
+    }
+  },
+  {
+    "kind": "set_room_fir",
+    "value": {
+      "speaker": "LFE",
+      "path": null
+    }
   },
   {
     "kind": "set_gain",

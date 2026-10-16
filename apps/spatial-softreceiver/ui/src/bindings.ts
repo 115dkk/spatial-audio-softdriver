@@ -207,13 +207,37 @@ dropped_events: number; clock: ClockStatus;
  */
 clock_ppm: number; fault: EngineFault | null }
 
+export type HeadphonesView = {
+/**
+ * Imported BRIR set (folder, hesuvi.wav, or hrir.wav).
+ */
+brir: string | null }
+
 export type Intent = { kind: "set_language"; value: Language | null } | { kind: "begin_setup" } | { kind: "install_driver" } |
 /**
  * Looks at the PC again after the user did something outside the app
  * (a reboot, test signing, a repair, a device plugged in at the output
  * step), or leaves the faulted state.
  */
-{ kind: "recheck" } | { kind: "choose_output"; value: DeviceId } | { kind: "import_brir"; value: string } | { kind: "import_headphone_fir"; value: string } | { kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
+{ kind: "recheck" } | { kind: "choose_output"; value: DeviceId } |
+/**
+ * Switches the output between headphones and speakers (ADR 0034).
+ * Headphones need an imported BRIR set.
+ */
+{ kind: "set_profile_kind"; value: ProfileKind } |
+/**
+ * Keeps the BRIR set for headphones; a running headphone output takes
+ * it live, while speakers in use stay as they are.
+ */
+{ kind: "import_brir"; value: string } | { kind: "set_speaker_layout"; value: SpeakerLayout } |
+/**
+ * Sets (`Some`) or clears (`None`) one speaker's room-correction FIR.
+ */
+{ kind: "set_room_fir"; value: RoomFir } |
+/**
+ * The gain of the output in use; each kind keeps its own.
+ */
+{ kind: "set_gain"; value: number } | { kind: "test_direction"; value: DirectionId } | { kind: "enable" } | { kind: "disable" } | { kind: "start_diagnostic_recording" } | { kind: "quit" }
 
 export type Language = "ko" | "en"
 
@@ -293,17 +317,67 @@ export type PolicyState =
  */
 "unknown"
 
-export type ProfileKind = "stereo" | "headphones" | "speakers"
+/**
+ * The two outputs a profile offers. One is in use at a time and each keeps
+ * its own settings, so switching back finds them as they were (ADR 0034).
+ */
+export type ProfileKind =
+/**
+ * Binaural over headphones through the imported BRIR set.
+ */
+"headphones" |
+/**
+ * The listener's speakers, each with an optional room-correction FIR.
+ */
+"speakers"
 
-export type ProfileView = { kind: ProfileKind; name: string;
+export type ProfileView = {
 /**
- * Imported BRIR set (folder, hesuvi.wav, or hrir.wav).
+ * The output in use: the one Enable starts, or the running engine plays.
  */
-brir: string | null; headphone_fir: string | null; gain_db: number; directions: DirectionView[];
+kind: ProfileKind;
 /**
- * The state directory's profile.toml takes precedence over import intents.
+ * The output in use by name: the BRIR set, the speaker layout (`"7.1.4"`),
+ * or the name `profile.toml` gives.
  */
-from_file: boolean }
+name: string;
+/**
+ * The gain of the output in use.
+ */
+gain_db: number;
+/**
+ * The directions of the output in use: the BRIR set's, or the speakers'
+ * (the subwoofer is not a direction).
+ */
+directions: DirectionView[];
+/**
+ * The state directory's profile.toml decides the output; the kind,
+ * import, layout and FIR intents are refused.
+ */
+from_file: boolean;
+/**
+ * Headphone settings, kept while speakers are in use.
+ */
+headphones: HeadphonesView;
+/**
+ * Speaker settings, kept while headphones are in use.
+ */
+speakers: SpeakersView }
+
+/**
+ * One speaker's room-correction FIR ([`Intent::SetRoomFir`]).
+ */
+export type RoomFir = {
+/**
+ * A speaker of the current layout by its name in
+ * [`SpeakersView::channels`] (`"L"`, `"Tfl"`, `"LFE"` for the subwoofer).
+ */
+speaker: string;
+/**
+ * A WAV: one track, or one track per device channel (ADR 0034). `None`
+ * clears the speaker's FIR.
+ */
+path: string | null }
 
 /**
  * How PCM samples are stored.
@@ -375,6 +449,38 @@ error: UserError | null;
 notes: string[] }
 
 export type SourceFormat = { kind: "pcm"; value: PcmFormat } | { kind: "bitstream"; value: BitstreamFormat }
+
+export type SpeakerChannelView = {
+/**
+ * The speaker's name (`"L"`, `"Tfl"`), or `"LFE"` for a subwoofer.
+ */
+name: string;
+/**
+ * Zero-based device channel.
+ */
+channel: number; subwoofer: boolean;
+/**
+ * The room-correction FIR, if any.
+ */
+room_fir: string | null }
+
+/**
+ * The speaker layouts the app offers: standard layouts with a Windows
+ * channel mask (ADR 0034). Any other layout takes a `profile.toml`
+ * (ADR 0030). The serialized form is the layout's name.
+ */
+export type SpeakerLayout = "2.0" | "2.1" | "4.0" | "5.1" | "7.1" | "5.1.2" | "5.1.4" | "7.1.2" | "7.1.4"
+
+export type SpeakersView = {
+/**
+ * The app layout; `None` when a speaker `profile.toml` lays the speakers
+ * out its own way.
+ */
+layout: SpeakerLayout | null;
+/**
+ * Every device channel of the layout, in device order.
+ */
+channels: SpeakerChannelView[] }
 
 /**
  * What the output saw in the period that last found the crossing ring short,

@@ -1,0 +1,200 @@
+{
+  "language": "en",
+  "language_choice": null,
+  "phase": {
+    "kind": "ready"
+  },
+  "profile": {
+    "kind": "speakers",
+    "name": "7.1.4",
+    "gain_db": -6.0,
+    "directions": [
+      {
+        "id": 0,
+        "name": "L",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "R",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 2,
+        "name": "C",
+        "azimuth_deg": 0.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 3,
+        "name": "Lrs",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 4,
+        "name": "Rrs",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "Lss",
+        "azimuth_deg": 90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "Rss",
+        "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 7,
+        "name": "Tfl",
+        "azimuth_deg": 45.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 8,
+        "name": "Tfr",
+        "azimuth_deg": -45.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 9,
+        "name": "Trl",
+        "azimuth_deg": 135.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 10,
+        "name": "Trr",
+        "azimuth_deg": -135.0,
+        "elevation_deg": 45.0
+      }
+    ],
+    "from_file": false,
+    "headphones": {
+      "brir": "C:\\Users\\me\\BRIR\\living-room"
+    },
+    "speakers": {
+      "layout": "7.1.4",
+      "channels": [
+        {
+          "name": "L",
+          "channel": 0,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\L.wav"
+        },
+        {
+          "name": "R",
+          "channel": 1,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\R.wav"
+        },
+        {
+          "name": "C",
+          "channel": 2,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\C.wav"
+        },
+        {
+          "name": "LFE",
+          "channel": 3,
+          "subwoofer": true,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SUB.wav"
+        },
+        {
+          "name": "Lrs",
+          "channel": 4,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBL.wav"
+        },
+        {
+          "name": "Rrs",
+          "channel": 5,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBR.wav"
+        },
+        {
+          "name": "Lss",
+          "channel": 6,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SL.wav"
+        },
+        {
+          "name": "Rss",
+          "channel": 7,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SR.wav"
+        },
+        {
+          "name": "Tfl",
+          "channel": 8,
+          "subwoofer": false,
+          "room_fir": null
+        },
+        {
+          "name": "Tfr",
+          "channel": 9,
+          "subwoofer": false,
+          "room_fir": null
+        },
+        {
+          "name": "Trl",
+          "channel": 10,
+          "subwoofer": false,
+          "room_fir": null
+        },
+        {
+          "name": "Trr",
+          "channel": 11,
+          "subwoofer": false,
+          "room_fir": null
+        }
+      ]
+    }
+  },
+  "engine": null,
+  "outputs": [
+    {
+      "id": "{0.0.0.00000000}.{3f2504e0-4f89-11d3-9a0c-0305e82c3301}",
+      "name": "Speakers (Realtek(R) Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+      "name": "DENON AVR (NVIDIA High Definition Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d}",
+      "name": "Headphones (USB Audio DAC)"
+    }
+  ],
+  "chosen_output": {
+    "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+    "name": "DENON AVR (NVIDIA High Definition Audio)"
+  },
+  "driver": {
+    "kind": "installed",
+    "value": {
+      "problem_code": 0,
+      "service_running": true,
+      "exclusive_policy": "applied"
+    }
+  },
+  "platform": {
+    "os_build": 26100,
+    "arch": "x64",
+    "test_signing": true,
+    "secure_boot": "disabled"
+  },
+  "roles_taken": false,
+  "error": {
+    "message": "The chosen output device does not accept the 7.1.4 layout (12 channels) in exclusive mode. Choose another layout or output device.",
+    "next": "none"
+  },
+  "notes": []
+}

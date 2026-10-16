@@ -7,8 +7,6 @@
   "profile": {
     "kind": "headphones",
     "name": "작업실 7.1.4",
-    "brir": "C:\\Users\\me\\BRIR\\studio\\hesuvi.wav",
-    "headphone_fir": null,
     "gain_db": 0.0,
     "directions": [
       {
@@ -78,7 +76,27 @@
         "elevation_deg": 45.0
       }
     ],
-    "from_file": true
+    "from_file": true,
+    "headphones": {
+      "brir": "C:\\Users\\me\\BRIR\\studio\\hesuvi.wav"
+    },
+    "speakers": {
+      "layout": "2.0",
+      "channels": [
+        {
+          "name": "L",
+          "channel": 0,
+          "subwoofer": false,
+          "room_fir": null
+        },
+        {
+          "name": "R",
+          "channel": 1,
+          "subwoofer": false,
+          "room_fir": null
+        }
+      ]
+    }
   },
   "engine": null,
   "outputs": [

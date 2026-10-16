@@ -7,8 +7,6 @@
   "profile": {
     "kind": "headphones",
     "name": "Living room 7.1.4 headphones",
-    "brir": "C:\\Users\\me\\BRIR\\living-room",
-    "headphone_fir": "C:\\Users\\me\\hd650.wav",
     "gain_db": -3.5,
     "directions": [
       {
@@ -78,7 +76,63 @@
         "elevation_deg": 45.0
       }
     ],
-    "from_file": false
+    "from_file": false,
+    "headphones": {
+      "brir": "C:\\Users\\me\\BRIR\\living-room"
+    },
+    "speakers": {
+      "layout": "7.1",
+      "channels": [
+        {
+          "name": "L",
+          "channel": 0,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\L.wav"
+        },
+        {
+          "name": "R",
+          "channel": 1,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\R.wav"
+        },
+        {
+          "name": "C",
+          "channel": 2,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\C.wav"
+        },
+        {
+          "name": "LFE",
+          "channel": 3,
+          "subwoofer": true,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SUB.wav"
+        },
+        {
+          "name": "Lrs",
+          "channel": 4,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBL.wav"
+        },
+        {
+          "name": "Rrs",
+          "channel": 5,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBR.wav"
+        },
+        {
+          "name": "Lss",
+          "channel": 6,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SL.wav"
+        },
+        {
+          "name": "Rss",
+          "channel": 7,
+          "subwoofer": false,
+          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SR.wav"
+        }
+      ]
+    }
   },
   "engine": null,
   "outputs": [
