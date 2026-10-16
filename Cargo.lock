@@ -3905,10 +3905,10 @@ dependencies = [
  "serde_json",
  "speakers",
  "ssr-guard",
+ "ssr-i18n",
  "ssr-sys",
  "ssr-types",
  "supervisor",
- "sys-locale",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -3991,10 +3991,20 @@ version = "0.15.0"
 dependencies = [
  "serde",
  "serde_json",
+ "ssr-i18n",
  "ssr-sys",
  "ssr-types",
  "supervisor",
+]
+
+[[package]]
+name = "ssr-i18n"
+version = "0.15.0"
+dependencies = [
+ "clap",
+ "ssr-types",
  "sys-locale",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -4008,6 +4018,7 @@ dependencies = [
  "serde_json",
  "speakers",
  "ssr-abi",
+ "ssr-i18n",
  "ssr-sys",
  "ssr-types",
  "supervisor",
@@ -4035,6 +4046,7 @@ dependencies = [
  "sha2 0.11.0",
  "speakers",
  "ssr-abi",
+ "ssr-i18n",
  "ssr-types",
 ]
 
@@ -4044,6 +4056,7 @@ version = "0.15.0"
 dependencies = [
  "clap",
  "ssr-abi",
+ "ssr-i18n",
  "ssr-setup-sys",
  "ssr-types",
 ]
@@ -4149,6 +4162,7 @@ dependencies = [
  "serde_json",
  "speakers",
  "ssr-abi",
+ "ssr-i18n",
  "ssr-types",
  "thiserror 2.0.21",
 ]

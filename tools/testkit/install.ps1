@@ -8,6 +8,14 @@ param(
     [string] $ResultPath = (Join-Path $PSScriptRoot 'install-result.json')
 )
 $ErrorActionPreference = 'Stop'
+$catalog = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'strings.psd1')
+$language = if ($env:SSR_LANG -eq 'ko') { 'ko' } elseif ($env:SSR_LANG -eq 'en') { 'en' } elseif ((Get-UICulture).TwoLetterISOLanguageName -eq 'ko') { 'ko' } else { 'en' }
+$strings = $catalog[$language]
+function Format-Text([string] $Key, [hashtable] $Values = @{}) {
+    $text = [string]$strings[$Key]
+    foreach ($name in $Values.Keys) { $text = $text.Replace("{$name}", [string]$Values[$name]) }
+    $text
+}
 $endpointHelper = Join-Path $PSScriptRoot 'endpoints.ps1'
 if (-not (Test-Path -LiteralPath $endpointHelper)) { $endpointHelper = Join-Path $PSScriptRoot '..\ci\endpoints.ps1' }
 . $endpointHelper
@@ -44,25 +52,25 @@ function Get-SsrEndpoints([string] $InstanceId) {
     Get-SpatialEndpoints -InstanceId $InstanceId
 }
 
-if (-not (Test-Administrator)) { Stop-Prerequisite '관리자 PowerShell에서 install.ps1을 다시 실행하십시오.' }
+if (-not (Test-Administrator)) { Stop-Prerequisite (Format-Text 'admin_required') }
 $os = Get-CimInstance Win32_OperatingSystem
-if ([int]$os.BuildNumber -lt 19041) { Stop-Prerequisite 'Windows 10 2004(빌드 19041) 이상에서 실행하십시오.' }
+if ([int]$os.BuildNumber -lt 19041) { Stop-Prerequisite (Format-Text 'os_required') }
 $kit = Get-Content -Raw (Join-Path $PSScriptRoot 'kit.json') | ConvertFrom-Json
 $nativeArch = $env:PROCESSOR_ARCHITECTURE
 if ($nativeArch -eq 'x86' -and $env:PROCESSOR_ARCHITEW6432) { $nativeArch = $env:PROCESSOR_ARCHITEW6432 }
 if ($kit.arch -eq 'x64' -and $nativeArch -notin @('AMD64', 'x64')) {
-    Stop-Prerequisite "이 묶음은 x64용이지만 현재 Windows 아키텍처는 $nativeArch 입니다."
+    Stop-Prerequisite (Format-Text 'architecture_mismatch' @{ arch = $nativeArch })
 }
 $testSigning = Get-TestSigning
 $secureBoot = Get-SecureBootState
-$testSigningGuide = 'Secure Boot를 끈 뒤 관리자 명령으로 `bcdedit /set testsigning on`을 실행하고 재부팅하십시오'
+$testSigningGuide = Format-Text 'test_signing_guide'
 if (-not $testSigning -and -not $AllowWithoutTestSigning) {
-    Stop-Prerequisite "$testSigningGuide."
+    Stop-Prerequisite (Format-Text 'test_signing_required' @{ guide = $testSigningGuide })
 }
-if (-not $testSigning) { Write-Warning "testsigning이 켜져 있지 않습니다. CI 허용 옵션으로 계속합니다. $testSigningGuide." }
-if ($secureBoot -eq 'enabled') { Write-Host "Secure Boot가 켜져 있습니다. 시험서명 드라이버를 위해 Secure Boot를 꺼야 합니다. $testSigningGuide." }
+if (-not $testSigning) { Write-Warning (Format-Text 'test_signing_warning' @{ guide = $testSigningGuide }) }
+if ($secureBoot -eq 'enabled') { Write-Host (Format-Text 'secure_boot_warning' @{ guide = $testSigningGuide }) }
 $existing = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { @($_.HardwareID | Where-Object { $_ -in @($SpatialPackage.HardwareId) + @($SpatialLegacyPackages | ForEach-Object HardwareId) }).Count -gt 0 })
-if ($existing.Count -gt 0) { Stop-Prerequisite '현재 또는 이전 시험판 장치가 이미 있습니다. 먼저 uninstall.ps1을 실행하십시오.' }
+if ($existing.Count -gt 0) { Stop-Prerequisite (Format-Text 'existing_device') }
 
 $certificatePath = Join-Path $PSScriptRoot 'spatialsoftreceiver-test.cer'
 $certificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certificatePath)
@@ -70,8 +78,8 @@ foreach ($name in 'Root', 'TrustedPublisher') {
     $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($name, 'LocalMachine')
     try { $store.Open('ReadWrite'); $store.Add($certificate) } finally { $store.Close() }
 }
-Write-Host "시험 드라이버 서명을 신뢰하려고 인증서를 설치했습니다: $($certificate.Subject), $($certificate.Thumbprint)"
-Write-Host '시험을 마치면 uninstall.ps1이 이 인증서를 삭제합니다.'
+Write-Host (Format-Text 'certificate_installed' @{ subject = $certificate.Subject; thumbprint = $certificate.Thumbprint })
+Write-Host (Format-Text 'certificate_cleanup')
 
 $exitCode = 1
 try {
@@ -80,16 +88,16 @@ try {
     Add-Type -TypeDefinition (Get-Content -Raw (Join-Path $PSScriptRoot 'RootDevice.cs'))
     try {
         $reboot = [RootDevice]::Install((Join-Path $PSScriptRoot 'spatialsoftreceiver.inf'), $HardwareId)
-        Write-Host "root device installed (reboot requested: $reboot)"
-    } catch { Write-Warning "device update: $($_.Exception.Message)" }
+        Write-Host (Format-Text 'root_device_installed' @{ reboot = $reboot })
+    } catch { Write-Warning (Format-Text 'device_update_warning' @{ detail = $_.Exception.Message }) }
     Start-Sleep -Seconds 5
     $device = Get-PnpDevice | Where-Object { $_.HardwareID -contains $HardwareId } | Select-Object -First 1
-    if (-not $device) { throw 'Root\SpatialSoftReceiver 장치를 만들지 못했습니다.' }
+    if (-not $device) { throw (Format-Text 'root_device_failed') }
     $problem = [int](Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_ProblemCode').Data
     $driverInf = (Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath').Data
     $driverService = Get-CimInstance Win32_SystemDriver -Filter "Name='$Service'" -ErrorAction SilentlyContinue
     $serviceState = if ($driverService) { $driverService.State } else { $null }
-    if (-not $driverInf) { throw '설치된 장치에 드라이버 INF가 연결되지 않았습니다.' }
+    if (-not $driverInf) { throw (Format-Text 'driver_inf_missing') }
     $parameters = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$Service\Parameters"
     $mask = if ($null -eq $parameters.EndpointMask -or [int]$parameters.EndpointMask -eq 0) { 0x7 } else { [int]$parameters.EndpointMask }
     # Only endpoints with mini-pairs can appear. This kit currently carries 0, 1 and 2.
@@ -109,9 +117,9 @@ try {
     $stateNames = @{ 1 = 'active'; 2 = 'disabled'; 4 = 'not present'; 8 = 'unplugged' }
     foreach ($endpoint in $endpoints | Sort-Object endpoint) {
         $stateName = if ($stateNames.ContainsKey([int]$endpoint.state)) { $stateNames[[int]$endpoint.state] } else { "state $($endpoint.state)" }
-        Write-Host "endpoint $($endpoint.endpoint) ($stateName): $($endpoint.name)"
+        Write-Host (Format-Text 'endpoint_line' @{ endpoint = $endpoint.endpoint; state = $stateName; name = $endpoint.name })
     }
-    Write-Host '이 이름들이 Windows 설정 > 시스템 > 소리의 출력 장치 목록에 보여야 합니다.'
+    Write-Host (Format-Text 'endpoints_visible')
     $activeEndpoints = @($endpoints | Where-Object state -eq 1)
     $active = $activeEndpoints.Count
     $activeNumbers = @($activeEndpoints | ForEach-Object endpoint)
@@ -136,7 +144,7 @@ try {
         time = (Get-Date).ToUniversalTime().ToString('o')
     }
     $result | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $ResultPath
-    Write-Host "device $($device.InstanceId): status $($device.Status), problem $problem, driver $driverInf, service $serviceState"
+    Write-Host (Format-Text 'device_line' @{ instance = $device.InstanceId; status = $device.Status; problem = $problem; driver = $driverInf; service = $serviceState })
     if ($problem -eq 52) { $exitCode = 3 }
     elseif (-not $loaded) { $exitCode = 1 }
     elseif ($active -ne $expectedCount -or -not $identitiesMatch) { $exitCode = 4 }
@@ -164,7 +172,7 @@ try {
 } catch {
     # Not Write-Error: with ErrorActionPreference Stop it would end the script
     # before the exit code below.
-    [Console]::Error.WriteLine("install.ps1: $($_.Exception.Message)")
+    [Console]::Error.WriteLine((Format-Text 'install_failed' @{ detail = $_.Exception.Message }))
     $exitCode = 1
 }
 exit $exitCode

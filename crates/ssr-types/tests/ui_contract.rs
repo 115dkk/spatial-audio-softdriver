@@ -10,6 +10,7 @@
 //! the types comes with its regenerated bindings and fixtures in the same
 //! commit (the same discipline as the driver's C header, `SSR_ABI_BLESS`).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use specta::TypeCollection;
@@ -25,8 +26,8 @@ use ssr_types::status::{
 };
 use ssr_types::{
     Arch, BitstreamCodec, BitstreamFormat, DeviceId, DirectionId, DirectionView, DriverState,
-    EngineFault, EngineStatus, OutputMode, PcmFormat, Platform, SampleType, SceneObject,
-    SecureBoot, SourceFormat,
+    EngineFault, EngineStatus, OutputError, OutputMode, PcmFormat, Platform, SampleType,
+    SceneObject, SecureBoot, SourceFormat,
 };
 
 const BLESS: &str = "SSR_UI_BLESS";
@@ -84,11 +85,15 @@ fn choice(id: &str, name: &str) -> OutputChoice {
     }
 }
 
-fn outputs() -> Vec<OutputChoice> {
+fn outputs(language: Language) -> Vec<OutputChoice> {
+    let (speakers, headphones) = match language {
+        Language::Ko => ("스피커 (Realtek(R) Audio)", "헤드폰 (USB Audio DAC)"),
+        Language::En => ("Speakers (Realtek(R) Audio)", "Headphones (USB Audio DAC)"),
+    };
     vec![
         choice(
             "{0.0.0.00000000}.{3f2504e0-4f89-11d3-9a0c-0305e82c3301}",
-            "스피커 (Realtek(R) Audio)",
+            speakers,
         ),
         choice(
             "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
@@ -96,7 +101,7 @@ fn outputs() -> Vec<OutputChoice> {
         ),
         choice(
             "{0.0.0.00000000}.{a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d}",
-            "헤드폰 (USB Audio DAC)",
+            headphones,
         ),
     ]
 }
@@ -134,10 +139,14 @@ fn direction(id: u16, name: &str, azimuth_deg: f32, elevation_deg: f32) -> Direc
     }
 }
 
-fn stereo_profile() -> ProfileView {
+fn stereo_profile(language: Language) -> ProfileView {
     ProfileView {
         kind: ProfileKind::Stereo,
-        name: "Stereo".to_owned(),
+        name: match language {
+            Language::Ko => "Stereo",
+            Language::En => "Default stereo",
+        }
+        .to_owned(),
         brir: None,
         headphone_fir: None,
         gain_db: 0.0,
@@ -149,10 +158,14 @@ fn stereo_profile() -> ProfileView {
     }
 }
 
-fn headphone_profile() -> ProfileView {
+fn headphone_profile(language: Language) -> ProfileView {
     ProfileView {
         kind: ProfileKind::Headphones,
-        name: "거실 7.1.4 헤드폰".to_owned(),
+        name: match language {
+            Language::Ko => "거실 7.1.4 헤드폰",
+            Language::En => "Living room 7.1.4 headphones",
+        }
+        .to_owned(),
         brir: Some(r"C:\Users\me\BRIR\living-room".to_owned()),
         headphone_fir: Some(r"C:\Users\me\hd650.wav".to_owned()),
         gain_db: -3.5,
@@ -175,12 +188,28 @@ fn headphone_profile() -> ProfileView {
     }
 }
 
-fn blank(phase: Phase) -> Snapshot {
+fn profile_file(language: Language) -> ProfileView {
+    ProfileView {
+        kind: ProfileKind::Headphones,
+        name: match language {
+            Language::Ko => "작업실 7.1.4",
+            Language::En => "Studio 7.1.4",
+        }
+        .to_owned(),
+        brir: Some(r"C:\Users\me\BRIR\studio\hesuvi.wav".to_owned()),
+        headphone_fir: None,
+        gain_db: 0.0,
+        directions: headphone_profile(language).directions,
+        from_file: true,
+    }
+}
+
+fn blank(language: Language, phase: Phase) -> Snapshot {
     Snapshot {
-        language: Language::Ko,
+        language,
         language_choice: None,
         phase,
-        profile: stereo_profile(),
+        profile: stereo_profile(language),
         engine: None,
         outputs: Vec::new(),
         chosen_output: None,
@@ -197,7 +226,7 @@ fn with_phase(mut snapshot: Snapshot, phase: Phase) -> Snapshot {
     snapshot
 }
 
-fn engine_status() -> EngineStatus {
+fn engine_status(language: Language) -> EngineStatus {
     let mut endpoints: [EndpointStatus; 4] = Default::default();
     endpoints[0] = EndpointStatus {
         format: Some(SourceFormat::Pcm(PcmFormat {
@@ -250,7 +279,7 @@ fn engine_status() -> EngineStatus {
         }),
     };
     EngineStatus {
-        directions: headphone_profile().directions,
+        directions: headphone_profile(language).directions,
         scene: vec![
             SceneObject {
                 lane: 0,
@@ -334,16 +363,53 @@ fn engine_status() -> EngineStatus {
 
 /// One snapshot per screen state the wizard, the status screen and the error
 /// banner must draw. The messages are the supervisor's own sentences.
-fn snapshots() -> Vec<(&'static str, Snapshot)> {
+fn snapshots(language: Language) -> Vec<(&'static str, Snapshot)> {
+    let output_choices = outputs(language);
+    let selected_name = output_choices[1].name.clone();
     let ready = Snapshot {
-        outputs: outputs(),
-        chosen_output: Some(outputs()[1].clone()),
+        outputs: output_choices.clone(),
+        chosen_output: Some(output_choices[1].clone()),
         driver: Some(installed(PolicyState::Applied)),
         platform: Some(platform(true, SecureBoot::Disabled)),
-        ..blank(Phase::Ready)
+        ..blank(language, Phase::Ready)
     };
+    let text = |ko: &'static str, en: &'static str| match language {
+        Language::Ko => ko,
+        Language::En => en,
+    };
+    let mut renamed_outputs = output_choices.clone();
+    renamed_outputs[1].id =
+        DeviceId("{0.0.0.00000000}.{5e8a2c44-74fb-4e6d-b257-82ea4b12f649}".to_owned());
+    let renamed_output = renamed_outputs[1].clone();
+    let mut outputs_without_saved = output_choices.clone();
+    outputs_without_saved.remove(1);
+    let output_id_changed = match language {
+        Language::Ko => {
+            format!("출력 장치의 식별자가 바뀌어 이름으로 다시 찾았습니다: {selected_name}")
+        }
+        Language::En => format!(
+            "The output device identifier changed, so it was found again by name: {selected_name}"
+        ),
+    };
+    let stored_output_missing = match language {
+        Language::Ko => format!("저장된 출력 장치를 찾을 수 없습니다: {selected_name}"),
+        Language::En => format!("The saved output device could not be found: {selected_name}"),
+    };
+    let brir_detail =
+        r"C:\Users\me\BRIR\studio\hesuvi.wav has 2 tracks, which matches no HeSuVi layout";
+    // What the engine reports, as it reports it: a removed output is the
+    // fault's detail (engine publish_output_error), and a busy one fails the
+    // start through StartError::Output (crates/engine/src/runtime/mod.rs).
+    let lost = OutputError::Removed.to_string();
+    let busy = format!(
+        "the output device could not be opened: {}",
+        OutputError::Busy
+    );
     vec![
-        ("setup-welcome", blank(Phase::Setup(SetupStep::Welcome))),
+        (
+            "setup-welcome",
+            blank(language, Phase::Setup(SetupStep::Welcome)),
+        ),
         (
             "setup-unsupported",
             Snapshot {
@@ -352,10 +418,13 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
                     ..platform(false, SecureBoot::Enabled)
                 }),
                 error: Some(error(
-                    "Windows 10 2004(빌드 19041) 이상이 필요합니다. 이 PC는 빌드 18363입니다.",
+                    text(
+                        "Windows 10 2004(빌드 19041) 이상이 필요합니다.",
+                        "Windows 10 version 2004 (build 19041) or newer is required.",
+                    ),
                     NextAction::None,
                 )),
-                ..blank(Phase::Setup(SetupStep::Unsupported))
+                ..blank(language, Phase::Setup(SetupStep::Unsupported))
             },
         ),
         (
@@ -363,12 +432,13 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
             Snapshot {
                 platform: Some(platform(false, SecureBoot::Enabled)),
                 error: Some(error(
-                    "시험서명 모드가 꺼져 있습니다. Secure Boot를 끈 뒤 관리자 명령으로 bcdedit \
-                     /set testsigning on을 실행하고 다시 시작하십시오. Secure Boot가 켜져 있어 \
-                     먼저 꺼야 합니다.",
+                    text(
+                        "시험서명 모드가 꺼져 있습니다. Secure Boot를 끈 뒤 관리자 명령으로 bcdedit /set testsigning on을 실행하고 다시 시작하십시오. Secure Boot가 켜져 있어 먼저 꺼야 합니다.",
+                        "Test-signing mode is off. Turn off Secure Boot, run bcdedit /set testsigning on as administrator, and restart Windows. Secure Boot is on and must be turned off first.",
+                    ),
                     NextAction::Reboot,
                 )),
-                ..blank(Phase::Setup(SetupStep::NotTestSigning))
+                ..blank(language, Phase::Setup(SetupStep::NotTestSigning))
             },
         ),
         (
@@ -376,7 +446,7 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
             Snapshot {
                 platform: Some(platform(true, SecureBoot::Disabled)),
                 driver: Some(DriverState::NotInstalled),
-                ..blank(Phase::Setup(SetupStep::Driver))
+                ..blank(language, Phase::Setup(SetupStep::Driver))
             },
         ),
         (
@@ -389,11 +459,13 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
                     exclusive_policy: PolicyState::Unknown,
                 }),
                 error: Some(error(
-                    "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 \
-                     다시 설치하십시오.",
+                    text(
+                        "드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오.",
+                        "Windows rejected the driver signature (problem code 52). Check test-signing mode, then reinstall the driver.",
+                    ),
                     NextAction::Retry,
                 )),
-                ..blank(Phase::Setup(SetupStep::Driver))
+                ..blank(language, Phase::Setup(SetupStep::Driver))
             },
         ),
         (
@@ -401,8 +473,14 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
             Snapshot {
                 platform: Some(platform(true, SecureBoot::Disabled)),
                 driver: Some(DriverState::NotInstalled),
-                error: Some(error("관리자 승인을 취소했습니다.", NextAction::Retry)),
-                ..blank(Phase::Setup(SetupStep::Driver))
+                error: Some(error(
+                    text(
+                        "관리자 승인을 취소했습니다.",
+                        "Administrator approval was cancelled.",
+                    ),
+                    NextAction::Retry,
+                )),
+                ..blank(language, Phase::Setup(SetupStep::Driver))
             },
         ),
         (
@@ -411,61 +489,73 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
                 platform: Some(platform(true, SecureBoot::Disabled)),
                 driver: Some(DriverState::RebootRequired),
                 error: Some(error(
-                    "드라이버 설치를 마치려면 다시 시작해야 합니다.",
+                    text(
+                        "드라이버 설치를 마치려면 다시 시작해야 합니다.",
+                        "Restart Windows to finish installing the driver.",
+                    ),
                     NextAction::Reboot,
                 )),
-                ..blank(Phase::Setup(SetupStep::RebootRequired))
+                ..blank(language, Phase::Setup(SetupStep::RebootRequired))
             },
         ),
         (
             "setup-choose-output",
             Snapshot {
-                outputs: outputs(),
+                outputs: output_choices.clone(),
                 driver: Some(installed(PolicyState::Applied)),
                 platform: Some(platform(true, SecureBoot::Disabled)),
-                ..blank(Phase::Setup(SetupStep::ChooseOutput))
+                ..blank(language, Phase::Setup(SetupStep::ChooseOutput))
+            },
+        ),
+        (
+            "setup-output-missing",
+            Snapshot {
+                outputs: outputs_without_saved,
+                chosen_output: Some(output_choices[1].clone()),
+                driver: Some(installed(PolicyState::Applied)),
+                platform: Some(platform(true, SecureBoot::Disabled)),
+                error: Some(error(&stored_output_missing, NextAction::OpenSettings)),
+                ..blank(language, Phase::Setup(SetupStep::ChooseOutput))
+            },
+        ),
+        (
+            "setup-choose-output-empty",
+            Snapshot {
+                driver: Some(installed(PolicyState::Applied)),
+                platform: Some(platform(true, SecureBoot::Disabled)),
+                ..blank(language, Phase::Setup(SetupStep::ChooseOutput))
             },
         ),
         ("ready", ready.clone()),
         (
             "ready-output-renamed",
             Snapshot {
-                notes: vec!["고른 출력의 식별자가 바뀌어 이름으로 다시 찾았습니다.".to_owned()],
-                error: Some(error(
-                    "저장된 출력 장치를 찾을 수 없습니다: DENON AVR (NVIDIA High Definition Audio)",
-                    NextAction::OpenSettings,
-                )),
-                chosen_output: None,
+                outputs: renamed_outputs,
+                chosen_output: Some(renamed_output),
+                notes: vec![output_id_changed],
                 ..ready.clone()
             },
         ),
         (
             "running",
             Snapshot {
-                profile: headphone_profile(),
-                engine: Some(engine_status()),
+                profile: headphone_profile(language),
+                engine: Some(engine_status(language)),
                 roles_taken: true,
-                notes: vec![
-                    "이전 기본 장치 '스피커 (Realtek(R) Audio)'를 복원점에 적었습니다.".to_owned(),
-                ],
+                notes: vec![text("다시 연결했습니다.", "Reconnected.").to_owned()],
                 ..with_phase(ready.clone(), Phase::Running)
             },
         ),
         (
             "running-reconnecting",
             Snapshot {
-                profile: headphone_profile(),
+                profile: headphone_profile(language),
                 engine: Some(EngineStatus {
-                    fault: Some(EngineFault::OutputLost(
-                        "AUDCLNT_E_DEVICE_INVALIDATED".to_owned(),
-                    )),
-                    ..engine_status()
+                    fault: Some(EngineFault::OutputLost(lost.clone())),
+                    ..engine_status(language)
                 }),
                 roles_taken: true,
-                error: Some(error(
-                    "출력 장치와의 연결이 끊어져 다시 연결하는 중입니다: AUDCLNT_E_DEVICE_INVALIDATED",
-                    NextAction::None,
-                )),
+                error: None,
                 ..with_phase(ready.clone(), Phase::Running)
             },
         ),
@@ -473,11 +563,59 @@ fn snapshots() -> Vec<(&'static str, Snapshot)> {
             "faulted",
             Snapshot {
                 error: Some(error(
-                    "엔진이 15초 동안 다시 연결하지 못했습니다. 출력 장치와의 연결이 \
-                     끊어졌습니다: AUDCLNT_E_DEVICE_INVALIDATED",
+                    &match language {
+                        Language::Ko => format!(
+                            "엔진이 15초 동안 다시 연결하지 못했습니다. 출력 장치와의 연결이 끊어졌습니다: {lost}"
+                        ),
+                        Language::En => format!(
+                            "The engine could not reconnect for 15 seconds. The output device disconnected: {lost}"
+                        ),
+                    },
                     NextAction::Retry,
                 )),
                 ..with_phase(ready.clone(), Phase::Faulted)
+            },
+        ),
+        (
+            "ready-headphones",
+            Snapshot {
+                profile: headphone_profile(language),
+                ..ready.clone()
+            },
+        ),
+        (
+            "ready-profile-file",
+            Snapshot {
+                profile: profile_file(language),
+                ..ready.clone()
+            },
+        ),
+        (
+            "ready-brir-unreadable",
+            Snapshot {
+                error: Some(error(
+                    &match language {
+                        Language::Ko => format!("BRIR 세트를 읽지 못했습니다: {brir_detail}"),
+                        Language::En => {
+                            format!("The BRIR set could not be read: {brir_detail}")
+                        }
+                    },
+                    NextAction::None,
+                )),
+                ..ready.clone()
+            },
+        ),
+        (
+            "ready-start-failed",
+            Snapshot {
+                error: Some(error(
+                    &match language {
+                        Language::Ko => format!("엔진을 시작하지 못했습니다: {busy}"),
+                        Language::En => format!("The engine could not start: {busy}"),
+                    },
+                    NextAction::Retry,
+                )),
+                ..ready.clone()
             },
         ),
         ("quit", with_phase(ready, Phase::Quit)),
@@ -493,7 +631,7 @@ fn intents() -> Vec<Intent> {
         Intent::BeginSetup,
         Intent::InstallDriver,
         Intent::Recheck,
-        Intent::ChooseOutput(outputs()[1].id.clone()),
+        Intent::ChooseOutput(outputs(Language::Ko)[1].id.clone()),
         Intent::ImportBrir(PathBuf::from(r"C:\Users\me\BRIR\living-room")),
         Intent::ImportHeadphoneFir(PathBuf::from(r"C:\Users\me\hd650.wav")),
         Intent::SetGain(-3.5),
@@ -511,18 +649,66 @@ fn pretty<T: serde::Serialize>(value: &T) -> String {
     json
 }
 
+fn json_files(dir: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("{}: {error}", dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect()
+}
+
+fn reject_extra_json(dir: &Path, expected: &BTreeSet<String>) {
+    if std::env::var_os(BLESS).is_none() {
+        let actual = json_files(dir);
+        assert_eq!(
+            actual,
+            *expected,
+            "unexpected JSON fixtures in {}",
+            dir.display()
+        );
+    }
+}
+
 #[test]
 fn snapshot_fixtures_match_the_types() {
-    let dir = ui_dir().join("fixtures");
-    let mut names = Vec::new();
-    for (name, snapshot) in snapshots() {
-        check_or_bless(&dir.join(format!("{name}.json")), &pretty(&snapshot));
-        let back: Snapshot = serde_json::from_str(&pretty(&snapshot)).unwrap();
-        assert_eq!(back, snapshot, "{name} does not round-trip");
-        names.push(name);
+    let root = ui_dir().join("fixtures");
+    let en = root.join("en");
+    let fixtures = snapshots(Language::Ko);
+    let names: Vec<_> = fixtures.iter().map(|(name, _)| *name).collect();
+
+    for (language, dir) in [(Language::Ko, &root), (Language::En, &en)] {
+        for (name, snapshot) in snapshots(language) {
+            let content = pretty(&snapshot);
+            check_or_bless(&dir.join(format!("{name}.json")), &content);
+            let back: Snapshot = serde_json::from_str(&content).unwrap();
+            assert_eq!(back, snapshot, "{name} does not round-trip in {language:?}");
+            assert_eq!(snapshot.language, language);
+            assert_eq!(snapshot.language_choice, None);
+            if language == Language::En {
+                assert!(
+                    !content.chars().any(|character| matches!(
+                        character as u32,
+                        0xAC00..=0xD7A3 | 0x1100..=0x11FF | 0x3130..=0x318F
+                    )),
+                    "{name} contains Hangul in the English fixture"
+                );
+            }
+        }
     }
-    check_or_bless(&dir.join("intents.json"), &pretty(&intents()));
+
+    check_or_bless(&root.join("intents.json"), &pretty(&intents()));
     let back: Vec<Intent> = serde_json::from_str(&pretty(&intents())).unwrap();
     assert_eq!(back, intents());
-    check_or_bless(&dir.join("index.json"), &pretty(&names));
+    check_or_bless(&root.join("index.json"), &pretty(&names));
+
+    let fixture_files: BTreeSet<_> = names.iter().map(|name| format!("{name}.json")).collect();
+    let mut root_files = fixture_files.clone();
+    root_files.insert("index.json".to_owned());
+    root_files.insert("intents.json".to_owned());
+    reject_extra_json(&root, &root_files);
+    reject_extra_json(&en, &fixture_files);
 }

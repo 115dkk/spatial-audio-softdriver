@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 ssr-types.workspace = true
+ssr-i18n.workspace = true
 ssr-abi.workspace = true
 engine.workspace = true
 brir.workspace = true

@@ -22,6 +22,7 @@ use ssr_types::{
 };
 use supervisor::machine::Config;
 use supervisor::restore_point::{self, RestorePoint, RestorePointError};
+use supervisor::text::Message;
 use supervisor::{
     EngineHandle, Launcher, Session, SessionError, SessionNotice, Settings, Supervisor,
 };
@@ -54,6 +55,8 @@ struct World {
     apply_errors: VecDeque<SessionError>,
     /// The directions the running engine reports in its status.
     engine_directions: Vec<DirectionView>,
+    /// The recoverable fault the running engine reports in its status.
+    engine_fault: Option<EngineFault>,
     calls: Vec<String>,
 }
 
@@ -176,8 +179,10 @@ impl EngineHandle for FakeEngine {
     }
 
     fn status(&self) -> EngineStatus {
+        let world = self.0.get();
         EngineStatus {
-            directions: self.0.get().engine_directions.clone(),
+            directions: world.engine_directions.clone(),
+            fault: world.engine_fault.clone(),
             ..EngineStatus::default()
         }
     }
@@ -284,6 +289,7 @@ fn ready_pc() -> World {
         applied: Vec::new(),
         apply_errors: VecDeque::new(),
         engine_directions: Vec::new(),
+        engine_fault: None,
         calls: Vec::new(),
     }
 }
@@ -1180,17 +1186,23 @@ fn an_engine_fault_stops_restores_and_faults() {
 fn a_recoverable_fault_keeps_running_until_the_engine_reconnects() {
     let (shared, mut supervisor) = running(ready_pc());
     let start = Instant::now();
-    let lost = SessionNotice::Fault(EngineFault::OutputLost("the DAC was removed".into()));
-    shared.get().engine_polls.push_back(Ok(vec![lost.clone()]));
+    let fault = EngineFault::OutputLost("the DAC was removed".into());
+    let lost = SessionNotice::Fault(fault.clone());
+    {
+        let mut world = shared.get();
+        world.engine_fault = Some(fault.clone());
+        world.engine_polls.push_back(Ok(vec![lost.clone()]));
+    }
     assert_eq!(supervisor.tick(start), [lost]);
     let snapshot = supervisor.snapshot();
     assert_eq!(snapshot.phase, Phase::Running);
+    assert_eq!(snapshot.error, None);
     assert_eq!(
-        snapshot.error,
-        Some(error(
-            "출력 장치와의 연결이 끊어져 다시 연결하는 중입니다: the DAC was removed",
-            NextAction::None
-        ))
+        snapshot
+            .engine
+            .as_ref()
+            .and_then(|engine| engine.fault.clone()),
+        Some(fault)
     );
     assert!(snapshot.roles_taken);
     assert!(snapshot.engine.is_some());
@@ -1198,10 +1210,14 @@ fn a_recoverable_fault_keeps_running_until_the_engine_reconnects() {
     assert_eq!(supervisor.snapshot().phase, Phase::Running);
 
     // The engine reconnects 3 s later.
-    shared.get().engine_polls.push_back(Ok(vec![
-        SessionNotice::OutputReconnected,
-        SessionNotice::FaultCleared,
-    ]));
+    {
+        let mut world = shared.get();
+        world.engine_fault = None;
+        world.engine_polls.push_back(Ok(vec![
+            SessionNotice::OutputReconnected,
+            SessionNotice::FaultCleared,
+        ]));
+    }
     assert_eq!(supervisor.tick(start + Duration::from_secs(3)).len(), 2);
     let snapshot = supervisor.snapshot();
     assert_eq!(snapshot.phase, Phase::Running);
@@ -1213,27 +1229,64 @@ fn a_recoverable_fault_keeps_running_until_the_engine_reconnects() {
     supervisor.tick(start + Duration::from_secs(20));
     assert_eq!(supervisor.snapshot().phase, Phase::Running);
 
-    // A lost capture says so in its own words.
-    shared
-        .get()
-        .engine_polls
-        .push_back(Ok(vec![SessionNotice::Fault(EngineFault::CaptureLost(
-            "the ring closed".into(),
-        ))]));
+    // A lost capture is reported in the engine status without adding an error.
+    let fault = EngineFault::CaptureLost("the ring closed".into());
+    {
+        let mut world = shared.get();
+        world.engine_fault = Some(fault.clone());
+        world
+            .engine_polls
+            .push_back(Ok(vec![SessionNotice::Fault(fault.clone())]));
+    }
     supervisor.tick(start + Duration::from_secs(21));
     let snapshot = supervisor.snapshot();
     assert_eq!(snapshot.phase, Phase::Running);
-    assert_eq!(
-        snapshot.error,
-        Some(error(
-            "캡처 장치와의 연결이 끊어져 다시 연결하는 중입니다.",
-            NextAction::None
-        ))
-    );
+    assert_eq!(snapshot.error, None);
+    assert_eq!(snapshot.engine.and_then(|engine| engine.fault), Some(fault));
 
     // Nothing was stopped and no role moved.
     assert!(shared.take_calls().is_empty());
     assert_eq!(shared.get().roles, taken_roles());
+}
+
+#[test]
+fn a_reconnect_notice_does_not_clear_an_unrelated_failure() {
+    let (shared, mut supervisor) = running(ready_pc());
+    let existing = error("게인은 -20 dB에서 +10 dB 사이입니다.", NextAction::None);
+    assert_eq!(
+        supervisor.handle(Intent::SetGain(11.0)),
+        Err(existing.clone())
+    );
+    assert_eq!(supervisor.snapshot().error, Some(existing.clone()));
+
+    let start = Instant::now();
+    let fault = EngineFault::OutputLost("the DAC was removed".into());
+    {
+        let mut world = shared.get();
+        world.engine_fault = Some(fault.clone());
+        world
+            .engine_polls
+            .push_back(Ok(vec![SessionNotice::Fault(fault.clone())]));
+    }
+    supervisor.tick(start);
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Running);
+    assert_eq!(snapshot.error, Some(existing.clone()));
+    assert_eq!(snapshot.engine.and_then(|engine| engine.fault), Some(fault));
+
+    {
+        let mut world = shared.get();
+        world.engine_fault = None;
+        world
+            .engine_polls
+            .push_back(Ok(vec![SessionNotice::FaultCleared]));
+    }
+    supervisor.tick(start + Duration::from_secs(1));
+    let snapshot = supervisor.snapshot();
+    assert_eq!(snapshot.phase, Phase::Running);
+    assert_eq!(snapshot.error, Some(existing));
+    assert_eq!(snapshot.engine.and_then(|engine| engine.fault), None);
+    assert_eq!(snapshot.notes, ["다시 연결했습니다."]);
 }
 
 #[test]
@@ -2588,6 +2641,40 @@ fn language_defaults_overrides_resets_and_rerenders_errors_in_every_phase() {
             NextAction::None
         ))
     );
+}
+
+#[test]
+fn default_profile_name_follows_the_language_through_enable_and_gain() {
+    for language in [Language::En, Language::Ko] {
+        let mut settings = dac_settings();
+        settings.language = Some(language);
+        let (_shared, mut supervisor) = start(ready_pc(), settings);
+        let expected = Message::DefaultProfileName.render(language);
+
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "Ready {language:?}"
+        );
+        supervisor.handle(Intent::Enable).unwrap();
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "Running {language:?}"
+        );
+        supervisor.handle(Intent::SetGain(-3.0)).unwrap();
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "SetGain {language:?}"
+        );
+        supervisor.handle(Intent::Disable).unwrap();
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "Disable {language:?}"
+        );
+    }
 }
 
 #[test]

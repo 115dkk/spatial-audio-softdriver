@@ -12,10 +12,10 @@ workspace = true
 
 [dependencies]
 ssr-types.workspace = true
+ssr-i18n.workspace = true
 supervisor.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sys-locale.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ssr-sys.workspace = true

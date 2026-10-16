@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Api } from '../src/api';
 import { mountApp } from '../src/app';
 import type { EngineStatus, Intent, Snapshot } from '../src/bindings';
@@ -6,6 +9,7 @@ import { fixture, fixtureNames } from '../src/fixtures';
 import { createMockApi } from '../src/mock';
 import type { Tab } from '../src/screens/common';
 import { MAP_POOL } from '../src/screens/objectmap';
+import { en, ko } from '../src/text';
 
 let root: HTMLElement;
 
@@ -100,21 +104,26 @@ describe('what each state says', () => {
     for (const name of ['공간 소프트리시버', '공간 소프트리시버 음악', '공간 소프트리시버 PASS']) {
       expect(text).toContain(name);
     }
-    expect(text).toContain('PCM 8채널 48 kHz float32');
-    expect(text).toContain('DD+ 6채널 48 kHz');
+    expect(text).toContain('PCM 8채널 48\u00a0kHz float32');
+    expect(text).toContain('DD+ 6채널 48\u00a0kHz');
     expect(text).toContain('직접 출력 12채널');
     expect(text).toContain('이 채널 수에는 직접 배치가 없습니다.');
     expect(text).toContain('12.4');
     expect(text).toContain('18.9');
     expect(text).toContain('-37.5');
     expect(text).toContain('독점');
-    expect(text).toContain("이전 기본 장치 '스피커 (Realtek(R) Audio)'를 복원점에 적었습니다.");
+    // The fixture's note is the supervisor's Message::Reconnected.
+    expect(text).toContain('다시 연결했습니다.');
   });
 
-  it('running while reconnecting says so in the head', () => {
+  it('running while reconnecting says so in the head, and only there', () => {
     draw('running-reconnecting');
-    expect(root.querySelector('#power-state')?.textContent).toContain('다시 연결하는 중');
-    expect(textOf()).toContain(errorOf('running-reconnecting'));
+    expect(fixture('running-reconnecting').error).toBeNull();
+    const state = root.querySelector('#power-state');
+    expect(state?.textContent).toContain('다시 연결하는 중');
+    expect(state?.className).toContain('tone-warning');
+    // The head already says it: no band repeats it.
+    expect(root.querySelector('.banner')).toBeNull();
   });
 
   it('faulted shows the sentence and 켜기', () => {
@@ -188,7 +197,7 @@ describe('meters', () => {
     expect(root.querySelector('.meters')).toBe(before);
     expect([...root.querySelectorAll('.endpoint-card')]).toEqual(cards);
     expect(root.querySelector('.meters')?.textContent).toContain('7.3');
-    expect(cards[0]?.textContent).toContain('-12.0 dB');
+    expect(cards[0]?.textContent).toContain('-12.0\u00a0dB');
   });
 
   it('are ignored outside running', () => {
@@ -291,7 +300,9 @@ describe('sending intents', () => {
     const app = mountApp(root, held.api);
     app.draw(start);
     install()?.click();
+    // Only the power switch turns a spinner; this button says what it does.
     expect(install()?.textContent).toBe('설치하는 중');
+    expect(install()?.querySelector('.spinner')).toBeNull();
     expect(install()?.disabled).toBe(true);
     install()?.click();
     expect(held.sent).toHaveLength(1);
@@ -351,6 +362,173 @@ describe('sending intents', () => {
     expect(slider()?.disabled).toBe(false);
     expect(slider()?.value).toBe('2');
     expect(root.querySelector('.gain-readout')?.textContent).toBe('2.0 dB');
+  });
+
+  describe('the power switch', () => {
+    // The stylesheet decides what is seen, so the document gets it. (Vite
+    // rewrites `new URL(path, import.meta.url)` into an asset URL here.)
+    const styles = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/styles.css'), 'utf8');
+    let sheet: HTMLStyleElement | null = null;
+    beforeEach(() => {
+      sheet = document.createElement('style');
+      sheet.textContent = styles;
+      document.head.append(sheet);
+    });
+    afterEach(() => sheet?.remove());
+
+    const power = () => root.querySelector<HTMLButtonElement>('[data-key="power"]');
+    const head = () => root.querySelector('#power-state');
+    const rail = () => root.querySelector('.nav-power');
+
+    /** The text a sighted user sees in `element`, by the stylesheet. */
+    function seenText(element: Element | null): string {
+      const hidden = (at: Element | null): boolean => {
+        for (; at !== null && at !== element?.parentElement; at = at.parentElement) {
+          const style = getComputedStyle(at);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.clipPath === 'inset(50%)') return true;
+        }
+        return false;
+      };
+      const seen = (node: Node): string =>
+        node.nodeType === Node.TEXT_NODE
+          ? hidden(node.parentElement)
+            ? ''
+            : (node.textContent ?? '')
+          : [...node.childNodes].map(seen).join('');
+      return element === null ? '' : seen(element).trim();
+    }
+
+    /** What a screen reader calls `element`: its text outside aria-hidden parts. */
+    function spokenName(element: Element | null): string {
+      const spoken = (node: Node): string =>
+        node instanceof Element && node.getAttribute('aria-hidden') === 'true'
+          ? ''
+          : node.nodeType === Node.TEXT_NODE
+            ? (node.textContent ?? '')
+            : [...node.childNodes].map(spoken).join('');
+      return element === null ? '' : (element.getAttribute('aria-label') ?? spoken(element).trim());
+    }
+
+    /** The state word in the status head and in the rail, with its tone. */
+    const states = () =>
+      [head(), rail()].map((state) => [
+        state?.textContent,
+        [...(state?.classList ?? [])].find((name) => name.startsWith('tone-')),
+      ]);
+
+    describe.each(['ko', 'en'] as const)('in %s', (language) => {
+      const t = language === 'ko' ? ko : en;
+
+      it('turning on spins in place of the label and says turning on', async () => {
+        const start = fixture('ready', language);
+        const held = heldApi(start, 'resolve');
+        const app = mountApp(root, held.api);
+        app.draw(start);
+        expect(seenText(power())).toBe(t.status.powerOn);
+        expect(power()?.querySelector('.spinner')).toBeNull();
+
+        power()?.click();
+        expect(held.sent).toEqual([{ kind: 'enable' }]);
+        const button = power();
+        expect(button?.getAttribute('aria-busy')).toBe('true');
+        expect(button?.disabled).toBe(true);
+        expect(button?.querySelector('.spinner')?.getAttribute('aria-hidden')).toBe('true');
+        expect(seenText(button)).toBe('');
+        expect(spokenName(button)).toBe(t.status.powerTurningOn);
+        // Its name already says turning on, so the state word is not read twice.
+        expect(button?.hasAttribute('aria-describedby')).toBe(false);
+        // The hidden label still holds the button's width.
+        expect(button?.querySelector('.button-label')?.textContent).toBe(t.status.powerOn);
+        expect(states()).toEqual([
+          [t.status.powerTurningOn, 'tone-warning'],
+          [t.status.powerTurningOn, 'tone-warning'],
+        ]);
+
+        // The reply is in; the switch still waits for the snapshot after it.
+        held.release();
+        await tick();
+        expect(power()?.querySelector('.spinner')).not.toBeNull();
+
+        app.draw(fixture('running', language));
+        await tick();
+        expect(power()?.getAttribute('aria-busy')).toBeNull();
+        expect(power()?.querySelector('.spinner')).toBeNull();
+        expect(seenText(power())).toBe(t.status.powerOff);
+        expect(spokenName(power())).toBe(t.status.powerOff);
+        expect(power()?.getAttribute('aria-describedby')).toBe('power-state');
+        expect(states()).toEqual([
+          [t.status.on, 'tone-on'],
+          [t.status.on, 'tone-on'],
+        ]);
+      });
+
+      it('turning off spins too, says turning off, and leaves the state on', async () => {
+        const start = fixture('running', language);
+        const held = heldApi(start, 'resolve');
+        const app = mountApp(root, held.api);
+        app.draw(start);
+
+        power()?.click();
+        expect(held.sent).toEqual([{ kind: 'disable' }]);
+        expect(power()?.getAttribute('aria-busy')).toBe('true');
+        expect(power()?.querySelector('.spinner')).not.toBeNull();
+        expect(seenText(power())).toBe('');
+        expect(spokenName(power())).toBe(t.status.powerTurningOff);
+        expect(power()?.querySelector('.button-label')?.textContent).toBe(t.status.powerOff);
+        expect(states()).toEqual([
+          [t.status.on, 'tone-on'],
+          [t.status.on, 'tone-on'],
+        ]);
+
+        held.release();
+        await tick();
+        app.draw(fixture('ready', language));
+        await tick();
+        expect(power()?.getAttribute('aria-busy')).toBeNull();
+        expect(power()?.querySelector('.spinner')).toBeNull();
+        expect(seenText(power())).toBe(t.status.powerOn);
+        expect(states()).toEqual([
+          [t.status.off, 'tone-off'],
+          [t.status.off, 'tone-off'],
+        ]);
+      });
+
+      it('a refused enable brings the label and the off state back', async () => {
+        const start = fixture('ready', language);
+        const held = heldApi(start, 'reject');
+        const app = mountApp(root, held.api);
+        app.draw(start);
+        power()?.click();
+        expect(power()?.querySelector('.spinner')).not.toBeNull();
+
+        held.release();
+        await tick();
+        app.draw(fixture('ready', language));
+        await tick();
+        expect(power()?.getAttribute('aria-busy')).toBeNull();
+        expect(power()?.querySelector('.spinner')).toBeNull();
+        expect(power()?.disabled).toBe(false);
+        expect(seenText(power())).toBe(t.status.powerOn);
+        expect(states()).toEqual([
+          [t.status.off, 'tone-off'],
+          [t.status.off, 'tone-off'],
+        ]);
+      });
+    });
+
+    it('the spinner turns once in 0.8 to 1 s and stands still when motion is reduced', () => {
+      const rules = [...(sheet?.sheet?.cssRules ?? [])];
+      const spinnerRule = (list: CSSRule[]) =>
+        list.find((rule) => 'selectorText' in rule && rule.selectorText === '.spinner')?.cssText ?? '';
+      const turn = /animation:\s*spin\s+([\d.]+)s\s+linear\s+infinite/.exec(spinnerRule(rules));
+      expect(Number(turn?.[1])).toBeGreaterThanOrEqual(0.8);
+      expect(Number(turn?.[1])).toBeLessThanOrEqual(1);
+      const reduced = rules.find(
+        (rule): rule is CSSMediaRule =>
+          'conditionText' in rule && rule.conditionText === '(prefers-reduced-motion: reduce)',
+      );
+      expect(spinnerRule([...(reduced?.cssRules ?? [])])).toMatch(/animation:\s*none/);
+    });
   });
 });
 

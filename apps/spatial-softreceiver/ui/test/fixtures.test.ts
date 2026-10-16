@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import intents from '../fixtures/intents.json';
-import { fixtureNames, rawFixture } from '../src/fixtures';
+import { fixture, fixtureNames, rawFixture } from '../src/fixtures';
 import { ShapeError, assertIntent, assertSnapshot } from '../src/guard';
 
 describe('fixtures match bindings.ts', () => {
@@ -12,6 +12,10 @@ describe('fixtures match bindings.ts', () => {
   it.each(fixtureNames)('%s passes assertSnapshot', (name) => {
     const raw = rawFixture(name);
     expect(assertSnapshot(raw)).toEqual(raw);
+  });
+
+  it('has the Korean fixtures in Korean', () => {
+    for (const name of fixtureNames) expect(fixture(name).language, name).toBe('ko');
   });
 
   it('covers every intent', () => {
@@ -33,6 +37,44 @@ describe('fixtures match bindings.ts', () => {
         'quit',
       ]),
     );
+  });
+});
+
+describe('the English fixtures', () => {
+  const englishFiles = Object.keys(import.meta.glob('../fixtures/en/*.json'))
+    .map((path) => path.replace(/^.*\//, '').replace(/\.json$/, ''))
+    .sort();
+
+  it('are the same states as the Korean ones', () => {
+    expect(englishFiles).toEqual([...fixtureNames].sort());
+  });
+
+  it.each(fixtureNames)('%s passes assertSnapshot', (name) => {
+    const raw = rawFixture(name, 'en');
+    expect(assertSnapshot(raw)).toEqual(raw);
+  });
+
+  it.each(fixtureNames)('%s is in English and in the same state as the Korean one', (name) => {
+    const english = fixture(name, 'en');
+    const korean = fixture(name);
+    expect(english.language).toBe('en');
+    expect(english.language_choice).toEqual(korean.language_choice);
+    expect(english.phase).toEqual(korean.phase);
+    expect(english.error?.next ?? null).toEqual(korean.error?.next ?? null);
+    expect(english.notes).toHaveLength(korean.notes.length);
+    expect(english.engine === null).toBe(korean.engine === null);
+    expect(english.profile.kind).toBe(korean.profile.kind);
+  });
+
+  it('a fresh copy every call, apart from the Korean one', () => {
+    const first = fixture('running', 'en');
+    first.notes.push('changed');
+    expect(fixture('running', 'en').notes).not.toContain('changed');
+    expect(fixture('running', 'en')).not.toEqual(fixture('running'));
+  });
+
+  it('names a missing fixture with its language', () => {
+    expect(() => rawFixture('no-such-state', 'en')).toThrow('no en fixture named no-such-state');
   });
 });
 

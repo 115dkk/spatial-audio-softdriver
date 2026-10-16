@@ -74,10 +74,6 @@ fn every_message_renders_nonempty_and_distinct_in_both_languages() {
         Message::EngineChangeFailed {
             detail: "detail".into(),
         },
-        Message::ReconnectingOutput {
-            detail: "detail".into(),
-        },
-        Message::ReconnectingCapture,
         Message::NotAllowed,
         Message::RebootRequired,
         Message::RoleChangeFailed {

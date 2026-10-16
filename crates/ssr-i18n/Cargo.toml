@@ -1,0 +1,23 @@
+[package]
+name = "ssr-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Help in the user's language for the command-line tools (clap_help).
+clap = ["dep:clap"]
+
+[dependencies]
+clap = { workspace = true, optional = true }
+ssr-types.workspace = true
+sys-locale.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

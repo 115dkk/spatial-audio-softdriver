@@ -355,7 +355,7 @@
     "clock_ppm": -37.5,
     "fault": {
       "kind": "output_lost",
-      "value": "AUDCLNT_E_DEVICE_INVALIDATED"
+      "value": "the output device was removed"
     }
   },
   "outputs": [
@@ -391,9 +391,6 @@
     "secure_boot": "disabled"
   },
   "roles_taken": true,
-  "error": {
-    "message": "출력 장치와의 연결이 끊어져 다시 연결하는 중입니다: AUDCLNT_E_DEVICE_INVALIDATED",
-    "next": "none"
-  },
+  "error": null,
   "notes": []
 }

@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 ssr-abi.workspace = true
 ssr-types.workspace = true
+ssr-i18n = { workspace = true, features = ["clap"] }
 ssr-sys.workspace = true
 clap.workspace = true
 brir.workspace = true

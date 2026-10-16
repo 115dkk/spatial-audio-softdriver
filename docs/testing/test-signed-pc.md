@@ -99,6 +99,8 @@ SAL이 없는 PC라면 M2 부분은 건너뜁니다. 둘 다 할 수 있으면 *
 
 `kit.json`에 이 묶음의 버전, 커밋, 서명 인증서의 지문, 파일 해시가 있습니다.
 
+명령줄 도구(`ssr-live`, `ssr-replay`, `ssr-setup`)와 묶음 스크립트(`install.ps1`, `uninstall.ps1`, `collect.ps1`)는 Windows 표시 언어가 한국어면 도움말과 출력을 한국어로, 그 밖에는 영어로 냅니다. 이 문서는 영어 출력을 인용하고, 한국어로 다른 곳은 그 문장도 함께 적습니다. 한 언어로 고정하려면 PowerShell에서 먼저 `$env:SSR_LANG = 'en'`(또는 `'ko'`)를 설정합니다. JSON 보고서와 결과 파일의 키와 값, 장치 이름, 경로, Windows가 돌려준 오류 상세는 언어와 관계없이 그대로입니다.
+
 ### 시험 인증서에 대해
 
 묶음의 드라이버는 릴리스를 만들 때 한 번 쓰고 버린 인증서(`CN=Spatial SoftReceiver test signing <버전>`)로 서명했습니다. 그 인증서의 개인 키는 빌드 러너 밖으로 나가지 않았고 지워졌습니다. 그래서 이 인증서를 신뢰해도, 이 인증서로 다른 무엇이 서명될 수는 없습니다.
@@ -192,7 +194,7 @@ py .\report_check.py --preset sal play-music-shared.json
 - 게임에서 소리가 화면보다 늦게 느껴지는지
 
 **합격 기준**
-- 재생 중 `underruns` 0. 언더런이 나면 ssr-live가 그 초의 줄 아래에 `underrun: ring … frames, markers …, layout …, needed …, produced …, last block … ms ago`를 찍고, `--report`의 JSON에도 `last_underrun`으로 남깁니다. 이 줄을 결과에 그대로 붙여 주십시오. 링이 비었는지(`ring`), 캡처가 멈췄는지(`last block`)를 가를 수 있습니다
+- 재생 중 `underruns` 0. 언더런이 나면 ssr-live가 그 초의 줄 아래에 `underrun: ring … frames, markers …, layout …, needed …, produced …, last block … ms ago`(한국어 Windows에서는 `끊김: 링 …프레임, 표지 …, 배치 …, 필요 …, 생성 …, 마지막 블록 … ms 전`)를 찍고, `--report`의 JSON에도 `last_underrun`으로 남깁니다. 이 줄을 결과에 그대로 붙여 주십시오. 링이 비었는지(`ring`), 캡처가 멈췄는지(`last block`)를 가를 수 있습니다
 - `output_restarts` 0. 아니면 그 DAC 이름과 함께 적습니다(ADR 0019)
 - 들리는 문제 없음
 
@@ -224,6 +226,8 @@ py .\report_check.py --preset sal play-music-shared.json
 | 3 | 설치는 됐지만 커널이 이미지를 거절(문제 코드 52). 시험서명 모드가 실제로 켜졌는지 다시 확인하십시오 |
 | 4 | 올라왔지만 활성 엔드포인트 수나 고정 식별자이 `EndpointMask`와 맞지 않음 |
 | 1 | 그 밖의 실패 |
+
+영어 Windows에서는 설치가 끝날 때 예를 들어 `root device installed (reboot requested: False)`라고 출력합니다. 한국어 Windows에서는 같은 자리에 `루트 장치를 설치했습니다(다시 시작 요청: False)`라고 출력합니다. 장치 이름, 경로와 Windows가 돌려준 오류 상세는 어느 언어에서도 원문 그대로입니다.
 
 **합격 기준**
 - 종료 코드 0
@@ -667,7 +671,7 @@ AV 리시버(HDMI)나 다채널 DAC·오디오 인터페이스가 있으면, 헤
 .\collect.ps1
 ```
 
-M2의 결과(`play-*.json`, `sal-*.ssrdump`, `builder-*.wav`)는 묶음 폴더로 옮긴 뒤 실행하면 함께 모입니다. M2만 하고 우리 드라이버를 깔지 않았어도 이 스크립트는 돕니다. 묶음 폴더에 `spatial-softreceiver-test-report-<무작위>-<날짜시각>.zip`이 생깁니다. 무엇이 들어갔는지는 화면과 zip 안 목록에 나옵니다.
+M2의 결과(`play-*.json`, `sal-*.ssrdump`, `builder-*.wav`)는 묶음 폴더로 옮긴 뒤 실행하면 함께 모입니다. M2만 하고 우리 드라이버를 깔지 않았어도 이 스크립트는 돕니다. 묶음 폴더에 `spatial-softreceiver-test-report-<무작위>-<날짜시각>.zip`이 생깁니다. 무엇이 들어갔는지는 화면과 zip 안 목록에 나옵니다. 영어 Windows의 마지막 줄은 `Test report: <path>`이고, 한국어 Windows에서는 `시험 보고서: <path>`입니다.
 - OS 빌드, 부팅 설정, Secure Boot와 HVCI 상태
 - 장치와 서비스 상태, 드라이버 해시, 레지스트리 매개변수
 - 엔드포인트 상태와 읽기 전용 `endpoint-policy.json`(독점 허용·우선권·오류)
@@ -709,7 +713,7 @@ M2의 결과(`play-*.json`, `sal-*.ssrdump`, `builder-*.wav`)는 묶음 폴더�
 .\uninstall.ps1
 ```
 
-장치 제거 전에 Spatial SoftReceiver 엔드포인트의 두 독점 속성을 지우고 읽어 확인한 다음, 장치·드라이버 저장소 항목·시험 인증서를 지우고 남은 것이 없는지 확인합니다(종료 코드 0). 정책 삭제 실패나 남은 엔드포인트는 종료 코드 1로 보고합니다. 다른 장치의 속성은 바꾸지 않습니다.
+장치 제거 전에 Spatial SoftReceiver 엔드포인트의 두 독점 속성을 지우고 읽어 확인한 다음, 장치·드라이버 저장소 항목·시험 인증서를 지우고 남은 것이 없는지 확인합니다(종료 코드 0). 영어 Windows의 요약은 `remaining: devices=0, driver packages=0, certificates=0, service keys=0, endpoints=0`이고, 한국어 Windows에서는 `남은 항목: 장치 0, 드라이버 패키지 0, 인증서 0, 서비스 키 0, 엔드포인트 0`입니다. 정책 삭제 실패나 남은 엔드포인트는 종료 코드 1로 보고합니다. 다른 장치의 속성은 바꾸지 않습니다.
 
 시험을 모두 마쳤으면 다음으로 되돌립니다.
 

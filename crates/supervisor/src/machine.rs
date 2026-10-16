@@ -332,8 +332,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     ///
     /// A lost output or capture is the engine's to reconnect: it retries
     /// without limit and says `FaultCleared` when it succeeds. So a `Fault`
-    /// notice keeps Running with an error that says it is reconnecting, and
-    /// `FaultCleared` clears it with a note. A fault that outlasts
+    /// notice keeps Running without changing the current error, and
+    /// `FaultCleared` ends the wait with a note. A fault that outlasts
     /// [`Config::fault_grace`] (from its first notice, by `now`), or a poll
     /// error, stops the engine, gives the roles back and moves to Faulted.
     pub fn tick(&mut self, now: Instant) -> Vec<SessionNotice> {
@@ -356,8 +356,6 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         for notice in &notices {
             match notice {
                 SessionNotice::Fault(fault) => {
-                    self.error =
-                        Some(self.message_error(reconnecting_message(fault), NextAction::None));
                     if self.reconnecting.is_none() {
                         self.reconnecting = Some(Reconnecting {
                             since: now,
@@ -836,7 +834,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         };
         // The profile is resolved before the roles move, so a broken
         // profile.toml or a BRIR set that went missing changes nothing.
-        let resolved = resolve(&self.config, &self.settings.profile)
+        let resolved = resolve(&self.config, &self.settings.profile, self.language())
             .map_err(|error| self.localized_error(error))?;
         self.profile = resolved.view;
         self.take_roles(ours, output.id.clone())?;
@@ -910,8 +908,6 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// The engine reconnected what it lost: the wait ends with a note.
     fn reconnected(&mut self) {
         if self.reconnecting.take().is_some() {
-            self.error = None;
-            self.error_message = None;
             self.notes.push(Message::Reconnected);
         }
     }
@@ -968,7 +964,7 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// from the imported BRIR set, else [`default_profile`] (with the saved
     /// gain). Reads the disk; the snapshot uses the cached view instead.
     pub fn output_profile(&self) -> Result<OutputProfile, UserError> {
-        resolve(&self.config, &self.settings.profile)
+        resolve(&self.config, &self.settings.profile, self.language())
             .map(|resolved| resolved.profile)
             .map_err(|error| error.render(self.language()))
     }
@@ -990,15 +986,11 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// does not resolve keeps what the settings say, with no directions, and
     /// becomes a note; enabling then fails with the same sentence.
     fn refresh_profile(&mut self) {
-        match resolve(&self.config, &self.settings.profile) {
-            Ok(resolved) => {
-                self.profile = resolved.view;
-                if self.profile.kind == ProfileKind::Stereo {
-                    self.profile.name = self.say(Message::DefaultProfileName);
-                }
-            }
+        match resolve(&self.config, &self.settings.profile, self.language()) {
+            Ok(resolved) => self.profile = resolved.view,
             Err(error) => {
-                self.profile = unresolved_view(&self.config, &self.settings.profile);
+                self.profile =
+                    unresolved_view(&self.config, &self.settings.profile, self.language());
                 self.notes.push(error.message);
             }
         }
@@ -1042,8 +1034,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// and the profile a re-prepare builds from kept: any failure leaves
     /// them and the running output as they were.
     fn change_profile(&mut self, settings: ProfileSettings) -> Result<(), UserError> {
-        let resolved =
-            resolve(&self.config, &settings).map_err(|error| self.localized_error(error))?;
+        let resolved = resolve(&self.config, &settings, self.language())
+            .map_err(|error| self.localized_error(error))?;
         if self.engine.is_some() {
             let prepared = match resolved.profile.prepare() {
                 Ok(prepared) => prepared,
@@ -1199,7 +1191,11 @@ fn profile_file(config: &Config) -> Option<&Path> {
 }
 
 /// The precedence of [`Supervisor::output_profile`], reading only headers.
-fn resolve(config: &Config, settings: &ProfileSettings) -> Result<Resolved, LocalizedError> {
+fn resolve(
+    config: &Config,
+    settings: &ProfileSettings,
+    language: Language,
+) -> Result<Resolved, LocalizedError> {
     if let Some(path) = profile_file(config) {
         let mut profile = engine::load_output_profile(path).map_err(|error| LocalizedError {
             message: Message::ProfileFileReadFailed {
@@ -1265,12 +1261,12 @@ fn resolve(config: &Config, settings: &ProfileSettings) -> Result<Resolved, Loca
     };
     speakers.gain_db = settings.gain_db.unwrap_or(0.0);
     let mut view = speakers_view(speakers, ProfileKind::Stereo, false);
-    view.name = Message::DefaultProfileName.render(Language::Ko);
+    view.name = Message::DefaultProfileName.render(language);
     Ok(Resolved { profile, view })
 }
 
 /// What the view says when the profile does not resolve.
-fn unresolved_view(config: &Config, settings: &ProfileSettings) -> ProfileView {
+fn unresolved_view(config: &Config, settings: &ProfileSettings, language: Language) -> ProfileView {
     let from_file = profile_file(config).is_some();
     let headphones = !from_file && settings.brir.is_some();
     ProfileView {
@@ -1284,7 +1280,7 @@ fn unresolved_view(config: &Config, settings: &ProfileSettings) -> ProfileView {
         name: match (&settings.brir, from_file) {
             (_, true) => "profile.toml".to_owned(),
             (Some(path), false) => brir_name(path),
-            (None, false) => "Stereo".to_owned(),
+            (None, false) => Message::DefaultProfileName.render(language),
         },
         brir: settings.brir.as_deref().filter(|_| headphones).map(display),
         headphone_fir: settings
@@ -1452,15 +1448,6 @@ enum Outcome {
 struct Reconnecting {
     since: Instant,
     fault: EngineFault,
-}
-
-fn reconnecting_message(fault: &EngineFault) -> Message {
-    match fault {
-        EngineFault::OutputLost(detail) => Message::ReconnectingOutput {
-            detail: detail.clone(),
-        },
-        EngineFault::CaptureLost(_) => Message::ReconnectingCapture,
-    }
 }
 
 /// Installed without a problem, running, and not missing the exclusive

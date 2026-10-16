@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 ssr-abi.workspace = true
 ssr-types.workspace = true
+ssr-i18n = { workspace = true, features = ["clap"] }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

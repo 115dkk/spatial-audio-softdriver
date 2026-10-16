@@ -1,0 +1,98 @@
+{
+  "$comment": "화면 갤러리의 장면 표. e2e/gallery.spec.ts가 장면마다 languages × schemes 장을 <name>.<language>.<scheme>.png로 찍고, tools/ui-gallery-issue.mjs가 같은 표로 찍힌 파일을 대조해 리뷰 이슈 본문을 만듭니다. fixture는 fixtures/index.json의 이름이고 모든 이름이 한 장면 이상에 나와야 합니다. tab은 status, profile, settings 중 하나(마법사와 종료 화면은 null). shell은 앱 셸이 OS에서 읽는 값(로그인 자동 시작, 업데이트)을 정합니다. hold가 true면 의도가 끝나지 않아 버튼이 진행 중인 모습으로 남습니다. steps는 찍기 전에 차례로 하는 일입니다: click은 그 선택자를 누르고 wait는 그 선택자가 보일 때까지 기다립니다.",
+  "languages": ["ko", "en"],
+  "languageNames": { "ko": "한국어", "en": "English" },
+  "schemeNames": { "light": "밝게", "dark": "어둡게" },
+  "defaults": {
+    "size": [1280, 800],
+    "schemes": ["light", "dark"],
+    "shell": { "autostart": false, "update": { "current": "0.15.0", "ready": null } }
+  },
+  "groups": [
+    { "id": "wizard", "title": "처음 설정" },
+    { "id": "status", "title": "상태" },
+    { "id": "profile", "title": "프로필" },
+    { "id": "settings", "title": "설정" },
+    { "id": "quit", "title": "종료" },
+    { "id": "window", "title": "작은 창" }
+  ],
+  "scenarios": [
+    { "name": "setup-welcome", "group": "wizard", "title": "환영", "fixture": "setup-welcome", "tab": null },
+    { "name": "setup-unsupported", "group": "wizard", "title": "지원하지 않는 Windows", "fixture": "setup-unsupported", "tab": null },
+    { "name": "setup-not-test-signing", "group": "wizard", "title": "시험서명 모드가 꺼짐", "fixture": "setup-not-test-signing", "tab": null },
+    { "name": "setup-driver-not-installed", "group": "wizard", "title": "드라이버 설치 전", "fixture": "setup-driver-not-installed", "tab": null },
+    {
+      "name": "setup-driver-installing",
+      "group": "wizard",
+      "title": "드라이버를 설치하는 중",
+      "fixture": "setup-driver-not-installed",
+      "tab": null,
+      "hold": true,
+      "steps": [{ "click": "[data-key=\"install\"]" }, { "wait": "[data-key=\"install\"][aria-busy=\"true\"]" }]
+    },
+    { "name": "setup-driver-problem", "group": "wizard", "title": "드라이버 문제(문제 코드 52)", "fixture": "setup-driver-problem", "tab": null },
+    { "name": "setup-driver-declined", "group": "wizard", "title": "관리자 승인을 취소함", "fixture": "setup-driver-declined", "tab": null },
+    { "name": "setup-reboot-required", "group": "wizard", "title": "다시 시작해야 함", "fixture": "setup-reboot-required", "tab": null },
+    { "name": "setup-choose-output", "group": "wizard", "title": "출력 장치 고르기", "fixture": "setup-choose-output", "tab": null },
+    { "name": "setup-output-missing", "group": "wizard", "title": "저장된 출력 장치가 없음", "fixture": "setup-output-missing", "tab": null },
+    { "name": "setup-choose-output-empty", "group": "wizard", "title": "고를 출력 장치가 없음", "fixture": "setup-choose-output-empty", "tab": null },
+
+    { "name": "ready", "group": "status", "title": "꺼짐", "fixture": "ready", "tab": "status" },
+    {
+      "name": "ready-outputs-open",
+      "group": "status",
+      "title": "출력 목록을 연 상태",
+      "fixture": "ready",
+      "tab": "status",
+      "steps": [{ "click": "[data-key=\"outputs-toggle\"]" }, { "wait": ".output-list" }]
+    },
+    {
+      "name": "ready-turning-on",
+      "group": "status",
+      "title": "켜는 중",
+      "fixture": "ready",
+      "tab": "status",
+      "hold": true,
+      "steps": [{ "click": "[data-key=\"power\"]" }, { "wait": "[data-key=\"power\"][aria-busy=\"true\"]" }]
+    },
+    { "name": "ready-start-failed", "group": "status", "title": "켜지 못함(다시 시도)", "fixture": "ready-start-failed", "tab": "status" },
+    { "name": "ready-output-renamed", "group": "status", "title": "출력 장치를 이름으로 다시 찾음", "fixture": "ready-output-renamed", "tab": "status" },
+    { "name": "running", "group": "status", "title": "켜짐(입구 셋과 계측)", "fixture": "running", "tab": "status" },
+    { "name": "running-reconnecting", "group": "status", "title": "출력에 다시 연결하는 중", "fixture": "running-reconnecting", "tab": "status" },
+    { "name": "faulted", "group": "status", "title": "다시 연결하지 못해 멈춤", "fixture": "faulted", "tab": "status" },
+
+    { "name": "ready-profile", "group": "profile", "title": "스테레오(BRIR 없음)", "fixture": "ready", "tab": "profile" },
+    { "name": "ready-headphones-profile", "group": "profile", "title": "헤드폰 프로필, 꺼짐", "fixture": "ready-headphones", "tab": "profile" },
+    { "name": "ready-profile-file", "group": "profile", "title": "profile.toml이 정한 프로필", "fixture": "ready-profile-file", "tab": "profile" },
+    { "name": "ready-brir-unreadable", "group": "profile", "title": "BRIR 세트를 읽지 못함", "fixture": "ready-brir-unreadable", "tab": "profile" },
+    { "name": "running-profile", "group": "profile", "title": "켜짐, 객체 지도", "fixture": "running", "tab": "profile" },
+    { "name": "faulted-profile", "group": "profile", "title": "멈춘 상태의 프로필", "fixture": "faulted", "tab": "profile" },
+
+    { "name": "ready-settings", "group": "settings", "title": "설정(업데이트 없음)", "fixture": "ready", "tab": "settings" },
+    {
+      "name": "ready-settings-update-ready",
+      "group": "settings",
+      "title": "받아 둔 업데이트가 있음, 로그인 때 시작",
+      "fixture": "ready",
+      "tab": "settings",
+      "shell": { "autostart": true, "update": { "current": "0.15.0", "ready": "0.16.0" } }
+    },
+    {
+      "name": "ready-settings-record-refused",
+      "group": "settings",
+      "title": "거절된 의도의 띠(진단 녹음)",
+      "fixture": "ready",
+      "tab": "settings",
+      "steps": [{ "click": "[data-key=\"record\"]" }, { "wait": ".banner" }]
+    },
+
+    { "name": "quit", "group": "quit", "title": "종료한 뒤", "fixture": "quit", "tab": null },
+
+    { "name": "running-960x640", "group": "window", "title": "상태, 960×640", "fixture": "running", "tab": "status", "size": [960, 640], "schemes": ["light"] },
+    { "name": "running-720x480", "group": "window", "title": "상태, 720×480", "fixture": "running", "tab": "status", "size": [720, 480], "schemes": ["light"] },
+    { "name": "running-profile-960x640", "group": "window", "title": "프로필, 960×640", "fixture": "running", "tab": "profile", "size": [960, 640], "schemes": ["light"] },
+    { "name": "running-profile-720x480", "group": "window", "title": "프로필, 720×480", "fixture": "running", "tab": "profile", "size": [720, 480], "schemes": ["light"] },
+    { "name": "ready-settings-720x480", "group": "window", "title": "설정, 720×480", "fixture": "ready", "tab": "settings", "size": [720, 480], "schemes": ["light"] },
+    { "name": "setup-choose-output-720x480", "group": "window", "title": "출력 고르기, 720×480", "fixture": "setup-choose-output", "tab": null, "size": [720, 480], "schemes": ["light"] }
+  ]
+}

@@ -61,17 +61,10 @@ impl Note {
     pub fn render(&self, language: Language) -> String {
         match self {
             Self::External(detail) => detail.clone(),
-            Self::RestoreReadFailed { detail } => match language {
-                Language::Ko => format!("복원점을 읽지 못했습니다: {detail}"),
-                Language::En => format!("Could not read the restore point: {detail}"),
-            },
-            Self::RestoreFailed => match language {
-                Language::Ko => "지난 실행의 기본 장치를 되돌리지 못했습니다.",
-                Language::En => {
-                    "Could not restore the default audio devices from the previous run."
-                }
+            Self::RestoreReadFailed { detail } => {
+                ssr_i18n::shell::restore_point_read_failed(language, detail)
             }
-            .to_owned(),
+            Self::RestoreFailed => ssr_i18n::shell::restore_failed(language).to_owned(),
             Self::Supervisor(message) => message.render(language),
         }
     }
@@ -548,11 +541,7 @@ fn without_engine(snapshot: &Snapshot) -> Snapshot {
 
 fn quitting(language: Language) -> UserError {
     UserError {
-        message: match language {
-            Language::Ko => "앱이 종료되는 중입니다.",
-            Language::En => "The app is shutting down.",
-        }
-        .to_owned(),
+        message: ssr_i18n::shell::quitting(language).to_owned(),
         next: NextAction::None,
     }
 }

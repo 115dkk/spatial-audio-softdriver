@@ -26,6 +26,24 @@ def sample():
     ]
 
 
+class TestkitCatalogTests(unittest.TestCase):
+    def test_scripts_load_generated_localized_strings(self):
+        strings = ROOT / "tools/testkit/strings.psd1"
+        data = strings.read_bytes()
+        self.assertTrue(data.startswith(b"\xef\xbb\xbf"))
+        text = data[3:].decode("utf-8")
+        self.assertIn("  ko = @{", text)
+        self.assertIn("  en = @{", text)
+        for script in ("install.ps1", "uninstall.ps1", "collect.ps1"):
+            source = read(f"tools/testkit/{script}")
+            self.assertIn("Import-PowerShellDataFile", source)
+            self.assertIn("$env:SSR_LANG -eq 'ko'", source)
+            self.assertIn("$env:SSR_LANG -eq 'en'", source)
+            self.assertIn("Get-UICulture", source)
+            self.assertIn("function Format-Text", source)
+        self.assertIn("'strings.psd1'", read("tools/ci/driver-test-kit.ps1"))
+
+
 class EndpointTests(unittest.TestCase):
     def test_json_and_id_selection_ignore_names_and_order(self):
         rows = parse_endpoints("\ufeff" + json.dumps(sample(), ensure_ascii=False))

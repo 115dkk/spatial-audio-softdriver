@@ -12,10 +12,16 @@ import type {
 } from './bindings';
 import { text } from './text';
 
-/** 48000 → "48 kHz", 44100 → "44.1 kHz". */
+/** U+00A0: keeps a number on the same line as its unit. */
+export const NBSP = '\u00a0';
+
+/**
+ * 48000 → "48 kHz", 44100 → "44.1 kHz". A number and its unit are joined
+ * by a no-break space (NBSP) so a narrow card never splits them.
+ */
 export function describeRate(hz: number): string {
   const khz = hz / 1000;
-  return `${Number.isInteger(khz) ? khz.toFixed(0) : khz.toFixed(1)} kHz`;
+  return `${Number.isInteger(khz) ? khz.toFixed(0) : khz.toFixed(1)}${NBSP}kHz`;
 }
 
 /** float/32 → "float32", int/24 in 32 → "int24/32". */
@@ -27,7 +33,9 @@ export function describeSamples(format: PcmFormat): string {
 }
 
 export function codecName(codec: BitstreamCodec): string {
-  return typeof codec === 'string' ? text.codecs[codec] : text.format.otherCodec(codec.other);
+  return typeof codec === 'string'
+    ? text.codecs[codec]
+    : text.format.otherCodec('0x' + codec.other.toString(16).padStart(8, '0'));
 }
 
 function describePcm(format: PcmFormat): string {
@@ -72,7 +80,7 @@ export function oneDecimal(value: number): string {
 }
 
 export function describeVolume(volumeDb: number, muted: boolean): string {
-  const db = `${oneDecimal(volumeDb)} dB`;
+  const db = `${oneDecimal(volumeDb)}${NBSP}dB`;
   return muted ? `${text.status.muted} (${db})` : db;
 }
 
@@ -94,7 +102,11 @@ export function chainErrorTotal(map: ChainErrorMap): number {
 }
 
 export function describeOutputMode(engine: EngineStatus): string {
-  if (engine.output_fell_back) return text.meters.fellBack(engine.output_mix_channels);
+  if (engine.output_fell_back) {
+    return engine.output_mix_channels > 0
+      ? text.meters.fellBackMix(engine.output_mix_channels)
+      : text.meters.fellBack;
+  }
   return engine.output_mode === 'exclusive' ? text.meters.exclusive : text.meters.shared;
 }
 
@@ -105,5 +117,5 @@ export function describeOutputFormat(engine: EngineStatus): string {
 
 export function describeClock(engine: EngineStatus): string {
   const name = engine.clock === 'trim' ? text.meters.trim : text.meters.asrc;
-  return `${name} · ${oneDecimal(engine.clock_ppm)} ${text.meters.ppm}`;
+  return `${name} · ${oneDecimal(engine.clock_ppm)}${NBSP}${text.meters.ppm}`;
 }

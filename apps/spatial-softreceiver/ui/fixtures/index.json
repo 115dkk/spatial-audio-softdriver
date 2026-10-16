@@ -7,10 +7,16 @@
   "setup-driver-declined",
   "setup-reboot-required",
   "setup-choose-output",
+  "setup-output-missing",
+  "setup-choose-output-empty",
   "ready",
   "ready-output-renamed",
   "running",
   "running-reconnecting",
   "faulted",
+  "ready-headphones",
+  "ready-profile-file",
+  "ready-brir-unreadable",
+  "ready-start-failed",
   "quit"
 ]

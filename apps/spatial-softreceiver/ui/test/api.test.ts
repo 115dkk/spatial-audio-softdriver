@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Snapshot } from '../src/bindings';
+import type { Language, Snapshot } from '../src/bindings';
 import { fixture } from '../src/fixtures';
 import { createMockApi } from '../src/mock';
 
@@ -55,6 +55,189 @@ describe('the mock bridge', () => {
       message: '먼저 끈 뒤 출력을 바꾸십시오.',
     });
     expect((await api.snapshot()).error?.message).toBe('먼저 끈 뒤 출력을 바꾸십시오.');
+  });
+});
+
+describe('the mock speaks as the supervisor', () => {
+  const languages: Language[] = ['ko', 'en'];
+
+  it.each([
+    ['ready-start-failed', 'ko', 'en'],
+    ['running', 'ko', 'en'],
+    ['setup-output-missing', 'en', 'ko'],
+    ['ready-output-renamed', 'en', 'ko'],
+  ] as const)('says the %s fixture sentences again in the other language (%s to %s)', async (name, from, to) => {
+    // machine.rs renders its kept error and its notes in the new language.
+    const api = createMockApi(fixture(name, from));
+    await api.dispatch({ kind: 'set_language', value: to });
+    const after = await api.snapshot();
+    const expected = fixture(name, to);
+    expect(after.language).toBe(to);
+    expect(after.error).toEqual(expected.error);
+    expect(after.notes).toEqual(expected.notes);
+  });
+
+  /** The welcome step on a PC whose platform or driver is a wizard fixture's. */
+  function welcomeOn(language: Language, from: string): Snapshot {
+    const start = fixture('setup-welcome', language);
+    const pc = fixture(from, language);
+    start.platform = pc.platform;
+    start.driver = pc.driver;
+    return start;
+  }
+
+  it.each(languages.flatMap((language) =>
+    ['setup-unsupported', 'setup-not-test-signing', 'setup-driver-problem', 'setup-reboot-required'].map(
+      (name) => [name, language] as const,
+    ),
+  ))('reaches %s (%s) with the sentence Rust wrote into it', async (name, language) => {
+    const api = createMockApi(welcomeOn(language, name));
+    const expected = fixture(name, language);
+    await expect(api.dispatch({ kind: 'begin_setup' })).rejects.toEqual(expected.error);
+    const snapshot = await api.snapshot();
+    expect(snapshot.phase).toEqual(expected.phase);
+    expect(snapshot.error).toEqual(expected.error);
+    expect(snapshot.notes).toEqual([]);
+  });
+
+  it('says why another architecture is unsupported', async () => {
+    const start = welcomeOn('en', 'setup-choose-output');
+    start.platform = { os_build: 26100, arch: 'arm64', test_signing: true, secure_boot: 'disabled' };
+    const api = createMockApi(start);
+    await expect(api.dispatch({ kind: 'begin_setup' })).rejects.toEqual({
+      message: 'This build is for x64, but this PC is Arm64.',
+      next: 'none',
+    });
+    expect((await api.snapshot()).phase).toEqual({ kind: 'setup', value: 'unsupported' });
+  });
+
+  it('fails and refuses in English when it starts from an English fixture', async () => {
+    const running = createMockApi(fixture('running', 'en'));
+    await expect(running.dispatch({ kind: 'choose_output', value: 'x' })).rejects.toEqual({
+      message: 'Turn it off before changing the output.',
+      next: 'none',
+    });
+    expect((await running.snapshot()).error?.message).toBe('Turn it off before changing the output.');
+    await expect(running.dispatch({ kind: 'test_direction', value: 99 })).rejects.toMatchObject({
+      message: 'That direction does not exist.',
+    });
+
+    const ready = createMockApi(fixture('ready', 'en'));
+    await expect(ready.dispatch({ kind: 'test_direction', value: 0 })).rejects.toEqual({
+      message: 'Turn it on before playing a test tone.',
+      next: 'none',
+    });
+    await expect(ready.dispatch({ kind: 'begin_setup' })).rejects.toEqual({
+      message: 'That action is not available right now.',
+      next: 'none',
+    });
+    await expect(ready.dispatch({ kind: 'start_diagnostic_recording' })).rejects.toMatchObject({
+      message: 'Diagnostic recording is coming in a later update.',
+    });
+    await expect(ready.dispatch({ kind: 'import_headphone_fir', value: 'C:\\hd650.wav' })).rejects.toMatchObject({
+      message: 'Import a BRIR set first.',
+    });
+    await expect(ready.dispatch({ kind: 'set_gain', value: 11 })).rejects.toMatchObject({
+      message: 'Gain must be between -20 dB and +10 dB.',
+    });
+    expect((await ready.snapshot()).error?.message).toBe('Gain must be between -20 dB and +10 dB.');
+  });
+
+  it('adds no note of its own when it turns on, and clears the old ones', async () => {
+    for (const language of languages) {
+      const api = createMockApi(fixture('running', language));
+      expect((await api.snapshot()).notes).toHaveLength(1);
+      await api.dispatch({ kind: 'disable' });
+      await api.dispatch({ kind: 'enable' });
+      const snapshot = await api.snapshot();
+      expect(snapshot.phase).toEqual({ kind: 'running' });
+      expect(snapshot.notes).toEqual([]);
+    }
+  });
+
+  it('finds a saved output again by its name, with the supervisor note', async () => {
+    const start = fixture('ready', 'en');
+    const saved = start.chosen_output;
+    if (saved === null) throw new Error('ready has a chosen output');
+    start.chosen_output = { id: 'an id from before a reboot', name: saved.name };
+    const api = createMockApi(start);
+    await api.dispatch({ kind: 'enable' });
+    const snapshot = await api.snapshot();
+    expect(snapshot.chosen_output).toEqual(saved);
+    expect(snapshot.notes).toEqual([`The output device identifier changed, so it was found again by name: ${saved.name}`]);
+  });
+
+  it('sends a missing saved output back to the output step', async () => {
+    const start = fixture('ready');
+    start.chosen_output = { id: 'gone', name: '사라진 장치' };
+    const api = createMockApi(start);
+    await expect(api.dispatch({ kind: 'enable' })).rejects.toEqual({
+      message: '저장된 출력 장치를 찾을 수 없습니다: 사라진 장치',
+      next: 'open_settings',
+    });
+    expect((await api.snapshot()).phase).toEqual({ kind: 'setup', value: 'choose_output' });
+  });
+
+  it('says a kept error again in the language chosen, as the supervisor does', async () => {
+    const api = createMockApi(fixture('ready'));
+    await expect(api.dispatch({ kind: 'set_gain', value: 12 })).rejects.toMatchObject({
+      message: '게인은 -20 dB에서 +10 dB 사이입니다.',
+    });
+    await api.dispatch({ kind: 'set_language', value: 'en' });
+    const snapshot = await api.snapshot();
+    expect(snapshot.language).toBe('en');
+    expect(snapshot.error).toEqual({ message: 'Gain must be between -20 dB and +10 dB.', next: 'none' });
+    // Any other success clears it.
+    await api.dispatch({ kind: 'set_gain', value: -3 });
+    expect((await api.snapshot()).error).toBeNull();
+  });
+
+  it('follows the starting language for automatic and names the default stereo profile in it', async () => {
+    const api = createMockApi(fixture('ready', 'en'));
+    expect((await api.snapshot()).profile.name).toBe('Default stereo');
+    await api.dispatch({ kind: 'set_language', value: 'ko' });
+    let snapshot = await api.snapshot();
+    expect(snapshot).toMatchObject({ language: 'ko', language_choice: 'ko' });
+    expect(snapshot.profile.name).toBe('Stereo');
+    await api.dispatch({ kind: 'set_language', value: null });
+    snapshot = await api.snapshot();
+    expect(snapshot).toMatchObject({ language: 'en', language_choice: null });
+    expect(snapshot.profile.name).toBe('Default stereo');
+  });
+});
+
+describe('the mock shell and held intents', () => {
+  it('is the plain browser without a shell', async () => {
+    const { shell } = createMockApi(fixture('ready'));
+    expect(shell.native).toBe(false);
+    expect(await shell.autostartEnabled()).toBe(false);
+  });
+
+  it('stands in for the Tauri shell with the values given', async () => {
+    const { shell } = createMockApi(fixture('ready'), {
+      shell: { autostart: true, update: { current: '0.15.0', ready: '0.16.0' } },
+    });
+    expect(shell.native).toBe(true);
+    expect(await shell.autostartEnabled()).toBe(true);
+    await shell.setAutostart(false);
+    expect(await shell.autostartEnabled()).toBe(false);
+    expect(await shell.updateState()).toEqual({ current: '0.15.0', ready: '0.16.0' });
+    await expect(shell.applyUpdate()).resolves.toBeUndefined();
+    const stop = await shell.onUpdate(() => {
+      throw new Error('the stand-in announces no update');
+    });
+    stop();
+  });
+
+  it('keeps every intent in flight when held, and changes nothing', async () => {
+    const api = createMockApi(fixture('ready'), { hold: true });
+    let settled = false;
+    void api.dispatch({ kind: 'enable' }).finally(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    expect((await api.snapshot()).phase).toEqual({ kind: 'ready' });
   });
 });
 

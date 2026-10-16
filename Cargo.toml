@@ -26,6 +26,7 @@ dbg_macro = "deny"
 
 [workspace.dependencies]
 ssr-types = { path = "crates/ssr-types" }
+ssr-i18n = { path = "crates/ssr-i18n" }
 ssr-abi = { path = "crates/ssr-abi" }
 bitstream = { path = "crates/bitstream" }
 decode = { path = "crates/decode" }

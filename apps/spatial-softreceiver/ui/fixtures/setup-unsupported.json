@@ -39,7 +39,7 @@
   },
   "roles_taken": false,
   "error": {
-    "message": "Windows 10 2004(빌드 19041) 이상이 필요합니다. 이 PC는 빌드 18363입니다.",
+    "message": "Windows 10 2004(빌드 19041) 이상이 필요합니다.",
     "next": "none"
   },
   "notes": []

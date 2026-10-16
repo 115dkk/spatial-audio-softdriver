@@ -2,6 +2,14 @@
 # Collects only Spatial SoftReceiver and Windows driver diagnostics into a shareable zip.
 param([string] $OutDir = $PSScriptRoot)
 $ErrorActionPreference = 'Continue'
+$catalog = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'strings.psd1')
+$language = if ($env:SSR_LANG -eq 'ko') { 'ko' } elseif ($env:SSR_LANG -eq 'en') { 'en' } elseif ((Get-UICulture).TwoLetterISOLanguageName -eq 'ko') { 'ko' } else { 'en' }
+$strings = $catalog[$language]
+function Format-Text([string] $Key, [hashtable] $Values = @{}) {
+    $text = [string]$strings[$Key]
+    foreach ($name in $Values.Keys) { $text = $text.Replace("{$name}", [string]$Values[$name]) }
+    $text
+}
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $alphabet = 'abcdefghijkmnopqrstuvwxyz23456789'.ToCharArray()
 $random = -join (1..6 | ForEach-Object { $alphabet[(Get-Random -Maximum $alphabet.Length)] })
@@ -131,7 +139,7 @@ $total = ($ssrdumps | Measure-Object Length -Sum).Sum
 if (-not $total) { $total = 0 }
 if ($total -le 200MB) {
     foreach ($file in $ssrdumps) { Copy-Item $file.FullName $work; $collected.Add($file.Name) }
-} else { Write-Warning '.ssrdump 파일 합계가 200 MB를 넘어 목록만 수집합니다.' }
+} else { Write-Warning (Format-Text 'dumps_too_large') }
 
 # Recordings (M2 builder loopback WAVs) and screenshots, up to 300 MB together.
 $media = @(Get-ChildItem (Join-Path $PSScriptRoot '*') -Include '*.wav', '*.png', '*.jpg' -File -ErrorAction SilentlyContinue)
@@ -141,15 +149,15 @@ $mediaTotal = ($media | Measure-Object Length -Sum).Sum
 if (-not $mediaTotal) { $mediaTotal = 0 }
 if ($mediaTotal -le 300MB) {
     foreach ($file in $media) { Copy-Item $file.FullName $work; $collected.Add($file.Name) }
-} else { Write-Warning '녹음과 화면 파일 합계가 300 MB를 넘어 목록만 수집합니다.' }
+} else { Write-Warning (Format-Text 'media_too_large') }
 
 $collected | Sort-Object | Set-Content -Encoding UTF8 (Join-Path $work 'CONTENTS.txt')
-Write-Host '수집한 항목:'
+Write-Host (Format-Text 'collected_heading')
 Get-Content (Join-Path $work 'CONTENTS.txt') | ForEach-Object { Write-Host "  $_" }
 Remove-Item -Force $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $work -DestinationPath $zip -CompressionLevel Optimal
-if (-not (Test-Path $zip)) { [Console]::Error.WriteLine("collect.ps1: $zip was not written"); exit 1 }
+if (-not (Test-Path $zip)) { [Console]::Error.WriteLine((Format-Text 'collect_failed' @{ path = $zip })); exit 1 }
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
-Write-Host "시험 보고서: $zip"
+Write-Host (Format-Text 'report_path' @{ path = $zip })
 # Explicit: the last native command (verifier, bcdedit) must not set the result.
 exit 0

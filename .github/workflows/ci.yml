@@ -12,7 +12,8 @@ name: CI
 #   ui        the app's screens (apps/spatial-softreceiver/ui): fonts pinned
 #             by SHA-256, tsc, vitest, the generated TypeScript bindings and
 #             snapshot fixtures compared with ssr-types (tests/ui_contract.rs),
-#             and gallery screenshots of every screen state as an artifact
+#             and the screen gallery (every scene in Korean and English, light
+#             and dark) as an artifact; ui-gallery.yml posts it to an issue
 #   test      cargo test on Linux, Windows Server 2022 and 2025 (x64) and
 #             Windows 11 (ARM64), debug and release; on Windows also the app
 #             started for real (--smoke: WebView2 draws the screens and asks
@@ -130,6 +131,10 @@ jobs:
       - name: The committed bindings and fixtures match ssr-types (tests/ui_contract.rs)
         run: cargo test -p ssr-types --features ts --test ui_contract --locked
 
+      # Every scene of ui/e2e/gallery.json in Korean and English, light and
+      # dark: no console error, the font loaded, no sideways scroll and no
+      # Hangul on an English screen. ui-gallery.yml takes the same pictures
+      # and posts them to a review issue.
       - name: Gallery screenshots of every screen state (Playwright, Chromium)
         working-directory: apps/spatial-softreceiver/ui
         env:
@@ -137,6 +142,9 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           npm run shots
+
+      - name: The pictures match the scene table (tools/ui-gallery-issue.mjs)
+        run: node tools/ui-gallery-issue.mjs --check --shots "$RUNNER_TEMP/ui-shots"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -600,6 +608,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
+
+      # deny.toml excuses the yanked zip 8.6.0 only while the newest velopack
+      # cannot be built with an unyanked zip; this proves it on every run.
+      # When velopack-zip-guard.yml removes the exception it deletes the
+      # script, which turns this step off.
+      - name: The zip 8.6.0 exception still stands
+        if: hashFiles('.github/scripts/velopack_zip_guard.py') != ''
+        run: python3 .github/scripts/velopack_zip_guard.py check
 
       - name: cargo deny check
         run: cargo deny --all-features check

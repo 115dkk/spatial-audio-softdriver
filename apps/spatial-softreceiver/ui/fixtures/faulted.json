@@ -61,7 +61,7 @@
   },
   "roles_taken": false,
   "error": {
-    "message": "엔진이 15초 동안 다시 연결하지 못했습니다. 출력 장치와의 연결이 끊어졌습니다: AUDCLNT_E_DEVICE_INVALIDATED",
+    "message": "엔진이 15초 동안 다시 연결하지 못했습니다. 출력 장치와의 연결이 끊어졌습니다: the output device was removed",
     "next": "retry"
   },
   "notes": []
