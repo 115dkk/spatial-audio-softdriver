@@ -27,8 +27,8 @@ pub const MAX_OUTPUT_CHANNELS: usize = 32;
 const _: () = assert!(speakers::MAX_DEVICE_CHANNELS == MAX_OUTPUT_CHANNELS);
 
 pub use chain::{
-    BlockOut, Chain, ChainConfig, ChainError, ChainEvent, EndpointFilter, OutputKind,
-    OutputProfile, OutputProfileError, PrepareError, Prepared, load_output_profile,
+    BlockOut, Chain, ChainConfig, ChainError, ChainEvent, CorrectionProfile, EndpointFilter,
+    OutputKind, OutputProfile, OutputProfileError, PrepareError, Prepared, load_output_profile,
 };
 pub use decode::direct::{
     DirectLayout, DirectLayoutOverride, DirectLayouts, parse_speaker,
