@@ -46,9 +46,14 @@ pub enum Intent {
     /// Keeps the BRIR set for headphones; a running headphone output takes
     /// it live, while speakers in use stay as they are.
     ImportBrir(PathBuf),
+    /// The layout speakers use while no correction is imported.
     SetSpeakerLayout(SpeakerLayout),
-    /// Sets (`Some`) or clears (`None`) one speaker's room-correction FIR.
-    SetRoomFir(RoomFir),
+    /// Imports a room correction for the speakers: the CamillaDSP
+    /// configuration SECS 2 or SECS 2R exports (ADR 0034). It decides the
+    /// speakers, the device channels and all their processing.
+    ImportCorrection(PathBuf),
+    /// Goes back to the stored speaker layout without correction.
+    ClearCorrection,
     /// The gain of the output in use; each kind keeps its own.
     SetGain(f32),
     TestDirection(DirectionId),
@@ -200,25 +205,13 @@ impl SpeakerLayout {
     }
 }
 
-/// One speaker's room-correction FIR ([`Intent::SetRoomFir`]).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(specta::Type))]
-pub struct RoomFir {
-    /// A speaker of the current layout by its name in
-    /// [`SpeakersView::channels`] (`"L"`, `"Tfl"`, `"LFE"` for the subwoofer).
-    pub speaker: String,
-    /// A WAV: one track, or one track per device channel (ADR 0034). `None`
-    /// clears the speaker's FIR.
-    pub path: Option<PathBuf>,
-}
-
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct ProfileView {
     /// The output in use: the one Enable starts, or the running engine plays.
     pub kind: ProfileKind,
     /// The output in use by name: the BRIR set, the speaker layout (`"7.1.4"`),
-    /// or the name `profile.toml` gives.
+    /// the imported correction's title, or the name `profile.toml` gives.
     pub name: String,
     /// The gain of the output in use.
     pub gain_db: f32,
@@ -226,7 +219,7 @@ pub struct ProfileView {
     /// (the subwoofer is not a direction).
     pub directions: Vec<DirectionView>,
     /// The state directory's profile.toml decides the output; the kind,
-    /// import, layout and FIR intents are refused.
+    /// import, layout and correction intents are refused.
     pub from_file: bool,
     /// Headphone settings, kept while speakers are in use.
     pub headphones: HeadphonesView,
@@ -244,23 +237,35 @@ pub struct HeadphonesView {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct SpeakersView {
-    /// The app layout; `None` when a speaker `profile.toml` lays the speakers
-    /// out its own way.
+    /// The stored app layout, used while no correction is imported; `None`
+    /// when a speaker `profile.toml` lays the speakers out its own way.
     pub layout: Option<SpeakerLayout>,
-    /// Every device channel of the layout, in device order.
+    /// The imported correction, which then decides the speakers.
+    pub correction: Option<CorrectionView>,
+    /// Every device channel that plays, in device order: the correction's
+    /// outputs when one is imported, else the layout's speakers.
     pub channels: Vec<SpeakerChannelView>,
+}
+
+/// An imported SECS 2 / SECS 2R correction (ADR 0034).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(specta::Type))]
+pub struct CorrectionView {
+    /// The CamillaDSP configuration file.
+    pub path: String,
+    /// The configuration's `title` (`"SECS 2 mixed (8.0 ms)"`).
+    pub title: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(specta::Type))]
 pub struct SpeakerChannelView {
-    /// The speaker's name (`"L"`, `"Tfl"`), or `"LFE"` for a subwoofer.
+    /// The speaker on this channel (`"L"`, `"Tfl"`), `"LFE"` for the layout's
+    /// subwoofer, or the correction's output name (`"Lb"`, `"SW2"`).
     pub name: String,
     /// Zero-based device channel.
     pub channel: u16,
     pub subwoofer: bool,
-    /// The room-correction FIR, if any.
-    pub room_fir: Option<String>,
 }
 
 /// An output the user may choose, or has chosen.

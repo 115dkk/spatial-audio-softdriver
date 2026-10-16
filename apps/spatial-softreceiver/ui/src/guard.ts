@@ -11,11 +11,13 @@ import type {
   BitstreamFormat,
   ChainErrorMap,
   ClockStatus,
+  CorrectionView,
   DirectionView,
   DriverState,
   EndpointStatus,
   EngineFault,
   EngineStatus,
+  HeadphonesView,
   Intent,
   LatencyStats,
   Language,
@@ -34,6 +36,9 @@ import type {
   SetupStep,
   Snapshot,
   SourceFormat,
+  SpeakerChannelView,
+  SpeakerLayout,
+  SpeakersView,
   UnderrunSnapshot,
   UnsupportedReason,
   UserError,
@@ -156,7 +161,19 @@ export const NEXT_ACTIONS: Record<NextAction, true> = {
   none: true,
 };
 export const OUTPUT_MODES: Record<OutputMode, true> = { exclusive: true, shared: true };
-export const PROFILE_KINDS: Record<ProfileKind, true> = { stereo: true, headphones: true, speakers: true };
+export const PROFILE_KINDS: Record<ProfileKind, true> = { headphones: true, speakers: true };
+/** The app's speaker layouts in the contract's order (`SpeakerLayout::ALL`), which the screen lists. */
+export const SPEAKER_LAYOUTS: Record<SpeakerLayout, true> = {
+  '2.0': true,
+  '2.1': true,
+  '4.0': true,
+  '5.1': true,
+  '7.1': true,
+  '5.1.2': true,
+  '5.1.4': true,
+  '7.1.2': true,
+  '7.1.4': true,
+};
 export const CLOCKS: Record<ClockStatus, true> = { trim: true, asrc: true };
 export const SAMPLE_TYPES: Record<SampleType, true> = { int: true, float: true };
 export const UNSUPPORTED_REASONS: Record<UnsupportedReason, true> = {
@@ -183,6 +200,7 @@ const setupStep = oneOf(SETUP_STEPS);
 const nextAction = oneOf(NEXT_ACTIONS);
 const outputMode = oneOf(OUTPUT_MODES);
 const profileKind = oneOf(PROFILE_KINDS);
+const speakerLayout = oneOf(SPEAKER_LAYOUTS);
 const clock = oneOf(CLOCKS);
 const sampleType = oneOf(SAMPLE_TYPES);
 const unsupportedReason = oneOf(UNSUPPORTED_REASONS);
@@ -340,15 +358,32 @@ const platform = object<Platform>({
 
 const userError = object<UserError>({ message: string, next: nextAction });
 
+const headphonesView = object<HeadphonesView>({ brir: nullable(string) });
+
+const correctionView = object<CorrectionView>({ path: string, title: string });
+
+const speakerChannelView = object<SpeakerChannelView>({
+  name: string,
+  channel: number,
+  subwoofer: boolean,
+});
+
+const speakersView = object<SpeakersView>({
+  layout: nullable(speakerLayout),
+  correction: nullable(correctionView),
+  channels: array(speakerChannelView),
+});
+
 const profileView = object<ProfileView>({
   kind: profileKind,
   name: string,
-  brir: nullable(string),
-  headphone_fir: nullable(string),
   gain_db: number,
   directions: array(directionView),
   from_file: boolean,
+  headphones: headphonesView,
+  speakers: speakersView,
 });
+
 
 const snapshot = object<Snapshot>({
   language,
@@ -371,8 +406,11 @@ const intent = tagged<Intent>({
   install_driver: unit('install_driver'),
   recheck: unit('recheck'),
   choose_output: carrying('choose_output', string),
+  set_profile_kind: carrying('set_profile_kind', profileKind),
   import_brir: carrying('import_brir', string),
-  import_headphone_fir: carrying('import_headphone_fir', string),
+  set_speaker_layout: carrying('set_speaker_layout', speakerLayout),
+  import_correction: carrying('import_correction', string),
+  clear_correction: unit('clear_correction'),
   set_gain: carrying('set_gain', number),
   test_direction: carrying('test_direction', number),
   enable: unit('enable'),

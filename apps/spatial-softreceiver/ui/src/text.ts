@@ -6,6 +6,7 @@ import { en as catalogEn, ko as catalogKo, type Catalog } from './catalog';
 
 type Screen = Catalog['screen'];
 type Common = Catalog['common'];
+type Supervisor = Catalog['supervisor'];
 type Text = Omit<Screen, 'endpoints' | 'chainErrorKinds' | 'status' | 'profile'> & {
   product: Catalog['names']['product'];
   endpoints: (Screen['endpoints'][number] & { name: string })[];
@@ -14,11 +15,12 @@ type Text = Omit<Screen, 'endpoints' | 'chainErrorKinds' | 'status' | 'profile'>
   profile: Screen['profile'] & {
     fromFile: Common['profile_file_takes_precedence'];
     testOff: Common['test_after_enable'];
+    needsBrir: Supervisor['import_brir_first'];
   };
 };
 
 function project(catalog: Catalog): Text {
-  const { screen, names, common } = catalog;
+  const { screen, names, common, supervisor } = catalog;
   return {
     ...screen,
     product: names.product,
@@ -28,6 +30,9 @@ function project(catalog: Catalog): Text {
       ...screen.profile,
       fromFile: common.profile_file_takes_precedence,
       testOff: common.test_after_enable,
+      // The supervisor refuses headphones without a BRIR set in this
+      // sentence; the screen says it before the button is pressed.
+      needsBrir: supervisor.import_brir_first,
     },
     endpoints: [
       { ...screen.endpoints[0]!, name: names.endpoint_main },

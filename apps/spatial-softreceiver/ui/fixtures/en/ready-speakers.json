@@ -6,7 +6,7 @@
   },
   "profile": {
     "kind": "speakers",
-    "name": "7.1.4",
+    "name": "SECS 2 mixed (8.0 ms)",
     "gain_db": -6.0,
     "directions": [
       {
@@ -29,26 +29,26 @@
       },
       {
         "id": 3,
-        "name": "Lrs",
-        "azimuth_deg": 150.0,
-        "elevation_deg": 0.0
-      },
-      {
-        "id": 4,
-        "name": "Rrs",
-        "azimuth_deg": -150.0,
-        "elevation_deg": 0.0
-      },
-      {
-        "id": 5,
-        "name": "Lss",
+        "name": "Ls",
         "azimuth_deg": 90.0,
         "elevation_deg": 0.0
       },
       {
-        "id": 6,
-        "name": "Rss",
+        "id": 4,
+        "name": "Rs",
         "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "Lb",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "Rb",
+        "azimuth_deg": -150.0,
         "elevation_deg": 0.0
       },
       {
@@ -65,13 +65,13 @@
       },
       {
         "id": 9,
-        "name": "Trl",
+        "name": "Tbl",
         "azimuth_deg": 135.0,
         "elevation_deg": 45.0
       },
       {
         "id": 10,
-        "name": "Trr",
+        "name": "Tbr",
         "azimuth_deg": -135.0,
         "elevation_deg": 45.0
       }
@@ -82,78 +82,75 @@
     },
     "speakers": {
       "layout": "7.1.4",
+      "correction": {
+        "path": "C:\\Users\\me\\Documents\\SECS_export\\2026-10-16 living room\\configs\\secs_mixed.yml",
+        "title": "SECS 2 mixed (8.0 ms)"
+      },
       "channels": [
         {
           "name": "L",
           "channel": 0,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\L.wav"
+          "subwoofer": false
         },
         {
           "name": "R",
           "channel": 1,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\R.wav"
+          "subwoofer": false
         },
         {
           "name": "C",
           "channel": 2,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\C.wav"
+          "subwoofer": false
         },
         {
-          "name": "LFE",
+          "name": "Ls",
           "channel": 3,
-          "subwoofer": true,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SUB.wav"
+          "subwoofer": false
         },
         {
-          "name": "Lrs",
+          "name": "Rs",
           "channel": 4,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBL.wav"
+          "subwoofer": false
         },
         {
-          "name": "Rrs",
+          "name": "Lb",
           "channel": 5,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBR.wav"
+          "subwoofer": false
         },
         {
-          "name": "Lss",
+          "name": "Rb",
           "channel": 6,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SL.wav"
-        },
-        {
-          "name": "Rss",
-          "channel": 7,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SR.wav"
+          "subwoofer": false
         },
         {
           "name": "Tfl",
-          "channel": 8,
-          "subwoofer": false,
-          "room_fir": null
+          "channel": 7,
+          "subwoofer": false
         },
         {
           "name": "Tfr",
+          "channel": 8,
+          "subwoofer": false
+        },
+        {
+          "name": "Tbl",
           "channel": 9,
-          "subwoofer": false,
-          "room_fir": null
+          "subwoofer": false
         },
         {
-          "name": "Trl",
+          "name": "Tbr",
           "channel": 10,
-          "subwoofer": false,
-          "room_fir": null
+          "subwoofer": false
         },
         {
-          "name": "Trr",
+          "name": "SW1",
           "channel": 11,
-          "subwoofer": false,
-          "room_fir": null
+          "subwoofer": true
+        },
+        {
+          "name": "SW2",
+          "channel": 12,
+          "subwoofer": true
         }
       ]
     }

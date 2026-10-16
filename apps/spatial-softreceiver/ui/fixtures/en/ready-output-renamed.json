@@ -28,18 +28,17 @@
     },
     "speakers": {
       "layout": "2.0",
+      "correction": null,
       "channels": [
         {
           "name": "L",
           "channel": 0,
-          "subwoofer": false,
-          "room_fir": null
+          "subwoofer": false
         },
         {
           "name": "R",
           "channel": 1,
-          "subwoofer": false,
-          "room_fir": null
+          "subwoofer": false
         }
       ]
     }

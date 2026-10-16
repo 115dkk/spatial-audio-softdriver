@@ -32,8 +32,10 @@ function uiOnly(snapshot: Snapshot): Snapshot {
   clean.outputs.forEach((output, index) => { output.name = `SOURCE_OUTPUT_${index}`; });
   if (clean.chosen_output !== null) clean.chosen_output.name = 'SOURCE_CHOSEN_OUTPUT';
   clean.profile.name = 'SOURCE_PROFILE';
-  if (clean.profile.brir !== null) clean.profile.brir = 'C:\\SOURCE_BRIR';
-  if (clean.profile.headphone_fir !== null) clean.profile.headphone_fir = 'C:\\SOURCE_FIR.wav';
+  if (clean.profile.headphones.brir !== null) clean.profile.headphones.brir = 'C:\\SOURCE_BRIR';
+  const { speakers } = clean.profile;
+  if (speakers.correction !== null) speakers.correction = { path: 'C:\\SOURCE_CORRECTION.yml', title: 'SOURCE_TITLE' };
+  speakers.channels.forEach((channel) => { channel.name = `SOURCE_CHANNEL_${channel.channel}`; });
   clean.profile.directions.forEach((direction) => { direction.name = `SOURCE_DIRECTION_${direction.id}`; });
   if (clean.engine !== null) {
     if (clean.engine.fault !== null) clean.engine.fault.value = 'SOURCE_FAULT';
@@ -124,9 +126,10 @@ describe('i18n catalog contract', () => {
       ...profile,
       fromFile: common.profile_file_takes_precedence,
       testOff: common.test_after_enable,
+      needsBrir: catalog.supervisor.import_brir_first,
     });
     for (const key of ['powerOn', 'powerOff']) expect(status).not.toHaveProperty(key);
-    for (const key of ['fromFile', 'testOff']) expect(profile).not.toHaveProperty(key);
+    for (const key of ['fromFile', 'testOff', 'needsBrir']) expect(profile).not.toHaveProperty(key);
     expect(product).toBe(catalog.names.product);
     expect(projected).not.toHaveProperty('productLatin');
     expect(named).toEqual([
@@ -196,6 +199,19 @@ describe('English rendering', () => {
     },
   );
 
+  it.each(fixtureNames.filter((name) => ['ready', 'running', 'faulted'].includes(fixture(name).phase.kind)))(
+    '%s has no Hangul on either output tab of the profile screen', (name) => {
+      const snapshot = uiOnly(fixture(name));
+      snapshot.language = 'en';
+      const { root } = mounted(snapshot, 'profile');
+      for (const kind of ['headphones', 'speakers'] as const) {
+        root.querySelector<HTMLButtonElement>(`[data-key="profile-tab-${kind}"]`)?.click();
+        expect(root.querySelector(`#profile-panel-${kind}`)).not.toBeNull();
+        expectEnglish(root);
+      }
+    },
+  );
+
   it('reads translated navigation labels after switching tabs and opening the output list', () => {
     const snapshot = uiOnly(fixture('ready'));
     snapshot.language = 'en';
@@ -216,11 +232,16 @@ describe('English rendering', () => {
     snapshot.language = 'en';
     snapshot.profile.from_file = true;
     snapshot.profile.kind = 'speakers';
+    snapshot.profile.speakers.layout = null;
     snapshot.profile.directions = [];
     const { app, root } = mounted(snapshot, 'profile');
     expectEnglish(root);
     expect(root.textContent).toContain(en.profile.fromFile);
+    expect(root.textContent).toContain(en.profile.layoutFromFile);
     expect(root.textContent).toContain(en.profile.noDirections);
+    root.querySelector<HTMLButtonElement>('[data-key="profile-tab-headphones"]')?.click();
+    expect(root.textContent).toContain(en.profile.useHeadphones);
+    expectEnglish(root);
     app.draw({ ...snapshot, phase: { kind: 'setup', value: 'choose_output' }, outputs: [] });
     expect(root.textContent).toContain(en.wizard.noOutputs);
     expectEnglish(root);
@@ -229,18 +250,22 @@ describe('English rendering', () => {
   it('keeps Rust sentences and user device, file, profile and direction names verbatim', () => {
     const snapshot = fixture('running');
     snapshot.language = 'en';
+    snapshot.profile.from_file = true;
     snapshot.profile.name = '내 프로필';
-    snapshot.profile.brir = 'C:\\내 측정\\방';
-    snapshot.profile.headphone_fir = 'C:\\보정\\헤드폰.wav';
+    snapshot.profile.headphones.brir = 'C:\\내 측정\\방';
+    snapshot.profile.speakers.correction = { path: 'C:\\보정\\거실.yml', title: '거실 보정' };
+    snapshot.profile.speakers.channels[0]!.name = '앞 왼쪽';
     snapshot.profile.directions[0]!.name = '왼쪽';
     snapshot.engine!.directions[0]!.name = '왼쪽';
     snapshot.chosen_output!.name = '내 출력';
     snapshot.error = { message: 'Rust 오류 문장', next: 'none' };
     snapshot.notes = ['Rust 알림 문장'];
     const { root } = mounted(snapshot, 'profile');
-    for (const value of ['내 프로필', 'C:\\내 측정\\방', 'C:\\보정\\헤드폰.wav', '왼쪽', 'Rust 오류 문장', 'Rust 알림 문장']) {
+    for (const value of ['내 프로필', 'C:\\내 측정\\방', '왼쪽', 'Rust 오류 문장', 'Rust 알림 문장']) {
       expect(root.textContent).toContain(value);
     }
+    root.querySelector<HTMLButtonElement>('[data-key="profile-tab-speakers"]')?.click();
+    for (const value of ['C:\\보정\\거실.yml', '거실 보정', '앞 왼쪽']) expect(root.textContent).toContain(value);
     root.querySelector<HTMLButtonElement>('[data-key="nav-status"]')?.click();
     expect(root.textContent).toContain('내 출력');
   });
@@ -259,11 +284,13 @@ describe('English rendering', () => {
     const app = mountApp(root, bridge, { tab: 'profile' });
     app.draw(snapshot);
     root.querySelector<HTMLButtonElement>('[data-key="brir-file"]')?.click();
-    root.querySelector<HTMLButtonElement>('[data-key="fir"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-key="profile-tab-speakers"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-key="correction-import"]')?.click();
     expect(pickFile.mock.calls).toEqual([
       [en.profile.brirFileDialog, { name: en.profile.brirFilter, extensions: ['wav'] }],
-      [en.profile.firDialog, { name: en.profile.firFilter, extensions: ['wav'] }],
+      [en.profile.correctionDialog, { name: en.profile.correctionFilter, extensions: ['yml', 'yaml'] }],
     ]);
+    root.querySelector<HTMLButtonElement>('[data-key="profile-tab-headphones"]')?.click();
     root.querySelector<HTMLButtonElement>('[data-key="brir-folder"]')?.click();
     await Promise.resolve();
     expect(pickFolder).toHaveBeenCalledWith(en.profile.brirFolderDialog);

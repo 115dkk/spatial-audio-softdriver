@@ -1,17 +1,36 @@
-// The profile screen: what the supervisor resolved as the profile, the BRIR
-// set and headphone FIR imports, the gain, a test tone per direction of the
-// layout, and the object map. Every value comes from `Snapshot.profile`;
-// Rust decides whether an import or a tone is taken.
+// The profile screen: the two outputs side by side as tabs (headphones with
+// their BRIR set, speakers with a layout or a SECS 2R correction), the gain
+// of the output in use, a test tone per direction of its layout, and the
+// object map. Every value comes from `Snapshot.profile`. Which tab is open is
+// view state; Rust decides whether a switch, an import or a tone is taken
+// (ADR 0034).
 
-import type { EngineStatus } from '../bindings';
-import { facts, h } from '../dom';
+import type { EngineStatus, ProfileKind, SpeakerLayout } from '../bindings';
+import { type Child, facts, h } from '../dom';
 import { oneDecimal } from '../format';
+import { SPEAKER_LAYOUTS } from '../guard';
 import { text } from '../text';
 import { type Context, type Drawn, button, intentButton, panel } from './common';
 import { objectMap } from './objectmap';
 
 export const GAIN_MIN = -20;
 export const GAIN_MAX = 10;
+
+/** The tabs in the order they stand. */
+const KINDS: readonly ProfileKind[] = ['headphones', 'speakers'];
+/** The app's speaker layouts in the contract's order. */
+const LAYOUTS = Object.keys(SPEAKER_LAYOUTS) as SpeakerLayout[];
+
+/** The file note's sentence: profile.toml wins over every change here. */
+const FILE_HINT = 'profile-file-hint';
+/** While running, a change re-prepares the engine. */
+const RUNNING_HINT = 'profile-running-hint';
+
+/** The ids that describe a control, or null when none does. */
+function described(...ids: (string | false | null)[]): string | null {
+  const present = ids.filter((id): id is string => typeof id === 'string');
+  return present.length === 0 ? null : present.join(' ');
+}
 
 function picker(
   ctx: Context,
@@ -38,53 +57,132 @@ function picker(
   return element;
 }
 
-function current(ctx: Context): HTMLElement {
-  const profile = ctx.snapshot.profile;
-  const kind = h(
-    'span',
-    { class: 'profile-kind' },
-    text.profile.kindNames[profile.kind],
-    profile.from_file ? h('span', { class: 'tag' }, text.profile.fromFileTag) : null,
-  );
-  const path = (value: string | null) => h('span', { class: value === null ? 'muted' : 'path' }, value ?? text.profile.none);
-  return panel(text.profile.currentTitle, [
-    facts([
-      [text.profile.kind, kind],
-      [text.profile.name, profile.name],
-      [text.profile.brir, path(profile.brir)],
-      [text.profile.fir, path(profile.headphone_fir)],
-    ]),
-    profile.kind === 'stereo' && !profile.from_file ? h('p', { class: 'hint panel-note' }, text.profile.stereoNote) : null,
-  ]);
+/** A path as data, or 없음. */
+const path = (value: string | null) => h('span', { class: value === null ? 'muted' : 'path' }, value ?? text.profile.none);
+
+/** The ids that describe a change control: the file that locks it, a change that takes seconds. */
+function changeHints(ctx: Context): (string | false)[] {
+  const { profile, phase } = ctx.snapshot;
+  return [profile.from_file && FILE_HINT, !profile.from_file && phase.kind === 'running' && RUNNING_HINT];
 }
 
-function imports(ctx: Context): HTMLElement {
-  const { profile, phase } = ctx.snapshot;
-  const shell = ctx.shell;
-  // profile.toml wins over every import: one sentence for all three buttons.
-  const fromFile = profile.from_file;
-  const brirHint = fromFile
-    ? null
-    : ctx.pending === 'import_brir'
-      ? text.profile.importing
-      : phase.kind === 'running'
-        ? text.profile.importRunning
-        : null;
-  const firHint = fromFile
-    ? null
-    : profile.brir === null
-      ? text.profile.firNeedsBrir
-      : ctx.pending === 'import_headphone_fir'
-        ? text.profile.importing
-        : null;
-  const brirDescribed = fromFile ? 'import-file-hint' : brirHint === null ? null : 'brir-hint';
-  const firDescribed = fromFile ? 'import-file-hint' : firHint === null ? null : 'fir-hint';
-
-  const brir = h(
+/** profile.toml decides the output: its tag and name, and the sentence. */
+function fileNote(ctx: Context): HTMLElement | null {
+  const profile = ctx.snapshot.profile;
+  if (!profile.from_file) return null;
+  return h(
     'div',
-    { class: 'import' },
-    h('h3', { class: 'import-title' }, text.profile.brir),
-    h('p', { class: 'body-text' }, text.profile.brirBody),
+    { class: 'file-note' },
+    h(
+      'p',
+      { class: 'file-note-head' },
+      h('span', { class: 'tag' }, text.profile.fromFileTag),
+      h('span', { class: 'file-note-name' }, profile.name),
+    ),
+    h('p', { id: FILE_HINT }, text.profile.fromFile),
+  );
+}
+
+/** The tab bar: one tab per kind, the kind in use badged. Opening one only changes view state. */
+function tabs(ctx: Context, open: ProfileKind): HTMLElement {
+  const inUse = ctx.snapshot.profile.kind;
+  const choose = (kind: ProfileKind, focus: boolean) => {
+    if (focus) list.querySelector<HTMLElement>(`[data-key="profile-tab-${kind}"]`)?.focus();
+    ctx.setView({ profileTab: kind });
+  };
+  const list = h('div', {
+    class: 'output-tabs',
+    role: 'tablist',
+    'aria-label': text.profile.outputTitle,
+    onKeydown: (event: Event) => {
+      const key = (event as KeyboardEvent).key;
+      const at = KINDS.indexOf(open);
+      const to =
+        key === 'ArrowRight' ? (at + 1) % KINDS.length
+        : key === 'ArrowLeft' ? (at - 1 + KINDS.length) % KINDS.length
+        : key === 'Home' ? 0
+        : key === 'End' ? KINDS.length - 1
+        : null;
+      const kind = to === null ? undefined : KINDS[to];
+      if (kind === undefined) return;
+      event.preventDefault();
+      // Focus first, so the redraw keeps it on the tab now open.
+      choose(kind, true);
+    },
+  });
+  for (const kind of KINDS) {
+    const selected = kind === open;
+    list.append(
+      h(
+        'button',
+        {
+          type: 'button',
+          role: 'tab',
+          id: `profile-tab-${kind}`,
+          class: 'output-tab',
+          'data-key': `profile-tab-${kind}`,
+          'aria-selected': selected ? 'true' : 'false',
+          'aria-controls': selected ? `profile-panel-${kind}` : null,
+          tabindex: selected ? 0 : -1,
+          onClick: () => choose(kind, false),
+        },
+        h('span', null, text.profile.kindNames[kind]),
+        kind === inUse ? h('span', { class: 'in-use' }, text.profile.inUse) : null,
+      ),
+    );
+  }
+  return list;
+}
+
+/** The end of a tab: the kind in use says so; the other offers the switch. */
+function footer(ctx: Context, kind: ProfileKind): HTMLElement {
+  const { profile, phase } = ctx.snapshot;
+  const children: Child[] = [];
+  if (profile.kind === kind) {
+    children.push(
+      h(
+        'p',
+        { class: 'in-use-line' },
+        h('span', { class: 'lamp', 'aria-hidden': 'true' }),
+        kind === 'headphones' ? text.profile.usingHeadphones : text.profile.usingSpeakers,
+      ),
+    );
+  } else {
+    // Headphones need a BRIR set; the supervisor refuses them without one.
+    const needsBrir = kind === 'headphones' && profile.headphones.brir === null && !profile.from_file;
+    const use = intentButton(
+      ctx,
+      kind === 'headphones' ? text.profile.useHeadphones : text.profile.useSpeakers,
+      { kind: 'set_profile_kind', value: kind },
+      { key: `use-${kind}`, variant: 'primary', pendingLabel: text.profile.switching },
+    );
+    if (profile.from_file || needsBrir) use.disabled = true;
+    const ids = described(needsBrir && 'use-headphones-hint', ...changeHints(ctx));
+    if (ids !== null) use.setAttribute('aria-describedby', ids);
+    children.push(
+      h(
+        'div',
+        { class: 'tab-footer-row' },
+        use,
+        needsBrir ? h('p', { id: 'use-headphones-hint', class: 'hint' }, text.profile.needsBrir) : null,
+      ),
+    );
+  }
+  if (phase.kind === 'running' && !profile.from_file) {
+    children.push(h('p', { id: RUNNING_HINT, class: 'hint' }, text.profile.importRunning));
+  }
+  return h('div', { class: 'tab-footer' }, ...children);
+}
+
+function headphonesTab(ctx: Context): Child[] {
+  const { profile } = ctx.snapshot;
+  const shell = ctx.shell;
+  const locked = profile.from_file;
+  const importing = ctx.pending === 'import_brir';
+  const ids = described(importing && 'brir-hint', ...changeHints(ctx));
+  return [
+    facts([[text.profile.brir, path(profile.headphones.brir)]], 'facts tab-facts'),
+    h('p', { class: 'body-text tab-body' }, text.profile.brirBody),
     h(
       'div',
       { class: 'actions' },
@@ -92,47 +190,166 @@ function imports(ctx: Context): HTMLElement {
         ctx,
         text.profile.brirFolder,
         'brir-folder',
-        fromFile,
-        brirDescribed,
+        locked,
+        ids,
         () => shell.pickFolder(text.profile.brirFolderDialog),
-        (path) => ctx.send({ kind: 'import_brir', value: path }),
+        (value) => ctx.send({ kind: 'import_brir', value }),
       ),
       picker(
         ctx,
         text.profile.brirFile,
         'brir-file',
-        fromFile,
-        brirDescribed,
+        locked,
+        ids,
         () => shell.pickFile(text.profile.brirFileDialog, { name: text.profile.brirFilter, extensions: ['wav'] }),
-        (path) => ctx.send({ kind: 'import_brir', value: path }),
+        (value) => ctx.send({ kind: 'import_brir', value }),
       ),
     ),
-    brirHint === null ? null : h('p', { id: 'brir-hint', class: 'hint import-hint' }, brirHint),
-  );
-  const fir = h(
+    importing ? h('p', { id: 'brir-hint', class: 'hint import-hint' }, text.profile.importing) : null,
+    footer(ctx, 'headphones'),
+  ];
+}
+
+/** The layout speakers use while no correction is imported. */
+function layoutField(ctx: Context): HTMLElement {
+  const { profile } = ctx.snapshot;
+  const { layout, correction } = profile.speakers;
+  const changing = ctx.pending === 'set_speaker_layout';
+  // A correction decides the speakers; the stored layout waits behind it.
+  const byCorrection = correction !== null && !profile.from_file;
+  const hint = changing ? text.profile.applying : byCorrection ? text.profile.layoutByCorrection : null;
+  const select = h('select', {
+    id: 'speaker-layout',
+    'data-key': 'speaker-layout',
+    disabled: ctx.busy || profile.from_file || layout === null || correction !== null,
+    'aria-busy': changing ? 'true' : null,
+    'aria-describedby': described(hint !== null && 'layout-hint', ...changeHints(ctx)),
+  });
+  // A speaker profile.toml lays the speakers out its own way.
+  if (layout === null) select.append(h('option', { value: '', selected: true }, text.profile.layoutFromFile));
+  for (const value of LAYOUTS) select.append(h('option', { value, selected: value === layout }, value));
+  select.addEventListener('change', () => {
+    const value = LAYOUTS.find((candidate) => candidate === select.value);
+    if (value !== undefined) ctx.send({ kind: 'set_speaker_layout', value });
+  });
+  return h(
     'div',
-    { class: 'import' },
-    h('h3', { class: 'import-title' }, text.profile.fir),
-    h('p', { class: 'body-text' }, text.profile.firBody),
+    { class: 'field layout-field' },
+    h('label', { for: 'speaker-layout' }, text.profile.layout),
+    select,
+    hint === null ? null : h('p', { id: 'layout-hint', class: 'hint' }, hint),
+  );
+}
+
+/** The SECS 2R correction: the file, its title, and the buttons that set and clear it. */
+function correctionSection(ctx: Context): HTMLElement {
+  const { profile } = ctx.snapshot;
+  const correction = profile.speakers.correction;
+  const locked = profile.from_file;
+  const hint =
+    ctx.pending === 'import_correction' ? text.profile.importing
+    : ctx.pending === 'clear_correction' ? text.profile.applying
+    : null;
+  const ids = described(hint !== null && 'correction-hint', ...changeHints(ctx));
+  const rows: [string, Child][] = [[text.profile.correctionFile, path(correction?.path ?? null)]];
+  if (correction !== null) rows.push([text.profile.correctionName, correction.title]);
+  let clear: HTMLButtonElement | null = null;
+  if (correction !== null) {
+    clear = intentButton(ctx, text.profile.correctionClear, { kind: 'clear_correction' }, { key: 'correction-clear' });
+    if (locked) clear.disabled = true;
+    if (ids !== null) clear.setAttribute('aria-describedby', ids);
+  }
+  return h(
+    'section',
+    { class: 'tab-section', 'aria-labelledby': 'correction-title' },
+    h('h3', { id: 'correction-title', class: 'tab-section-title' }, text.profile.correctionTitle),
+    h('p', { class: 'body-text' }, text.profile.correctionBody),
+    facts(rows, 'facts tab-facts'),
     h(
       'div',
       { class: 'actions' },
       picker(
         ctx,
-        text.profile.firImport,
-        'fir',
-        fromFile || profile.brir === null,
-        firDescribed,
-        () => shell.pickFile(text.profile.firDialog, { name: text.profile.firFilter, extensions: ['wav'] }),
-        (path) => ctx.send({ kind: 'import_headphone_fir', value: path }),
+        text.profile.correctionImport,
+        'correction-import',
+        locked,
+        ids,
+        () =>
+          ctx.shell.pickFile(text.profile.correctionDialog, {
+            name: text.profile.correctionFilter,
+            extensions: ['yml', 'yaml'],
+          }),
+        (value) => ctx.send({ kind: 'import_correction', value }),
+      ),
+      clear,
+    ),
+    hint === null ? null : h('p', { id: 'correction-hint', class: 'hint import-hint' }, hint),
+  );
+}
+
+/** What each device channel plays: the correction's outputs, else the layout's speakers. */
+function channelTable(ctx: Context): HTMLElement {
+  const { channels } = ctx.snapshot.profile.speakers;
+  const rows = channels.map((channel) =>
+    h(
+      'tr',
+      null,
+      h('td', { class: 'channel-number' }, channel.channel + 1),
+      h(
+        'th',
+        { scope: 'row', class: 'channel-name' },
+        h('span', null, channel.name),
+        channel.subwoofer ? h('span', { class: 'tag' }, text.profile.subwoofer) : null,
       ),
     ),
-    firHint === null ? null : h('p', { id: 'fir-hint', class: 'hint import-hint' }, firHint),
   );
+  return h(
+    'section',
+    { class: 'tab-section', 'aria-labelledby': 'channels-title' },
+    h('h3', { id: 'channels-title', class: 'tab-section-title' }, text.profile.channelsTitle),
+    h(
+      'table',
+      { class: 'channel-table', 'aria-labelledby': 'channels-title' },
+      h(
+        'thead',
+        null,
+        h(
+          'tr',
+          null,
+          h('th', { scope: 'col', class: 'channel-number' }, text.profile.channel),
+          h('th', { scope: 'col' }, text.profile.speaker),
+        ),
+      ),
+      h('tbody', null, ...rows),
+    ),
+  );
+}
+
+function speakersTab(ctx: Context): Child[] {
+  return [layoutField(ctx), correctionSection(ctx), channelTable(ctx), footer(ctx, 'speakers')];
+}
+
+/** The output panel: the file note, the tabs, and the open tab's settings. */
+function output(ctx: Context): HTMLElement {
+  const open = ctx.view.profileTab ?? ctx.snapshot.profile.kind;
   return panel(
-    text.profile.importTitle,
-    [fromFile ? h('p', { id: 'import-file-hint', class: 'file-note' }, text.profile.fromFile) : null, brir, fir],
-    'imports',
+    text.profile.outputTitle,
+    [
+      fileNote(ctx),
+      tabs(ctx, open),
+      h(
+        'div',
+        {
+          role: 'tabpanel',
+          id: `profile-panel-${open}`,
+          class: 'output-panel',
+          'aria-labelledby': `profile-tab-${open}`,
+          tabindex: 0,
+        },
+        ...(open === 'headphones' ? headphonesTab(ctx) : speakersTab(ctx)),
+      ),
+    ],
+    'output',
   );
 }
 
@@ -217,7 +434,7 @@ export function profile(ctx: Context, engineNow: EngineStatus | null): Drawn {
     h(
       'div',
       { class: 'profile-layout' },
-      h('div', { class: 'profile-controls' }, current(ctx), imports(ctx), gain(ctx), tones(ctx)),
+      h('div', { class: 'profile-controls' }, output(ctx), gain(ctx), tones(ctx)),
       map.element,
     ),
   );
