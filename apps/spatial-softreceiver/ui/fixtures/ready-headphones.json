@@ -82,54 +82,47 @@
     },
     "speakers": {
       "layout": "7.1",
+      "correction": null,
       "channels": [
         {
           "name": "L",
           "channel": 0,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\L.wav"
+          "subwoofer": false
         },
         {
           "name": "R",
           "channel": 1,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\R.wav"
+          "subwoofer": false
         },
         {
           "name": "C",
           "channel": 2,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\C.wav"
+          "subwoofer": false
         },
         {
           "name": "LFE",
           "channel": 3,
-          "subwoofer": true,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SUB.wav"
+          "subwoofer": true
         },
         {
           "name": "Lrs",
           "channel": 4,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBL.wav"
+          "subwoofer": false
         },
         {
           "name": "Rrs",
           "channel": 5,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SBR.wav"
+          "subwoofer": false
         },
         {
           "name": "Lss",
           "channel": 6,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SL.wav"
+          "subwoofer": false
         },
         {
           "name": "Rss",
           "channel": 7,
-          "subwoofer": false,
-          "room_fir": "C:\\Users\\me\\RoomEQ\\living-room\\SR.wav"
+          "subwoofer": false
         }
       ]
     }
