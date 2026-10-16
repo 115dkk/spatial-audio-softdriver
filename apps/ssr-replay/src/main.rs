@@ -6,7 +6,7 @@
 //! decode, render and convolver chain as the live app and writes the binaural
 //! WAV; it links no Windows code, so it runs in Linux CI.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use engine::{Chain, ChainConfig, ChainEvent, EndpointFilter, OutputKind, load_output_profile};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use ssr_abi::{
     ENDPOINT_PRIMARY, ENDPOINT_SECOND, OverrunPayload, RECORD_KIND_READ_END,
     RECORD_KIND_RECORDER_GAP, Record, raw_records, reads, records, split_dump,
 };
+use ssr_types::app::Language;
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::mem::size_of;
@@ -67,14 +68,21 @@ impl EndpointArg {
 #[derive(Subcommand)]
 enum Command {
     /// Print a JSON summary of a dump: formats per endpoint and epoch, record counts, losses.
-    Inspect { dump: PathBuf },
+    Inspect {
+        /// Diagnostic record dump.
+        dump: PathBuf,
+    },
     /// Render a diagnostic dump to a deterministic 32-bit float WAV.
     Render {
+        /// Diagnostic record dump.
         dump: PathBuf,
+        /// Output profile TOML.
         #[arg(long)]
         profile: PathBuf,
+        /// Output WAV file.
         #[arg(long)]
         out: PathBuf,
+        /// Write a machine-readable JSON render report to this file.
         #[arg(long)]
         report: Option<PathBuf>,
         /// Override a zero-mask PCM order, as CHANNELS=PRESET or CHANNELS=SPEAKER,SPEAKER,...
@@ -153,8 +161,9 @@ impl OutputWriter {
     ) -> Result<Self, String> {
         match kind {
             OutputKind::Headphones => {
-                let channels = u16::try_from(channels)
-                    .map_err(|_| format!("output has too many channels: {channels}"))?;
+                let channels = u16::try_from(channels).map_err(|_| {
+                    ssr_i18n::replay::too_many_channels(ssr_i18n::cli_language(), channels)
+                })?;
                 hound::WavWriter::create(
                     path,
                     hound::WavSpec {
@@ -198,16 +207,16 @@ struct ExtensibleWavWriter {
 impl ExtensibleWavWriter {
     fn create(path: &Path, channels: usize, rate: u32, channel_mask: u32) -> Result<Self, String> {
         let channels = u16::try_from(channels)
-            .map_err(|_| format!("output has too many channels: {channels}"))?;
+            .map_err(|_| ssr_i18n::replay::too_many_channels(ssr_i18n::cli_language(), channels))?;
         if channels == 0 {
-            return Err("output has no channels".into());
+            return Err(ssr_i18n::replay::no_channels(ssr_i18n::cli_language()).into());
         }
-        let block_align = channels
-            .checked_mul(4)
-            .ok_or_else(|| "output block alignment overflows WAVE".to_string())?;
-        let byte_rate = rate
-            .checked_mul(u32::from(block_align))
-            .ok_or_else(|| "output byte rate overflows WAVE".to_string())?;
+        let block_align = channels.checked_mul(4).ok_or_else(|| {
+            ssr_i18n::replay::block_align_overflow(ssr_i18n::cli_language()).to_owned()
+        })?;
+        let byte_rate = rate.checked_mul(u32::from(block_align)).ok_or_else(|| {
+            ssr_i18n::replay::byte_rate_overflow(ssr_i18n::cli_language()).to_owned()
+        })?;
         let file =
             std::fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let mut writer = BufWriter::new(file);
@@ -245,10 +254,10 @@ impl ExtensibleWavWriter {
 
     fn finalize(mut self, path: &Path) -> Result<(), String> {
         let data_bytes = u32::try_from(self.data_bytes)
-            .map_err(|_| "rendered output exceeds the 4 GiB RIFF limit".to_string())?;
+            .map_err(|_| ssr_i18n::replay::riff_too_large(ssr_i18n::cli_language()).to_owned())?;
         let riff_size = 60_u32
             .checked_add(data_bytes)
-            .ok_or_else(|| "rendered output exceeds the 4 GiB RIFF limit".to_string())?;
+            .ok_or_else(|| ssr_i18n::replay::riff_too_large(ssr_i18n::cli_language()).to_owned())?;
         self.writer
             .flush()
             .and_then(|()| self.writer.seek(SeekFrom::Start(4)).map(|_| ()))
@@ -348,16 +357,17 @@ fn write_output_block(
     hash: &mut Sha256,
 ) -> Result<(), String> {
     if output_rate.is_some_and(|rate| rate != block.rate) {
-        return Err(format!(
-            "scene rate changed from {} Hz to {} Hz during the dump",
+        return Err(ssr_i18n::replay::scene_rate_changed(
+            ssr_i18n::cli_language(),
             output_rate.expect("rate was checked"),
-            block.rate
+            block.rate,
         ));
     }
     if block.channels != report.output_channels {
-        return Err(format!(
-            "output channel count changed from {} to {} during the dump",
-            report.output_channels, block.channels
+        return Err(ssr_i18n::replay::channel_count_changed(
+            ssr_i18n::cli_language(),
+            report.output_channels,
+            block.channels,
         ));
     }
     if writer.is_none() {
@@ -395,13 +405,13 @@ fn render_dump(
 ) -> Result<RenderReport, String> {
     let (header, stream) = split_dump(bytes).map_err(|error| error.to_string())?;
     if !arrival_slack_ms.is_finite() || arrival_slack_ms < 0.0 {
-        return Err("--arrival-slack-ms must be a finite non-negative number".into());
+        return Err(ssr_i18n::replay::arrival_slack_invalid(ssr_i18n::cli_language()).into());
     }
     let arrival_slack_frames = arrival_slack_ms * f64::from(engine::MIX_RATE) / 1_000.0;
     if arrival_slack_frames > engine::MAX_ARRIVAL_SLACK_FRAMES as f64 {
-        return Err(format!(
-            "--arrival-slack-ms must not exceed {} ms",
-            engine::MAX_ARRIVAL_SLACK_FRAMES as f64 * 1_000.0 / f64::from(engine::MIX_RATE)
+        return Err(ssr_i18n::replay::arrival_slack_too_large(
+            ssr_i18n::cli_language(),
+            engine::MAX_ARRIVAL_SLACK_FRAMES as f64 * 1_000.0 / f64::from(engine::MIX_RATE),
         ));
     }
     let profile = load_output_profile(profile_path).map_err(|error| error.to_string())?;
@@ -562,7 +572,7 @@ fn render_dump(
     report.suppressed_errors = chain.suppressed_errors();
 
     let Some(writer) = writer else {
-        return Err("the dump produced no audio blocks".into());
+        return Err(ssr_i18n::replay::no_audio_blocks(ssr_i18n::cli_language()).into());
     };
     writer.finalize(output_path)?;
     report.output_sha256 = hash
@@ -573,8 +583,40 @@ fn render_dump(
     Ok(report)
 }
 
-fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+fn localized_command(language: Language) -> clap::Command {
+    use ssr_i18n::replay;
+
+    let command = Cli::command()
+        .about(replay::about(language))
+        .mut_subcommand("inspect", |subcommand| {
+            subcommand
+                .about(replay::inspect_about(language))
+                .mut_arg("dump", |arg| arg.help(replay::dump_help(language)))
+        })
+        .mut_subcommand("render", |subcommand| {
+            subcommand
+                .about(replay::render_about(language))
+                .mut_arg("dump", |arg| arg.help(replay::dump_help(language)))
+                .mut_arg("profile", |arg| arg.help(replay::profile_help(language)))
+                .mut_arg("out", |arg| arg.help(replay::out_help(language)))
+                .mut_arg("report", |arg| arg.help(replay::report_help(language)))
+                .mut_arg("direct_layouts", |arg| {
+                    arg.help(replay::direct_layout_help(language))
+                })
+                .mut_arg("endpoint", |arg| arg.help(replay::endpoint_help(language)))
+                .mut_arg("arrival_slack_ms", |arg| {
+                    arg.help(replay::arrival_slack_help(language))
+                })
+        });
+    ssr_i18n::clap_help::localize(command, language)
+}
+
+fn parse_cli(language: Language) -> Result<Cli, clap::Error> {
+    let matches = localized_command(language).try_get_matches()?;
+    Cli::from_arg_matches(&matches)
+}
+
+fn run(cli: Cli, language: Language) -> Result<(), String> {
     match cli.command {
         Command::Inspect { dump } => {
             let bytes =
@@ -610,22 +652,44 @@ fn run() -> Result<(), String> {
                     .map_err(|error| format!("{}: {error}", report_path.display()))?;
             }
             eprintln!(
-                "ssr-replay: wrote {} blocks, {} frames to {} (sha256 {})",
-                rendered.blocks,
-                rendered.frames_written,
-                out.display(),
-                rendered.output_sha256
+                "{}",
+                ssr_i18n::replay::wrote(
+                    language,
+                    rendered.blocks,
+                    rendered.frames_written,
+                    out.display(),
+                    rendered.output_sha256
+                )
             );
         }
     }
     Ok(())
 }
 
+fn parse_error_exit(error: clap::Error, language: Language) -> ExitCode {
+    if matches!(
+        error.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    ) {
+        let _ = error.print();
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("{}", ssr_i18n::cli::parse_error(language));
+        let _ = error.print();
+        ExitCode::from(2)
+    }
+}
+
 fn main() -> ExitCode {
-    match run() {
+    let language = ssr_i18n::cli_language();
+    let cli = match parse_cli(language) {
+        Ok(cli) => cli,
+        Err(error) => return parse_error_exit(error, language),
+    };
+    match run(cli, language) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("ssr-replay: {error}");
+            eprintln!("{}", ssr_i18n::replay::error_prefix(language, error));
             ExitCode::FAILURE
         }
     }
@@ -639,6 +703,11 @@ mod tests {
     use ssr_types::{PcmFormat, SampleType, SourceFormat};
 
     use super::*;
+
+    #[test]
+    fn english_help_is_the_derived_help_and_korean_help_is_complete() {
+        ssr_i18n::clap_help::verify(Cli::command(), localized_command);
+    }
 
     #[test]
     fn render_direct_layouts_are_repeatable_and_validate_before_startup() {

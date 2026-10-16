@@ -555,17 +555,7 @@ fn snapshots(language: Language) -> Vec<(&'static str, Snapshot)> {
                     ..engine_status(language)
                 }),
                 roles_taken: true,
-                error: Some(error(
-                    &match language {
-                        Language::Ko => {
-                            format!("출력 장치와의 연결이 끊어져 다시 연결하는 중입니다: {lost}")
-                        }
-                        Language::En => {
-                            format!("The output device disconnected. Reconnecting: {lost}")
-                        }
-                    },
-                    NextAction::None,
-                )),
+                error: None,
                 ..with_phase(ready.clone(), Phase::Running)
             },
         ),

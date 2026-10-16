@@ -332,8 +332,8 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     ///
     /// A lost output or capture is the engine's to reconnect: it retries
     /// without limit and says `FaultCleared` when it succeeds. So a `Fault`
-    /// notice keeps Running with an error that says it is reconnecting, and
-    /// `FaultCleared` clears it with a note. A fault that outlasts
+    /// notice keeps Running without changing the current error, and
+    /// `FaultCleared` ends the wait with a note. A fault that outlasts
     /// [`Config::fault_grace`] (from its first notice, by `now`), or a poll
     /// error, stops the engine, gives the roles back and moves to Faulted.
     pub fn tick(&mut self, now: Instant) -> Vec<SessionNotice> {
@@ -356,8 +356,6 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         for notice in &notices {
             match notice {
                 SessionNotice::Fault(fault) => {
-                    self.error =
-                        Some(self.message_error(reconnecting_message(fault), NextAction::None));
                     if self.reconnecting.is_none() {
                         self.reconnecting = Some(Reconnecting {
                             since: now,
@@ -910,8 +908,6 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
     /// The engine reconnected what it lost: the wait ends with a note.
     fn reconnected(&mut self) {
         if self.reconnecting.take().is_some() {
-            self.error = None;
-            self.error_message = None;
             self.notes.push(Message::Reconnected);
         }
     }
@@ -1452,15 +1448,6 @@ enum Outcome {
 struct Reconnecting {
     since: Instant,
     fault: EngineFault,
-}
-
-fn reconnecting_message(fault: &EngineFault) -> Message {
-    match fault {
-        EngineFault::OutputLost(detail) => Message::ReconnectingOutput {
-            detail: detail.clone(),
-        },
-        EngineFault::CaptureLost(_) => Message::ReconnectingCapture,
-    }
 }
 
 /// Installed without a problem, running, and not missing the exclusive

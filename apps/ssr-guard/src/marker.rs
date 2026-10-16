@@ -43,28 +43,11 @@ impl Marker {
 
 /// The marker stays language-neutral on disk; render it when it is shown.
 pub fn sentence(marker: &Marker, language: ssr_types::app::Language) -> &'static str {
-    use ssr_types::app::Language::{En, Ko};
-    match (marker.reason, language) {
-        (MarkerReason::AppExited, Ko) => "지난 실행이 비정상 종료되어 기본 장치를 되돌렸습니다.",
-        (MarkerReason::AppExited, En) => {
-            "The app exited unexpectedly. The default audio devices have been restored."
-        }
-        (MarkerReason::StallRestarted, Ko) => "엔진이 멈춰 앱을 다시 시작했습니다.",
-        (MarkerReason::StallRestarted, En) => {
-            "The engine stopped responding, so the app was restarted."
-        }
-        (MarkerReason::RestartFailed, Ko) => {
-            "다시 시작한 뒤에도 엔진이 멈춰 기본 장치를 되돌렸습니다."
-        }
-        (MarkerReason::RestartFailed, En) => {
-            "The engine stopped responding after restarting. The default audio devices have been restored."
-        }
-        (MarkerReason::Stuck, Ko) => {
-            "지난 실행이 기본 장치를 넘겨받은 채 멈춰 기본 장치를 되돌렸습니다."
-        }
-        (MarkerReason::Stuck, En) => {
-            "The app stopped responding while holding the default audio devices. The defaults have been restored."
-        }
+    match marker.reason {
+        MarkerReason::AppExited => ssr_i18n::guard::marker_app_exited(language),
+        MarkerReason::StallRestarted => ssr_i18n::guard::marker_stall_restarted(language),
+        MarkerReason::RestartFailed => ssr_i18n::guard::marker_restart_failed(language),
+        MarkerReason::Stuck => ssr_i18n::guard::marker_stuck(language),
     }
 }
 

@@ -39,11 +39,13 @@ function header(ctx: Context): HTMLElement {
       variant: running ? 'secondary' : 'primary',
       className: 'power',
       pendingLabel: running ? s.powerTurningOff : s.powerTurningOn,
+      busy: 'spinner',
     },
   );
-  toggle.setAttribute('aria-describedby', 'power-state');
+  // While turning on the button's spoken name is already the state word.
+  if (ctx.pending !== 'enable') toggle.setAttribute('aria-describedby', 'power-state');
 
-  const power = powerState(snapshot);
+  const power = powerState(snapshot, ctx.pending);
   const state = h(
     'div',
     { class: 'power-state' },

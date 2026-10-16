@@ -33,10 +33,9 @@ pub fn apply(
     quit: impl FnOnce(),
 ) -> Result<(), UserError> {
     let Some(pending) = pending else {
-        return Err(user_error(match language {
-            Language::Ko => "받아 둔 업데이트가 없습니다.",
-            Language::En => "There is no downloaded update.",
-        }));
+        return Err(user_error(ssr_i18n::shell::update_none_downloaded(
+            language,
+        )));
     };
     finish(
         language,
@@ -79,12 +78,9 @@ pub enum ApplyError {
 
 impl ApplyError {
     pub fn render(&self, language: Language) -> String {
-        use Language::{En, Ko};
-        match (self, language) {
-            (Self::NotBuilt, Ko) => "이 빌드에는 업데이트 기능이 없습니다.".to_owned(),
-            (Self::NotBuilt, En) => "This build has no updater.".to_owned(),
-            (Self::Failed(detail), Ko) => format!("업데이트를 적용하지 못했습니다: {detail}"),
-            (Self::Failed(detail), En) => format!("Could not apply the update: {detail}"),
+        match self {
+            Self::NotBuilt => ssr_i18n::shell::update_not_built(language).to_owned(),
+            Self::Failed(detail) => ssr_i18n::shell::update_apply_failed(language, detail),
         }
     }
 }

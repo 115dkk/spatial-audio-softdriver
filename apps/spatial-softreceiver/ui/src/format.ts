@@ -33,7 +33,9 @@ export function describeSamples(format: PcmFormat): string {
 }
 
 export function codecName(codec: BitstreamCodec): string {
-  return typeof codec === 'string' ? text.codecs[codec] : text.format.otherCodec(codec.other);
+  return typeof codec === 'string'
+    ? text.codecs[codec]
+    : text.format.otherCodec('0x' + codec.other.toString(16).padStart(8, '0'));
 }
 
 function describePcm(format: PcmFormat): string {
@@ -100,7 +102,11 @@ export function chainErrorTotal(map: ChainErrorMap): number {
 }
 
 export function describeOutputMode(engine: EngineStatus): string {
-  if (engine.output_fell_back) return text.meters.fellBack(engine.output_mix_channels);
+  if (engine.output_fell_back) {
+    return engine.output_mix_channels > 0
+      ? text.meters.fellBackMix(engine.output_mix_channels)
+      : text.meters.fellBack;
+  }
   return engine.output_mode === 'exclusive' ? text.meters.exclusive : text.meters.shared;
 }
 

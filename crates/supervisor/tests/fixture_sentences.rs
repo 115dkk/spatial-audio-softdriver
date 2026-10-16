@@ -105,12 +105,7 @@ fn expected(name: &str, output_name: &str) -> Expected {
             default_profile: false,
         },
         "running-reconnecting" => Expected {
-            error: Some((
-                Message::ReconnectingOutput {
-                    detail: OutputError::Removed.to_string(),
-                },
-                NextAction::None,
-            )),
+            error: None,
             notes: Vec::new(),
             default_profile: false,
         },

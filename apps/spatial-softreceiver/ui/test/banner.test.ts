@@ -109,7 +109,8 @@ describe('the band on screen', () => {
   });
 
   it('closes a none band until the sentence changes', () => {
-    const snapshot = fixture('running-reconnecting');
+    const snapshot = fixture('running');
+    snapshot.error = { message: '게인은 -20 dB에서 +10 dB 사이입니다.', next: 'none' };
     const { root, app } = mount(snapshot);
     expect(bandButtons(root)).toEqual(['닫기']);
     root.querySelector<HTMLButtonElement>('.banner button')?.click();
@@ -117,11 +118,11 @@ describe('the band on screen', () => {
     app.draw(structuredClone(snapshot));
     expect(root.querySelector('.banner')).toBeNull();
     const changed = structuredClone(snapshot);
-    changed.error = { message: '캡처 장치와의 연결이 끊어져 다시 연결하는 중입니다.', next: 'none' };
+    changed.error = { message: '그 방향이 없습니다.', next: 'none' };
     app.draw(changed);
-    expect(root.querySelector('.banner')?.textContent).toContain('캡처 장치');
+    expect(root.querySelector('.banner')?.textContent).toContain('방향');
     app.draw(structuredClone(snapshot));
-    expect(root.querySelector('.banner')?.textContent).toContain(snapshot.error?.message ?? 'no error');
+    expect(root.querySelector('.banner')?.textContent).toContain(snapshot.error.message);
   });
 });
 

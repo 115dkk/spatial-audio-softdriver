@@ -7,25 +7,6 @@ use std::path::Path;
 use serde::Deserialize;
 use ssr_types::app::Language;
 
-/// Accept Windows language tags and POSIX locales without their encoding or
-/// modifier. Korean without a region also denotes the Korean UI.
-pub fn from_locale(locale: Option<&str>) -> Language {
-    let tag = locale.unwrap_or_default().trim();
-    let tag = tag.split(['.', '@']).next().unwrap_or_default();
-    if tag.eq_ignore_ascii_case("ko")
-        || tag.eq_ignore_ascii_case("ko-KR")
-        || tag.eq_ignore_ascii_case("ko_KR")
-    {
-        Language::Ko
-    } else {
-        Language::En
-    }
-}
-
-pub fn system() -> Language {
-    from_locale(sys_locale::get_locale().as_deref())
-}
-
 /// Rereads the envelope on every call: a running guard follows changes made
 /// by the app, rather than keeping the language it launched with.
 pub fn resolve_in(state_dir: &Path, default: Language) -> Language {
@@ -48,40 +29,12 @@ fn explicit(text: &str) -> Option<Language> {
 }
 
 pub fn title(language: Language) -> &'static str {
-    match language {
-        Language::Ko => "공간 소프트리시버",
-        Language::En => "Spatial SoftReceiver",
-    }
+    ssr_i18n::names::product(language)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn locales_are_normalized_and_unknown_defaults_to_english() {
-        for locale in [
-            "ko-KR",
-            "KO-kr",
-            "ko_KR.UTF-8",
-            "ko_KR@variant",
-            "ko",
-            " ko-KR ",
-        ] {
-            assert_eq!(from_locale(Some(locale)), Language::Ko, "{locale}");
-        }
-        for locale in [
-            None,
-            Some(""),
-            Some("en-US"),
-            Some("ja-JP"),
-            Some("C"),
-            Some("kok-IN"),
-            Some("ko-KP"),
-        ] {
-            assert_eq!(from_locale(locale), Language::En, "{locale:?}");
-        }
-    }
 
     #[test]
     fn only_a_supported_envelope_with_explicit_language_overrides_the_os() {

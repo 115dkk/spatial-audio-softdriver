@@ -1219,6 +1219,31 @@ tests = [
 note = "ADR 0001: Language Ko/En, SetLanguage(Some) override and None OS fallback; resolved Snapshot.language selects matching Korean/English UI catalogues and document language. Supervisor Message renders user sentences in the selected language. Shell tray labels and guard marker sentences follow that choice; sys-locale supplies the OS default. UI vitest test/i18n.test.ts checks recursive catalogue keys/function signatures, every fixture on status/profile/settings/wizard screens without UI-owned Hangul, live language switches, source-data preservation, picker text and bridge validation, and the settings screen's language select (auto/ko/en sends SetLanguage). The guard's toast and the shell's update errors render in the resolved language too."
 
 [[feature]]
+id = "app.i18n_catalog"
+kind = "app"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "ssr-i18n::catalog_files_match_sources",
+  "ssr-i18n::inf_names_match_catalog",
+  "ssr-i18n::typescript_screen_shapes_are_generated",
+  "ssr-i18n::repeated_placeholders_share_one_argument",
+  "ssr-i18n::literal_braces_are_decoded_by_both_generators",
+  "ssr-i18n::dollars_and_template_literals_are_escaped",
+  "ssr-i18n::unmatched_braces_are_rejected",
+  "ssr-i18n::identifiers_and_keywords_are_validated",
+  "ssr-i18n::empty_strings_are_rejected_at_every_leaf",
+  "ssr-i18n::endpoint_names_count_utf16_units",
+  "ssr-i18n::multiline_docs_and_selector_collisions_generate_safe_rust",
+  "ssr-i18n::typescript_object_keys_are_always_quoted",
+  "ssr-i18n::powershell_catalog_has_a_bom_equal_keys_and_escaped_apostrophes",
+  "ssr-live::english_help_is_the_derived_help_and_korean_help_is_complete",
+  "ssr-replay::english_help_is_the_derived_help_and_korean_help_is_complete",
+  "ssr-setup::english_help_is_the_derived_help_and_korean_help_is_complete",
+]
+note = "한국어와 영어 TOML을 사용자 문구의 단일 원본으로 삼고, 시험이 Rust·TypeScript·PowerShell 카탈로그 생성 결과와 커밋된 파일을 대조합니다. PowerShell 자료는 UTF-8 BOM, 같은 키·자리표시자와 작은따옴표 이스케이프를 검사하고, INF 이름도 같은 원본과 일치하는지 검사합니다. 명령줄 도구의 도움말은 영어가 clap derive와 바이트까지 같고 한국어에는 영어 설명이나 머리말이 남지 않는지 도구마다 검사합니다."
+
+[[feature]]
 id = "app.profile_intents"
 kind = "app"
 milestone = "M4"

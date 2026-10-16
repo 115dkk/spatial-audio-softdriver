@@ -139,29 +139,23 @@ impl Platform for WindowsPlatform {
     }
 
     fn restore(&mut self, app: u32) -> Option<Vec<String>> {
-        let language = language::resolve_in(&self.state_dir, language::system());
+        let language = language::resolve_in(&self.state_dir, ssr_i18n::system_language());
         let path = self.state_dir.join(RESTORE_POINT_FILE);
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
             Err(error) => {
-                return Some(vec![match language {
-                    ssr_types::app::Language::Ko => format!("복원점을 읽지 못했습니다: {error}"),
-                    ssr_types::app::Language::En => {
-                        format!("Could not read the restore point: {error}")
-                    }
-                }]);
+                return Some(vec![ssr_i18n::guard::restore_point_read_failed(
+                    language, error,
+                )]);
             }
         };
         let point = match RestorePoint::from_json(&text) {
             Ok(point) => point,
             Err(error) => {
-                return Some(vec![match language {
-                    ssr_types::app::Language::Ko => format!("복원점을 읽지 못했습니다: {error}"),
-                    ssr_types::app::Language::En => {
-                        format!("Could not read the restore point: {error}")
-                    }
-                }]);
+                return Some(vec![ssr_i18n::guard::restore_point_read_failed(
+                    language, error,
+                )]);
             }
         };
         if !runner::restore_allowed(point.app_pid, app) {
@@ -196,7 +190,7 @@ impl Platform for WindowsPlatform {
         // The language is resolved now, not at guard startup, so the toast
         // and the log follow a setting changed since; the marker itself stays
         // language-neutral and the app renders it with its own language.
-        let language = language::resolve_in(&self.state_dir, language::system());
+        let language = language::resolve_in(&self.state_dir, ssr_i18n::system_language());
         log(
             &self.state_dir,
             &format!(

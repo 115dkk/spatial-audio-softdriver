@@ -22,6 +22,7 @@ import type {
   Snapshot,
   UserError,
 } from './bindings';
+import { en as catalogEn, ko as catalogKo } from './catalog';
 import { fixture, fixtureNames } from './fixtures';
 import { text } from './text';
 
@@ -55,87 +56,63 @@ const message = (ko: string, en: string): Message => ({ ko, en });
 /** text.rs arch_name. */
 const archName = (arch: Arch): Message =>
   arch === 'x64'
-    ? message('x64', 'x64')
+    ? message(catalogKo.supervisor.arch_x64, catalogEn.supervisor.arch_x64)
     : arch === 'arm64'
-      ? message('Arm64', 'Arm64')
-      : message('다른 아키텍처', 'another architecture');
+      ? message(catalogKo.supervisor.arch_arm64, catalogEn.supervisor.arch_arm64)
+      : message(catalogKo.supervisor.arch_other, catalogEn.supervisor.arch_other);
 
 /** The Messages the mock can meet, by their names in text.rs. */
 const say = {
-  notAllowed: message('지금은 할 수 없는 동작입니다.', 'That action is not available right now.'),
-  testAfterEnable: message('켠 뒤에 시험음을 낼 수 있습니다.', 'Turn it on before playing a test tone.'),
+  notAllowed: message(catalogKo.supervisor.not_allowed, catalogEn.supervisor.not_allowed),
+  testAfterEnable: message(catalogKo.common.test_after_enable, catalogEn.common.test_after_enable),
   diagnosticRecordingUnavailable: message(
-    '진단 녹음은 다음 조각에서 옵니다.',
-    'Diagnostic recording is coming in a later update.',
+    catalogKo.supervisor.diagnostic_recording_unavailable,
+    catalogEn.supervisor.diagnostic_recording_unavailable,
   ),
   disableBeforeChangingOutput: message(
-    '먼저 끈 뒤 출력을 바꾸십시오.',
-    'Turn it off before changing the output.',
+    catalogKo.supervisor.disable_before_changing_output,
+    catalogEn.supervisor.disable_before_changing_output,
   ),
   architectureMismatch: (build: Arch, pc: Arch): Message =>
     message(
-      `이 빌드는 ${archName(build).ko}용이지만 이 PC는 ${archName(pc).ko}입니다.`,
-      `This build is for ${archName(build).en}, but this PC is ${archName(pc).en}.`,
+      catalogKo.supervisor.architecture_mismatch(archName(build).ko, archName(pc).ko),
+      catalogEn.supervisor.architecture_mismatch(archName(build).en, archName(pc).en),
     ),
   testSigningDisabled: (secureBoot: SecureBoot): Message => {
     const on = secureBoot === 'enabled';
     return message(
-      '시험서명 모드가 꺼져 있습니다. Secure Boot를 끈 뒤 관리자 명령으로 bcdedit /set testsigning on을 실행하고 다시 시작하십시오.' +
-        (on ? ' Secure Boot가 켜져 있어 먼저 꺼야 합니다.' : ''),
-      'Test-signing mode is off. Turn off Secure Boot, run bcdedit /set testsigning on as administrator, and restart Windows.' +
-        (on ? ' Secure Boot is on and must be turned off first.' : ''),
+      catalogKo.supervisor.test_signing_disabled +
+        (on ? catalogKo.supervisor.test_signing_secure_boot : ''),
+      catalogEn.supervisor.test_signing_disabled +
+        (on ? catalogEn.supervisor.test_signing_secure_boot : ''),
     );
   },
-  driverSignatureRejected: message(
-    '드라이버 서명을 받아들이지 않았습니다(문제 코드 52). 시험서명 모드를 확인한 뒤 다시 설치하십시오.',
-    'Windows rejected the driver signature (problem code 52). Check test-signing mode, then reinstall the driver.',
-  ),
-  driverServiceStopped: message(
-    '드라이버 서비스가 돌고 있지 않습니다. 복구를 실행하십시오.',
-    'The driver service is not running. Run repair.',
-  ),
-  exclusivePolicyMissing: message(
-    '드라이버는 있지만 독점 정책이 적용되지 않았습니다. 복구를 실행하십시오.',
-    'The driver is installed, but its exclusive-mode policy is missing. Run repair.',
-  ),
+  driverSignatureRejected: message(catalogKo.supervisor.driver_signature_rejected, catalogEn.supervisor.driver_signature_rejected),
+  driverServiceStopped: message(catalogKo.supervisor.driver_service_stopped, catalogEn.supervisor.driver_service_stopped),
+  exclusivePolicyMissing: message(catalogKo.supervisor.exclusive_policy_missing, catalogEn.supervisor.exclusive_policy_missing),
   driverProblem: (code: number): Message =>
-    message(
-      `드라이버가 올바르게 설치되지 않았습니다(문제 코드 ${code}). 복구를 실행하십시오.`,
-      `The driver is not installed correctly (problem code ${code}). Run repair.`,
-    ),
-  chosenOutputMissing: message(
-    '고른 출력 장치를 찾을 수 없습니다.',
-    'The selected output device could not be found.',
-  ),
+    message(catalogKo.supervisor.driver_problem(code), catalogEn.supervisor.driver_problem(code)),
+  chosenOutputMissing: message(catalogKo.supervisor.chosen_output_missing, catalogEn.supervisor.chosen_output_missing),
   outputIdChanged: (name: string): Message =>
-    message(
-      `출력 장치의 식별자가 바뀌어 이름으로 다시 찾았습니다: ${name}`,
-      `The output device identifier changed, so it was found again by name: ${name}`,
-    ),
-  importBrirFirst: message('먼저 BRIR 세트를 가져오십시오.', 'Import a BRIR set first.'),
+    message(catalogKo.supervisor.output_id_changed(name), catalogEn.supervisor.output_id_changed(name)),
+  importBrirFirst: message(catalogKo.supervisor.import_brir_first, catalogEn.supervisor.import_brir_first),
   headphoneFirReadFailed: (detail: string): Message =>
-    message(`헤드폰 FIR을 읽지 못했습니다: ${detail}`, `The headphone FIR could not be read: ${detail}`),
-  gainOutOfRange: message('게인은 -20 dB에서 +10 dB 사이입니다.', 'Gain must be between -20 dB and +10 dB.'),
-  directionMissing: message('그 방향이 없습니다.', 'That direction does not exist.'),
+    message(catalogKo.supervisor.headphone_fir_read_failed(detail), catalogEn.supervisor.headphone_fir_read_failed(detail)),
+  gainOutOfRange: message(catalogKo.supervisor.gain_out_of_range, catalogEn.supervisor.gain_out_of_range),
+  directionMissing: message(catalogKo.supervisor.direction_missing, catalogEn.supervisor.direction_missing),
   storedOutputMissing: (name: string): Message =>
-    message(`저장된 출력 장치를 찾을 수 없습니다: ${name}`, `The saved output device could not be found: ${name}`),
+    message(catalogKo.supervisor.stored_output_missing(name), catalogEn.supervisor.stored_output_missing(name)),
   profileFileTakesPrecedence: message(
-    '상태 폴더의 profile.toml이 우선합니다. 그 파일을 지우거나 고치십시오.',
-    'profile.toml in the state folder takes precedence. Remove or edit that file.',
+    catalogKo.common.profile_file_takes_precedence,
+    catalogEn.common.profile_file_takes_precedence,
   ),
-  invalidBrirSource: message(
-    'hesuvi.wav, hrir.wav 또는 방향별 WAV 폴더를 고르십시오.',
-    'Choose hesuvi.wav, hrir.wav, or a folder of per-direction WAV files.',
-  ),
-  rebootRequired: message(
-    '드라이버 설치를 마치려면 다시 시작해야 합니다.',
-    'Restart Windows to finish installing the driver.',
-  ),
+  invalidBrirSource: message(catalogKo.supervisor.invalid_brir_source, catalogEn.supervisor.invalid_brir_source),
+  rebootRequired: message(catalogKo.supervisor.reboot_required, catalogEn.supervisor.reboot_required),
   osRequirement: (minBuild: number): Message =>
     minBuild === 19041
-      ? message('Windows 10 2004(빌드 19041) 이상이 필요합니다.', 'Windows 10 version 2004 (build 19041) or newer is required.')
-      : message(`Windows 빌드 ${minBuild} 이상이 필요합니다.`, `Windows build ${minBuild} or newer is required.`),
-  defaultProfileName: message('Stereo', 'Default stereo'),
+      ? message(catalogKo.supervisor.os_requirement_19041, catalogEn.supervisor.os_requirement_19041)
+      : message(catalogKo.supervisor.os_requirement(minBuild), catalogEn.supervisor.os_requirement(minBuild)),
+  defaultProfileName: message(catalogKo.supervisor.default_profile_name, catalogEn.supervisor.default_profile_name),
 } as const;
 
 /**

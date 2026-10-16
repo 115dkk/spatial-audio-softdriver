@@ -19,11 +19,9 @@ impl Toggle {
     }
 
     pub fn text(self, language: Language) -> &'static str {
-        match (self, language) {
-            (Self::Disable, Language::Ko) => "끄기",
-            (Self::Enable | Self::Unavailable, Language::Ko) => "켜기",
-            (Self::Disable, Language::En) => "Disable",
-            (Self::Enable | Self::Unavailable, Language::En) => "Enable",
+        match self {
+            Self::Disable => ssr_i18n::common::turn_off(language),
+            Self::Enable | Self::Unavailable => ssr_i18n::common::turn_on(language),
         }
     }
 
@@ -37,17 +35,11 @@ impl Toggle {
 }
 
 pub fn open(language: Language) -> &'static str {
-    match language {
-        Language::Ko => "열기",
-        Language::En => "Open",
-    }
+    ssr_i18n::shell::tray_open(language)
 }
 
 pub fn quit(language: Language) -> &'static str {
-    match language {
-        Language::Ko => "종료",
-        Language::En => "Quit",
-    }
+    ssr_i18n::shell::tray_quit(language)
 }
 
 #[cfg(test)]
@@ -59,7 +51,7 @@ mod tests {
     fn every_label_follows_language_and_actions_stay_the_same() {
         for (language, labels) in [
             (Language::Ko, ["열기", "켜기", "끄기", "종료"]),
-            (Language::En, ["Open", "Enable", "Disable", "Quit"]),
+            (Language::En, ["Open", "Turn on", "Turn off", "Quit"]),
         ] {
             assert_eq!(open(language), labels[0]);
             assert_eq!(quit(language), labels[3]);

@@ -135,7 +135,10 @@ for (const scene of scenes) {
           await check(page, language, problems);
           const dir = String(info.config.metadata.shotsDir);
           mkdirSync(dir, { recursive: true });
-          await page.screenshot({ path: join(dir, file), fullPage: true });
+          // A turning spinner would make every picture of its scene differ;
+          // 'disabled' cancels an infinite animation to its first frame for
+          // the shot (and finishes finite ones) so it is the same each run.
+          await page.screenshot({ path: join(dir, file), fullPage: true, animations: 'disabled' });
           await check(page, language, problems);
         });
       });

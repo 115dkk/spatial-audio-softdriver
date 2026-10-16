@@ -203,7 +203,7 @@ fn setup(
         log::line(&format!("shell: toast registration: {error}"));
     }
     let state_dir = ending.state_dir.clone();
-    let default_language = language::from_locale(sys_locale::get_locale().as_deref());
+    let default_language = ssr_i18n::system_language();
     let language = language::resolve_in(&state_dir, default_language);
     let mut initial_notes = Vec::new();
     if state_dir.join(RESTORE_POINT_FILE).exists() {
@@ -604,7 +604,7 @@ fn quit_within(bridge: &Bridge, limit: Duration) -> QuitOutcome {
 /// the host's COM calls, so never on the UI thread.
 pub(crate) fn last_resort_restore(state_dir: &Path) -> Vec<Note> {
     let notes = restore_notes(state_dir);
-    let language = language::resolve_in(state_dir, language::system());
+    let language = language::resolve_in(state_dir, ssr_i18n::system_language());
     for note in &notes {
         log::line(&format!("shell: last resort: {}", note.render(language)));
     }

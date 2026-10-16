@@ -2,6 +2,14 @@
 # Removes current and legacy root devices, packages, services and test certificates.
 param([switch] $KeepCertificates)
 $ErrorActionPreference = 'Continue'
+$catalog = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'strings.psd1')
+$language = if ($env:SSR_LANG -eq 'ko') { 'ko' } elseif ($env:SSR_LANG -eq 'en') { 'en' } elseif ((Get-UICulture).TwoLetterISOLanguageName -eq 'ko') { 'ko' } else { 'en' }
+$strings = $catalog[$language]
+function Format-Text([string] $Key, [hashtable] $Values = @{}) {
+    $text = [string]$strings[$Key]
+    foreach ($name in $Values.Keys) { $text = $text.Replace("{$name}", [string]$Values[$name]) }
+    $text
+}
 $helper = Join-Path $PSScriptRoot 'package-identities.ps1'
 if (-not (Test-Path -LiteralPath $helper)) { $helper = Join-Path $PSScriptRoot '..\ci\package-identities.ps1' }
 . $helper
@@ -25,10 +33,10 @@ foreach ($device in $devices) {
     try {
         . (Join-Path (Split-Path $helper) 'exclusive-policy.ps1')
         Clear-SsrExclusivePolicy -InstanceId $device.InstanceId
-    } catch { Write-Warning "policy cleanup: $($_.Exception.Message)"; $failed = $true }
-    Write-Host "removing device $($device.InstanceId)"
+    } catch { Write-Warning (Format-Text 'policy_cleanup' @{ detail = $_.Exception.Message }); $failed = $true }
+    Write-Host (Format-Text 'removing_device' @{ instance = $device.InstanceId })
     & pnputil.exe /remove-device $device.InstanceId
-    if ($LASTEXITCODE -ne 0) { Write-Warning "could not remove $($device.InstanceId) ($LASTEXITCODE)"; $failed = $true }
+    if ($LASTEXITCODE -ne 0) { Write-Warning (Format-Text 'remove_device_failed' @{ instance = $device.InstanceId; code = $LASTEXITCODE }); $failed = $true }
 }
 $drivers = @(Get-WindowsDriver -Online -ErrorAction SilentlyContinue | Where-Object {
     (Split-Path -Leaf $_.OriginalFileName) -in $infNames
@@ -36,9 +44,9 @@ $drivers = @(Get-WindowsDriver -Online -ErrorAction SilentlyContinue | Where-Obj
 foreach ($driver in $drivers) {
     $published = $driver.Driver
     if (-not $published) { $published = $driver.PublishedName }
-    Write-Host "deleting driver package $published (original $($driver.OriginalFileName))"
+    Write-Host (Format-Text 'deleting_driver' @{ published = $published; original = $driver.OriginalFileName })
     & pnputil.exe /delete-driver $published /uninstall /force
-    if ($LASTEXITCODE -ne 0) { Write-Warning "could not delete $published ($LASTEXITCODE)"; $failed = $true }
+    if ($LASTEXITCODE -ne 0) { Write-Warning (Format-Text 'delete_driver_failed' @{ published = $published; code = $LASTEXITCODE }); $failed = $true }
 }
 # Remove orphan legacy services as well, but never while one of their devices
 # or packages failed to uninstall. No direct service-registry deletion.
@@ -60,7 +68,7 @@ if (-not $KeepCertificates) {
         try {
             $store.Open('ReadWrite')
             foreach ($certificate in @($store.Certificates | Where-Object { Test-OurCertificate $_ })) {
-                Write-Host "removing certificate $name $($certificate.Thumbprint)"
+                Write-Host (Format-Text 'removing_certificate' @{ store = $name; thumbprint = $certificate.Thumbprint })
                 $store.Remove($certificate)
             }
         } finally { $store.Close() }
@@ -80,9 +88,9 @@ $remainingEndpoints = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentV
     $owner = [string]$props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},2'
     @($owners | Where-Object { $owner.Equals($_, [StringComparison]::OrdinalIgnoreCase) -or $owner.EndsWith("\$_", [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
 })
-Write-Host "remaining: devices=$($remainingDevices.Count), driver packages=$($remainingDrivers.Count), certificates=$($remainingCerts.Count), service keys=$($serviceKeys.Count), endpoints=$($remainingEndpoints.Count)"
+Write-Host (Format-Text 'remaining' @{ devices = $remainingDevices.Count; drivers = $remainingDrivers.Count; certificates = $remainingCerts.Count; services = $serviceKeys.Count; endpoints = $remainingEndpoints.Count })
 if ($serviceKeys.Count -and $remainingDevices.Count -eq 0 -and $remainingDrivers.Count -eq 0) {
-    Write-Warning '서비스 키는 장치와 패키지를 지운 뒤에도 재부팅 전까지 남을 수 있습니다. 재부팅 후 다시 확인하십시오.'
+    Write-Warning (Format-Text 'service_keys_warning')
 }
 if ($remainingDevices.Count -or $remainingDrivers.Count -or $remainingCerts.Count -or $remainingEndpoints.Count) { $failed = $true }
 exit $(if ($failed) { 1 } else { 0 })

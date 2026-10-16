@@ -191,7 +191,7 @@ export function objectMap(directions: readonly DirectionView[], running: boolean
     objectLayer,
   );
 
-  const status = liveText(running ? p.mapObjects(0) : p.mapOff);
+  const status = liveText(running ? p.mapObjectsNone : p.mapOff);
   const element = panel(
     p.mapTitle,
     [
@@ -219,7 +219,7 @@ export function objectMap(directions: readonly DirectionView[], running: boolean
     }
     for (let slot = count; slot < shown; slot += 1) circles[slot]?.setAttribute('display', 'none');
     shown = count;
-    status.set(p.mapObjects(count));
+    status.set(count === 0 ? p.mapObjectsNone : count === 1 ? p.mapObjectsOne : p.mapObjectsMany(count));
   }
 
   return {

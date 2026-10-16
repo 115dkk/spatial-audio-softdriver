@@ -1,15 +1,23 @@
 // The narrow column on the left: the mark, the three screens and a one-word
 // power state so it is visible from every screen.
 
-import type { Snapshot } from '../bindings';
+import type { Intent, Snapshot } from '../bindings';
 import { h } from '../dom';
 import { text } from '../text';
 import type { Context, Tab } from './common';
 
 const TABS: Tab[] = ['status', 'profile', 'settings'];
 
-/** The power state in one word, and its tone. */
-export function powerState(snapshot: Snapshot): { label: string; tone: 'off' | 'on' | 'warning' | 'error' } {
+/**
+ * The power state in one word, and its tone. `pending` is the intent in
+ * flight (`Context.pending`): while an `enable` is on its way the snapshot
+ * still says off, but the screen knows it is turning on.
+ */
+export function powerState(
+  snapshot: Snapshot,
+  pending: Intent['kind'] | null,
+): { label: string; tone: 'off' | 'on' | 'warning' | 'error' } {
+  if (pending === 'enable') return { label: text.status.powerTurningOn, tone: 'warning' };
   switch (snapshot.phase.kind) {
     case 'running':
       return snapshot.engine?.fault
@@ -54,7 +62,7 @@ export function nav(ctx: Context): HTMLElement {
       ),
     );
   }
-  const power = powerState(ctx.snapshot);
+  const power = powerState(ctx.snapshot, ctx.pending);
   // The rail paints the column the whole page down; the nav inside it stays
   // in view while the page scrolls.
   return h(

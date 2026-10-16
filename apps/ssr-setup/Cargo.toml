@@ -14,10 +14,9 @@ workspace = true
 
 [dependencies]
 ssr-abi.workspace = true
+ssr-i18n = { workspace = true, features = ["clap"] }
+ssr-types.workspace = true
 clap.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ssr-setup-sys.workspace = true
-
-[dev-dependencies]
-ssr-types.workspace = true

@@ -13,8 +13,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use ssr_abi::setup_contract::{TaskLine, TaskName};
+use ssr_types::app::Language;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -45,6 +46,7 @@ enum Task {
     /// Remove the current and legacy devices, driver packages, orphan services
     /// and test-signing certificates, and report what stayed.
     Uninstall {
+        /// Where to write the result line.
         #[arg(long)]
         result: PathBuf,
     },
@@ -54,21 +56,26 @@ enum Task {
         /// Bit n enables endpoint n.
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..16))]
         endpoint_mask: u8,
+        /// Where to write the result line.
         #[arg(long)]
         result: PathBuf,
     },
     /// Disable and enable the device.
     RestartDevice {
+        /// Where to write the result line.
         #[arg(long)]
         result: PathBuf,
     },
     /// Reinstall the driver on the device and apply the exclusive-mode policy,
     /// or install when there is no device.
     Repair {
+        /// The driver package INF.
         #[arg(long)]
         inf: PathBuf,
+        /// The test-signing certificate; a missing file means a release package.
         #[arg(long)]
         cert: Option<PathBuf>,
+        /// Where to write the result line.
         #[arg(long)]
         result: PathBuf,
     },
@@ -108,17 +115,80 @@ impl Task {
     }
 }
 
+fn localized_command(language: Language) -> clap::Command {
+    use ssr_i18n::setup;
+
+    let mut command = Cli::command().about(setup::about(language));
+    let descriptions = [
+        ("install", setup::install_about(language)),
+        ("uninstall", setup::uninstall_about(language)),
+        ("set-formats", setup::set_formats_about(language)),
+        ("restart-device", setup::restart_device_about(language)),
+        ("repair", setup::repair_about(language)),
+    ];
+    for (name, about) in descriptions {
+        command = command.mut_subcommand(name, |subcommand| {
+            let mut subcommand = subcommand.about(about);
+            // In declaration order: mut_arg moves an argument to the end, and
+            // the usage line lists them in that order.
+            let arguments: Vec<String> = subcommand
+                .get_arguments()
+                .map(|arg| arg.get_id().to_string())
+                .collect();
+            for argument in arguments {
+                let help = match argument.as_str() {
+                    "inf" => setup::inf_help(language),
+                    "cert" => setup::cert_help(language),
+                    "result" => setup::result_help(language),
+                    "endpoint_mask" => setup::endpoint_mask_help(language),
+                    _ => continue,
+                };
+                subcommand = subcommand.mut_arg(argument, |arg| arg.help(help));
+            }
+            subcommand
+        });
+    }
+    ssr_i18n::clap_help::localize(command, language)
+}
+
+fn parse_cli(language: Language) -> Result<Cli, clap::Error> {
+    let matches = localized_command(language).try_get_matches()?;
+    Cli::from_arg_matches(&matches)
+}
+
+fn parse_error_exit(error: clap::Error, language: Language) -> ExitCode {
+    if matches!(
+        error.kind(),
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+    ) {
+        let _ = error.print();
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("{}", ssr_i18n::cli::parse_error(language));
+        let _ = error.print();
+        ExitCode::from(2)
+    }
+}
+
 fn main() -> ExitCode {
-    execute(&Cli::parse().task.into_line())
+    let language = ssr_i18n::cli_language();
+    let cli = match parse_cli(language) {
+        Ok(cli) => cli,
+        Err(error) => return parse_error_exit(error, language),
+    };
+    execute(&cli.task.into_line(), language)
 }
 
 #[cfg(windows)]
-fn execute(line: &TaskLine) -> ExitCode {
+fn execute(line: &TaskLine, language: Language) -> ExitCode {
     let result = ssr_setup_sys::tasks::run(line);
     let json = result.to_json();
     println!("{json}");
     if let Err(error) = write_result(&line.result, &json) {
-        eprintln!("ssr-setup: {}: {error}", line.result.display());
+        eprintln!(
+            "{}",
+            ssr_i18n::setup::write_result_failed(language, line.result.display(), error)
+        );
     }
     ExitCode::from(if result.ok { 0 } else { 1 })
 }
@@ -136,7 +206,7 @@ fn write_result(path: &std::path::Path, json: &str) -> std::io::Result<()> {
 const NOT_ON_WINDOWS: &str = r#"{"ok":false,"error":"ssr-setup runs on Windows","code":2}"#;
 
 #[cfg(not(windows))]
-fn execute(_line: &TaskLine) -> ExitCode {
+fn execute(_line: &TaskLine, _language: Language) -> ExitCode {
     println!("{NOT_ON_WINDOWS}");
     ExitCode::from(2)
 }
@@ -150,6 +220,11 @@ mod tests {
     fn parse(args: &[&str]) -> Result<TaskLine, clap::Error> {
         Cli::try_parse_from(std::iter::once("ssr-setup").chain(args.iter().copied()))
             .map(|cli| cli.task.into_line())
+    }
+
+    #[test]
+    fn english_help_is_the_derived_help_and_korean_help_is_complete() {
+        ssr_i18n::clap_help::verify(Cli::command(), localized_command);
     }
 
     #[test]

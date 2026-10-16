@@ -61,6 +61,13 @@ export interface ButtonOptions {
   variant?: 'primary' | 'secondary' | 'quiet';
   /** Label while this intent is in flight. */
   pendingLabel?: string;
+  /**
+   * How the button shows its intent in flight. `'label'` (the default)
+   * writes `pendingLabel` in place of the label. `'spinner'` hides the label
+   * where it stands, so the button keeps its width, turns a spinner over it
+   * and gives `pendingLabel` to screen readers only.
+   */
+  busy?: 'label' | 'spinner';
   /** Extra classes. */
   className?: string;
 }
@@ -69,20 +76,37 @@ export interface ButtonOptions {
 export function intentButton(ctx: Context, label: string, intent: Intent, options: ButtonOptions): HTMLButtonElement {
   ctx.offer(intent.kind);
   const pending = ctx.pending === intent.kind;
+  const spinning = pending && options.busy === 'spinner';
   const button = h(
     'button',
     {
       type: 'button',
-      class: ['button', options.variant ?? 'secondary', options.className].filter(Boolean).join(' '),
+      class: ['button', options.variant ?? 'secondary', options.className, spinning ? 'is-spinning' : null]
+        .filter(Boolean)
+        .join(' '),
       'data-key': options.key,
       'data-intent': intent.kind,
       disabled: ctx.busy,
       'aria-busy': pending ? 'true' : null,
       onClick: () => ctx.send(intent),
     },
-    pending && options.pendingLabel ? options.pendingLabel : label,
+    ...(spinning
+      ? spinnerLabel(label, options.pendingLabel ?? label)
+      : [pending && options.pendingLabel ? options.pendingLabel : label]),
   );
   return button;
+}
+
+/**
+ * A busy button's content: the label, kept only for its width (neither seen
+ * nor read), the spinner over it, and what a screen reader says instead.
+ */
+function spinnerLabel(label: string, spoken: string): Child[] {
+  return [
+    h('span', { class: 'button-label', 'aria-hidden': 'true' }, label),
+    h('span', { class: 'spinner', 'aria-hidden': 'true' }),
+    h('span', { class: 'visually-hidden' }, spoken),
+  ];
 }
 
 /** A plain button for view changes and OS calls. */

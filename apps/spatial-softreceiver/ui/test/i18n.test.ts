@@ -2,6 +2,8 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { Api } from '../src/api';
 import { mountApp } from '../src/app';
 import type { Language, Snapshot } from '../src/bindings';
+import { en as catalogEn, ko as catalogKo } from '../src/catalog';
+import { codecName } from '../src/format';
 import { fixture, fixtureNames } from '../src/fixtures';
 import { assertIntent, assertSnapshot } from '../src/guard';
 import { createMockApi } from '../src/mock';
@@ -80,11 +82,11 @@ describe('i18n catalog contract', () => {
     const cases = {
       'bridge.unreachable': [['detail']],
       'bridge.badSnapshot': [['detail']],
-      'meters.fellBack': [[0], [2]],
+      'meters.fellBackMix': [[0], [2]],
       'format.channels': [[1], [12]],
-      'format.otherCodec': [[0x1234]],
+      'format.otherCodec': [['0x00001234']],
       'profile.angles': [[-30, 45]],
-      'profile.mapObjects': [[0], [1], [8]],
+      'profile.mapObjectsMany': [[0], [1], [8]],
       'settings.updateCurrent': [['0.13.0']],
       'settings.updateReady': [['0.14.0']],
     } satisfies Record<FunctionPaths<typeof ko>, unknown[][]>;
@@ -99,9 +101,43 @@ describe('i18n catalog contract', () => {
         expect(translated(...args).length, path).toBeGreaterThan(0);
       }
     }
-    expect(en.format.otherCodec(0x1234)).toBe('Unknown codec 0x00001234');
+    setLanguage('en');
+    expect(codecName({ other: 0x1234 })).toBe('Unknown codec 0x00001234');
     expect(en.profile.angles(-30, 45)).toContain('-30°');
-    expect(en.profile.mapObjects(1)).toBe('1 sound object');
+    expect(en.profile.mapObjectsOne).toBe('1 sound object');
+  });
+
+  it.each([
+    [ko, catalogKo],
+    [en, catalogEn],
+  ])('projects generated screen leaves and sources shared names only from names', (projected, catalog) => {
+    const { endpoints, status, profile, ...screen } = catalog.screen;
+    const { product, endpoints: named, status: projectedStatus, profile: projectedProfile, ...rest } = projected;
+    expect(rest).toEqual(screen);
+    for (const key of Object.keys(screen) as (keyof typeof screen)[]) {
+      expect(rest[key], key).toBe(screen[key]);
+    }
+    // Sentences the supervisor also says come from [common], not a second copy.
+    const { common } = catalog;
+    expect(projectedStatus).toEqual({ ...status, powerOn: common.turn_on, powerOff: common.turn_off });
+    expect(projectedProfile).toEqual({
+      ...profile,
+      fromFile: common.profile_file_takes_precedence,
+      testOff: common.test_after_enable,
+    });
+    for (const key of ['powerOn', 'powerOff']) expect(status).not.toHaveProperty(key);
+    for (const key of ['fromFile', 'testOff']) expect(profile).not.toHaveProperty(key);
+    expect(product).toBe(catalog.names.product);
+    expect(projected).not.toHaveProperty('productLatin');
+    expect(named).toEqual([
+      { ...endpoints[0], name: catalog.names.endpoint_main },
+      { ...endpoints[1], name: catalog.names.endpoint_music },
+      { ...endpoints[2], name: catalog.names.endpoint_pass },
+    ]);
+    expect(catalog.screen).not.toHaveProperty('product');
+    expect(catalog.screen).not.toHaveProperty('productLatin');
+    for (const endpoint of endpoints) expect(Object.keys(endpoint)).toEqual(['purpose']);
+    expect(projected.chainErrorKinds['future_kind']).toBeUndefined();
   });
 
   it('keeps the text.foo calling convention live across catalog changes', () => {

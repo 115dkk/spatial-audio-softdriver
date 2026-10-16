@@ -391,9 +391,6 @@
     "secure_boot": "disabled"
   },
   "roles_taken": true,
-  "error": {
-    "message": "출력 장치와의 연결이 끊어져 다시 연결하는 중입니다: the output device was removed",
-    "next": "none"
-  },
+  "error": null,
   "notes": []
 }

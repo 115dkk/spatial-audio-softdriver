@@ -36,6 +36,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "apps/spatial-softreceiver/ui/**"
+      - "i18n/**"
       - "tools/ui-fonts.mjs"
       - "tools/ui-gallery-issue.mjs"
       - ".github/actions/ui-dist/**"
@@ -44,6 +45,7 @@ on:
     branches: [master]
     paths:
       - "apps/spatial-softreceiver/ui/**"
+      - "i18n/**"
       - "tools/ui-fonts.mjs"
       - "tools/ui-gallery-issue.mjs"
       - ".github/actions/ui-dist/**"

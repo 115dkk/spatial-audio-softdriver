@@ -29,7 +29,7 @@
 - **객체 지도 계약.** `EngineStatus.directions`는 현재 준비된 출력 레이아웃을, `EngineStatus.scene`은 가장 최근 믹스 블록에서 신호를 낸 객체의 차선·객체 번호·방향 벡터·RMS dBFS를 담습니다. 화면은 30 Hz `meters` 이벤트에 실린 이 값만 그립니다.
 - **셸의 몫.** 트레이(열기, 켜기/끄기, 종료), 창 닫기는 숨기기(소리는 계속), 단일 인스턴스(두 번째 실행은 창을 앞으로), 로그인 시 자동 시작(`--minimized`), 로그오프 같은 바깥의 종료 요청에도 `Quit`를 먼저 보내 역할을 되돌리기. `Quit`가 3초 안에 끝나지 않거나 제어 스레드가 패닉으로 끝나면 셸이 복원점 파일을 읽어 `restore_roles`로 역할을 되돌립니다(`ssr-guard`가 할 일을 프로세스 안에서 마지막 수단으로 하는 것). 설치본과 업데이트는 아래 '설치본' 항목입니다(Tauri의 `bundle.active`는 꺼 둠).
 - **연기 시험.** `--smoke [초]`로 띄우면 화면이 `snapshot` 명령을 부른 순간 `Quit`를 거쳐 0으로 끝나고, 시간 안에 안 오면 2로 끝납니다. CI의 Windows 러너가 디버그와 릴리스 빌드로 돌려, WebView2가 우리 번들을 그리고 IPC가 통하는지 확인합니다. 드라이버가 없는 러너에서는 마법사의 첫 단계가 그 스냅샷입니다.
-- **글꼴.** IBM Plex Sans KR은 저장소에 넣지 않고 `tools/ui-fonts.mjs`가 npm 패키지 `@ibm/plex-sans-kr` 1.1.0의 tarball과 파일을 SHA-256으로 대조해 받습니다(ASIO SDK와 같은 방식). 화면 문구는 `ui/src/text.ts`의 한국어·영어 카탈로그에 모읍니다.
+- **글꼴.** IBM Plex Sans KR은 저장소에 넣지 않고 `tools/ui-fonts.mjs`가 npm 패키지 `@ibm/plex-sans-kr` 1.1.0의 tarball과 파일을 SHA-256으로 대조해 받습니다(ASIO SDK와 같은 방식). 화면 문구를 포함한 모든 사용자 문구는 `i18n/ko.toml`, `i18n/en.toml`에 모읍니다(아래 문장 항목).
 
 ## 설치본과 업데이트 (2026-10-15 추가)
 
@@ -43,5 +43,5 @@
 
 - **언어 결정도 Rust의 몫입니다.** `Language`는 `Ko`와 `En`이고, `Intent::SetLanguage(Some(language))`는 명시한 언어를 저장하며 `None`은 Windows 표시 언어를 따릅니다. `Settings.language`가 없는 옛 설정 파일도 `None`으로 읽습니다. 셸은 `sys-locale`로 얻은 OS 언어를 `Config.default_language`로 넘깁니다. 한국어(`ko-KR`)이면 `Ko`, 그 밖은 `En`입니다. 플랫폼을 붙이지 않은 감독자와 시험의 기본값은 `Ko`입니다.
 - **스냅샷은 결정된 언어와 저장한 선택을 내보냅니다.** `Supervisor::language()`는 저장한 언어가 있으면 그것을, 없으면 `Config.default_language`를 돌려주며 `Snapshot.language`도 이 값입니다. `Snapshot.language_choice`는 저장한 선택 그대로(`None`이면 자동)이고, 설정 화면의 선택기는 이 값을 보입니다. 문구는 `language`로 고르므로 자동 상태에서 지금 언어를 고정하는 선택도 변경으로 들어갑니다. `SetLanguage`는 `Quit`를 뺀 모든 위상에서 받습니다. 언어를 바꾸려고 엔진을 다시 시작하거나 마법사 단계를 옮기지 않습니다.
-- **문장은 소유한 쪽에서 만듭니다.** 감독자의 사용자 문장은 `supervisor::text::Message`가 두 언어로 렌더합니다. 화면은 `Snapshot.language`로 `text.ts`의 카탈로그와 문서의 `lang`을 고르고, Rust가 보낸 오류와 메모는 번역하지 않고 그대로 그립니다. 장치 이름, 파일 경로, 외부 라이브러리의 오류 상세도 번역하지 않습니다. 두 화면 카탈로그는 같은 키와 함수 서명을 TypeScript로 강제합니다.
+- **문장은 소유한 쪽에서 만듭니다.** 감독자의 사용자 문장은 `supervisor::text::Message`가 두 언어로 렌더합니다. 화면은 `Snapshot.language`로 `text.ts`의 카탈로그와 문서의 `lang`을 고르고, Rust가 보낸 오류와 메모는 번역하지 않고 그대로 그립니다. 장치 이름, 파일 경로, 외부 라이브러리의 오류 상세도 번역하지 않습니다. 문장의 원본은 언어마다 하나인 `i18n/ko.toml`, `i18n/en.toml`이고(2026-10-16 보탬), `crates/ssr-i18n`의 시험이 거기서 Rust 함수(`ssr_i18n::{names, supervisor, guard, shell}`)와 화면 카탈로그(`ui/src/catalog.ts`)를 생성해 커밋된 파일과 대조합니다. 두 언어의 키와 자리표시자가 같은지, 영어에 한글이 없는지, 드라이버 INF의 지역화 라벨이 `[names]`와 같은지도 그 시험이 확인합니다. 조건이 있는 문장은 키를 나누고 고르는 일은 코드가 합니다.
 - **셸과 감시 프로세스도 같은 규칙을 씁니다.** 트레이 문구는 다음 스냅샷의 언어로 갱신합니다. 감시 프로세스는 상태 폴더의 `settings.json`에서 명시한 언어를 읽고, 없거나 `null`이면 OS 언어를 따릅니다. 복원 표지의 까닭은 언어와 무관한 값으로 남기며, 셸은 현재 언어로 안내합니다. 이미 표지 파일에 저장된 진단 상세(`notes`)는 기록 당시의 문장 그대로 둡니다. ADR 0033 보탬의 토스트는 제목(`ssr_guard::language::title`)과 문장을 그 언어로 띄웁니다. 설정 화면의 '언어' 선택기(자동, 한국어, 영어)가 `SetLanguage`를 보내고, 셸의 업데이트 오류(`update::ApplyError`)도 같은 언어로 렌더합니다.
