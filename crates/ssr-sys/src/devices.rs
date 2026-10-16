@@ -85,7 +85,7 @@ const STANDARD_LAYOUTS: [OutputLayout; 5] = [
     },
 ];
 
-fn supports_layout(device: &Device, layout: OutputLayout) -> bool {
+pub(crate) fn supports_layout(device: &Device, layout: OutputLayout) -> bool {
     Encoding::ALL.into_iter().any(|encoding| {
         device.get_iaudioclient().is_ok_and(|client| {
             client

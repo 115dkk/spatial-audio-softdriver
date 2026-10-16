@@ -360,6 +360,14 @@ pub trait Host {
 
     fn set_default_role(&mut self, role: Role, device: &DeviceId) -> Result<(), HostError>;
 
+    /// Whether `output` accepts `layout` in exclusive mode. `Err(HostError::Unsupported)`
+    /// when this host cannot tell; the supervisor then goes ahead.
+    fn supports_layout(
+        &mut self,
+        output: &DeviceId,
+        layout: OutputLayout,
+    ) -> Result<bool, HostError>;
+
     /// Runs `ssr-setup` elevated (one UAC prompt) and waits for its one JSON
     /// line.
     fn run_setup(&mut self, task: &SetupTask) -> Result<SetupOutcome, HostError>;

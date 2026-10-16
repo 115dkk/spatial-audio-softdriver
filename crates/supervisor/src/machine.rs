@@ -18,20 +18,21 @@
 //! calls, which a UI thread's single-threaded apartment cannot.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use engine::{LiveChange, OutputProfile, Prepared};
-use speakers::{SpeakerConfig, SpeakerProfile, SpeakerRange};
+use speakers::SpeakerProfile;
 use ssr_types::app::{
-    Intent, Language, NextAction, OutputChoice, Phase, ProfileKind, ProfileView, SetupStep,
-    Snapshot, UserError,
+    HeadphonesView, Intent, Language, NextAction, OutputChoice, Phase, ProfileKind, ProfileView,
+    RoomFir, SetupStep, Snapshot, SpeakerChannelView, SpeakerLayout, SpeakersView, UserError,
 };
 use ssr_types::ports::PolicyState;
 use ssr_types::{
     Arch, DeviceId, DeviceState, DirectionId, DirectionView, DriverState, EngineFault,
-    EngineStatus, Host, HostError, Layout, OutputDevice, Platform, Role, SetupTask,
+    EngineStatus, Host, HostError, Layout, OutputDevice, OutputLayout, Platform, Role, SetupTask,
 };
 
 use crate::restore_point::{self, RestorePoint};
@@ -123,23 +124,93 @@ struct Running {
     pending: Option<Box<Prepared>>,
 }
 
-/// What the profile intents remember (ADR 0013, 2026-10-15 addendum).
-///
-/// Every field has a default, so a settings file written before profiles
-/// existed, or one missing a field, still loads.
+/// What the profile intents remember (ADR 0034).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "ProfileSettingsFile")]
+pub struct ProfileSettings {
+    pub kind: ProfileKind,
+    pub headphones: HeadphoneSettings,
+    pub speakers: SpeakerSettings,
+}
+
+impl Default for ProfileSettings {
+    fn default() -> Self {
+        Self {
+            kind: ProfileKind::Speakers,
+            headphones: HeadphoneSettings::default(),
+            speakers: SpeakerSettings::default(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
-pub struct ProfileSettings {
-    /// The imported BRIR set: a folder of direction WAVs, `hesuvi.wav`, or
-    /// `hrir.wav`. `Some` makes the output headphones.
+pub struct HeadphoneSettings {
     pub brir: Option<PathBuf>,
-    /// The imported headphone FIR, folded into the BRIR set.
-    pub headphone_fir: Option<PathBuf>,
-    /// The gain [`Intent::SetGain`] saved, in dB (-20 to +10). `None` (never
-    /// set, or a settings file from before profiles) keeps the gain of the
-    /// state directory's `profile.toml` and is 0 dB for an imported set or
-    /// the default stereo profile; `Some` overrides all of them.
     pub gain_db: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SpeakerSettings {
+    pub layout: SpeakerLayout,
+    pub room_fir: BTreeMap<String, PathBuf>,
+    pub gain_db: Option<f32>,
+}
+
+impl Default for SpeakerSettings {
+    fn default() -> Self {
+        Self {
+            layout: SpeakerLayout::Stereo,
+            room_fir: BTreeMap::new(),
+            gain_db: None,
+        }
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct ProfileSettingsFile {
+    kind: Option<ProfileKind>,
+    headphones: HeadphoneSettings,
+    speakers: SpeakerSettings,
+    brir: Option<PathBuf>,
+    gain_db: Option<f32>,
+    // Accepted only so settings written before ADR 0034 still load.
+    headphone_fir: Option<PathBuf>,
+}
+
+impl From<ProfileSettingsFile> for ProfileSettings {
+    fn from(mut file: ProfileSettingsFile) -> Self {
+        let old_brir = file.brir.take();
+        if file.headphones.brir.is_none() {
+            file.headphones.brir = old_brir;
+        }
+        let kind = file.kind.unwrap_or_else(|| {
+            if file.headphones.brir.is_some() {
+                ProfileKind::Headphones
+            } else {
+                ProfileKind::Speakers
+            }
+        });
+        if let Some(gain_db) = file.gain_db {
+            match kind {
+                ProfileKind::Headphones if file.headphones.gain_db.is_none() => {
+                    file.headphones.gain_db = Some(gain_db);
+                }
+                ProfileKind::Speakers if file.speakers.gain_db.is_none() => {
+                    file.speakers.gain_db = Some(gain_db);
+                }
+                _ => {}
+            }
+        }
+        let _ = file.headphone_fir;
+        Self {
+            kind,
+            headphones: file.headphones,
+            speakers: file.speakers,
+        }
+    }
 }
 
 /// Settings the shell persists; the machine reads and updates them.
@@ -557,19 +628,24 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         let result = match intent {
             Intent::SetLanguage(language) => {
                 self.settings.language = language;
-                if self.profile.kind == ProfileKind::Stereo && !self.profile.from_file {
-                    self.profile.name = self.say(Message::DefaultProfileName);
-                }
                 Ok(())
             }
             // The profile can change whenever the wizard is done; a running
-            // engine takes the change live, all or nothing.
+            // engine takes changes to the kind in use live, all or nothing.
+            Intent::SetProfileKind(kind) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.set_profile_kind(kind),
+                _ => return self.refused(),
+            },
             Intent::ImportBrir(path) => match self.phase {
                 Phase::Ready | Phase::Running | Phase::Faulted => self.import_brir(path),
                 _ => return self.refused(),
             },
-            Intent::ImportHeadphoneFir(path) => match self.phase {
-                Phase::Ready | Phase::Running | Phase::Faulted => self.import_headphone_fir(path),
+            Intent::SetSpeakerLayout(layout) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.set_speaker_layout(layout),
+                _ => return self.refused(),
+            },
+            Intent::SetRoomFir(room_fir) => match self.phase {
+                Phase::Ready | Phase::Running | Phase::Faulted => self.set_room_fir(room_fir),
                 _ => return self.refused(),
             },
             Intent::SetGain(db) => match self.phase {
@@ -837,6 +913,15 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         let resolved = resolve(&self.config, &self.settings.profile, self.language())
             .map_err(|error| self.localized_error(error))?;
         self.profile = resolved.view;
+        if let OutputProfile::Speakers(profile) = &resolved.profile {
+            self.check_layout(
+                &profile.name,
+                OutputLayout {
+                    channels: u16::try_from(profile.device_channels).unwrap_or(u16::MAX),
+                    channel_mask: profile.channel_mask,
+                },
+            )?;
+        }
         self.take_roles(ours, output.id.clone())?;
         match self.launcher.launch(&output, &resolved.profile) {
             Ok(handle) => {
@@ -996,36 +1081,126 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
         }
     }
 
+    fn set_profile_kind(&mut self, kind: ProfileKind) -> Result<(), UserError> {
+        if self.profile_file_active() {
+            return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
+        }
+        if self.settings.profile.kind == kind {
+            return Ok(());
+        }
+        if kind == ProfileKind::Headphones && self.settings.profile.headphones.brir.is_none() {
+            return Err(self.message_error(Message::ImportBrirFirst, NextAction::None));
+        }
+        if kind == ProfileKind::Speakers {
+            let layout = self.settings.profile.speakers.layout;
+            self.check_layout(layout.name(), layout.output_layout())?;
+        }
+        let mut settings = self.settings.profile.clone();
+        settings.kind = kind;
+        self.change_profile(settings)
+    }
+
     fn import_brir(&mut self, path: PathBuf) -> Result<(), UserError> {
         if self.profile_file_active() {
             return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
         }
-        if brir_source(&path).is_none() {
-            return Err(self.message_error(Message::InvalidBrirSource, NextAction::None));
-        }
+        let source = brir_source(&path)
+            .ok_or_else(|| self.message_error(Message::InvalidBrirSource, NextAction::None))?;
+        let profile = imported_brir_profile(
+            &path,
+            source,
+            self.settings.profile.headphones.gain_db.unwrap_or(0.0),
+        );
+        brir::layout(&profile).map_err(|error| self.localized_error(brir_error(error)))?;
         let mut settings = self.settings.profile.clone();
-        settings.brir = Some(path);
-        self.change_profile(settings)
+        settings.headphones.brir = Some(path);
+        if settings.kind == ProfileKind::Headphones {
+            self.change_profile(settings)
+        } else {
+            self.settings.profile = settings;
+            self.refresh_profile();
+            Ok(())
+        }
     }
 
-    fn import_headphone_fir(&mut self, path: PathBuf) -> Result<(), UserError> {
+    fn set_speaker_layout(&mut self, layout: SpeakerLayout) -> Result<(), UserError> {
         if self.profile_file_active() {
             return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
         }
-        if self.settings.profile.brir.is_none() {
-            return Err(self.message_error(Message::ImportBrirFirst, NextAction::None));
+        let mut settings = self.settings.profile.clone();
+        settings.speakers.layout = layout;
+        if settings.kind == ProfileKind::Speakers {
+            self.check_layout(layout.name(), layout.output_layout())?;
+            self.change_profile(settings)
+        } else {
+            self.settings.profile = settings;
+            self.refresh_profile();
+            Ok(())
         }
-        if let Err(error) = brir::check_headphone_fir(&path) {
+    }
+
+    fn set_room_fir(&mut self, room_fir: RoomFir) -> Result<(), UserError> {
+        if self.profile_file_active() {
+            return Err(self.message_error(Message::ProfileFileTakesPrecedence, NextAction::None));
+        }
+        let layout = self.settings.profile.speakers.layout;
+        let Some(channel) = layout
+            .speakers()
+            .iter()
+            .position(|speaker| speaker.name() == room_fir.speaker)
+        else {
             return Err(self.message_error(
-                Message::HeadphoneFirReadFailed {
+                Message::SpeakerNotInLayout {
+                    name: room_fir.speaker,
+                },
+                NextAction::None,
+            ));
+        };
+        if let Some(path) = room_fir.path.as_deref()
+            && let Err(error) = speakers::check_room_fir(path, channel)
+        {
+            return Err(self.message_error(
+                Message::RoomFirReadFailed {
                     detail: error.to_string(),
                 },
                 NextAction::None,
             ));
         }
         let mut settings = self.settings.profile.clone();
-        settings.headphone_fir = Some(path);
-        self.change_profile(settings)
+        match room_fir.path {
+            Some(path) => {
+                settings.speakers.room_fir.insert(room_fir.speaker, path);
+            }
+            None => {
+                settings.speakers.room_fir.remove(&room_fir.speaker);
+            }
+        }
+        if settings.kind == ProfileKind::Speakers {
+            self.change_profile(settings)
+        } else {
+            self.settings.profile = settings;
+            self.refresh_profile();
+            Ok(())
+        }
+    }
+
+    fn check_layout(&mut self, name: &str, layout: OutputLayout) -> Result<(), UserError> {
+        if layout == OutputLayout::STEREO {
+            return Ok(());
+        }
+        let Some(output) = self.settings.output.as_ref().map(|output| output.id.clone()) else {
+            return Ok(());
+        };
+        if matches!(self.host.get_mut().supports_layout(&output, layout), Ok(false)) {
+            return Err(self.message_error(
+                Message::LayoutUnsupported {
+                    layout: name.into(),
+                    channels: layout.channels,
+                },
+                NextAction::None,
+            ));
+        }
+        Ok(())
     }
 
     /// Resolves `settings`; with an engine running, prepares the result on
@@ -1081,7 +1256,10 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
                 db,
             );
         }
-        self.settings.profile.gain_db = Some(db);
+        match self.profile.kind {
+            ProfileKind::Headphones => self.settings.profile.headphones.gain_db = Some(db),
+            ProfileKind::Speakers => self.settings.profile.speakers.gain_db = Some(db),
+        }
         self.profile.gain_db = db;
         Ok(())
     }
@@ -1128,34 +1306,13 @@ impl<H: Host, L: Launcher> Supervisor<H, L> {
 const GAIN_MIN_DB: f32 = -20.0;
 const GAIN_MAX_DB: f32 = 10.0;
 
-/// The profile without a `profile.toml` or an imported BRIR set: two
-/// full-range speakers at ±30° on the device's first two channels, so every
-/// source is panned to stereo and the app makes sound from the first day.
+/// The profile without a `profile.toml`: app speaker layout 2.0.
 pub fn default_profile() -> OutputProfile {
-    let speaker = |name: &str, azimuth_deg: f32, channel: usize| SpeakerConfig {
-        name: name.into(),
-        azimuth_deg,
-        elevation_deg: 0.0,
-        channel,
-        distance_m: None,
-        delay_ms: None,
-        trim_db: 0.0,
-        range: SpeakerRange::Full,
-        crossover_hz: None,
-        fir: None,
-    };
-    OutputProfile::Speakers(SpeakerProfile {
-        name: "Stereo".into(),
-        device_channels: 2,
-        channel_mask: 3,
-        gain_db: 0.0,
-        limiter_ceiling_dbfs: -1.0,
-        crossover_hz: 80.0,
-        lfe_gain_db: 10.0,
-        speakers: vec![speaker("FL", 30.0, 0), speaker("FR", -30.0, 1)],
-        subwoofers: Vec::new(),
-        bass_to: Vec::new(),
-    })
+    OutputProfile::Speakers(speakers::layout_profile(
+        SpeakerLayout::Stereo,
+        &BTreeMap::new(),
+        0.0,
+    ))
 }
 
 fn set_gain_db(profile: &mut OutputProfile, db: f32) {
@@ -1167,13 +1324,9 @@ fn set_gain_db(profile: &mut OutputProfile, db: f32) {
 
 /// [`default_profile`] as the screen sees it, for snapshots taken without a
 /// supervisor.
-pub fn default_profile_view_for(language: Language) -> ProfileView {
-    let OutputProfile::Speakers(profile) = default_profile() else {
-        unreachable!("the default profile is a speaker profile");
-    };
-    let mut view = speakers_view(&profile, ProfileKind::Stereo, false);
-    view.name = Message::DefaultProfileName.render(language);
-    view
+pub fn default_profile_view_for(_language: Language) -> ProfileView {
+    let settings = ProfileSettings::default();
+    unresolved_view(&Config::default(), &settings, Language::Ko)
 }
 
 pub fn default_profile_view() -> ProfileView {
@@ -1194,7 +1347,7 @@ fn profile_file(config: &Config) -> Option<&Path> {
 fn resolve(
     config: &Config,
     settings: &ProfileSettings,
-    language: Language,
+    _language: Language,
 ) -> Result<Resolved, LocalizedError> {
     if let Some(path) = profile_file(config) {
         let mut profile = engine::load_output_profile(path).map_err(|error| LocalizedError {
@@ -1205,127 +1358,143 @@ fn resolve(
         })?;
         let view = match &mut profile {
             OutputProfile::Headphones(profile) => {
-                if let Some(db) = settings.gain_db {
+                if let Some(db) = settings.headphones.gain_db {
                     profile.gain_db = db;
                 }
-                headphones_view(profile, true)?
+                headphones_view(profile, true, settings, true)?
             }
             OutputProfile::Speakers(profile) => {
-                if let Some(db) = settings.gain_db {
+                if let Some(db) = settings.speakers.gain_db {
                     profile.gain_db = db;
                 }
-                speakers_view(profile, ProfileKind::Speakers, true)
+                speakers_view(profile, true, settings, None)
             }
         };
         return Ok(Resolved { profile, view });
     }
-    if let Some(path) = &settings.brir {
-        let source = brir_source(path).ok_or_else(invalid_brir_error)?;
-        let mut profile = brir::Profile {
-            name: brir_name(path),
-            brir: source,
-            headphone_fir: settings.headphone_fir.clone(),
-            gain_db: settings.gain_db.unwrap_or(0.0),
-            limiter_ceiling_dbfs: -1.0,
-            lfe: brir::LfePolicy::Mute,
-            angles: brir::AnglePreset::Standard,
-            angle_overrides: Vec::new(),
-            truncate: None,
-            trim_leading_delay: true,
-        };
-        let layout = brir::layout(&profile).map_err(brir_error)?;
-        // The build logs routed LFE into the centre at 0 dB.
-        if layout.find("FC").is_some() {
-            profile.lfe = brir::LfePolicy::Direction {
-                name: "FC".into(),
-                gain_db: 0.0,
-            };
+    match settings.kind {
+        ProfileKind::Headphones => {
+            let path = settings
+                .headphones
+                .brir
+                .as_ref()
+                .ok_or_else(|| LocalizedError {
+                    message: Message::ImportBrirFirst,
+                    next: NextAction::None,
+                })?;
+            let source = brir_source(path).ok_or_else(invalid_brir_error)?;
+            let mut profile = imported_brir_profile(
+                path,
+                source,
+                settings.headphones.gain_db.unwrap_or(0.0),
+            );
+            let layout = brir::layout(&profile).map_err(brir_error)?;
+            if layout.find("FC").is_some() {
+                profile.lfe = brir::LfePolicy::Direction {
+                    name: "FC".into(),
+                    gain_db: 0.0,
+                };
+            }
+            let view = headphones_view(&profile, false, settings, false)?;
+            Ok(Resolved {
+                profile: OutputProfile::Headphones(profile),
+                view,
+            })
         }
-        let view = ProfileView {
-            kind: ProfileKind::Headphones,
-            name: profile.name.clone(),
-            brir: Some(display(path)),
-            headphone_fir: profile.headphone_fir.as_deref().map(display),
-            gain_db: profile.gain_db,
-            directions: direction_views(&layout),
-            from_file: false,
-        };
-        return Ok(Resolved {
-            profile: OutputProfile::Headphones(profile),
-            view,
-        });
+        ProfileKind::Speakers => {
+            let profile = speakers::layout_profile(
+                settings.speakers.layout,
+                &settings.speakers.room_fir,
+                settings.speakers.gain_db.unwrap_or(0.0),
+            );
+            let view = speakers_view(
+                &profile,
+                false,
+                settings,
+                Some(settings.speakers.layout),
+            );
+            Ok(Resolved {
+                profile: OutputProfile::Speakers(profile),
+                view,
+            })
+        }
     }
-    let mut profile = default_profile();
-    let OutputProfile::Speakers(speakers) = &mut profile else {
-        unreachable!("the default profile is a speaker profile");
-    };
-    speakers.gain_db = settings.gain_db.unwrap_or(0.0);
-    let mut view = speakers_view(speakers, ProfileKind::Stereo, false);
-    view.name = Message::DefaultProfileName.render(language);
-    Ok(Resolved { profile, view })
 }
 
 /// What the view says when the profile does not resolve.
-fn unresolved_view(config: &Config, settings: &ProfileSettings, language: Language) -> ProfileView {
+fn unresolved_view(
+    config: &Config,
+    settings: &ProfileSettings,
+    _language: Language,
+) -> ProfileView {
     let from_file = profile_file(config).is_some();
-    let headphones = !from_file && settings.brir.is_some();
-    ProfileView {
-        kind: if from_file {
-            ProfileKind::Speakers
-        } else if headphones {
-            ProfileKind::Headphones
-        } else {
-            ProfileKind::Stereo
-        },
-        name: match (&settings.brir, from_file) {
-            (_, true) => "profile.toml".to_owned(),
-            (Some(path), false) => brir_name(path),
-            (None, false) => Message::DefaultProfileName.render(language),
-        },
-        brir: settings.brir.as_deref().filter(|_| headphones).map(display),
-        headphone_fir: settings
-            .headphone_fir
-            .as_deref()
-            .filter(|_| headphones)
-            .map(display),
-        // The file's own gain is unknown when the file does not load.
-        gain_db: settings.gain_db.unwrap_or(0.0),
-        directions: Vec::new(),
+    let profile = speakers::layout_profile(
+        settings.speakers.layout,
+        &settings.speakers.room_fir,
+        settings.speakers.gain_db.unwrap_or(0.0),
+    );
+    let mut view = speakers_view(
+        &profile,
         from_file,
+        settings,
+        (!from_file).then_some(settings.speakers.layout),
+    );
+    view.kind = if from_file {
+        ProfileKind::Speakers
+    } else {
+        settings.kind
+    };
+    if settings.kind == ProfileKind::Headphones && !from_file {
+        view.name = settings
+            .headphones
+            .brir
+            .as_deref()
+            .map_or_else(|| "BRIR".into(), brir_name);
+        view.gain_db = settings.headphones.gain_db.unwrap_or(0.0);
+        view.directions.clear();
+    } else if from_file {
+        view.name = "profile.toml".into();
+        view.directions.clear();
     }
+    view
 }
 
 fn headphones_view(
     profile: &brir::Profile,
     from_file: bool,
+    settings: &ProfileSettings,
+    file_brir: bool,
 ) -> Result<ProfileView, LocalizedError> {
     let layout = brir::layout(profile).map_err(brir_error)?;
-    let brir = match &profile.brir {
-        brir::BrirSource::Hesuvi(path)
-        | brir::BrirSource::Hrir(path)
-        | brir::BrirSource::Folder(path)
-        | brir::BrirSource::Mapped { wav: path, .. } => Some(display(path)),
-        brir::BrirSource::Directions(_) => None,
-    };
+    let brir = brir_path(&profile.brir);
     Ok(ProfileView {
         kind: ProfileKind::Headphones,
         name: profile.name.clone(),
-        brir,
-        headphone_fir: profile.headphone_fir.as_deref().map(display),
         gain_db: profile.gain_db,
         directions: direction_views(&layout),
         from_file,
+        headphones: HeadphonesView {
+            brir: if file_brir {
+                brir
+            } else {
+                settings.headphones.brir.as_deref().map(display)
+            },
+        },
+        speakers: stored_speakers_view(settings),
     })
 }
 
 /// Speakers in profile order, which is the order `speakers::prepare` lays
 /// them out in.
-fn speakers_view(profile: &SpeakerProfile, kind: ProfileKind, from_file: bool) -> ProfileView {
+fn speakers_view(
+    profile: &SpeakerProfile,
+    from_file: bool,
+    settings: &ProfileSettings,
+    layout: Option<SpeakerLayout>,
+) -> ProfileView {
     ProfileView {
-        kind,
+        kind: ProfileKind::Speakers,
         name: profile.name.clone(),
-        brir: None,
-        headphone_fir: None,
         gain_db: profile.gain_db,
         directions: profile
             .speakers
@@ -1339,6 +1508,56 @@ fn speakers_view(profile: &SpeakerProfile, kind: ProfileKind, from_file: bool) -
             })
             .collect(),
         from_file,
+        headphones: HeadphonesView {
+            brir: settings.headphones.brir.as_deref().map(display),
+        },
+        speakers: SpeakersView {
+            layout,
+            channels: profile_channels(profile),
+        },
+    }
+}
+
+fn stored_speakers_view(settings: &ProfileSettings) -> SpeakersView {
+    let profile = speakers::layout_profile(
+        settings.speakers.layout,
+        &settings.speakers.room_fir,
+        settings.speakers.gain_db.unwrap_or(0.0),
+    );
+    SpeakersView {
+        layout: Some(settings.speakers.layout),
+        channels: profile_channels(&profile),
+    }
+}
+
+fn profile_channels(profile: &SpeakerProfile) -> Vec<SpeakerChannelView> {
+    let mut channels: Vec<_> = profile
+        .speakers
+        .iter()
+        .map(|speaker| SpeakerChannelView {
+            name: speaker.name.clone(),
+            channel: u16::try_from(speaker.channel).unwrap_or(u16::MAX),
+            subwoofer: false,
+            room_fir: speaker.fir.as_deref().map(display),
+        })
+        .chain(profile.subwoofers.iter().map(|subwoofer| SpeakerChannelView {
+            name: "LFE".into(),
+            channel: u16::try_from(subwoofer.channel).unwrap_or(u16::MAX),
+            subwoofer: true,
+            room_fir: subwoofer.fir.as_deref().map(display),
+        }))
+        .collect();
+    channels.sort_by_key(|channel| channel.channel);
+    channels
+}
+
+fn brir_path(source: &brir::BrirSource) -> Option<String> {
+    match source {
+        brir::BrirSource::Hesuvi(path)
+        | brir::BrirSource::Hrir(path)
+        | brir::BrirSource::Folder(path)
+        | brir::BrirSource::Mapped { wav: path, .. } => Some(display(path)),
+        brir::BrirSource::Directions(_) => None,
     }
 }
 

@@ -5,9 +5,8 @@
 //!
 //! `prepare` reads the BRIR set (Impulcifer `hesuvi.wav` or `hrir.wav`, or one
 //! stereo WAV per direction for custom sets such as the 21-direction D49 set),
-//! names each direction and gives it its angles, folds the headphone FIR into
-//! every BRIR (both are linear and time invariant, so the result is the same as
-//! filtering afterwards; ADR 0016), resamples to the scene rate, and computes
+//! names each direction and gives it its angles, resamples to the scene rate,
+//! and computes
 //! the partitioned spectra. It runs on the control thread; hundreds of
 //! milliseconds do not interrupt sound. One adapter, so no trait.
 //!
@@ -20,7 +19,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use convolver::FilterBank;
-use realfft::RealFftPlanner;
 use serde::Deserialize;
 use ssr_types::{Direction, DirectionId, Layout, Speaker};
 
@@ -150,14 +148,12 @@ pub enum LfePolicy {
     },
 }
 
-/// A BRIR set, headphone FIR, gain and LFE policy (CONTEXT.md: 프로필). The
-/// output device selector joins in M4.
+/// A BRIR set, gain and LFE policy (CONTEXT.md: 프로필). The output device
+/// selector joins in M4.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
     pub name: String,
     pub brir: BrirSource,
-    /// Mono (both ears) or stereo (left, right) FIR WAV.
-    pub headphone_fir: Option<PathBuf>,
     /// Applied by the engine after the convolver, before the limiter.
     pub gain_db: f32,
     pub limiter_ceiling_dbfs: f32,
@@ -211,8 +207,6 @@ pub enum BrirError {
         path: PathBuf,
         line: usize,
     },
-    #[error("{path} is a raw measurement, not a headphone FIR")]
-    MeasurementFir { path: PathBuf },
     #[error("invalid truncation: {detail}")]
     Truncation { detail: String },
 }
@@ -413,6 +407,7 @@ struct BrirToml {
     wav: Option<PathBuf>,
     map: Option<PathBuf>,
     folder: Option<PathBuf>,
+    /// Removed in ADR 0034. Retained only to reject old profile files clearly.
     headphone_fir: Option<PathBuf>,
 }
 
@@ -445,8 +440,6 @@ struct LfeToml {
 /// [brir]
 /// hesuvi = "hesuvi.wav"          # or: hrir = "hrir.wav"
 /// # or: directions = [{ name = "FL", azimuth = 30, elevation = 0, file = "FL.wav" }, ...]
-/// headphone_fir = "headphones.wav" # optional
-///
 /// [lfe]
 /// direction = "FC"                 # omit the table to mute LFE
 /// gain_db = 0.0
@@ -460,6 +453,12 @@ pub fn load_profile(path: &Path) -> Result<Profile, BrirError> {
         path: path.to_path_buf(),
         detail: error.to_string(),
     })?;
+    if parsed.brir.headphone_fir.is_some() {
+        return Err(BrirError::Profile {
+            path: path.to_path_buf(),
+            detail: "headphone_fir is no longer supported: headphone correction belongs in the BRIR set (Impulcifer); for room correction use a speaker profile's per-speaker fir (ADR 0034)".into(),
+        });
+    }
     let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let mapped = parsed.brir.wav.is_some() || parsed.brir.map.is_some();
     if parsed.brir.wav.is_some() != parsed.brir.map.is_some() {
@@ -535,10 +534,6 @@ pub fn load_profile(path: &Path) -> Result<Profile, BrirError> {
     Ok(Profile {
         name: parsed.name,
         brir,
-        headphone_fir: parsed
-            .brir
-            .headphone_fir
-            .map(|path| resolve_path(directory, path)),
         gain_db: parsed.gain_db,
         limiter_ceiling_dbfs: parsed.limiter_ceiling_dbfs,
         lfe: parsed
@@ -590,31 +585,6 @@ pub fn layout(profile: &Profile) -> Result<Layout, BrirError> {
         BrirSource::Folder(path) => folder_layout(path, profile)?,
     };
     Ok(Layout::new(directions)?)
-}
-
-/// Checks that `path` is a headphone FIR [`prepare`] can fold: not a raw
-/// measurement file (`*_measurement_lr.wav`), and a readable WAV with one
-/// track (both ears) or two (left, right).
-pub fn check_headphone_fir(path: impl AsRef<Path>) -> Result<(), BrirError> {
-    let path = path.as_ref();
-    if is_measurement_file(path) {
-        return Err(BrirError::MeasurementFir {
-            path: path.to_path_buf(),
-        });
-    }
-    let header = ir::read_wav_header(path)?;
-    if header.tracks != 1 && header.tracks != 2 {
-        return Err(BrirError::Wav {
-            path: path.to_path_buf(),
-            detail: format!(
-                "headphone FIR needs one or two tracks, got {}",
-                header.tracks
-            ),
-        });
-    }
-    // A FIR is short; decoding it once proves the data chunk is readable too.
-    ir::read_wav_raw(path)?;
-    Ok(())
 }
 
 /// The first sample rate of a set of direction files, which the rest must
@@ -708,11 +678,6 @@ fn mapped_layout(wav: &Path, map: &Path, profile: &Profile) -> Result<Vec<Direct
 /// `partition`.
 pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<PreparedBrir, BrirError> {
     validate_truncation(profile.truncate)?;
-    if let Some(path) = &profile.headphone_fir
-        && is_measurement_file(path)
-    {
-        return Err(BrirError::MeasurementFir { path: path.clone() });
-    }
     let mut loaded = load_brir_source(&profile.brir, profile)?;
 
     if loaded.rate != rate {
@@ -729,29 +694,6 @@ pub fn prepare(profile: &Profile, rate: u32, partition: usize) -> Result<Prepare
             .map(|ears| [ears[0].clone(), ears[1].clone()])
             .collect();
         loaded.rate = rate;
-    }
-
-    if let Some(path) = &profile.headphone_fir {
-        let headphone = ir::read_wav(path, rate)?;
-        if headphone.channels.len() != 1 && headphone.channels.len() != 2 {
-            return Err(BrirError::Wav {
-                path: path.clone(),
-                detail: format!(
-                    "headphone FIR needs one or two tracks, got {}",
-                    headphone.channels.len()
-                ),
-            });
-        }
-        let headphone_channels = headphone.channels;
-        for ears in &mut loaded.irs {
-            ears[0] = convolve(&ears[0], &headphone_channels[0]);
-            let right_fir = if headphone_channels.len() == 1 {
-                &headphone_channels[0]
-            } else {
-                &headphone_channels[1]
-            };
-            ears[1] = convolve(&ears[1], right_fir);
-        }
     }
 
     let trimmed_leading_frames = if profile.trim_leading_delay {
@@ -1262,46 +1204,6 @@ fn truncate_irs(irs: &mut [[Vec<f32>; 2]], rate: u32, truncation: Truncation) {
     }
 }
 
-fn is_measurement_file(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.to_ascii_lowercase().ends_with("_measurement_lr.wav"))
-}
-
-fn convolve(signal: &[f32], filter: &[f32]) -> Vec<f32> {
-    debug_assert!(!signal.is_empty() && !filter.is_empty());
-    let output_len = signal.len() + filter.len() - 1;
-    let fft_len = output_len.next_power_of_two();
-    let mut planner = RealFftPlanner::<f32>::new();
-    let forward = planner.plan_fft_forward(fft_len);
-    let inverse = planner.plan_fft_inverse(fft_len);
-    let mut signal_time = forward.make_input_vec();
-    let mut filter_time = forward.make_input_vec();
-    signal_time[..signal.len()].copy_from_slice(signal);
-    filter_time[..filter.len()].copy_from_slice(filter);
-    let mut signal_spectrum = forward.make_output_vec();
-    let mut filter_spectrum = forward.make_output_vec();
-    forward
-        .process(&mut signal_time, &mut signal_spectrum)
-        .expect("planner-sized signal buffers are valid");
-    forward
-        .process(&mut filter_time, &mut filter_spectrum)
-        .expect("planner-sized filter buffers are valid");
-    for (signal_bin, filter_bin) in signal_spectrum.iter_mut().zip(filter_spectrum) {
-        *signal_bin *= filter_bin;
-    }
-    let mut output = inverse.make_output_vec();
-    inverse
-        .process(&mut signal_spectrum, &mut output)
-        .expect("planner-sized inverse buffers are valid");
-    let scale = 1.0 / fft_len as f32;
-    output.truncate(output_len);
-    for sample in &mut output {
-        *sample *= scale;
-    }
-    output
-}
-
 fn trim_common_leading_delay(irs: &mut [[Vec<f32>; 2]], rate: u32) -> usize {
     let earliest = irs
         .iter()
@@ -1329,48 +1231,3 @@ fn trim_common_leading_delay(irs: &mut [[Vec<f32>; 2]], rate: u32) -> usize {
     trim
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn direct_convolve(signal: &[f32], filter: &[f32]) -> Vec<f32> {
-        let mut output = vec![0.0; signal.len() + filter.len() - 1];
-        for (signal_index, signal_sample) in signal.iter().enumerate() {
-            for (filter_index, filter_sample) in filter.iter().enumerate() {
-                output[signal_index + filter_index] += signal_sample * filter_sample;
-            }
-        }
-        output
-    }
-
-    #[test]
-    fn fft_convolution_matches_direct_reference() {
-        let cases = [(1, 1), (3, 7), (31, 257), (70_000, 3), (3, 70_000)];
-        let mut state = 0x243f_6a88_u32;
-        let mut maximum_ratio = 0.0_f32;
-        for (signal_len, filter_len) in cases {
-            let mut next = || {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                (state as f32 / u32::MAX as f32 - 0.5) * 0.25
-            };
-            let signal: Vec<f32> = (0..signal_len).map(|_| next()).collect();
-            let filter: Vec<f32> = (0..filter_len).map(|_| next()).collect();
-            let actual = convolve(&signal, &filter);
-            let expected = direct_convolve(&signal, &filter);
-            let scale = signal.iter().map(|sample| sample.abs()).sum::<f32>()
-                * filter.iter().map(|sample| sample.abs()).fold(0.0, f32::max);
-            let tolerance = 1.0e-6 * scale.max(f32::MIN_POSITIVE);
-            let maximum_error = actual
-                .iter()
-                .zip(expected)
-                .map(|(actual, expected)| (actual - expected).abs())
-                .fold(0.0, f32::max);
-            maximum_ratio = maximum_ratio.max(maximum_error / scale.max(f32::MIN_POSITIVE));
-            assert!(
-                maximum_error <= tolerance,
-                "{signal_len}x{filter_len}: error {maximum_error}, tolerance {tolerance}"
-            );
-        }
-        eprintln!("maximum FFT convolution normalized error: {maximum_ratio:e}");
-    }
-}

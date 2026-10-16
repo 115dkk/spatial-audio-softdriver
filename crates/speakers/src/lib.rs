@@ -3,14 +3,14 @@
 //! Speaker profile loading and control-thread preparation for the real-time
 //! speaker output stage (ADR 0030).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use convolver::FilterBank;
 use serde::Deserialize;
-use ssr_types::{Direction, Layout, Speaker};
+use ssr_types::{Direction, Layout, Speaker, SpeakerLayout};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpeakerRange {
@@ -414,7 +414,13 @@ pub fn prepare(
                 rate,
             ),
             gain: db_to_linear(speaker.trim_db),
-            fir: prepare_fir(speaker.fir.as_deref(), rate, partition, &mut fir_cache)?,
+            fir: prepare_fir(
+                speaker.fir.as_deref(),
+                speaker.channel,
+                rate,
+                partition,
+                &mut fir_cache,
+            )?,
         });
     }
     let mut subwoofers = Vec::with_capacity(profile.subwoofers.len());
@@ -428,7 +434,13 @@ pub fn prepare(
                 rate,
             ),
             gain: db_to_linear(subwoofer.trim_db),
-            fir: prepare_fir(subwoofer.fir.as_deref(), rate, partition, &mut fir_cache)?,
+            fir: prepare_fir(
+                subwoofer.fir.as_deref(),
+                subwoofer.channel,
+                rate,
+                partition,
+                &mut fir_cache,
+            )?,
         });
     }
     let bass_to = if subwoofers.is_empty() {
@@ -451,40 +463,128 @@ pub fn prepare(
     })
 }
 
-/// Loads a mono room FIR at `rate` into a one-output convolver bank.
+/// Checks that `path` is a room FIR `prepare` can use for the speaker on
+/// zero-based `device_channel`: a readable WAV, the track rule, and at most
+/// four seconds at the file's own rate.
+pub fn check_room_fir(path: &Path, device_channel: usize) -> Result<(), SpeakerError> {
+    let header = brir::ir::read_wav_header(path)?;
+    let track = room_fir_track(path, header.tracks, device_channel)?;
+    let wav = brir::ir::read_wav_raw(path)?;
+    let samples = &wav.channels[track];
+    check_fir_length(path, samples.len(), wav.rate)
+}
+
+/// The speaker profile of an app layout (ADR 0034): every speaker full
+/// range at its nominal angles, the LFE channel a subwoofer, no alignment,
+/// and the room FIRs `room_fir` names by speaker name ("LFE" for the
+/// subwoofer); names the layout lacks are ignored.
+pub fn layout_profile(
+    layout: SpeakerLayout,
+    room_fir: &BTreeMap<String, PathBuf>,
+    gain_db: f32,
+) -> SpeakerProfile {
+    let output = layout.output_layout();
+    let mut speakers = Vec::new();
+    let mut subwoofers = Vec::new();
+    for (channel, &speaker) in layout.speakers().iter().enumerate() {
+        let name = speaker.name();
+        if speaker == Speaker::Lfe {
+            subwoofers.push(SubwooferConfig {
+                channel,
+                distance_m: None,
+                delay_ms: None,
+                trim_db: 0.0,
+                fir: room_fir.get("LFE").cloned(),
+            });
+        } else {
+            let (azimuth_deg, elevation_deg) = speaker
+                .angles()
+                .expect("an app layout's non-LFE speakers have nominal angles");
+            speakers.push(SpeakerConfig {
+                name: name.into(),
+                azimuth_deg,
+                elevation_deg,
+                channel,
+                distance_m: None,
+                delay_ms: None,
+                trim_db: 0.0,
+                range: SpeakerRange::Full,
+                crossover_hz: None,
+                fir: room_fir.get(name).cloned(),
+            });
+        }
+    }
+    SpeakerProfile {
+        name: layout.name().into(),
+        device_channels: usize::from(output.channels),
+        channel_mask: output.channel_mask,
+        gain_db,
+        limiter_ceiling_dbfs: -1.0,
+        crossover_hz: 80.0,
+        lfe_gain_db: 10.0,
+        speakers,
+        subwoofers,
+        bass_to: Vec::new(),
+    }
+}
+
+/// Loads one room FIR track at `rate` into a one-output convolver bank.
 fn prepare_fir(
     path: Option<&Path>,
+    device_channel: usize,
     rate: u32,
     partition: usize,
-    cache: &mut HashMap<PathBuf, Arc<FilterBank>>,
+    cache: &mut HashMap<(PathBuf, usize), Arc<FilterBank>>,
 ) -> Result<Option<Arc<FilterBank>>, SpeakerError> {
     let Some(path) = path else {
         return Ok(None);
     };
-    if let Some(bank) = cache.get(path) {
+    let header = brir::ir::read_wav_header(path)?;
+    let track = room_fir_track(path, header.tracks, device_channel)?;
+    let key = (path.to_path_buf(), track);
+    if let Some(bank) = cache.get(&key) {
         return Ok(Some(Arc::clone(bank)));
     }
     let wav = brir::ir::read_wav(path, rate)?;
-    if wav.channels.len() != 1 {
-        return Err(brir::ir::IrError::Wav {
-            path: path.to_path_buf(),
-            detail: format!("room FIR needs one track, got {}", wav.channels.len()),
-        }
-        .into());
-    }
-    let samples = &wav.channels[0];
-    if samples.len() as f64 > MAX_FIR_SECONDS * f64::from(rate) {
-        return Err(SpeakerError::FirTooLong {
-            path: path.to_path_buf(),
-            frames: samples.len(),
-            seconds: MAX_FIR_SECONDS,
-            rate,
-        });
-    }
+    let samples = &wav.channels[track];
+    check_fir_length(path, samples.len(), rate)?;
     let filters = [samples.as_slice()];
     let bank = Arc::new(FilterBank::new_mono(&filters, partition)?);
-    cache.insert(path.to_path_buf(), Arc::clone(&bank));
+    cache.insert(key, Arc::clone(&bank));
     Ok(Some(bank))
+}
+
+fn room_fir_track(
+    path: &Path,
+    tracks: usize,
+    device_channel: usize,
+) -> Result<usize, SpeakerError> {
+    if tracks == 1 {
+        Ok(0)
+    } else if device_channel < tracks {
+        Ok(device_channel)
+    } else {
+        Err(brir::ir::IrError::Wav {
+            path: path.to_path_buf(),
+            detail: format!(
+                "room FIR has {tracks} tracks, none for device channel {device_channel}"
+            ),
+        }
+        .into())
+    }
+}
+
+fn check_fir_length(path: &Path, frames: usize, rate: u32) -> Result<(), SpeakerError> {
+    if frames as f64 > MAX_FIR_SECONDS * f64::from(rate) {
+        Err(SpeakerError::FirTooLong {
+            path: path.to_path_buf(),
+            frames,
+            seconds: MAX_FIR_SECONDS,
+            rate,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn validate(profile: &SpeakerProfile) -> Result<Layout, SpeakerError> {
