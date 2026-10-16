@@ -1166,6 +1166,25 @@ tests = [
 note = "ADR 0030: the source-clock-domain mixer pans into the listener's real speaker layout and routes an N-channel planar block with LR4 bass management (f64 state), LFE at a profile gain (+10 dB default), per-loudspeaker delay/trim alignment and optional one-output mono room FIR (subwoofers included, without a discarded second-ear FFT), global gain and one linked limiter; a channel mask must agree with the speaker names' Windows channel order. The crossing ring carries each block's layout (up to 32 channels), the output thread opens the installed profile's layout and reopens the device when it changes, and WASAPI opens that exact WAVEFORMATEXTENSIBLE layout (mask or direct out). ssr-live and ssr-replay take speaker profiles. CI plays a speaker profile through VB-CABLE and checks every channel comes back on its own channel (tools/ci/multichannel_loopback_check.py)."
 
 [[feature]]
+id = "output.secs_correction"
+kind = "pipeline"
+milestone = "M4"
+status = "implemented"
+tests = [
+  "correction::allpass_and_peaking_match_closed_form_at_three_rates",
+  "correction::butterworth_orders_have_the_corner_response",
+  "correction::linkwitz_riley_four_and_eight_sum_flat",
+  "correction::parses_roles_route_out_and_mask",
+  "correction::gain_delay_and_mixer_run_end_to_end",
+  "correction::flow_and_block_yaml_are_equivalent",
+  "correction::rejects_unknown_role_filter_and_subsample_delay",
+  "correction::correction_run_does_not_allocate",
+  "engine::correction_stage_routes_lfe_and_applies_profile_gain_before_limiter",
+  "engine::steady_state_correction_output_does_not_allocate",
+]
+note = "ADR 0034: the MIT correction crate reads the documented CamillaDSP v4 subset exported by SECS 2/2R, skips route_in, runs route_out and the intervening filters and mixers with preallocated per-run state, f64 biquads and the shared partitioned convolver, and derives renderer directions and device masks from SECS role names. The engine feeds its speaker bed and LFE into this graph, then retains the profile gain and linked limiter."
+
+[[feature]]
 id = "app.shell"
 kind = "app"
 milestone = "M4"
