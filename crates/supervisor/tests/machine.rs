@@ -1928,7 +1928,7 @@ fn the_device_must_accept_the_speaker_layout() {
     assert_eq!(
         supervisor.handle(Intent::SetSpeakerLayout(SpeakerLayout::Surround714)),
         Err(error(
-            "고른 출력 장치가 7.1.4 배치(12채널)를 독점 모드로 받지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
+            "고른 출력 장치가 독점 모드에서 7.1.4 배치(12채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
             NextAction::None,
         ))
     );
@@ -1946,7 +1946,7 @@ fn the_device_must_accept_the_speaker_layout() {
     assert_eq!(
         supervisor.handle(Intent::SetProfileKind(ProfileKind::Speakers)),
         Err(error(
-            "고른 출력 장치가 7.1.4 배치(12채널)를 독점 모드로 받지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
+            "고른 출력 장치가 독점 모드에서 7.1.4 배치(12채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
             NextAction::None,
         ))
     );
@@ -1959,7 +1959,7 @@ fn the_device_must_accept_the_speaker_layout() {
     assert_eq!(
         supervisor.handle(Intent::Enable),
         Err(error(
-            "고른 출력 장치가 7.1.4 배치(12채널)를 독점 모드로 받지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
+            "고른 출력 장치가 독점 모드에서 7.1.4 배치(12채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오.",
             NextAction::None,
         ))
     );
