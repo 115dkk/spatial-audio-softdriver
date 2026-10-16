@@ -17,7 +17,9 @@ mkdir -p "$out_dir"
 out="$out_dir/OpenSpatial_Upmixer.vst3"
 gpg --batch --yes --quiet --pinentry-mode loopback --passphrase-fd 0 \
   -o "$out" -d "$here/openspatial-upmixer.vst3.gpg" <<< "$UPMIX_PLUGIN_KEY"
-actual="$(sha256sum "$out" | cut -d' ' -f1)"
+# From stdin: GNU sha256sum escapes a path with backslashes (Windows
+# runner paths) by putting a backslash before the hash.
+actual="$(sha256sum < "$out" | cut -d' ' -f1)"
 if [ "$actual" != "$expected" ]; then
   rm -f "$out"
   echo "the decrypted upmixer does not match its SHA-256" >&2

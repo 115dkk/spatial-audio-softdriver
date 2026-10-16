@@ -4,6 +4,7 @@
 *.cmd text eol=crlf
 *.wav binary
 *.bin binary
+*.gpg binary
 *.ssrdump binary
 *.biodump binary
 *.png binary
