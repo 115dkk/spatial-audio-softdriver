@@ -38,7 +38,7 @@ use crate::mixer::{
 use crate::test_tone::TestTonePlayer;
 
 const DEFAULT_LFE_GAIN: f32 = 1.0;
-const SPEAKER_TAIL_LIMIT_FRAMES: usize = 6 * MIX_RATE as usize;
+pub const SPEAKER_TAIL_LIMIT_FRAMES: usize = 6 * MIX_RATE as usize;
 const BRIR_TAIL_MARGIN_FRAMES: usize = 2 * MIX_RATE as usize;
 static SILENT_TAIL_BED: [f32; ssr_types::Layout::MAX_DIRECTIONS * MIX_FRAMES] =
     [0.0; ssr_types::Layout::MAX_DIRECTIONS * MIX_FRAMES];
@@ -2074,9 +2074,8 @@ impl Chain {
                 PreparedOutput::Headphones { brir, .. } => {
                     brir.ir_frames.saturating_add(BRIR_TAIL_MARGIN_FRAMES)
                 }
-                PreparedOutput::Speakers { .. } | PreparedOutput::Correction { .. } => {
-                    SPEAKER_TAIL_LIMIT_FRAMES
-                }
+                PreparedOutput::Speakers { .. } => SPEAKER_TAIL_LIMIT_FRAMES,
+                PreparedOutput::Correction { correction, .. } => correction.tail_frames(),
             });
         self.finish = Some(FinishState {
             front: 0,
@@ -2818,11 +2817,156 @@ pipeline:
     }
 
     #[test]
+    fn file_backed_correction_routes_impulse_and_test_tone() {
+        let directory = std::env::temp_dir().join(format!(
+            "engine-correction-profile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let mut writer = hound::WavWriter::create(
+            directory.join("fir.wav"),
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: MIX_RATE,
+                bits_per_sample: 32,
+                sample_format: hound::SampleFormat::Float,
+            },
+        )
+        .unwrap();
+        for frame in 0..(2 * MIX_FRAMES + 1) {
+            writer
+                .write_sample(if frame == 2 * MIX_FRAMES {
+                    1.0_f32
+                } else {
+                    0.0
+                })
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+
+        let profile_path = directory.join("profile.yml");
+        fs::write(
+            &profile_path,
+            r#"
+description: "inputs 0 L, 1 R | outputs 0 L, 1 R"
+devices:
+  samplerate: 48000
+  capture: {channels: 2}
+  playback: {channels: 2}
+filters:
+  fir: {type: Conv, parameters: {type: Wav, filename: fir.wav}}
+  delay: {type: Delay, parameters: {delay: 2, unit: samples}}
+mixers:
+  route_out:
+    channels: {in: 2, out: 2}
+    mapping:
+      - {dest: 0, sources: [{channel: 1}]}
+      - {dest: 1, sources: [{channel: 0}]}
+pipeline:
+  - {type: Filter, channels: [0], names: [fir, delay]}
+  - {type: Mixer, name: route_out}
+"#,
+        )
+        .unwrap();
+        let prepared = OutputProfile::Correction(CorrectionProfile {
+            path: profile_path,
+            gain_db: 0.0,
+            limiter_ceiling_dbfs: 0.0,
+        })
+        .prepare()
+        .unwrap();
+        let mut chain = Chain::new(ChainConfig::default());
+        chain.set_prepared(Box::new(prepared));
+
+        let mut channels = vec![0.0_f32; 2 * MIX_FRAMES];
+        channels[0] = 0.25;
+        let bed = BedBlock {
+            epoch: 1,
+            rate: MIX_RATE,
+            source_qpc: 0,
+            directions: 2,
+            frames: MIX_FRAMES,
+            channels: &channels,
+            lfe: None,
+            silent: false,
+            idle: false,
+        };
+        let mut output = Vec::new();
+        let emitted_block_samples = 2 * MIX_FRAMES;
+        chain.process_bed(&bed, &mut |event| {
+            if let ChainEvent::Block(block) = event {
+                output.extend_from_slice(block.samples);
+            }
+        });
+        assert!(output.iter().all(|sample| *sample == 0.0));
+        output.clear();
+        chain.finish(&mut |event| {
+            if let ChainEvent::Block(block) = event {
+                output.extend_from_slice(block.samples);
+            }
+        });
+        assert!(
+            output
+                .chunks_exact(emitted_block_samples)
+                .any(|block| (block[MIX_FRAMES + 2] - 0.25).abs() < 1.0e-6)
+        );
+
+        chain.set_prepared(Box::new(
+            OutputProfile::Correction(CorrectionProfile {
+                path: directory.join("profile.yml"),
+                gain_db: 0.0,
+                limiter_ceiling_dbfs: 0.0,
+            })
+            .prepare()
+            .unwrap(),
+        ));
+        assert!(chain.start_test_tone(DirectionId(0)));
+        let silence = vec![0.0_f32; 2 * MIX_FRAMES];
+        let silent_bed = BedBlock {
+            channels: &silence,
+            silent: true,
+            idle: true,
+            ..bed
+        };
+        output.clear();
+        chain.process_bed(&silent_bed, &mut |event| {
+            if let ChainEvent::Block(block) = event {
+                output.extend_from_slice(block.samples);
+            }
+        });
+        chain.finish(&mut |event| {
+            if let ChainEvent::Block(block) = event {
+                output.extend_from_slice(block.samples);
+            }
+        });
+        assert!(
+            output
+                .chunks_exact(emitted_block_samples)
+                .all(|block| block[..MIX_FRAMES].iter().all(|sample| *sample == 0.0))
+        );
+        assert!(
+            output
+                .chunks_exact(emitted_block_samples)
+                .any(|block| block[MIX_FRAMES..].iter().any(|sample| *sample != 0.0))
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn correction_stage_routes_lfe_and_applies_profile_gain_before_limiter() {
         let with_lfe = correction_yaml(
             "0 L, 1 R, 2 LFE",
             3,
             "  - {type: Filter, channels: [0], names: [half]}\n  - {type: Mixer, name: route_out}",
+        )
+        .replace(
+            "      - {dest: 1, sources: [{channel: 1}]}",
+            "      - {dest: 1, sources: [{channel: 2}]}",
         );
         let mut bed = vec![0.0; 2 * MIX_FRAMES];
         bed[0] = 0.4;
@@ -2836,7 +2980,7 @@ pipeline:
             Some(&lfe),
         );
         assert!((rendered[0] - 0.1).abs() < 1.0e-5);
-        assert!((rendered[MIX_FRAMES] - 0.1).abs() < 1.0e-5);
+        assert!((rendered[MIX_FRAMES] - 0.05).abs() < 1.0e-5);
 
         let without_lfe = correction_yaml("0 L, 1 R", 2, "  - {type: Mixer, name: route_out}");
         let silent = vec![0.0; 2 * MIX_FRAMES];

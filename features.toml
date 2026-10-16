@@ -1172,17 +1172,22 @@ milestone = "M4"
 status = "implemented"
 tests = [
   "correction::allpass_and_peaking_match_closed_form_at_three_rates",
-  "correction::butterworth_orders_have_the_corner_response",
-  "correction::linkwitz_riley_four_and_eight_sum_flat",
-  "correction::parses_roles_route_out_and_mask",
-  "correction::gain_delay_and_mixer_run_end_to_end",
+  "correction::crossover_passbands_stopbands_and_processed_sines_match_transfer_function",
+  "correction::peaking_band_edges_and_allpass_phase_match_rbj",
+  "correction::input_metadata_defaults_linear_gain_and_filter_channels_are_supported",
+  "correction::standard_and_multi_sub_output_names_and_masks_follow_final_route_out",
+  "correction::route_out_names_only_identity_destinations_and_follows_reordering",
+  "correction::role_angle_table_and_surround_back_condition_are_complete",
+  "correction::resource_numerical_tail_and_nonfinite_limits_are_enforced",
+  "correction::synthetic_peq_fir_split_bus_allpass_delay_chain_matches_reference",
+  "correction::mimo_convolver_uses_share_fir_data_but_keep_independent_state",
   "correction::flow_and_block_yaml_are_equivalent",
-  "correction::rejects_unknown_role_filter_and_subsample_delay",
-  "correction::correction_run_does_not_allocate",
+  "correction::every_processing_variant_and_live_tail_do_not_allocate",
+  "engine::file_backed_correction_routes_impulse_and_test_tone",
   "engine::correction_stage_routes_lfe_and_applies_profile_gain_before_limiter",
   "engine::steady_state_correction_output_does_not_allocate",
 ]
-note = "ADR 0034: the MIT correction crate reads the documented CamillaDSP v4 subset exported by SECS 2/2R, skips route_in, runs route_out and the intervening filters and mixers with preallocated per-run state, f64 biquads and the shared partitioned convolver, and derives renderer directions and device masks from SECS role names. The engine feeds its speaker bed and LFE into this graph, then retains the profile gain and linked limiter."
+note = "ADR 0034: the MIT correction crate reads the documented CamillaDSP v4 subset exported by SECS 2/2R, skips route_in, runs the final route_out and intervening filters and mixers with bounded, preallocated per-run state, f64 biquads and the shared partitioned convolver, and derives renderer directions and device masks from declared SECS output names. It accepts dB and linear gain plus documented channel/delay defaults, rejects oversized or non-finite graphs before processing, resets poisoned state without allocation, and exposes a bounded tail for engine finish. The engine feeds its speaker bed and LFE into this graph, then retains the profile gain and linked limiter."
 
 [[feature]]
 id = "app.shell"
