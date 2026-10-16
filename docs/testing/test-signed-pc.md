@@ -122,7 +122,7 @@ limiter_ceiling_dbfs = -1.0
 
 [brir]
 hesuvi = 'C:\BRIR\hesuvi.wav'          # 또는: hrir = 'C:\BRIR\hrir.wav'
-# headphone_fir = 'C:\BRIR\headphones.wav'
+# 헤드폰 보정은 BRIR에 넣습니다. headphone_fir 키는 거절합니다(ADR 0034).
 
 [lfe]
 direction = "FC"

@@ -19,7 +19,7 @@ Dolby, Dolby Atmos는 Dolby Laboratories의 상표입니다. 이 프로젝트는
 | M1 리플레이 | `bitstream`, `decode`(PCM·MAT·DD+), `render`, `brir`, `convolver`, `ssr-replay render` | v0.2.0. MAT 디코더와 블랙박스 골든만 남음(링 덤프 대기) |
 | M2 실시간 | `engine`, `speakers`, `ssr-sys`(SAL 개발용 링, WASAPI 출력), `ssr-live` | 헤드폰과 스피커(2~32채널, ADR 0030) 출력의 실시간 경로를 개발 PC와 러너의 가상 케이블에서 확인. SAL의 12채널 PCM도 러너에서 확인. SAL PC에서 게임과 음악을 듣는 시험, 지연 비교, 실제 스피커 청취가 남음 |
 | M3 드라이버 | `spatialsoftreceiver.sys`, ABI v1 동결 | 진행 중. 호스트 러너에서 세 엔드포인트(주, 음악, 패스스루) 재생, 링 읽기, 볼륨, 독점 정책, Driver Verifier와 IOCTL 퍼저, 엔진까지의 종단 듣기를 확인. 시험서명 PC의 확인과 동결이 남음 |
-| M4 앱 | `supervisor`, `ssr-setup`, `spatial-softreceiver`(Tauri 셸과 화면), `ssr-guard`, Velopack | 진행 중. 감독자 상태기계(ADR 0013), Windows 호스트 어댑터와 `ssr-setup`(ADR 0032), Tauri 셸과 화면 골격(ADR 0001), 감시 프로세스 `ssr-guard`(ADR 0033), 설치본과 Velopack 업데이트(ADR 0001 추가), 프로필 의도와 객체 지도(ADR 0013 추가), 한국어·영어 문구 카탈로그와 언어 설정(ADR 0001 추가), 모든 화면 상태를 두 언어와 두 팔레트로 찍어 리뷰 이슈에 모으는 화면 갤러리(`ui-gallery.yml`)가 들어옴. 시험서명 PC의 실기 확인이 남음 |
+| M4 앱 | `supervisor`, `ssr-setup`, `spatial-softreceiver`(Tauri 셸과 화면), `ssr-guard`, Velopack | 진행 중. 감독자 상태기계(ADR 0013), Windows 호스트 어댑터와 `ssr-setup`(ADR 0032), Tauri 셸과 화면 골격(ADR 0001), 감시 프로세스 `ssr-guard`(ADR 0033), 설치본과 Velopack 업데이트(ADR 0001 추가), 프로필 의도와 객체 지도(ADR 0013 추가), 한국어·영어 문구 카탈로그와 언어 설정(ADR 0001 추가), 모든 화면 상태를 두 언어와 두 팔레트로 찍어 리뷰 이슈에 모으는 화면 갤러리(`ui-gallery.yml`)가 들어옴. 프로필 화면에서 헤드폰(BRIR)과 스피커(표준 배치와 스피커마다 룸 보정 FIR) 가운데 하나를 고르게 되었고, 헤드폰 FIR은 없앰(ADR 0034). 시험서명 PC의 실기 확인이 남음 |
 | M5 서명·출시 | EV 인증서, 증명 서명 | 예정 |
 
 기능별 상태는 [`features.toml`](features.toml)이 정본입니다.
