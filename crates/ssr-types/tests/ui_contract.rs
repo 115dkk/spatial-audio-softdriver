@@ -698,8 +698,12 @@ fn snapshots(language: Language) -> Vec<(&'static str, Snapshot)> {
             "running-speakers",
             Snapshot {
                 profile: speaker_profile(language),
+                // The engine plays the correction's inputs and opens its 13
+                // device channels direct (two subwoofers: no Windows mask).
                 engine: Some(EngineStatus {
-                    directions: speaker_directions(SpeakerLayout::Surround714),
+                    directions: speaker_profile(language).directions,
+                    output_channels: 13,
+                    output_channel_mask: 0,
                     ..engine_status(language)
                 }),
                 roles_taken: true,

@@ -177,26 +177,26 @@
       },
       {
         "id": 3,
-        "name": "Lrs",
-        "azimuth_deg": 150.0,
-        "elevation_deg": 0.0
-      },
-      {
-        "id": 4,
-        "name": "Rrs",
-        "azimuth_deg": -150.0,
-        "elevation_deg": 0.0
-      },
-      {
-        "id": 5,
-        "name": "Lss",
+        "name": "Ls",
         "azimuth_deg": 90.0,
         "elevation_deg": 0.0
       },
       {
-        "id": 6,
-        "name": "Rss",
+        "id": 4,
+        "name": "Rs",
         "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "Lb",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "Rb",
+        "azimuth_deg": -150.0,
         "elevation_deg": 0.0
       },
       {
@@ -213,13 +213,13 @@
       },
       {
         "id": 9,
-        "name": "Trl",
+        "name": "Tbl",
         "azimuth_deg": 135.0,
         "elevation_deg": 45.0
       },
       {
         "id": 10,
-        "name": "Trr",
+        "name": "Tbr",
         "azimuth_deg": -135.0,
         "elevation_deg": 45.0
       }
@@ -408,8 +408,8 @@
     "output_restarts": 0,
     "output_rate": 48000,
     "trim_available": true,
-    "output_channels": 2,
-    "output_channel_mask": 3,
+    "output_channels": 13,
+    "output_channel_mask": 0,
     "output_reopens": 1,
     "output_reconnects": 0,
     "output_reconnect_attempts": 0,
