@@ -137,7 +137,7 @@ describe('what each state says', () => {
   it('the profile screen opens on the speakers of the first day', () => {
     draw('ready', 'profile');
     expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('스피커사용 중');
-    expect(textOf()).toContain('지금 스피커로 듣고 있습니다.');
+    expect(textOf()).toContain(ko.profile.usingSpeakers);
     expect(textOf()).toContain('객체 지도');
     expect(textOf()).not.toContain('다음 조각');
     expect(buttons()).toEqual(expect.arrayContaining(['헤드폰', '스피커사용 중', '보정 파일 고르기']));
@@ -567,7 +567,7 @@ describe('the profile screen', () => {
     expect(openTab()).toBe('profile-tab-headphones');
     expect(badged()).toBe('profile-tab-headphones');
     expect(root.querySelectorAll('.in-use')).toHaveLength(1);
-    expect(textOf()).toContain('지금 헤드폰으로 듣고 있습니다.');
+    expect(textOf()).toContain(ko.profile.usingHeadphones);
     expect(textOf()).toContain(fixture('ready-headphones').profile.headphones.brir ?? 'no BRIR in fixture');
   });
 
@@ -609,14 +609,14 @@ describe('the profile screen', () => {
     const headphones = recording(fixture('ready-headphones'));
     expect(byKey('use-headphones')).toBeNull();
     tab('speakers')?.click();
-    expect(byKey('use-speakers')?.textContent).toBe('스피커로 듣기');
+    expect(byKey('use-speakers')?.textContent).toBe(ko.profile.useSpeakers);
     expect(byKey('use-speakers')?.classList.contains('primary')).toBe(true);
     byKey('use-speakers')?.click();
     expect(headphones.sent).toEqual([{ kind: 'set_profile_kind', value: 'speakers' }]);
 
     const speakers = recording(fixture('ready-speakers'));
     expect(byKey('use-speakers')).toBeNull();
-    expect(textOf()).toContain('지금 스피커로 듣고 있습니다.');
+    expect(textOf()).toContain(ko.profile.usingSpeakers);
     tab('headphones')?.click();
     expect(byKey('use-headphones')?.disabled).toBe(false);
     byKey('use-headphones')?.click();
@@ -697,9 +697,7 @@ describe('the profile screen', () => {
     const select = byKey<HTMLSelectElement>('speaker-layout');
     expect(select?.disabled).toBe(true);
     expect(describedBy(select)).toContain('layout-hint');
-    expect(root.querySelector('#layout-hint')?.textContent).toBe(
-      '보정 파일이 스피커를 정합니다. 보정을 지우면 이 배치로 돌아갑니다.',
-    );
+    expect(root.querySelector('#layout-hint')?.textContent).toBe(ko.profile.layoutByCorrection);
     expect(textOf()).toContain(correction.path);
     expect(textOf()).toContain(correction.title);
     const numbers = [...root.querySelectorAll('.channel-table tbody td')].map((cell) => cell.textContent);
@@ -763,9 +761,7 @@ describe('the profile screen', () => {
   it('says once, near the footer, that a change while on takes seconds', () => {
     draw('running', 'profile');
     expect(root.querySelectorAll('#profile-running-hint')).toHaveLength(1);
-    expect(root.querySelector('.tab-footer #profile-running-hint')?.textContent).toBe(
-      '켜져 있을 때 바꾸면 엔진을 다시 준비하므로 몇 초 걸립니다.',
-    );
+    expect(root.querySelector('.tab-footer #profile-running-hint')?.textContent).toBe(ko.profile.importRunning);
     expect(describedBy(byKey('brir-folder'))).toContain('profile-running-hint');
     tab('speakers')?.click();
     expect(root.querySelectorAll('#profile-running-hint')).toHaveLength(1);
@@ -807,7 +803,7 @@ describe('the profile screen', () => {
     await vi.waitFor(() => expect(byKey('use-headphones')?.disabled).toBe(false));
     byKey('use-headphones')?.click();
     await vi.waitFor(() => expect(badged()).toBe('profile-tab-headphones'));
-    expect(textOf()).toContain('지금 헤드폰으로 듣고 있습니다.');
+    expect(textOf()).toContain(ko.profile.usingHeadphones);
     expect(tones()).toHaveLength(fixture('running').profile.directions.length);
   });
 

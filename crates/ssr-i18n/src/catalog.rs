@@ -188,14 +188,14 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "고른 출력 장치가 보정 파일의 {channels}채널 출력을 독점 모드로 받지 않습니다. 다른 출력 장치를 고르십시오."]
+    #[doc = "고른 출력 장치가 독점 모드에서 보정 파일에 지정된 {channels}채널 출력을 지원하지 않습니다. 다른 출력 장치를 고르십시오."]
     pub fn correction_unsupported(language: Language, channels: impl core::fmt::Display) -> String {
         match language {
             Language::Ko => format!(
-                "고른 출력 장치가 보정 파일의 {channels}채널 출력을 독점 모드로 받지 않습니다. 다른 출력 장치를 고르십시오."
+                "고른 출력 장치가 독점 모드에서 보정 파일에 지정된 {channels}채널 출력을 지원하지 않습니다. 다른 출력 장치를 고르십시오."
             ),
             Language::En => format!(
-                "The chosen output device does not accept the correction file's {channels}-channel output in exclusive mode. Choose another output device."
+                "The selected output device does not support the {channels}-channel output specified in the correction file in exclusive mode. Choose another output device."
             ),
         }
     }
@@ -359,7 +359,7 @@ pub mod supervisor {
         }
     }
 
-    #[doc = "고른 출력 장치가 {layout} 배치({channels}채널)를 독점 모드로 받지 않습니다. 다른 배치나 출력 장치를 고르십시오."]
+    #[doc = "고른 출력 장치가 독점 모드에서 {layout} 배치({channels}채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오."]
     pub fn layout_unsupported(
         language: Language,
         layout: impl core::fmt::Display,
@@ -367,10 +367,10 @@ pub mod supervisor {
     ) -> String {
         match language {
             Language::Ko => format!(
-                "고른 출력 장치가 {layout} 배치({channels}채널)를 독점 모드로 받지 않습니다. 다른 배치나 출력 장치를 고르십시오."
+                "고른 출력 장치가 독점 모드에서 {layout} 배치({channels}채널)를 지원하지 않습니다. 다른 배치나 출력 장치를 고르십시오."
             ),
             Language::En => format!(
-                "The chosen output device does not accept the {layout} layout ({channels} channels) in exclusive mode. Choose another layout or output device."
+                "The selected output device does not support the {layout} layout ({channels} channels) in exclusive mode. Choose another layout or output device."
             ),
         }
     }
