@@ -1,0 +1,38 @@
+{
+  "language": "en",
+  "language_choice": null,
+  "phase": {
+    "kind": "setup",
+    "value": "welcome"
+  },
+  "profile": {
+    "kind": "stereo",
+    "name": "Default stereo",
+    "brir": null,
+    "headphone_fir": null,
+    "gain_db": 0.0,
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      }
+    ],
+    "from_file": false
+  },
+  "engine": null,
+  "outputs": [],
+  "chosen_output": null,
+  "driver": null,
+  "platform": null,
+  "roles_taken": false,
+  "error": null,
+  "notes": []
+}

@@ -231,7 +231,7 @@ export const ko = {
   },
 
   gallery: {
-    title: '고정물',
+    title: '화면 갤러리',
   },
 
   settings: {
@@ -419,7 +419,7 @@ export const en: typeof ko = {
   format: {
     pcm: 'PCM',
     direct: 'Direct output',
-    channels: (n: number) => `${n} channels`,
+    channels: (n: number) => `${n}\u00a0channels`,
     container: 'Carrier',
     otherCodec: (code: number) => `Unknown codec 0x${code.toString(16).padStart(8, '0')}`,
   },
@@ -479,7 +479,7 @@ export const en: typeof ko = {
     legendUp: 'Above',
   },
   gallery: {
-    title: 'Fixtures',
+    title: 'Screen gallery',
   },
   settings: {
     title: 'Settings',

@@ -1,0 +1,46 @@
+{
+  "language": "en",
+  "language_choice": null,
+  "phase": {
+    "kind": "setup",
+    "value": "unsupported"
+  },
+  "profile": {
+    "kind": "stereo",
+    "name": "Default stereo",
+    "brir": null,
+    "headphone_fir": null,
+    "gain_db": 0.0,
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      }
+    ],
+    "from_file": false
+  },
+  "engine": null,
+  "outputs": [],
+  "chosen_output": null,
+  "driver": null,
+  "platform": {
+    "os_build": 18363,
+    "arch": "x64",
+    "test_signing": false,
+    "secure_boot": "enabled"
+  },
+  "roles_taken": false,
+  "error": {
+    "message": "Windows 10 version 2004 (build 19041) or newer is required.",
+    "next": "none"
+  },
+  "notes": []
+}

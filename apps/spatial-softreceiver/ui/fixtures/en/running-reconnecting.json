@@ -1,0 +1,399 @@
+{
+  "language": "en",
+  "language_choice": null,
+  "phase": {
+    "kind": "running"
+  },
+  "profile": {
+    "kind": "headphones",
+    "name": "Living room 7.1.4 headphones",
+    "brir": "C:\\Users\\me\\BRIR\\living-room",
+    "headphone_fir": "C:\\Users\\me\\hd650.wav",
+    "gain_db": -3.5,
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 2,
+        "name": "FC",
+        "azimuth_deg": 0.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 3,
+        "name": "SL",
+        "azimuth_deg": 90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 4,
+        "name": "SR",
+        "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "BL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "BR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 7,
+        "name": "TFL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 8,
+        "name": "TFR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 9,
+        "name": "TBL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 10,
+        "name": "TBR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 45.0
+      }
+    ],
+    "from_file": false
+  },
+  "engine": {
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 2,
+        "name": "FC",
+        "azimuth_deg": 0.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 3,
+        "name": "SL",
+        "azimuth_deg": 90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 4,
+        "name": "SR",
+        "azimuth_deg": -90.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 5,
+        "name": "BL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 6,
+        "name": "BR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 7,
+        "name": "TFL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 8,
+        "name": "TFR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 9,
+        "name": "TBL",
+        "azimuth_deg": 150.0,
+        "elevation_deg": 45.0
+      },
+      {
+        "id": 10,
+        "name": "TBR",
+        "azimuth_deg": -150.0,
+        "elevation_deg": 45.0
+      }
+    ],
+    "scene": [
+      {
+        "lane": 0,
+        "index": 0,
+        "x": -0.5,
+        "y": 0.866,
+        "z": 0.0,
+        "level_dbfs": -12.0
+      },
+      {
+        "lane": 0,
+        "index": 1,
+        "x": 0.5,
+        "y": 0.866,
+        "z": 0.0,
+        "level_dbfs": -18.0
+      },
+      {
+        "lane": 1,
+        "index": 0,
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0,
+        "level_dbfs": -24.0
+      },
+      {
+        "lane": 2,
+        "index": 3,
+        "x": 0.25,
+        "y": 0.433,
+        "z": 0.866,
+        "level_dbfs": -30.0
+      }
+    ],
+    "endpoints": [
+      {
+        "format": {
+          "kind": "pcm",
+          "value": {
+            "channels": 8,
+            "sample_rate": 48000,
+            "bits_per_sample": 32,
+            "valid_bits": 32,
+            "sample_type": "float",
+            "channel_mask": 1599
+          }
+        },
+        "epoch": 3,
+        "volume_db": -6.0,
+        "muted": false,
+        "unsupported": null,
+        "chain_errors": {
+          "unsupported_codec": 0,
+          "unsupported_format": 0,
+          "corrupt_payload": 0,
+          "missing_format": 0,
+          "wrong_route": 0,
+          "unsupported_scene_rate": 0,
+          "truncated_record": 0,
+          "bad_record_length": 0,
+          "bad_format_record": 0,
+          "bad_volume_record": 0,
+          "missing_direct_layout": 0,
+          "decoder_behind": 0
+        }
+      },
+      {
+        "format": {
+          "kind": "bitstream",
+          "value": {
+            "codec": "eac3",
+            "container_rate": 192000,
+            "container_channels": 2,
+            "encoded_rate": 48000,
+            "encoded_channels": 6
+          }
+        },
+        "epoch": 1,
+        "volume_db": 0.0,
+        "muted": false,
+        "unsupported": null,
+        "chain_errors": {
+          "unsupported_codec": 0,
+          "unsupported_format": 0,
+          "corrupt_payload": 0,
+          "missing_format": 0,
+          "wrong_route": 0,
+          "unsupported_scene_rate": 0,
+          "truncated_record": 0,
+          "bad_record_length": 0,
+          "bad_format_record": 0,
+          "bad_volume_record": 0,
+          "missing_direct_layout": 0,
+          "decoder_behind": 2
+        }
+      },
+      {
+        "format": {
+          "kind": "pcm",
+          "value": {
+            "channels": 12,
+            "sample_rate": 96000,
+            "bits_per_sample": 24,
+            "valid_bits": 24,
+            "sample_type": "int",
+            "channel_mask": 0
+          }
+        },
+        "epoch": 2,
+        "volume_db": 0.0,
+        "muted": true,
+        "unsupported": "direct_layout",
+        "chain_errors": {
+          "unsupported_codec": 0,
+          "unsupported_format": 0,
+          "corrupt_payload": 0,
+          "missing_format": 0,
+          "wrong_route": 0,
+          "unsupported_scene_rate": 0,
+          "truncated_record": 0,
+          "bad_record_length": 0,
+          "bad_format_record": 0,
+          "bad_volume_record": 0,
+          "missing_direct_layout": 41,
+          "decoder_behind": 0
+        }
+      },
+      {
+        "format": null,
+        "epoch": 0,
+        "volume_db": 0.0,
+        "muted": false,
+        "unsupported": null,
+        "chain_errors": {
+          "unsupported_codec": 0,
+          "unsupported_format": 0,
+          "corrupt_payload": 0,
+          "missing_format": 0,
+          "wrong_route": 0,
+          "unsupported_scene_rate": 0,
+          "truncated_record": 0,
+          "bad_record_length": 0,
+          "bad_format_record": 0,
+          "bad_volume_record": 0,
+          "missing_direct_layout": 0,
+          "decoder_behind": 0
+        }
+      }
+    ],
+    "unattributed_chain_errors": {
+      "unsupported_codec": 0,
+      "unsupported_format": 0,
+      "corrupt_payload": 0,
+      "missing_format": 0,
+      "wrong_route": 0,
+      "unsupported_scene_rate": 0,
+      "truncated_record": 0,
+      "bad_record_length": 0,
+      "bad_format_record": 0,
+      "bad_volume_record": 0,
+      "missing_direct_layout": 0,
+      "decoder_behind": 0
+    },
+    "skipped_records": 0,
+    "latency": {
+      "p50_ms": 12.4,
+      "p99_ms": 18.9,
+      "samples": 300
+    },
+    "ring_level_ms": 9.6,
+    "underruns": 1,
+    "last_underrun": {
+      "ring_frames": 96,
+      "marker_frames": 96,
+      "layout_frames": 480,
+      "needed_frames": 480,
+      "produced_frames": 96,
+      "since_block_ms": 31.5
+    },
+    "output_periods": 12345,
+    "capture_reads": 6789,
+    "output_restarts": 0,
+    "output_rate": 48000,
+    "trim_available": true,
+    "output_channels": 2,
+    "output_channel_mask": 3,
+    "output_reopens": 1,
+    "output_reconnects": 0,
+    "output_reconnect_attempts": 0,
+    "output_mode": "exclusive",
+    "output_fell_back": false,
+    "output_mix_channels": 0,
+    "output_cadence_ratio": 1.001,
+    "output_cadence_faults": 0,
+    "lost_bytes": 0,
+    "lane_underrun_frames": 1920,
+    "dropped_frames": 0,
+    "decode_refused": 2,
+    "volume_transitions_coalesced": 0,
+    "output_overflow_frames": 0,
+    "idle_blocks": 1204,
+    "dropped_events": 0,
+    "clock": "asrc",
+    "clock_ppm": -37.5,
+    "fault": {
+      "kind": "output_lost",
+      "value": "the output device was removed"
+    }
+  },
+  "outputs": [
+    {
+      "id": "{0.0.0.00000000}.{3f2504e0-4f89-11d3-9a0c-0305e82c3301}",
+      "name": "Speakers (Realtek(R) Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+      "name": "DENON AVR (NVIDIA High Definition Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d}",
+      "name": "Headphones (USB Audio DAC)"
+    }
+  ],
+  "chosen_output": {
+    "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+    "name": "DENON AVR (NVIDIA High Definition Audio)"
+  },
+  "driver": {
+    "kind": "installed",
+    "value": {
+      "problem_code": 0,
+      "service_running": true,
+      "exclusive_policy": "applied"
+    }
+  },
+  "platform": {
+    "os_build": 26100,
+    "arch": "x64",
+    "test_signing": true,
+    "secure_boot": "disabled"
+  },
+  "roles_taken": true,
+  "error": {
+    "message": "The output device disconnected. Reconnecting: the output device was removed",
+    "next": "none"
+  },
+  "notes": []
+}

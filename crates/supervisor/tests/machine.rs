@@ -22,6 +22,7 @@ use ssr_types::{
 };
 use supervisor::machine::Config;
 use supervisor::restore_point::{self, RestorePoint, RestorePointError};
+use supervisor::text::Message;
 use supervisor::{
     EngineHandle, Launcher, Session, SessionError, SessionNotice, Settings, Supervisor,
 };
@@ -2588,6 +2589,40 @@ fn language_defaults_overrides_resets_and_rerenders_errors_in_every_phase() {
             NextAction::None
         ))
     );
+}
+
+#[test]
+fn default_profile_name_follows_the_language_through_enable_and_gain() {
+    for language in [Language::En, Language::Ko] {
+        let mut settings = dac_settings();
+        settings.language = Some(language);
+        let (_shared, mut supervisor) = start(ready_pc(), settings);
+        let expected = Message::DefaultProfileName.render(language);
+
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "Ready {language:?}"
+        );
+        supervisor.handle(Intent::Enable).unwrap();
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "Running {language:?}"
+        );
+        supervisor.handle(Intent::SetGain(-3.0)).unwrap();
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "SetGain {language:?}"
+        );
+        supervisor.handle(Intent::Disable).unwrap();
+        assert_eq!(
+            supervisor.snapshot().profile.name,
+            expected,
+            "Disable {language:?}"
+        );
+    }
 }
 
 #[test]

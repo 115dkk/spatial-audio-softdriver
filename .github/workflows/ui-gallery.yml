@@ -1,0 +1,263 @@
+name: ui-gallery
+
+# 화면 갤러리. 앱의 모든 화면 상태를 한국어와 영어, 밝은 팔레트와 어두운
+# 팔레트로 찍어(apps/spatial-softreceiver/ui/e2e/gallery.json의 장면 표,
+# e2e/gallery.spec.ts) ui-gallery 브랜치에 올리고, 리뷰 이슈 하나에 모아
+# 보여 줍니다. 앱을 띄우지 않고 실제 화면 코드를 Rust가 만든 시험 자료와
+# 모의 감독자(ui/src/mock.ts) 위에서 그립니다.
+#
+#   render   장면을 찍고 tools/ui-gallery-issue.mjs --check로 장면 표와
+#            대조합니다(빠진 그림, 빈 그림, 표에 없는 그림, 어느 장면에도 없는
+#            시험 자료가 있으면 실패). 그림은 ui-gallery 아티팩트로 남깁니다.
+#   publish  그림을 ui-gallery 브랜치의 맥락 폴더(pr-<번호>, master,
+#            ref-<이름>)에 바꿔 넣고, 맥락의 이슈("화면 갤러리: PR #N",
+#            "화면 갤러리: master")의 본문을 이번 갤러리로 바꾼 뒤 짧은 댓글로
+#            알립니다. 이슈가 없으면 만들고, PR이면 PR에 이슈 링크를 한 번
+#            남깁니다.
+#   close    PR이 닫히면 그 PR의 이슈를 닫고 브랜치에서 그 폴더를 지웁니다.
+#
+# ui-gallery 브랜치는 그림만 담은 커밋 하나입니다. 게시할 때마다 부모 없는
+# 새 커밋으로 바꿔 쓰므로 지난 그림이 저장소 내력에 쌓이지 않습니다. 맥락이
+# 다른 게시끼리는 동시에 돌 수 있고, 브랜치 스크립트가 --force-with-lease로
+# 밀어 넣어 진 쪽이 새 끝에서 다시 시작하므로 서로의 폴더를 지우지 않습니다.
+# 같은 맥락(PR 하나, master)의 게시와 닫기는 맥락별 concurrency로 하나씩
+# 돌고, 대기 중인 옛 실행은 새 실행이 대신합니다. 게시는 쓰기 직전에 PR이
+# 아직 열려 있고 head가 이 실행의 커밋인지 확인해, 닫힌 PR이나 지난 커밋의
+# 갤러리를 되살리지 않습니다. 이슈의 그림 주소는 그 커밋의 SHA를 가리키므로
+# 캐시된 옛 그림이 보이지 않습니다.
+#
+# ci.yml과 달리 경로 조건이 있습니다. 같은 갤러리를 ci.yml의 ui 잡이 모든
+# 이벤트에서 찍어 검사하고, 여기서는 화면이 바뀐 PR과 master에만 이슈를
+# 씁니다. 다른 저장소에서 온 PR은 브랜치와 이슈를 쓸 권한이 없어 찍기만
+# 합니다.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "apps/spatial-softreceiver/ui/**"
+      - "tools/ui-fonts.mjs"
+      - "tools/ui-gallery-issue.mjs"
+      - ".github/actions/ui-dist/**"
+      - ".github/workflows/ui-gallery.yml"
+  push:
+    branches: [master]
+    paths:
+      - "apps/spatial-softreceiver/ui/**"
+      - "tools/ui-fonts.mjs"
+      - "tools/ui-gallery-issue.mjs"
+      - ".github/actions/ui-dist/**"
+      - ".github/workflows/ui-gallery.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GALLERY_BRANCH: ui-gallery
+
+jobs:
+  render:
+    name: render the gallery
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ui-gallery-render-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/ui-dist
+
+      - name: Every scene in Korean and English, light and dark (Playwright, Chromium)
+        working-directory: apps/spatial-softreceiver/ui
+        env:
+          SSR_UI_SHOTS_DIR: ${{ runner.temp }}/ui-gallery
+        run: |
+          npx playwright install --with-deps chromium
+          npm run shots
+
+      - name: The pictures match the scene table
+        run: node tools/ui-gallery-issue.mjs --check --shots "$RUNNER_TEMP/ui-gallery"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ui-gallery
+          path: ${{ runner.temp }}/ui-gallery/*.png
+          if-no-files-found: error
+
+  publish:
+    name: publish to the branch and the review issue
+    needs: render
+    if: >-
+      github.event.action != 'closed' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    concurrency:
+      group: ui-gallery-publish-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      # A run that finished after its PR was closed, or after a newer push,
+      # must not bring that gallery back: the newer run (or none) owns it.
+      - name: The PR is still open at this commit
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          read -r state head < <(gh pr view "$PR" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"')
+          if [ "$state" = OPEN ] && [ "$head" = "$HEAD_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "PR #$PR is $state at ${head:0:7}; this run is for ${HEAD_SHA:0:7}. Not publishing."
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v8
+        if: steps.current.outputs.current == 'true'
+        with:
+          name: ui-gallery
+          path: ${{ runner.temp }}/ui-gallery
+
+      - name: Where this gallery belongs
+        if: steps.current.outputs.current == 'true'
+        id: context
+        env:
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = pull_request ]; then
+            dir="pr-$PR"; title="화면 갤러리: PR #$PR"; source="$HEAD_REF"; commit="$HEAD_SHA"
+          elif [ "$GITHUB_REF_NAME" = master ]; then
+            dir=master; title="화면 갤러리: master"; source=master; commit="$GITHUB_SHA"
+          else
+            safe="$(printf '%s' "$GITHUB_REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+            dir="ref-$safe"; title="화면 갤러리: $GITHUB_REF_NAME"; source="$GITHUB_REF_NAME"; commit="$GITHUB_SHA"
+          fi
+          {
+            echo "dir=$dir"
+            echo "title=$title"
+            echo "source=$source"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Replace this context's pictures on the gallery branch
+        if: steps.current.outputs.current == 'true'
+        id: branch
+        env:
+          DIR: ${{ steps.context.outputs.dir }}
+          SOURCE: ${{ steps.context.outputs.source }}
+          COMMIT: ${{ steps.context.outputs.commit }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/ui-gallery-branch.sh put "$DIR" "$RUNNER_TEMP/ui-gallery" \
+            "ui-gallery: $DIR, run $GITHUB_RUN_NUMBER ($SOURCE ${COMMIT:0:7})"
+
+      - name: Open or update the review issue
+        if: steps.current.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.context.outputs.title }}
+          DIR: ${{ steps.context.outputs.dir }}
+          SOURCE: ${{ steps.context.outputs.source }}
+          COMMIT: ${{ steps.context.outputs.commit }}
+          GALLERY_SHA: ${{ steps.branch.outputs.sha }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; fi
+              if [ "$attempt" -lt 3 ]; then sleep $((attempt * 5)); fi
+            done
+            return 1
+          }
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          node tools/ui-gallery-issue.mjs --shots "$RUNNER_TEMP/ui-gallery" \
+            --base "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GALLERY_SHA/$DIR" \
+            --tree "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/tree/$GALLERY_SHA/$DIR" \
+            --run "$run_url" --run-number "$GITHUB_RUN_NUMBER" \
+            --commit "$COMMIT" --source "$SOURCE" > "$RUNNER_TEMP/body.md"
+
+          retry gh label create ui-gallery --force --color 0e8a16 \
+            --description "화면 갤러리(ui-gallery.yml)가 여는 리뷰 이슈" >/dev/null
+          # The list endpoint, not search: a just-created issue is not in the
+          # search index yet, and a second issue for the same context would
+          # follow. Every open issue, label or not, so a removed label does
+          # not open a second one.
+          issue="$(retry gh issue list --state open --limit 5000 --json number,title \
+            --jq "map(select(.title == env.TITLE)) | .[0].number // empty")"
+          if [ -n "$issue" ]; then
+            retry gh issue edit "$issue" --body-file "$RUNNER_TEMP/body.md" >/dev/null
+            retry gh issue comment "$issue" --body "실행 [#$GITHUB_RUN_NUMBER]($run_url)의 갤러리로 본문을 바꿨습니다(커밋 \`${COMMIT:0:7}\`)." >/dev/null
+            echo "Updated issue #$issue"
+          else
+            url="$(retry gh issue create --title "$TITLE" --label ui-gallery --body-file "$RUNNER_TEMP/body.md")"
+            issue="${url##*/}"
+            echo "Opened issue #$issue"
+            if [ "$EVENT" = pull_request ]; then
+              retry gh pr comment "$PR" --body "이 PR의 화면 갤러리: #$issue (화면이 바뀌어 다시 찍을 때마다 그 이슈의 본문이 바뀝니다)" >/dev/null
+            fi
+          fi
+          echo "### 화면 갤러리: #$issue" >> "$GITHUB_STEP_SUMMARY"
+
+  close:
+    name: close the closed PR's gallery
+    if: >-
+      github.event_name == 'pull_request' && github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    concurrency:
+      group: ui-gallery-publish-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Drop the PR's pictures from the gallery branch
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          bash .github/scripts/ui-gallery-branch.sh drop "pr-$PR" "" "ui-gallery: drop pr-$PR (closed)"
+
+      - name: Close the PR's review issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "화면 갤러리: PR #${{ github.event.pull_request.number }}"
+          MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          set -euo pipefail
+          issue="$(gh issue list --state open --limit 5000 --json number,title \
+            --jq "map(select(.title == env.TITLE)) | .[0].number // empty")"
+          if [ -z "$issue" ]; then
+            echo "No open gallery issue titled '$TITLE'"
+            exit 0
+          fi
+          if [ "$MERGED" = true ]; then
+            why="PR이 머지되어 이 갤러리를 닫습니다. 지금 화면은 \"화면 갤러리: master\" 이슈에 있습니다."
+          else
+            why="PR이 닫혀 이 갤러리를 닫습니다."
+          fi
+          gh issue close "$issue" --comment "$why 그림은 ui-gallery 브랜치에서 지웠습니다." >/dev/null
+          echo "Closed issue #$issue"

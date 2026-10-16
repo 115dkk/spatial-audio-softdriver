@@ -1,0 +1,65 @@
+{
+  "language": "en",
+  "language_choice": null,
+  "phase": {
+    "kind": "ready"
+  },
+  "profile": {
+    "kind": "stereo",
+    "name": "Default stereo",
+    "brir": null,
+    "headphone_fir": null,
+    "gain_db": 0.0,
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      }
+    ],
+    "from_file": false
+  },
+  "engine": null,
+  "outputs": [
+    {
+      "id": "{0.0.0.00000000}.{3f2504e0-4f89-11d3-9a0c-0305e82c3301}",
+      "name": "Speakers (Realtek(R) Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+      "name": "DENON AVR (NVIDIA High Definition Audio)"
+    },
+    {
+      "id": "{0.0.0.00000000}.{a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d}",
+      "name": "Headphones (USB Audio DAC)"
+    }
+  ],
+  "chosen_output": {
+    "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+    "name": "DENON AVR (NVIDIA High Definition Audio)"
+  },
+  "driver": {
+    "kind": "installed",
+    "value": {
+      "problem_code": 0,
+      "service_running": true,
+      "exclusive_policy": "applied"
+    }
+  },
+  "platform": {
+    "os_build": 26100,
+    "arch": "x64",
+    "test_signing": true,
+    "secure_boot": "disabled"
+  },
+  "roles_taken": false,
+  "error": null,
+  "notes": []
+}

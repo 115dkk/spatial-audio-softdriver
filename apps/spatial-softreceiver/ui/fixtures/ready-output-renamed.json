@@ -33,7 +33,7 @@
       "name": "스피커 (Realtek(R) Audio)"
     },
     {
-      "id": "{0.0.0.00000000}.{7c1c3e55-3a8c-4b1f-9d33-5a2a7b0d7e12}",
+      "id": "{0.0.0.00000000}.{5e8a2c44-74fb-4e6d-b257-82ea4b12f649}",
       "name": "DENON AVR (NVIDIA High Definition Audio)"
     },
     {
@@ -41,7 +41,10 @@
       "name": "헤드폰 (USB Audio DAC)"
     }
   ],
-  "chosen_output": null,
+  "chosen_output": {
+    "id": "{0.0.0.00000000}.{5e8a2c44-74fb-4e6d-b257-82ea4b12f649}",
+    "name": "DENON AVR (NVIDIA High Definition Audio)"
+  },
   "driver": {
     "kind": "installed",
     "value": {
@@ -57,11 +60,8 @@
     "secure_boot": "disabled"
   },
   "roles_taken": false,
-  "error": {
-    "message": "저장된 출력 장치를 찾을 수 없습니다: DENON AVR (NVIDIA High Definition Audio)",
-    "next": "open_settings"
-  },
+  "error": null,
   "notes": [
-    "고른 출력의 식별자가 바뀌어 이름으로 다시 찾았습니다."
+    "출력 장치의 식별자가 바뀌어 이름으로 다시 찾았습니다: DENON AVR (NVIDIA High Definition Audio)"
   ]
 }

@@ -109,7 +109,7 @@ describe('i18n catalog contract', () => {
     expect(text).toBe(ko);
     setLanguage('en');
     expect(text).toBe(en);
-    expect(text.format.channels(8)).toBe('8 channels');
+    expect(text.format.channels(8)).toBe('8\u00a0channels');
     setLanguage('ko');
     expect(text.format.channels(8)).toBe('8채널');
   });

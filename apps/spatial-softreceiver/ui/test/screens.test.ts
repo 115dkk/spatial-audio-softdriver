@@ -100,15 +100,16 @@ describe('what each state says', () => {
     for (const name of ['공간 소프트리시버', '공간 소프트리시버 음악', '공간 소프트리시버 PASS']) {
       expect(text).toContain(name);
     }
-    expect(text).toContain('PCM 8채널 48 kHz float32');
-    expect(text).toContain('DD+ 6채널 48 kHz');
+    expect(text).toContain('PCM 8채널 48\u00a0kHz float32');
+    expect(text).toContain('DD+ 6채널 48\u00a0kHz');
     expect(text).toContain('직접 출력 12채널');
     expect(text).toContain('이 채널 수에는 직접 배치가 없습니다.');
     expect(text).toContain('12.4');
     expect(text).toContain('18.9');
     expect(text).toContain('-37.5');
     expect(text).toContain('독점');
-    expect(text).toContain("이전 기본 장치 '스피커 (Realtek(R) Audio)'를 복원점에 적었습니다.");
+    // The fixture's note is the supervisor's Message::Reconnected.
+    expect(text).toContain('다시 연결했습니다.');
   });
 
   it('running while reconnecting says so in the head', () => {
@@ -188,7 +189,7 @@ describe('meters', () => {
     expect(root.querySelector('.meters')).toBe(before);
     expect([...root.querySelectorAll('.endpoint-card')]).toEqual(cards);
     expect(root.querySelector('.meters')?.textContent).toContain('7.3');
-    expect(cards[0]?.textContent).toContain('-12.0 dB');
+    expect(cards[0]?.textContent).toContain('-12.0\u00a0dB');
   });
 
   it('are ignored outside running', () => {

@@ -18,7 +18,7 @@ function tabParam(): Tab | undefined {
 async function start(host: HTMLElement) {
   if (params.has('gallery')) {
     const { gallery } = await import('./gallery');
-    await gallery(host, params.get('fixture'), tabParam());
+    await gallery(host, params, tabParam());
     return;
   }
   const api = await connect(params.get('fixture') ?? undefined);
@@ -35,6 +35,12 @@ async function start(host: HTMLElement) {
 }
 
 start(root).catch((reason: unknown) => {
+  // The gallery's pictures must fail on this (as a page error), not show it.
+  if (params.has('gallery')) {
+    setTimeout(() => {
+      throw reason;
+    }, 0);
+  }
   // Nothing to draw without a snapshot: say why and offer a reload.
   const error = toUserError(reason);
   root.replaceChildren(

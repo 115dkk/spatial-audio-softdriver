@@ -4,8 +4,11 @@ import { fileURLToPath } from 'node:url';
 import { chromium, defineConfig } from '@playwright/test';
 
 // `npm run shots`: builds the screen, serves it with `vite preview` and has
-// e2e/shots.spec.ts photograph every fixture in the light and dark palettes.
-// Shots go to $SSR_UI_SHOTS_DIR (CI uploads it), else ui/shots/.
+// e2e/gallery.spec.ts photograph every scene of e2e/gallery.json in each
+// language and palette the table names, one test per picture, as
+// <name>.<language>.<scheme>.png in $SSR_UI_SHOTS_DIR (CI uploads it and
+// tools/ui-gallery-issue.mjs checks it), else ui/shots/. Each test opens its
+// own context with the language's locale and the scene's window size.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const port = 4173;

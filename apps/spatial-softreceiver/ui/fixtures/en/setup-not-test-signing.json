@@ -1,0 +1,46 @@
+{
+  "language": "en",
+  "language_choice": null,
+  "phase": {
+    "kind": "setup",
+    "value": "not_test_signing"
+  },
+  "profile": {
+    "kind": "stereo",
+    "name": "Default stereo",
+    "brir": null,
+    "headphone_fir": null,
+    "gain_db": 0.0,
+    "directions": [
+      {
+        "id": 0,
+        "name": "FL",
+        "azimuth_deg": 30.0,
+        "elevation_deg": 0.0
+      },
+      {
+        "id": 1,
+        "name": "FR",
+        "azimuth_deg": -30.0,
+        "elevation_deg": 0.0
+      }
+    ],
+    "from_file": false
+  },
+  "engine": null,
+  "outputs": [],
+  "chosen_output": null,
+  "driver": null,
+  "platform": {
+    "os_build": 26100,
+    "arch": "x64",
+    "test_signing": false,
+    "secure_boot": "enabled"
+  },
+  "roles_taken": false,
+  "error": {
+    "message": "Test-signing mode is off. Turn off Secure Boot, run bcdedit /set testsigning on as administrator, and restart Windows. Secure Boot is on and must be turned off first.",
+    "next": "reboot"
+  },
+  "notes": []
+}

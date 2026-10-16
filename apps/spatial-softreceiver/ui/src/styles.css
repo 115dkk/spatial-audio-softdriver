@@ -144,7 +144,8 @@ p {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
   color: inherit;
 }
@@ -671,6 +672,12 @@ input[type="checkbox"] {
   flex-wrap: wrap;
   align-items: center;
   gap: 16px 28px;
+  /* The output's divider sits in the gap before it; when the output wraps
+     to a line of its own (a longer state line, a narrower window), the
+     divider falls outside the row and is clipped. The margin keeps focus
+     rings. */
+  overflow: clip;
+  overflow-clip-margin: 6px;
 }
 
 .button.power {
@@ -702,8 +709,13 @@ input[type="checkbox"] {
   height: 10px;
 }
 
+.power-state {
+  padding-right: 29px;
+}
+
 .output-state {
   flex: 1 1 240px;
+  margin-left: -29px;
   padding-left: 28px;
   border-left: 1px solid var(--line);
 }
@@ -907,9 +919,10 @@ input[type="checkbox"] {
 
 .meter {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: 0 12px;
   padding: 5px 0;
   border-top: 1px solid var(--line);
 }
@@ -924,7 +937,9 @@ input[type="checkbox"] {
 }
 
 .meter dd {
-  margin: 0;
+  /* A value too long to share the row with its label (an English output
+     format) goes under it, still on the right, instead of breaking both. */
+  margin: 0 0 0 auto;
   text-align: right;
   font-weight: 500;
 }
@@ -952,6 +967,7 @@ input[type="checkbox"] {
   }
 
   .meter dd {
+    margin-left: 0;
     text-align: left;
     font-size: var(--size-l);
   }
@@ -1262,6 +1278,37 @@ input[type="checkbox"] {
   grid-column: 2;
 }
 
+/* A labelled select (the language), drawn like the other controls. */
+.field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+.field label {
+  font-weight: 500;
+}
+
+.field select {
+  min-height: 32px;
+  max-width: 100%;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.field select:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.field .hint {
+  flex-basis: 100%;
+}
+
 /* ---- Fallback page and gallery --------------------------------------- */
 
 .fatal {
@@ -1273,27 +1320,94 @@ input[type="checkbox"] {
   padding: 32px;
 }
 
+/* The review page (`?gallery=1`): every scene of e2e/gallery.json, group by
+   group, its languages side by side. Each frame draws the scene at its own
+   window size and shows it at half that, so the small windows stay small. */
+
 .gallery {
+  --frame-scale: 0.5;
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 36px;
   padding: 24px;
 }
 
 .gallery h1 {
   font-size: var(--size-xl);
+  font-weight: 600;
 }
 
-.gallery h2 {
-  margin-bottom: 8px;
+.gallery-group {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.gallery-group h2 {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--size-l);
+  font-weight: 600;
+}
+
+.gallery-scene {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gallery-scene-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+}
+
+.gallery-scene h3 {
   font-size: var(--size-m);
   font-weight: 600;
 }
 
-.gallery iframe {
-  display: block;
+.gallery-scene code {
+  font-family: var(--font);
+  font-size: var(--size-s);
+  color: var(--text-muted);
+}
+
+.gallery-frames {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px 20px;
+}
+
+.gallery-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+
+.gallery-frame a {
+  font-size: var(--size-xs);
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.gallery-viewport {
+  width: calc(var(--frame-width) * var(--frame-scale) + 2px);
+  height: calc(var(--frame-height) * var(--frame-scale) + 2px);
+  overflow: hidden;
   border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
   background: var(--bg);
+}
+
+.gallery-viewport iframe {
+  display: block;
+  border: 0;
+  transform: scale(var(--frame-scale));
+  transform-origin: 0 0;
 }
 
 /* ---- Narrow windows (the window can shrink to 720 x 480) -------------- */
@@ -1307,7 +1421,12 @@ input[type="checkbox"] {
     padding: 16px 16px 24px;
   }
 
+  .power-state {
+    padding-right: 0;
+  }
+
   .output-state {
+    margin-left: 0;
     padding-left: 0;
     border-left: 0;
   }

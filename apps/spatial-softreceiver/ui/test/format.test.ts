@@ -20,15 +20,15 @@ const pcm = (channels: number, rate: number, mask: number, type: 'int' | 'float'
 
 describe('describeFormat', () => {
   it('names PCM with a channel mask', () => {
-    expect(describeFormat(pcm(8, 48000, 1599, 'float', 32))).toBe('PCM 8채널 48 kHz float32');
+    expect(describeFormat(pcm(8, 48000, 1599, 'float', 32))).toBe('PCM 8채널 48\u00a0kHz float32');
   });
 
   it('names mask 0 as direct output', () => {
-    expect(describeFormat(pcm(12, 96000, 0, 'int', 24))).toBe('직접 출력 12채널 96 kHz int24');
+    expect(describeFormat(pcm(12, 96000, 0, 'int', 24))).toBe('직접 출력 12채널 96\u00a0kHz int24');
   });
 
   it('shows integer samples padded in a wider container', () => {
-    expect(describeFormat(pcm(2, 44100, 3, 'int', 32, 24))).toBe('PCM 2채널 44.1 kHz int24/32');
+    expect(describeFormat(pcm(2, 44100, 3, 'int', 32, 24))).toBe('PCM 2채널 44.1\u00a0kHz int24/32');
   });
 
   it('names a bitstream by codec and what it encodes', () => {
@@ -36,8 +36,8 @@ describe('describeFormat', () => {
       kind: 'bitstream',
       value: { codec: 'eac3_joc', container_rate: 192000, container_channels: 2, encoded_rate: 48000, encoded_channels: 6 },
     };
-    expect(describeFormat(format)).toBe('DD+ JOC 6채널 48 kHz');
-    expect(describeCarrier(format)).toBe('전송 2채널 192 kHz');
+    expect(describeFormat(format)).toBe('DD+ JOC 6채널 48\u00a0kHz');
+    expect(describeCarrier(format)).toBe('전송 2채널 192\u00a0kHz');
   });
 
   it('leaves out encoded values the stream did not give', () => {
@@ -73,12 +73,12 @@ describe('names and numbers', () => {
     expect(oneDecimal(12.44)).toBe('12.4');
     expect(oneDecimal(-37.5)).toBe('-37.5');
     expect(oneDecimal(-0.04)).toBe('0.0');
-    expect(describeRate(48000)).toBe('48 kHz');
+    expect(describeRate(48000)).toBe('48\u00a0kHz');
   });
 
   it('shows volume and mute', () => {
-    expect(describeVolume(-6, false)).toBe('-6.0 dB');
-    expect(describeVolume(0, true)).toBe('음소거 (0.0 dB)');
+    expect(describeVolume(-6, false)).toBe('-6.0\u00a0dB');
+    expect(describeVolume(0, true)).toBe('음소거 (0.0\u00a0dB)');
   });
 
   it('lists chain errors that happened, largest first', () => {
