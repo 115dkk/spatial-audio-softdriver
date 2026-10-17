@@ -149,7 +149,8 @@ pub(super) fn apply_fade_in(
 /// Deliberate, unchanged subsets: an underrun keeps the controller, ASRC,
 /// latency, and cadence; a sink restart keeps the controller and ASRC; and a
 /// crossing discard keeps the controller. Keeping the controller keeps its
-/// learned skew: the end of every priming restarts its reference
+/// learned skew, and the capture thread's stall reserve is independent of
+/// every reprime. The end of priming restarts only the moving reference
 /// ([`TroughController::restart_reference`]).
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Reprime {
@@ -585,6 +586,7 @@ impl OutputState {
             self.target_ms * rate / 1_000.0,
             take_frames,
             self.delivery_frames(scene_rate),
+            self.shared.stall_reserve_frames.load(Ordering::Acquire) as f64,
             self.crossing.capacity_frames as f64,
         ) * 1_000.0
             / rate
@@ -678,6 +680,10 @@ impl OutputState {
             return None;
         }
         let to_ms = |frames: usize| frames as f64 * 1_000.0 / f64::from(scene_rate);
+        let period_seconds = self.period_frames as f64 / f64::from(self.device_rate);
+        self.shared
+            .output_elapsed_ns
+            .fetch_add((period_seconds * 1.0e9).round() as u64, Ordering::Relaxed);
         if !self.period_had_audio {
             // Priming or starved: show the level that is building up.
             self.shared.ring_level_bits.store(
@@ -686,7 +692,6 @@ impl OutputState {
             );
             return None;
         }
-        let period_seconds = self.period_frames as f64 / f64::from(self.device_rate);
         let setpoint_ms =
             self.trough_setpoint_ms(scene_rate, period_seconds * f64::from(scene_rate));
         let completed = self.controller.observe(

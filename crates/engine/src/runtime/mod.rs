@@ -84,7 +84,8 @@ const RECONNECT_MAX_MS: u64 = 5_000;
 // E-AC-3 as several mixer blocks) while the output takes one period at a
 // time, so the level is a sawtooth whose trough, just before the next
 // delivery lands, is how close the output came to running dry. The controller
-// holds that trough at target_ms plus what one late delivery costs a take
+// holds that trough at target_ms plus what one late delivery costs a take and
+// a bounded reserve learned from recurring source stalls
 // (trough_setpoint_frames): it reads the lowest level left after each period
 // over a window, and acts once per window, against a reference that moves from
 // where priming left the trough to that setpoint (TroughController). The
@@ -955,6 +956,9 @@ struct Shared {
     blocks: AtomicU64,
     underruns: AtomicU64,
     output_periods: AtomicU64,
+    /// Elapsed output time in nanoseconds, advanced by one device period at a
+    /// time so capture-side stall aging uses the controller's time base.
+    output_elapsed_ns: AtomicU64,
     capture_reads: AtomicU64,
     /// Origin of the nanosecond stamps below.
     started: Instant,
@@ -987,6 +991,8 @@ struct Shared {
     /// Frames per channel of the largest recent capture-step delivery into
     /// the crossing ring ([`ArrivalPeak`]); the output primes for it.
     arrival_frames: AtomicU64,
+    /// Frames per channel reserved in the trough for a recurring source stall.
+    stall_reserve_frames: AtomicU64,
     dropped_frames: AtomicU64,
     decode_refused: AtomicU64,
     skipped_records: AtomicU64,
@@ -1112,6 +1118,7 @@ impl Shared {
             blocks: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
             output_periods: AtomicU64::new(0),
+            output_elapsed_ns: AtomicU64::new(0),
             capture_reads: AtomicU64::new(0),
             started: Instant::now(),
             last_block_ns: AtomicU64::new(0),
@@ -1138,6 +1145,7 @@ impl Shared {
             lost_bytes: AtomicU64::new(0),
             lane_underrun_frames: AtomicU64::new(0),
             arrival_frames: AtomicU64::new(0),
+            stall_reserve_frames: AtomicU64::new(0),
             dropped_frames: AtomicU64::new(0),
             decode_refused: AtomicU64::new(0),
             skipped_records: AtomicU64::new(0),
@@ -1699,6 +1707,44 @@ fn capture_rt_step<C: CaptureSource>(
     CaptureStep::Continue
 }
 
+/// What the capture thread learns from the frames each step put into the
+/// crossing ring, published for the output thread: the largest recent
+/// delivery ([`ArrivalPeak`], priming and the setpoint) and the reserve for a
+/// source that stalls and catches up ([`StallReserve`]). The reserve ages by
+/// output time (`Shared::output_elapsed_ns`), the controller's time base.
+struct Arrivals {
+    peak: ArrivalPeak,
+    reserve: StallReserve,
+    last_elapsed_ns: u64,
+}
+
+impl Arrivals {
+    fn new(shared: &Shared) -> Self {
+        Self {
+            peak: ArrivalPeak::new(),
+            reserve: StallReserve::new(),
+            last_elapsed_ns: shared.output_elapsed_ns.load(Ordering::Acquire),
+        }
+    }
+
+    /// Records one capture step that put `delivered` (non-zero) frames into
+    /// the crossing ring.
+    fn record(&mut self, delivered: u64, shared: &Shared) {
+        let elapsed_ns = shared.output_elapsed_ns.load(Ordering::Acquire);
+        let elapsed_seconds = elapsed_ns.saturating_sub(self.last_elapsed_ns) as f64 / 1.0e9;
+        self.last_elapsed_ns = elapsed_ns;
+        let reserve = self
+            .reserve
+            .record(delivered, self.peak.peak(), elapsed_seconds);
+        shared
+            .stall_reserve_frames
+            .store(reserve, Ordering::Release);
+        shared
+            .arrival_frames
+            .store(self.peak.record(delivered), Ordering::Release);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capture_thread_main<C: CaptureSource>(
     config: EngineConfig,
@@ -1718,7 +1764,7 @@ fn capture_thread_main<C: CaptureSource>(
     let mut events = EventWriter::new(event_producer, Arc::clone(&shared));
     let mut applied_trim = f64::NAN;
     let mut pending_retired: Option<Retired> = None;
-    let mut arrivals = ArrivalPeak::new();
+    let mut arrivals = Arrivals::new(&shared);
     shared.capture_started.store(true, Ordering::Release);
     let mut finishing = false;
     while !shared.stop.load(Ordering::Acquire) {
@@ -1748,9 +1794,7 @@ fn capture_thread_main<C: CaptureSource>(
         }
         let delivered = crossing.stream_frame().saturating_sub(step_start);
         if delivered != 0 {
-            shared
-                .arrival_frames
-                .store(arrivals.record(delivered), Ordering::Release);
+            arrivals.record(delivered, &shared);
         }
         if let Some(hook) = &config.rt_event {
             hook(RtLoopEvent::CaptureEnd);

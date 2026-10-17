@@ -124,3 +124,7 @@ CI 소크에서 master는 끊김이 없었는데 이 변경에서는 소크마�
   - 실행 중에 바꾼 목표도 1초 동안 유지되면 기준이 초당 1 ms로 따라갑니다. 예전에는 목표가 계단으로 바뀌어, 바뀐 만큼을 비례항이 빼거나 채우는 동안 적분이 같은 식으로 배웠습니다.
   - 초과분을 상한(2,000 ppm)으로 빼고 적분을 멈추는 방식도 시험했습니다. 시작할 때 넘친 블록 하나만으로도 상한에 닿아, 어긋남이 없을 때 상한에 한 번도 닿지 않아야 한다는 시험(`clock_holds_the_trough_without_chasing_the_block_sawtooth`)을 어겨서 버렸습니다.
 - 시험 `a_primed_excess_moves_the_reference_without_teaching_the_integral`, `the_reference_follows_a_setpoint_only_once_it_holds`, `a_restarted_reference_ignores_the_window_begun_before_the_refill`이 제어기 단독으로 이 규칙들을 봅니다. 실제 출력을 돌리는 시계 시험 다섯(`clock_holds_the_trough_without_chasing_the_block_sawtooth`, `clock_follows_three_hundred_ppm_of_skew_for_asrc_and_trim`, `audible_priming_excess_drains_without_winding_up_the_clock`, `a_period_as_long_as_a_block_survives_phase_slips_and_late_blocks`, `a_period_longer_than_a_block_plays_after_priming`)은 판정 기준을 바꾸지 않고 통과합니다. 10 ms 주기의 E-AC-3만 위의 까닭으로 묶음을 옮겼습니다.
+
+## 수정 (2026-10-17, 공백 여유)
+
+바닥 설정점에 공백 여유를 더합니다: `target + min(take, delivery) + reserve`. 캡처 걸음 하나의 도착량이 최근 최대보다 `max(블록 둘, 최근 최대)`를 넘게 크면, 원본이 멈췄다가 따라잡은 것으로 보고 그 초과분을 여유로 붙잡습니다(상한 150 ms, 그런 걸음이 30초 동안 없으면 0). 몇 초마다 되풀이되는 공백이 링을 비우지 않게 하기 위해서입니다. 한 걸음 늦은 PCM이나 DD+ 동기 프레임 둘로는 여유가 생기지 않으므로 위 시계 시험의 설정점은 바뀌지 않습니다. 자세한 것은 ADR 0036입니다.

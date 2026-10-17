@@ -31,6 +31,12 @@ const REFERENCE_SLEW_MS_PER_SECOND: f64 = PI_LIMIT_PPM / 2.0 / 1_000.0;
 /// windows in a row, and a live target change would never be followed.
 pub(super) const SETPOINT_SETTLE_WINDOWS: usize = 5;
 const ARRIVAL_WINDOW: usize = 8;
+/// A learned source stall remains relevant for 30 seconds after the last
+/// catch-up delivery, long enough to cover stalls that recur every few seconds.
+pub(super) const STALL_HOLD_SECONDS: f64 = 30.0;
+/// At most 150 ms at 48 kHz is kept for a recurring source stall, less than
+/// half the default 320 ms crossing ring so catch-up deliveries retain room.
+pub(super) const MAX_STALL_RESERVE_FRAMES: u64 = 7_200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClockMode {
@@ -362,26 +368,77 @@ impl ArrivalPeak {
         }
     }
 
+    pub(super) fn peak(&self) -> u64 {
+        self.recent.iter().copied().max().unwrap_or(0)
+    }
+
     /// Records one step's delivery and returns the window's largest.
     pub(super) fn record(&mut self, frames: u64) -> u64 {
         self.recent[self.next] = frames;
         self.next = (self.next + 1) % ARRIVAL_WINDOW;
-        self.recent.iter().copied().max().unwrap_or(frames)
+        self.peak()
+    }
+}
+
+/// Extra trough margin learned from a catch-up delivery after a source stall.
+/// It is fixed-size state suitable for the real-time capture thread.
+pub(super) struct StallReserve {
+    frames: u64,
+    age_seconds: f64,
+}
+
+impl StallReserve {
+    pub(super) fn new() -> Self {
+        Self {
+            frames: 0,
+            age_seconds: 0.0,
+        }
+    }
+
+    /// Observes one non-empty capture-step delivery against the peak from
+    /// before that delivery. A delivery is a catch-up only when its excess is
+    /// larger than both 20 ms and the prior peak, which excludes ordinary
+    /// one-step PCM and DD+ lateness; an empty prior window cannot establish a
+    /// normal delivery size. A catch-up keeps the largest excess and restarts
+    /// the hold, so stalls that keep coming keep the reserve even when they
+    /// are shorter than the one it was learned from. Other deliveries age it
+    /// by elapsed output time.
+    pub(super) fn record(&mut self, delivery: u64, prior_peak: u64, elapsed_seconds: f64) -> u64 {
+        let excess = delivery.saturating_sub(prior_peak);
+        let threshold = (2 * crate::MIX_FRAMES as u64).max(prior_peak);
+        if prior_peak != 0 && excess > threshold {
+            self.frames = self.frames.max(excess.min(MAX_STALL_RESERVE_FRAMES));
+            self.age_seconds = 0.0;
+        } else {
+            self.age_seconds += elapsed_seconds;
+            if self.age_seconds > STALL_HOLD_SECONDS {
+                self.frames = 0;
+                self.age_seconds = 0.0;
+            }
+        }
+        self.frames
     }
 }
 
 /// Where the controller holds the trough, in frames: the target beyond what
 /// one delivery landing just after a take instead of just before it costs
-/// that take, which is the smaller of the take and the delivery. The trough
-/// alone cannot show that cost while every period gets its delivery: with a
+/// that take, which is the smaller of the take and the delivery, plus the
+/// learned reserve for a recurring source stall. The trough alone cannot show
+/// that cost while every period gets its delivery: with a
 /// period at least as long as a delivery (10 ms shared on 10 ms PCM, 20 ms
 /// periods) it is flat until the arrival phase crosses the period boundary,
 /// so a controller holding it at the target kept the ring one late delivery
 /// from empty, and the period that missed its delivery underran. Priming
 /// fills to target + delivery + take, so the trough starts here. Capped where
 /// the ring still takes a delivery after the take.
-pub(super) fn trough_setpoint_frames(target: f64, take: f64, delivery: f64, capacity: f64) -> f64 {
-    (target + take.min(delivery)).min((capacity - delivery - take).max(0.0))
+pub(super) fn trough_setpoint_frames(
+    target: f64,
+    take: f64,
+    delivery: f64,
+    reserve: f64,
+    capacity: f64,
+) -> f64 {
+    (target + take.min(delivery) + reserve).min((capacity - delivery - take).max(0.0))
 }
 
 /// The PI controller fed with the ring's trough: the lowest level left after
