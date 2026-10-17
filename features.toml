@@ -132,7 +132,11 @@ id = "replay.inspect"
 kind = "tool"
 milestone = "M0"
 status = "implemented"
-tests = ["ssr-replay::inspect_counts_records_and_names_each_epoch"]
+tests = [
+  "ssr-replay::inspect_counts_records_and_names_each_epoch",
+  "ssr-replay::inspect_summarizes_payload_read_arrivals",
+]
+note = "Per endpoint, arrival summarizes how READs came: gaps between payload READs, the length of one READ in stream time, gaps over 50 and 100 ms, and the READ after each gap over 50 ms (catch_up, first 64), so a tester can share the delivery pattern without the audio (ADR 0036)"
 
 # ---- Replay chain (M1) ----
 
@@ -604,8 +608,11 @@ tests = [
   "ssr-sys::sal_invalid_format_does_not_commit_state",
   "ssr-sys::sal_idle_before_first_format_waits_without_committing_an_epoch",
   "ssr-sys::sal_translation_does_not_allocate_in_steady_state",
+  "ssr-sys::sal_delivery_delay_raises_stop_threshold_and_suppresses_shorter_stop",
+  "ssr-sys::sal_real_stop_does_not_raise_stop_threshold",
+  "ssr-sys::sal_learned_stop_threshold_is_capped",
 ]
-note = "SAL's READ results become ssr_abi records, from its interface only (ADR 0005). Translation drains a large SAL READ as whole records over multiple engine reads. SAL exposes no stop signal, so 100 ms without payload by READ QPC emits StreamStop; later data emits StreamStart, resets byte_pos to zero, and repeats the unchanged format without changing epoch. READs before the first format negotiation are waited out without an epoch. Windows 2025 CI (the opt-in SAL runner) captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
+note = "SAL's READ results become ssr_abi records, from its interface only (ADR 0005). Translation drains a large SAL READ as whole records over multiple engine reads. SAL exposes no stop signal, so 100 ms without payload by READ QPC emits StreamStop; a restart whose first READ brings back at least 70% of the gap was a stall, not a stop, and raises the threshold to 1.5 times the gap plus 20 ms, up to 500 ms, for the translator's life (ADR 0036); later data emits StreamStart, resets byte_pos to zero, and repeats the unchanged format without changing epoch. READs before the first format negotiation are waited out without an epoch. Windows 2025 CI (the opt-in SAL runner) captured real 12-channel PCM without loss and exercised SAL -> engine -> VB-CABLE. MAT/JOC sources remain unverified. See docs/experiments/m2-sal-runner.md. Development only; release builds leave it out"
 
 [[feature]]
 id = "sys.wasapi_output"
@@ -1093,8 +1100,10 @@ tests = [
   "engine::pcm_lane_resets_do_not_take_decode_jobs_from_a_bitstream_lane",
   "engine::a_stop_in_the_same_read_as_the_last_burst_keeps_the_burst_whole",
   "engine::the_decode_thread_is_promoted_as_its_own_kind",
+  "engine::a_mid_stream_backlog_read_waits_for_its_deliveries",
+  "engine::a_stalled_decode_thread_does_not_hold_other_lanes_past_the_lateness_bound",
 ]
-note = "ADR 0031: the capture thread copies each complete E-AC-3 burst into one of 16 preallocated jobs (bitstream::MAX_PAYLOAD bytes each) and the ssr-decode thread runs the allocating upstream decoders; results come back through a second rtrb ring and are placed at the start of the next capture step, so the lane delay grows by one capture step. Reset jobs follow the bursts queued before them and are queued only for fronts that decoded since the last reset; a full queue refuses the burst with DecodeError::DecoderBehind (ChainErrorKind::DecoderBehind, counted as decode_refused). Each job carries the lane generation and the lane clock at submit: the chain discards a delivery from an earlier generation (a lane restart) or one later than MAX_DELAY_FRAMES of lane transport, counting its frames as dropped without an error event, so the mixer lane delay stays uncapped and a paused or zero-padded lane resumes from the frontier. A stop with deliveries in flight runs when the last one returns; a panic in the upstream decoder ends that job as a Corrupt error and the thread keeps running. Chains built by tests and offline tools keep the worker inline and run each job at the submit point, so offline rendering is unchanged; the runtime takes the worker with Chain::take_decode_worker"
+note = "ADR 0031: the capture thread copies each complete E-AC-3 burst into one of 16 preallocated jobs (bitstream::MAX_PAYLOAD bytes each) and the ssr-decode thread runs the allocating upstream decoders; results come back through a second rtrb ring and are placed at the start of the next capture step, so the lane delay grows by one capture step. An interval a settled lane has not filled while it has current-generation bursts on the decode thread waits for them past the arrival slack, up to MAX_DELAY_FRAMES behind now, so a READ that brings several bursts at once leaves no empty place and does not grow the lane delay (ADR 0036). Reset jobs follow the bursts queued before them and are queued only for fronts that decoded since the last reset; a full queue refuses the burst with DecodeError::DecoderBehind (ChainErrorKind::DecoderBehind, counted as decode_refused). Each job carries the lane generation and the lane clock at submit: the chain discards a delivery from an earlier generation (a lane restart) or one later than MAX_DELAY_FRAMES of lane transport, counting its frames as dropped without an error event, so the mixer lane delay stays uncapped and a paused or zero-padded lane resumes from the frontier. A stop with deliveries in flight runs when the last one returns; a panic in the upstream decoder ends that job as a Corrupt error and the thread keeps running. Chains built by tests and offline tools keep the worker inline and run each job at the submit point, so offline rendering is unchanged; the runtime takes the worker with Chain::take_decode_worker"
 
 [[feature]]
 id = "engine.no_drop"
