@@ -673,11 +673,11 @@ jobs:
         with:
           tool: cargo-deny
 
-      # deny.toml excuses the yanked zip 8.6.0 only while the newest velopack
-      # cannot be built with an unyanked zip; this proves it on every run.
-      # When velopack-zip-guard.yml removes the exception it deletes the
+      # deny.toml excuses the zip advisories only while the newest velopack
+      # cannot be built with a patched zip; this proves it on every run.
+      # When zip-advisory-guard.yml removes the exception it deletes the
       # script, which turns this step off.
-      - name: The zip 8.6.0 exception still stands
+      - name: The zip advisory exception still stands
         if: hashFiles('.github/scripts/velopack_zip_guard.py') != ''
         run: python3 .github/scripts/velopack_zip_guard.py check
 
