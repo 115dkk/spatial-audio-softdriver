@@ -929,6 +929,9 @@ pub struct SceneMixer {
     /// Lanes with data still to come in the READ being processed, starting
     /// before the moment just processed ([`SceneMixer::set_waiting`]).
     waiting: u32,
+    /// Lanes with a current-generation burst still on the decode thread. A
+    /// settled lane waits for that burst instead of emitting its empty place.
+    decoding: u32,
     lane_underrun_frames: u64,
     dropped_frames: u64,
     /// Objects of the last emitted interval ([`SceneMixer::scene`]).
@@ -996,6 +999,7 @@ impl SceneMixer {
             last_source_qpc: None,
             pending_lanes: 0,
             waiting: 0,
+            decoding: 0,
             lane_underrun_frames: 0,
             dropped_frames: 0,
             scene: [EMPTY_SCENE_OBJECT; MAX_SCENE_OBJECTS],
@@ -1379,6 +1383,14 @@ impl SceneMixer {
         self.waiting = lanes;
     }
 
+    /// Names the lanes (bit `i` for endpoint `i`) with a current-generation
+    /// burst still on the decode thread. A lane whose delay is already settled
+    /// waits for such a burst, because its transport advanced when the bytes
+    /// arrived but its scene can only be placed on a later capture step.
+    pub(crate) fn set_decoding(&mut self, lanes: u32) {
+        self.decoding = lanes;
+    }
+
     /// Ends a READ: nothing more is coming, so what is late leaves now.
     pub fn release_waiting(&mut self, out: &mut dyn FnMut(&BedBlock<'_>)) {
         self.waiting = 0;
@@ -1386,11 +1398,23 @@ impl SceneMixer {
         self.retire_drained();
     }
 
+    /// Emits intervals made ready by a returned decode delivery without moving
+    /// `now`; intervals still protected by READ or decode waiting remain held.
+    pub(crate) fn release_decoded(&mut self, out: &mut dyn FnMut(&BedBlock<'_>)) {
+        self.emit_ready(out);
+        self.retire_drained();
+    }
+
     fn waiting_lane_short_of(&self, end: u64) -> bool {
         self.lanes.iter().enumerate().any(|(index, lane)| {
-            self.waiting & (1_u32 << index) != 0
-                && lane.state == LaneState::Active
-                && !(lane.delay.is_some() && lane.generation_end >= end)
+            let bit = 1_u32 << index;
+            let waiting_in_read =
+                self.waiting & bit != 0 && !(lane.delay.is_some() && lane.generation_end >= end);
+            let waiting_for_decode = self.decoding & bit != 0
+                && lane.delay.is_some()
+                && lane.generation_end < end
+                && self.now.saturating_sub(end) < MAX_DELAY_FRAMES;
+            lane.state == LaneState::Active && (waiting_in_read || waiting_for_decode)
         })
     }
 

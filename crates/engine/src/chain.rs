@@ -873,8 +873,12 @@ struct DeferredLane {
     /// reset. A delivery that comes back more than `MAX_DELAY_FRAMES` of it
     /// after its burst was queued is discarded.
     clock: u64,
-    /// Burst jobs queued for this lane and not yet collected.
+    /// Burst jobs queued for this lane and not yet collected, across all
+    /// generations. Stops wait for this count to drain.
     in_flight: usize,
+    /// Jobs of the current generation not yet collected. A restart clears this
+    /// without touching `in_flight`, whose older jobs still have to come back.
+    current_in_flight: usize,
     /// A stream stop that waits for the lane's in-flight deliveries (see
     /// `Chain::stop_lane`).
     stop_pending: bool,
@@ -884,6 +888,7 @@ impl DeferredLane {
     /// Starts a new generation: deliveries queued before now are discarded.
     fn restart(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.current_in_flight = 0;
     }
 
     /// A returned burst job not to place: from before the lane's last restart
@@ -1027,6 +1032,7 @@ fn submit_deferred_burst(
     queue: &mut DecodeQueue,
     inline_worker: &mut Option<DecodeWorker>,
     mixer: &mut SceneMixer,
+    decoding: &mut u32,
     upmix: &mut UpmixLanes,
     geometry: Option<&PanGeometry>,
     endpoint: u16,
@@ -1059,11 +1065,16 @@ fn submit_deferred_burst(
         // Deliveries queued before a refused burst come back to a restarted
         // lane, at least a full queue late: discarded and counted.
         lane.restart();
+        *decoding &= !(1_u32 << endpoint);
+        mixer.set_decoding(*decoding);
         decoders.reset();
         submit_front_reset(queue, inline_worker, endpoint);
         return Some(ChainError::Decode(error));
     }
     lane.in_flight += 1;
+    lane.current_in_flight += 1;
+    *decoding |= 1_u32 << endpoint;
+    mixer.set_decoding(*decoding);
     let worker = inline_worker.as_mut()?;
     while worker.run_one() {}
     let mut failure = None;
@@ -1073,6 +1084,11 @@ fn submit_deferred_burst(
         }
         debug_assert_eq!(job.endpoint(), endpoint);
         lane.in_flight = lane.in_flight.saturating_sub(1);
+        lane.current_in_flight = lane.current_in_flight.saturating_sub(1);
+        if lane.current_in_flight == 0 {
+            *decoding &= !(1_u32 << endpoint);
+            mixer.set_decoding(*decoding);
+        }
         debug_assert!(
             !lane.discards(job),
             "an inline delivery is placed where its burst is queued"
@@ -1085,6 +1101,8 @@ fn submit_deferred_burst(
     });
     let (error, reset_front) = failure?;
     lane.restart();
+    *decoding &= !(1_u32 << endpoint);
+    mixer.set_decoding(*decoding);
     if reset_front {
         submit_front_reset(queue, inline_worker, endpoint);
     }
@@ -1571,11 +1589,29 @@ impl Chain {
         self.decode_queue.refused()
     }
 
+    /// Bit mask of lanes with current-generation decode work not yet collected.
+    fn decoding_lanes(&self) -> u32 {
+        self.fronts
+            .iter()
+            .enumerate()
+            .fold(0_u32, |lanes, (index, front)| {
+                lanes | ((front.deferred.current_in_flight > 0) as u32) << index
+            })
+    }
+
+    /// Recomputes the mixer's decode waiting from the current generation of
+    /// every front. Old-generation jobs remain in `in_flight` for stop draining
+    /// but do not hold output after a restart.
+    fn update_decoding(&mut self) {
+        self.mixer.set_decoding(self.decoding_lanes());
+    }
+
     /// Resets a front's deframer and capture-thread decoder state now and its
     /// decode-thread half after the bursts already queued for it. The lane
     /// starts a new generation: deliveries still in flight are discarded.
     fn reset_front(&mut self, index: usize, endpoint: u16) {
         self.fronts[index].reset();
+        self.update_decoding();
         submit_front_reset(&mut self.decode_queue, &mut self.inline_worker, endpoint);
     }
 
@@ -1663,6 +1699,8 @@ impl Chain {
         if self.decode_queue.in_flight() == 0 {
             return;
         }
+        let decoding_before = self.decoding_lanes();
+        let mut placed = false;
         let Self {
             fronts,
             mixer,
@@ -1685,6 +1723,9 @@ impl Chain {
             };
             let lane = &mut front.deferred;
             lane.in_flight = lane.in_flight.saturating_sub(1);
+            if job.generation() == lane.generation {
+                lane.current_in_flight = lane.current_in_flight.saturating_sub(1);
+            }
             if lane.in_flight == 0 && lane.stop_pending {
                 drained |= 1_u32 << endpoint;
             }
@@ -1695,7 +1736,7 @@ impl Chain {
                 return;
             }
             // The lane's transport moved when the burst's bytes arrived.
-            if let Placement::Failed { error, reset_front } = place_decoded(
+            match place_decoded(
                 &mut front.decoders,
                 mixer,
                 upmix,
@@ -1703,14 +1744,17 @@ impl Chain {
                 job,
                 &mut |_| {},
             ) {
-                front.deferred.restart();
-                if reset_front {
-                    resets |= 1_u32 << endpoint;
+                Placement::Placed => placed = true,
+                Placement::Failed { error, reset_front } => {
+                    front.deferred.restart();
+                    if reset_front {
+                        resets |= 1_u32 << endpoint;
+                    }
+                    if !mixer.lane_is_idle(endpoint) {
+                        mixer.lane_discontinuity(endpoint, 0);
+                    }
+                    emit_front_error(front, suppressed_errors, endpoint, error, out);
                 }
-                if !mixer.lane_is_idle(endpoint) {
-                    mixer.lane_discontinuity(endpoint, 0);
-                }
-                emit_front_error(front, suppressed_errors, endpoint, error, out);
             }
         });
         for endpoint in 0..MAX_ENDPOINTS as u16 {
@@ -1722,6 +1766,12 @@ impl Chain {
             if drained & (1_u32 << endpoint) != 0 {
                 self.run_pending_stop(usize::from(endpoint), endpoint, out);
             }
+        }
+        let decoding_after = self.decoding_lanes();
+        self.mixer.set_decoding(decoding_after);
+        if placed || decoding_after != decoding_before {
+            let (mixer, back) = (&mut self.mixer, &mut self.back);
+            mixer.release_decoded(&mut |scene| back.process(scene, out));
         }
     }
 
@@ -2174,6 +2224,8 @@ impl Chain {
                 self.run_pending_stop(index, index as u16, out);
             }
         }
+        debug_assert_eq!(self.decoding_lanes(), 0);
+        self.mixer.set_decoding(0);
         let mut emitted = 0;
         if block_budget == 0 {
             let front_quiet = self.fronts.iter().all(|front| front.format.is_none());
@@ -2594,6 +2646,7 @@ impl Chain {
         out: &mut dyn FnMut(ChainEvent<'_>),
     ) {
         let frequency = self.qpc_frequency;
+        let mut decoding = self.decoding_lanes();
         let Self {
             fronts,
             mixer,
@@ -2658,6 +2711,7 @@ impl Chain {
                         decode_queue,
                         inline_worker,
                         mixer,
+                        &mut decoding,
                         upmix,
                         geometry,
                         endpoint,
@@ -2682,6 +2736,8 @@ impl Chain {
                     };
                     if error.is_some() {
                         lane.restart();
+                        decoding &= !(1_u32 << endpoint);
+                        mixer.set_decoding(decoding);
                         decoders.reset();
                         submit_front_reset(decode_queue, inline_worker, endpoint);
                     }

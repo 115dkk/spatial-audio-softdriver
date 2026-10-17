@@ -4226,6 +4226,154 @@ fn ddp_read(bursts: &[Vec<u8>], first: usize, count: usize, format: bool) -> Vec
     stream
 }
 
+fn render_deferred_ddp_reads(
+    bursts: &[Vec<u8>],
+    reads: &[(usize, usize)],
+    label: &str,
+) -> (Rendered, u64, u64) {
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared(label));
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+    for (read, &(first, count)) in reads.iter().enumerate() {
+        chain.push_records(&ddp_read(bursts, first, count, read == 0), &mut |event| {
+            rendered.event(event)
+        });
+        while worker.run_one() {}
+    }
+    chain.finish(&mut |event| rendered.event(event));
+    let underruns = chain.lane_underrun_frames();
+    let dropped = chain.dropped_frames();
+    (rendered, underruns, dropped)
+}
+
+#[test]
+fn a_mid_stream_backlog_read_waits_for_its_deliveries() {
+    const BEFORE: usize = 10;
+    const BATCH: usize = 4;
+    const AFTER: usize = 20;
+    const TOTAL: usize = BEFORE + BATCH + AFTER;
+    let fixture = ddp_bursts();
+    let bursts = (0..TOTAL)
+        .map(|index| fixture[index % fixture.len()].clone())
+        .collect::<Vec<_>>();
+
+    let mut inline = Chain::new(ChainConfig::default());
+    inline.set_prepared(identity_prepared("ddp-mid-backlog-inline"));
+    let mut expected = Rendered::default();
+    inline.push_records(&ddp_read(&bursts, 0, BEFORE, true), &mut |event| {
+        expected.event(event)
+    });
+    inline.push_records(&ddp_read(&bursts, BEFORE, BATCH, false), &mut |event| {
+        expected.event(event)
+    });
+    for index in BEFORE + BATCH..TOTAL {
+        inline.push_records(&ddp_read(&bursts, index, 1, false), &mut |event| {
+            expected.event(event)
+        });
+    }
+    inline.finish(&mut |event| expected.event(event));
+
+    let mut backlog_reads = (0..BEFORE).map(|index| (index, 1)).collect::<Vec<_>>();
+    backlog_reads.push((BEFORE, BATCH));
+    backlog_reads.extend((BEFORE + BATCH..TOTAL).map(|index| (index, 1)));
+    let (rendered, underruns, dropped) =
+        render_deferred_ddp_reads(&bursts, &backlog_reads, "ddp-mid-backlog");
+    let steady_reads = (0..TOTAL).map(|index| (index, 1)).collect::<Vec<_>>();
+    let (steady, steady_underruns, steady_dropped) =
+        render_deferred_ddp_reads(&bursts, &steady_reads, "ddp-mid-steady");
+
+    assert!(expected.errors.is_empty());
+    assert!(rendered.errors.is_empty());
+    assert!(steady.errors.is_empty());
+    assert_eq!(underruns, 0);
+    assert_eq!(dropped, 0);
+    assert_eq!(steady_underruns, 0);
+    assert_eq!(steady_dropped, 0);
+    assert_eq!(rendered.audible(), expected.audible());
+    let last_audible = |rendered: &Rendered| {
+        rendered
+            .blocks
+            .iter()
+            .rposition(|(_, left, right)| left.iter().chain(right).any(|sample| *sample != 0.0))
+    };
+    assert_eq!(last_audible(&rendered), last_audible(&steady));
+}
+
+fn ddp_pcm_read(bursts: &[Vec<u8>], index: usize, format: bool) -> Vec<u8> {
+    let pcm = pcm_bytes(0.125, 1_536);
+    let mut stream = vec![0; 512 + ssr_abi::record_size(24_576) + ssr_abi::record_size(pcm.len())];
+    let mut writer = RecordWriter::new(&mut stream);
+    if format {
+        writer.set_endpoint(ENDPOINT_PRIMARY);
+        assert!(writer.format_change(
+            1,
+            1,
+            &wave_format_bytes(&bitstream_format(BitstreamCodec::Eac3, 48_000))
+        ));
+        writer.set_endpoint(ENDPOINT_SECOND);
+        assert!(writer.format_change(1, 1, &wave_format_bytes(&stereo_pcm_format())));
+    }
+    let qpc = (index as u64 + 1) * 320_000;
+    writer.set_endpoint(ENDPOINT_PRIMARY);
+    assert!(writer.data(1, index as u64 * 24_576, qpc, &bursts[index]));
+    writer.set_endpoint(ENDPOINT_SECOND);
+    assert!(writer.data(1, index as u64 * pcm.len() as u64, qpc, &pcm));
+    let len = writer.len();
+    stream.truncate(len);
+    stream
+}
+
+#[test]
+fn a_stalled_decode_thread_does_not_hold_other_lanes_past_the_lateness_bound() {
+    const WARM: usize = 10;
+    const STALLED: usize = 10;
+    let fixture = ddp_bursts();
+    let bursts = (0..WARM + STALLED)
+        .map(|index| fixture[index % fixture.len()].clone())
+        .collect::<Vec<_>>();
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared("ddp-stalled-pcm"));
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+
+    for index in 0..WARM {
+        chain.push_records(&ddp_pcm_read(&bursts, index, index == 0), &mut |event| {
+            rendered.event(event)
+        });
+        while worker.run_one() {}
+    }
+    chain.idle(1, &mut |event| rendered.event(event));
+    let before_stall = rendered.blocks.len();
+
+    for index in WARM..WARM + STALLED {
+        chain.push_records(&ddp_pcm_read(&bursts, index, false), &mut |event| {
+            rendered.event(event)
+        });
+    }
+
+    let now = (WARM + STALLED) * 1_536;
+    let latest_allowed_end = now
+        .saturating_sub(MAX_DELAY_FRAMES as usize)
+        .saturating_sub(MIX_FRAMES);
+    let emitted_end = rendered.blocks.len() * MIX_FRAMES;
+    assert!(
+        rendered.blocks.len() > before_stall,
+        "PCM stopped with the decoder"
+    );
+    assert!(
+        emitted_end >= latest_allowed_end,
+        "output ends at {emitted_end}, now is {now}, lateness bound is {MAX_DELAY_FRAMES}"
+    );
+    assert!(
+        rendered
+            .blocks
+            .last()
+            .is_some_and(|(_, left, right)| left.iter().chain(right).any(|sample| *sample != 0.0)),
+        "the last released block does not contain the PCM lane"
+    );
+}
+
 #[test]
 fn a_delivery_batch_after_a_capture_backlog_does_not_cut_later_bursts() {
     const BATCH: usize = 3;
