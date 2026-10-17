@@ -1,3 +1,5 @@
+<p align="center"><img src="apps/spatial-softreceiver/ui/public/mark.svg" width="112" alt="" /></p>
+
 # Spatial SoftReceiver · 공간 소프트리시버
 
 AV 리시버가 하던 일을 PC 안에서 소프트웨어로 하는 Windows 앱입니다. 가상 HDMI 장치로 게임, 음악, 영화의 소리를 받아 디코드하고 공간에 배치한 뒤, 둘 가운데 하나로 내보냅니다.
