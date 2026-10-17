@@ -101,6 +101,30 @@ enum Command {
 struct EndpointSummary {
     records: u64,
     data_bytes: u64,
+    arrival: Option<ArrivalSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArrivalSummary {
+    payload_reads: u64,
+    gap_ms: Option<ArrivalDistribution>,
+    read_ms: Option<ArrivalDistribution>,
+    gaps_over_50_ms: u64,
+    gaps_over_100_ms: u64,
+    catch_up: Vec<CatchUp>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArrivalDistribution {
+    p50: f64,
+    p99: f64,
+    max: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct CatchUp {
+    gap_ms: f64,
+    next_read_ms: f64,
 }
 
 #[derive(Serialize, Default)]
@@ -273,6 +297,165 @@ fn epoch_key(endpoint: u16, epoch: u32) -> String {
     format!("{endpoint}:{epoch}")
 }
 
+#[derive(Default)]
+struct ArrivalCollector {
+    payload_reads: u64,
+    gaps_ms: Vec<f64>,
+    reads_ms: Vec<f64>,
+    catch_up: Vec<CatchUp>,
+    previous_qpc: Option<u64>,
+}
+
+impl ArrivalCollector {
+    fn push(&mut self, qpc: u64, payload_bytes: u64, byte_rate: Option<u64>, frequency: u64) {
+        self.payload_reads += 1;
+        let gap_ms = self
+            .previous_qpc
+            .map(|previous| qpc.saturating_sub(previous) as f64 * 1_000.0 / frequency as f64);
+        if let Some(gap_ms) = gap_ms {
+            self.gaps_ms.push(gap_ms);
+        }
+        let read_ms = byte_rate
+            .filter(|rate| *rate != 0)
+            .map(|rate| payload_bytes as f64 * 1_000.0 / rate as f64);
+        if let Some(read_ms) = read_ms {
+            self.reads_ms.push(read_ms);
+        }
+        if let (Some(gap_ms), Some(next_read_ms)) = (gap_ms, read_ms)
+            && gap_ms > 50.0
+            && self.catch_up.len() < 64
+        {
+            self.catch_up.push(CatchUp {
+                gap_ms: round_tenth(gap_ms),
+                next_read_ms: round_tenth(next_read_ms),
+            });
+        }
+        self.previous_qpc = Some(qpc);
+    }
+
+    fn finish(self) -> ArrivalSummary {
+        ArrivalSummary {
+            payload_reads: self.payload_reads,
+            gaps_over_50_ms: self.gaps_ms.iter().filter(|gap| **gap > 50.0).count() as u64,
+            gaps_over_100_ms: self.gaps_ms.iter().filter(|gap| **gap > 100.0).count() as u64,
+            gap_ms: distribution(self.gaps_ms),
+            read_ms: distribution(self.reads_ms),
+            catch_up: self.catch_up,
+        }
+    }
+}
+
+fn round_tenth(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+
+fn distribution(mut values: Vec<f64>) -> Option<ArrivalDistribution> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let nearest_rank = |percent: usize| {
+        let rank = (percent * values.len()).div_ceil(100).max(1);
+        round_tenth(values[rank - 1])
+    };
+    Some(ArrivalDistribution {
+        p50: nearest_rank(50),
+        p99: nearest_rank(99),
+        max: round_tenth(*values.last().expect("non-empty above")),
+    })
+}
+
+fn finish_legacy_reads(
+    pending: &mut BTreeMap<u16, (u64, u64, Option<u64>)>,
+    collectors: &mut BTreeMap<u16, ArrivalCollector>,
+    frequency: u64,
+) {
+    for (endpoint, (qpc, bytes, byte_rate)) in core::mem::take(pending) {
+        collectors
+            .entry(endpoint)
+            .or_default()
+            .push(qpc, bytes, byte_rate, frequency);
+    }
+}
+
+fn collect_arrivals(
+    header: &ssr_abi::DumpHeader,
+    stream: &[u8],
+) -> BTreeMap<u16, ArrivalCollector> {
+    let mut collectors = BTreeMap::<u16, ArrivalCollector>::new();
+    let mut formats = BTreeMap::<u16, u64>::new();
+    if header.format_version >= 2 {
+        for chunk in reads(header, stream) {
+            let mut payload = BTreeMap::<u16, (u64, Option<u64>)>::new();
+            for record in records(chunk.bytes).flatten() {
+                match record {
+                    Record::FormatChange {
+                        endpoint, format, ..
+                    } => {
+                        formats.insert(endpoint, format.bytes_per_second() as u64);
+                    }
+                    Record::Data {
+                        endpoint, bytes, ..
+                    } => {
+                        let byte_rate = formats.get(&endpoint).copied();
+                        let read = payload.entry(endpoint).or_insert((0, byte_rate));
+                        read.0 = read.0.saturating_add(bytes.len() as u64);
+                        if read.1 != byte_rate {
+                            read.1 = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for (endpoint, (bytes, byte_rate)) in payload {
+                if let Some(qpc) = chunk.end_qpc {
+                    collectors.entry(endpoint).or_default().push(
+                        qpc,
+                        bytes,
+                        byte_rate,
+                        header.qpc_frequency.max(1),
+                    );
+                }
+            }
+        }
+    } else {
+        let frequency = header.qpc_frequency.max(1);
+        let mut pending = BTreeMap::<u16, (u64, u64, Option<u64>)>::new();
+        for record in records(stream).flatten() {
+            match record {
+                Record::FormatChange {
+                    endpoint, format, ..
+                } => {
+                    finish_legacy_reads(&mut pending, &mut collectors, frequency);
+                    formats.insert(endpoint, format.bytes_per_second() as u64);
+                }
+                Record::Data {
+                    endpoint,
+                    qpc,
+                    bytes,
+                    ..
+                } => {
+                    if pending
+                        .get(&endpoint)
+                        .is_some_and(|(current_qpc, _, _)| *current_qpc != qpc)
+                    {
+                        finish_legacy_reads(&mut pending, &mut collectors, frequency);
+                    }
+                    let byte_rate = formats.get(&endpoint).copied();
+                    let read = pending.entry(endpoint).or_insert((qpc, 0, byte_rate));
+                    read.1 = read.1.saturating_add(bytes.len() as u64);
+                    if read.2 != byte_rate {
+                        read.2 = None;
+                    }
+                }
+                _ => finish_legacy_reads(&mut pending, &mut collectors, frequency),
+            }
+        }
+        finish_legacy_reads(&mut pending, &mut collectors, frequency);
+    }
+    collectors
+}
+
 fn inspect(bytes: &[u8]) -> Result<Summary, String> {
     let (header, stream) = split_dump(bytes).map_err(|error| error.to_string())?;
     let mut summary = Summary {
@@ -300,6 +483,7 @@ fn inspect(bytes: &[u8]) -> Result<Summary, String> {
             _ => {}
         }
     }
+    let arrivals = collect_arrivals(&header, stream);
     for record in records(stream) {
         let (kind, endpoint, data_bytes) = match record {
             Ok(Record::Data {
@@ -341,6 +525,9 @@ fn inspect(bytes: &[u8]) -> Result<Summary, String> {
             endpoint.records += 1;
             endpoint.data_bytes += data_bytes;
         }
+    }
+    for (endpoint, arrival) in arrivals {
+        summary.endpoints.entry(endpoint).or_default().arrival = Some(arrival.finish());
     }
     Ok(summary)
 }
@@ -798,6 +985,68 @@ path = "missing.sofa"
         assert!(error.contains("must not exceed 200 ms"), "{error}");
         assert!(!output.exists());
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn inspect_summarizes_payload_read_arrivals() {
+        let frequency = 1_000;
+        let pcm = SourceFormat::Pcm(PcmFormat {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            valid_bits: 16,
+            sample_type: SampleType::Int,
+            channel_mask: 3,
+        });
+        let bytes_per_ms = pcm.bytes_per_second() / 1_000;
+        let mut stream = vec![0; 100_000];
+        let mut writer = RecordWriter::new(&mut stream);
+        assert!(writer.format_change(1, 0, &wave_format_bytes(&pcm)));
+        for index in 0..20_u64 {
+            assert!(writer.data(
+                1,
+                index * (bytes_per_ms * 10) as u64,
+                index * 10,
+                &vec![0; bytes_per_ms * 10],
+            ));
+            assert!(writer.read_end(index * 10));
+        }
+        assert!(writer.data(
+            1,
+            20 * (bytes_per_ms * 10) as u64,
+            310,
+            &vec![0; bytes_per_ms * 130],
+        ));
+        assert!(writer.read_end(310));
+        for index in 1..=10_u64 {
+            assert!(writer.data(
+                1,
+                (20 * bytes_per_ms * 10
+                    + bytes_per_ms * 130
+                    + (index as usize - 1) * bytes_per_ms * 10) as u64,
+                310 + index * 10,
+                &vec![0; bytes_per_ms * 10],
+            ));
+            assert!(writer.read_end(310 + index * 10));
+        }
+        let length = writer.len();
+        let mut file = dump_header_bytes(frequency);
+        file.extend_from_slice(&stream[..length]);
+
+        let summary = inspect(&file).unwrap();
+        let arrival = summary.endpoints[&ENDPOINT_PRIMARY]
+            .arrival
+            .as_ref()
+            .unwrap();
+        assert_eq!(arrival.payload_reads, 31);
+        assert_eq!(arrival.gaps_over_100_ms, 1);
+        assert_eq!(arrival.catch_up.len(), 1);
+        assert_eq!(arrival.catch_up[0].gap_ms, 120.0);
+        assert_eq!(arrival.catch_up[0].next_read_ms, 130.0);
+        let gap = arrival.gap_ms.as_ref().unwrap();
+        assert_eq!((gap.p50, gap.p99, gap.max), (10.0, 120.0, 120.0));
+        let read = arrival.read_ms.as_ref().unwrap();
+        assert_eq!((read.p50, read.p99, read.max), (10.0, 130.0, 130.0));
     }
 
     #[test]
