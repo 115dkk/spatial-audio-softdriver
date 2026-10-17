@@ -3902,6 +3902,18 @@ impl Rendered {
             .count()
     }
 
+    fn audible_frames(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|(_, left, right)| {
+                left.iter()
+                    .zip(right)
+                    .filter(|(left, right)| **left != 0.0 || **right != 0.0)
+                    .count()
+            })
+            .sum()
+    }
+
     fn left(&self) -> Vec<f32> {
         self.blocks
             .iter()
@@ -4151,6 +4163,65 @@ fn a_reset_job_follows_the_bursts_queued_before_it() {
 }
 
 #[test]
+fn finish_step_never_emits_more_than_its_budget_after_a_backlog() {
+    const WARM: usize = 6;
+    const BACKLOG: usize = 4;
+    const TOTAL: usize = WARM + BACKLOG;
+    let fixture = ddp_bursts();
+    let bursts = (0..TOTAL)
+        .map(|index| fixture[index % fixture.len()].clone())
+        .collect::<Vec<_>>();
+
+    let mut inline = Chain::new(ChainConfig::default());
+    inline.set_prepared(identity_prepared("finish-budget-inline"));
+    let mut expected = Rendered::default();
+    for index in 0..WARM {
+        inline.push_records(&ddp_read(&bursts, index, 1, index == 0), &mut |event| {
+            expected.event(event)
+        });
+    }
+    inline.push_records(&ddp_read(&bursts, WARM, BACKLOG, false), &mut |event| {
+        expected.event(event)
+    });
+    inline.finish(&mut |event| expected.event(event));
+
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared("finish-budget-deferred"));
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+    for index in 0..WARM {
+        chain.push_records(&ddp_read(&bursts, index, 1, index == 0), &mut |event| {
+            rendered.event(event)
+        });
+        while worker.run_one() {}
+    }
+    chain.push_records(&ddp_read(&bursts, WARM, BACKLOG, false), &mut |event| {
+        rendered.event(event)
+    });
+    assert_eq!(chain.decode_in_flight(), BACKLOG);
+    chain.begin_finish();
+    while worker.run_one() {}
+
+    loop {
+        let before = rendered.blocks.len();
+        let done = chain.finish_step(1, &mut |event| rendered.event(event));
+        let emitted = rendered.blocks.len() - before;
+        assert!(
+            emitted <= 1,
+            "finish_step emitted {emitted} blocks with a budget of one"
+        );
+        if done {
+            break;
+        }
+    }
+
+    assert!(expected.errors.is_empty());
+    assert!(rendered.errors.is_empty());
+    assert_eq!(chain.dropped_frames(), 0);
+    assert_eq!(rendered.audible_frames(), expected.audible_frames());
+}
+
+#[test]
 fn in_flight_deliveries_are_waited_for_at_finish() {
     let bursts = ddp_bursts();
     let bursts = bursts.iter().take(4).map(Vec::as_slice).collect::<Vec<_>>();
@@ -4224,6 +4295,149 @@ fn ddp_read(bursts: &[Vec<u8>], first: usize, count: usize, format: bool) -> Vec
     let len = writer.len();
     stream.truncate(len);
     stream
+}
+
+fn ddp_lane_read(bursts: &[Vec<u8>], lanes: &[(u16, usize, usize)], format: bool) -> Vec<u8> {
+    let records = lanes.iter().map(|(_, _, count)| *count).sum::<usize>();
+    let mut stream = vec![0_u8; 512 + records * ssr_abi::record_size(24_576)];
+    let mut writer = RecordWriter::new(&mut stream);
+    for &(endpoint, _, _) in lanes {
+        writer.set_endpoint(endpoint);
+        if format {
+            assert!(writer.format_change(
+                1,
+                1,
+                &wave_format_bytes(&bitstream_format(BitstreamCodec::Eac3, 48_000))
+            ));
+        }
+    }
+    for &(endpoint, first, count) in lanes {
+        writer.set_endpoint(endpoint);
+        for (index, burst) in bursts.iter().enumerate().skip(first).take(count) {
+            assert!(writer.data(
+                1,
+                index as u64 * 24_576,
+                (index as u64 + 1) * 320_000,
+                burst
+            ));
+        }
+    }
+    let len = writer.len();
+    stream.truncate(len);
+    stream
+}
+
+fn render_deferred_lane_reads(
+    bursts: &[Vec<u8>],
+    reads: &[Vec<(u16, usize, usize)>],
+    label: &str,
+) -> (Rendered, u64, u64) {
+    let mut chain = Chain::new(ChainConfig::default());
+    chain.set_prepared(identity_prepared(label));
+    let mut worker = chain.take_decode_worker().unwrap();
+    let mut rendered = Rendered::default();
+    for (read, lanes) in reads.iter().enumerate() {
+        chain.push_records(&ddp_lane_read(bursts, lanes, read == 0), &mut |event| {
+            rendered.event(event)
+        });
+        while worker.run_one() {}
+    }
+    chain.finish(&mut |event| rendered.event(event));
+    let underruns = chain.lane_underrun_frames();
+    let dropped = chain.dropped_frames();
+    (rendered, underruns, dropped)
+}
+
+#[test]
+fn waiting_for_one_lane_does_not_cut_a_late_lane_ahead_of_it() {
+    const SETTLE: usize = 4;
+    const BATCH: usize = 4;
+    const AFTER: usize = 12;
+    const A_TOTAL: usize = 1 + SETTLE + BATCH + AFTER;
+    const B_INITIAL: usize = 6;
+    const B_TOTAL: usize = B_INITIAL + SETTLE + BATCH + AFTER;
+    let fixture = ddp_bursts();
+    let bursts = (0..B_TOTAL)
+        .map(|index| fixture[index % fixture.len()].clone())
+        .collect::<Vec<_>>();
+
+    let mut reads = vec![vec![
+        (ENDPOINT_PRIMARY, 0, 1),
+        (ENDPOINT_SECOND, 0, B_INITIAL),
+    ]];
+    for step in 0..SETTLE {
+        reads.push(vec![
+            (ENDPOINT_PRIMARY, 1 + step, 1),
+            (ENDPOINT_SECOND, B_INITIAL + step, 1),
+        ]);
+    }
+    reads.push(vec![
+        (ENDPOINT_PRIMARY, 1 + SETTLE, BATCH),
+        (ENDPOINT_SECOND, B_INITIAL + SETTLE, BATCH),
+    ]);
+    for step in 0..AFTER {
+        reads.push(vec![
+            (ENDPOINT_PRIMARY, 1 + SETTLE + BATCH + step, 1),
+            (ENDPOINT_SECOND, B_INITIAL + SETTLE + BATCH + step, 1),
+        ]);
+    }
+    debug_assert_eq!(A_TOTAL, 1 + SETTLE + BATCH + AFTER);
+
+    let (mixed, underruns, dropped) =
+        render_deferred_lane_reads(&bursts, &reads, "late-lane-mixed");
+    let lane_reads = |endpoint| {
+        reads
+            .iter()
+            .map(|read| {
+                read.iter()
+                    .copied()
+                    .filter(|(candidate, _, _)| *candidate == endpoint)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let (primary, primary_underruns, primary_dropped) = render_deferred_lane_reads(
+        &bursts[..A_TOTAL],
+        &lane_reads(ENDPOINT_PRIMARY),
+        "late-lane-primary",
+    );
+    let (second, second_underruns, second_dropped) =
+        render_deferred_lane_reads(&bursts, &lane_reads(ENDPOINT_SECOND), "late-lane-second");
+
+    assert!(mixed.errors.is_empty());
+    assert!(primary.errors.is_empty());
+    assert!(second.errors.is_empty());
+    assert_eq!(dropped, 0);
+    assert_eq!(underruns, 0);
+    assert_eq!(primary_dropped, 0);
+    assert_eq!(second_dropped, 0);
+    assert_eq!(primary_underruns, 0);
+    assert_eq!(second_underruns, 0);
+    // The mixer adds lane beds, so nothing cut or dropped means each channel
+    // of the mix sums to what the two lanes sum to alone, wherever each lane
+    // landed on the timeline (lane delays differ, so the waveforms do not line
+    // up block for block).
+    let sums = |rendered: &Rendered| {
+        rendered
+            .blocks
+            .iter()
+            .fold([0.0_f64; 2], |[left_sum, right_sum], (_, left, right)| {
+                [
+                    left_sum + left.iter().map(|sample| f64::from(*sample)).sum::<f64>(),
+                    right_sum + right.iter().map(|sample| f64::from(*sample)).sum::<f64>(),
+                ]
+            })
+    };
+    let mixed_sums = sums(&mixed);
+    let (primary_sums, second_sums) = (sums(&primary), sums(&second));
+    for (channel, mixed_sum) in mixed_sums.into_iter().enumerate() {
+        let alone = primary_sums[channel] + second_sums[channel];
+        assert!(
+            (mixed_sum - alone).abs() <= 1.0e-3 * alone.abs().max(1.0),
+            "channel {channel}: mix sums to {mixed_sum}, the lanes alone to {alone}"
+        );
+    }
+    assert!(mixed.audible_frames() >= primary.audible_frames().max(second.audible_frames()));
 }
 
 fn render_deferred_ddp_reads(

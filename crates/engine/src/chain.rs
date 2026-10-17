@@ -1693,9 +1693,12 @@ impl Chain {
     /// adapter (the capture-thread half at once, the decode-thread half by a
     /// reset job unless the failed job did it), restarts the lane and reports
     /// the error, as a synchronous decode error did. A stop waiting for the
-    /// lane's deliveries runs after the last one. Never allocates or frees:
+    /// lane's deliveries runs after the last one. `release` normally lets newly
+    /// ready timeline intervals leave immediately. Bounded finish disables both
+    /// that release and pending stops, because a stop can drain many intervals;
+    /// its budget loop handles both after collection. Never allocates or frees:
     /// the job's frames are borrowed.
-    fn collect_decoded(&mut self, out: &mut dyn FnMut(ChainEvent<'_>)) {
+    fn collect_decoded_with(&mut self, out: &mut dyn FnMut(ChainEvent<'_>), release: bool) {
         if self.decode_queue.in_flight() == 0 {
             return;
         }
@@ -1762,17 +1765,23 @@ impl Chain {
                 submit_front_reset(&mut self.decode_queue, &mut self.inline_worker, endpoint);
             }
         }
-        for endpoint in 0..MAX_ENDPOINTS as u16 {
-            if drained & (1_u32 << endpoint) != 0 {
-                self.run_pending_stop(usize::from(endpoint), endpoint, out);
+        if release {
+            for endpoint in 0..MAX_ENDPOINTS as u16 {
+                if drained & (1_u32 << endpoint) != 0 {
+                    self.run_pending_stop(usize::from(endpoint), endpoint, out);
+                }
             }
         }
         let decoding_after = self.decoding_lanes();
         self.mixer.set_decoding(decoding_after);
-        if placed || decoding_after != decoding_before {
+        if release && (placed || decoding_after != decoding_before) {
             let (mixer, back) = (&mut self.mixer, &mut self.back);
             mixer.release_decoded(&mut |scene| back.process(scene, out));
         }
+    }
+
+    fn collect_decoded(&mut self, out: &mut dyn FnMut(ChainEvent<'_>)) {
+        self.collect_decoded_with(out, true);
     }
 
     pub fn set_prepared(&mut self, prepared: Box<Prepared>) -> Option<Box<Prepared>> {
@@ -2209,7 +2218,7 @@ impl Chain {
             if let Some(worker) = &mut self.inline_worker {
                 while worker.run_one() {}
             }
-            self.collect_decoded(out);
+            self.collect_decoded_with(out, false);
             if self.decode_queue.in_flight() > 0 {
                 return false;
             }

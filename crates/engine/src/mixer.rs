@@ -954,17 +954,16 @@ impl SceneMixer {
             arrival_slack_frames: config.arrival_slack_frames.min(MAX_ARRIVAL_SLACK_FRAMES),
             ..config
         };
-        // The ring holds a lane whose placed audio leads the frontier by up to
-        // the chain's delivery-lateness bound (`MAX_DELAY_FRAMES`) plus the
-        // admitted arrival slack, a scene and two intervals, with the frontier
-        // trailing `now` by up to an interval plus the slack (an interval is
-        // emitted late once `now` passes its end by the slack). A lane that
-        // leads further is held at the ring end by `ahead_limit`. The extra
-        // slot keeps a just-emitted interval from aliasing the furthest
+        // The ring holds the full admitted lane lead plus the furthest the
+        // frontier may trail `now`. Ordinary arrival waiting trails by one
+        // interval plus its slack, while decode waiting may trail by the full
+        // delivery-lateness bound. Use the larger one so another waiting lane
+        // cannot make a late delivery hit this lane's ring end and be cut. The
+        // extra slot keeps a just-emitted interval from aliasing the furthest
         // admissible write.
         let slot_capacity = retained_frames(config.arrival_slack_frames)
             .saturating_add(MIX_FRAMES as u64)
-            .saturating_add(config.arrival_slack_frames)
+            .saturating_add(config.arrival_slack_frames.max(MAX_DELAY_FRAMES))
             .div_ceil(MIX_FRAMES as u64) as usize
             + 1;
         Self {
