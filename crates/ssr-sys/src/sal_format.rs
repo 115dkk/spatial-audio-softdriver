@@ -26,10 +26,22 @@ pub const SAL_DEVICE_PATH: &str = r"\\.\DolbyDecoderMat";
 pub const SAL_IOCTL_READ: u32 = (0x22 << 16) | (1 << 14) | (0x800 << 2);
 pub const SAL_IOCTL_RESET: u32 = (0x22 << 16) | (2 << 14) | (0x802 << 2);
 pub const SAL_HEADER_LEN: usize = 80;
-/// SAL has no stop indication. Five missing 20 ms game blocks is long enough
-/// to distinguish a stopped stream from normal scheduling jitter while keeping
-/// restart latency bounded. Elapsed time is measured only between READ QPCs.
+/// SAL has no stop indication, so a stop is synthesized after this long
+/// without payload. Five missing 20 ms game blocks tell a stopped stream from
+/// scheduling jitter while keeping restart latency bounded; the threshold
+/// starts here. Some sources only stall: Apple Music's DD+ goes quiet for
+/// 100–150 ms every few seconds and then hands over what it held. A restart
+/// whose first READ brings back at least 70% of the gap's audio shows such a
+/// stall, and a stop synthesized for it made the engine fill the gap with
+/// silence and then play the held audio as well, adding the gap to the
+/// latency at every stall. The threshold then grows to 1.5 times that gap
+/// plus 20 ms, up to [`SAL_STOP_IDLE_MAX_MS`], for the translator's life.
+/// Elapsed time is measured only between READ QPCs.
 pub const SAL_STOP_IDLE_MS: u64 = 100;
+/// The most the stop threshold learns. Three times the observed 100–150 ms
+/// stalls; a source that really stops is then reported at most this late,
+/// and until then its lane holds the output ring, which can run dry once.
+pub const SAL_STOP_IDLE_MAX_MS: u64 = 500;
 
 /// One parsed READ header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,6 +182,7 @@ pub struct SalTranslator {
     active: bool,
     last_payload_qpc: Option<u64>,
     qpc_frequency: u64,
+    stop_idle_ms: u64,
     pending: Option<PendingRead>,
 }
 
@@ -191,6 +204,7 @@ struct PendingRead {
     lost: u64,
     format_repeat: bool,
     stop: bool,
+    learned_stop_idle_ms: Option<u64>,
 }
 
 impl Default for SalTranslator {
@@ -213,8 +227,14 @@ impl SalTranslator {
             active: false,
             last_payload_qpc: None,
             qpc_frequency: qpc_frequency.max(1),
+            stop_idle_ms: SAL_STOP_IDLE_MS,
             pending: None,
         }
+    }
+
+    /// The current idle threshold used to synthesize a stream stop.
+    pub fn stop_idle_ms(&self) -> u64 {
+        self.stop_idle_ms
     }
 
     pub fn has_pending(&self) -> bool {
@@ -241,7 +261,7 @@ impl SalTranslator {
         }
         let changed = self.previous.is_none_or(|old| !old.same_format(&h));
         let restarting = !self.active && h.payload_bytes > 0;
-        let stop_ticks = self.qpc_frequency.saturating_mul(SAL_STOP_IDLE_MS) / 1_000;
+        let stop_ticks = self.qpc_frequency.saturating_mul(self.stop_idle_ms) / 1_000;
         let stop = self.active
             && h.payload_bytes == 0
             && self
@@ -250,6 +270,24 @@ impl SalTranslator {
         if changed {
             h.source_format()?;
         }
+        let learned_stop_idle_ms = restarting
+            .then(|| {
+                let gap_ticks = qpc.saturating_sub(self.last_payload_qpc?);
+                let gap_ms = u64::try_from(
+                    u128::from(gap_ticks).saturating_mul(1_000) / u128::from(self.qpc_frequency),
+                )
+                .unwrap_or(u64::MAX);
+                let byte_rate = u64::from(h.rate) * u64::from(h.block_align);
+                let catch_up_ms = u64::from(h.payload_bytes)
+                    .saturating_mul(1_000)
+                    .checked_div(byte_rate)?;
+                (u128::from(catch_up_ms) * 10 >= u128::from(gap_ms) * 7).then(|| {
+                    self.stop_idle_ms
+                        .max(gap_ms.saturating_mul(3) / 2 + 20)
+                        .min(SAL_STOP_IDLE_MAX_MS)
+                })
+            })
+            .flatten();
         let stage = if stop || changed || restarting {
             PendingStage::Start
         } else if h.dropped_bytes > self.dropped {
@@ -267,6 +305,7 @@ impl SalTranslator {
             lost: h.dropped_bytes.saturating_sub(self.dropped),
             format_repeat: restarting && !changed,
             stop,
+            learned_stop_idle_ms,
         });
         Ok(true)
     }
@@ -284,7 +323,7 @@ impl SalTranslator {
         }
         let changed = self.previous.is_none_or(|old| !old.same_format(&h));
         let restarting = !self.active && h.payload_bytes > 0;
-        let stop_ticks = self.qpc_frequency.saturating_mul(SAL_STOP_IDLE_MS) / 1_000;
+        let stop_ticks = self.qpc_frequency.saturating_mul(self.stop_idle_ms) / 1_000;
         let stop = self.active
             && h.payload_bytes == 0
             && self
@@ -365,6 +404,9 @@ impl SalTranslator {
                     }
                     self.position = 0;
                     self.active = true;
+                    if let Some(stop_idle_ms) = pending.learned_stop_idle_ms {
+                        self.stop_idle_ms = stop_idle_ms;
+                    }
                     pending.stage = PendingStage::Format;
                     count += 1;
                 }

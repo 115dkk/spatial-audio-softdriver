@@ -158,11 +158,13 @@ MAT 디코더와 블랙박스 골든 시험의 재료입니다. 구축기에서 
 - `inspect`의 형식이 재생한 것과 맞음(Atmos → MAT, DD+ → E-AC-3)
 - 유실(losses)이 0
 
+`inspect`의 엔드포인트마다 있는 `arrival`은 READ가 도착한 간격의 요약입니다(`gap_ms`, `read_ms`, `gaps_over_100_ms`, `catch_up`). 소리는 담기지 않으므로, 덤프를 공개하기 어려우면 이 부분만 붙여 주셔도 됩니다. `catch_up`에 공백과 비슷한 길이의 READ가 이어지면 원본이 멈췄다가 몰아 보낸 것입니다(ADR 0036).
+
 **골든 기준 녹음(선택).** `sal-music-joc`와 같은 곡의 같은 60초를 구축기로 재생하면서, 헤드폰 출력의 WASAPI 루프백을 32비트 WAV로 녹음해 `builder-music-joc.wav`로 남깁니다. Audacity라면 호스트 "Windows WASAPI", 녹음 장치는 헤드폰 출력의 "(loopback)"입니다. 쓴 BRIR과 구축기 설정을 메모에 적습니다.
 
 ### M2-2. 듣기 (게임과 음악)
 
-구축기를 끈 상태에서 `ssr-live`가 SAL 링을 받아 헤드폰으로 내게 합니다. SAL 쪽 공간 음향은 켠 그대로 둡니다.
+구축기를 끈 상태에서 `ssr-live`가 SAL 링을 받아 헤드폰으로 재생합니다. SAL 쪽 공간 음향은 켠 그대로 둡니다.
 
 게임(독점 모드, 장치 최소 주기, 링 목표 10 ms):
 
@@ -178,7 +180,7 @@ MAT 디코더와 블랙박스 골든 시험의 재료입니다. 구축기에서 
 
 같은 것을 공유 모드로 한 번 더: `--shared --report play-music-shared.json`.
 
-Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 바닥, 클럭 보정이 남습니다. 화면에도 1초마다 나옵니다. 각 보고를 검사합니다.
+Enter로 멈추면 `--report` 파일에 끊김, 장치 재시작, 지연, 링 바닥, 클럭 보정이 남습니다. 화면에도 1초마다 나옵니다. 1초 줄의 `출력 끊김 N회`(영어 `underruns N`)는 출력 링이 비어 장치에 보낼 소리가 없었던 횟수의 누계이고, `입력 공백 +N ms`(영어 `input gap +N ms`)는 그 1초 동안 입력이 제때 오지 않아 무음으로 채운 길이입니다. 각 보고를 검사합니다.
 
 ```powershell
 py .\report_check.py --preset sal play-game.json
@@ -194,8 +196,9 @@ py .\report_check.py --preset sal play-music-shared.json
 - 게임에서 소리가 화면보다 늦게 느껴지는지
 
 **합격 기준**
-- 재생 중 `underruns` 0. 언더런이 나면 ssr-live가 그 초의 줄 아래에 `underrun: ring … frames, markers …, layout …, needed …, produced …, last block … ms ago`(한국어 Windows에서는 `끊김: 링 …프레임, 표지 …, 배치 …, 필요 …, 생성 …, 마지막 블록 … ms 전`)를 찍고, `--report`의 JSON에도 `last_underrun`으로 남깁니다. 이 줄을 결과에 그대로 붙여 주십시오. 링이 비었는지(`ring`), 캡처가 멈췄는지(`last block`)를 가를 수 있습니다
+- 재생 중 `underruns` 0. 언더런이 나면 ssr-live가 그 초의 줄 아래에 `underrun: ring … frames, markers …, layout …, needed …, produced …, last block … ms ago`(한국어 Windows에서는 `출력 끊김: 링 …프레임, 표지 …, 배치 …, 필요 …, 생성 …, 마지막 블록 … ms 전`)를 찍고, `--report`의 JSON에도 `last_underrun`으로 남깁니다. 이 줄을 결과에 그대로 붙여 주십시오. 링이 비었는지(`ring`), 캡처가 멈췄는지(`last block`)를 가를 수 있습니다
 - `output_restarts` 0. 아니면 그 DAC 이름과 함께 적습니다(ADR 0019)
+- `lane_underrun_frames` 0. 1초 줄의 `입력 공백`이 늘면 그 초의 줄들을 결과에 붙여 주십시오
 - 들리는 문제 없음
 
 ### M2-3. 지연을 구축기와 비교 (M2의 끝나는 조건)

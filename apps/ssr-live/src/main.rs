@@ -1138,6 +1138,7 @@ mod platform {
         let mut next_report = Duration::from_secs(1);
         let mut ended_at: Option<Instant> = None;
         let mut reported_underruns = 0;
+        let mut reported_lane_underrun_frames = 0;
         while !stop.load(Ordering::Acquire)
             && options
                 .seconds
@@ -1160,6 +1161,7 @@ mod platform {
                     &status,
                     session.recorder_dropped_bytes(),
                     &mut reported_underruns,
+                    &mut reported_lane_underrun_frames,
                     language,
                 );
                 next_report += Duration::from_secs(1);
@@ -1270,6 +1272,7 @@ mod platform {
         status: &ssr_types::EngineStatus,
         recorder_dropped: u64,
         reported_underruns: &mut u64,
+        reported_lane_underrun_frames: &mut u64,
         language: ssr_types::app::Language,
     ) {
         let chain_errors = status.unattributed_chain_errors.total()
@@ -1288,6 +1291,11 @@ mod platform {
             .as_ref()
             .map(|fault| ssr_i18n::live::fault_suffix(language, format_args!("{fault:?}")))
             .unwrap_or_default();
+        let gap_ms = status
+            .lane_underrun_frames
+            .saturating_sub(*reported_lane_underrun_frames)
+            .saturating_add(24)
+            / 48;
         eprintln!(
             "{}",
             ssr_i18n::live::status(
@@ -1297,6 +1305,7 @@ mod platform {
                 format_args!("{:.1}", status.latency.p99_ms),
                 format_args!("{:.1}", status.ring_level_ms),
                 status.underruns,
+                gap_ms,
                 status.output_restarts,
                 format_args!("{:+.0}", status.clock_ppm),
                 status.lost_bytes,
@@ -1322,6 +1331,7 @@ mod platform {
             );
         }
         *reported_underruns = status.underruns;
+        *reported_lane_underrun_frames = status.lane_underrun_frames;
     }
 
     pub fn devices(formats: bool, json: bool) -> Result<(), String> {

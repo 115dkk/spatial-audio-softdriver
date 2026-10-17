@@ -1722,7 +1722,7 @@ pub mod live {
         }
     }
 
-    #[doc = "{second}초  지연 p50 {p50} ms p99 {p99} ms  링 최저 {ring} ms  끊김 {underruns}회  장치 재시작 {restarts}회  클럭 {clock} ppm  손실 {lost} B  tee 손실 {dropped} B{suffix}{fault}"]
+    #[doc = "{second}초  지연 p50 {p50} ms p99 {p99} ms  링 최저 {ring} ms  출력 끊김 {underruns}회  입력 공백 +{gap} ms  장치 재시작 {restarts}회  클럭 {clock} ppm  손실 {lost} B  tee 손실 {dropped} B{suffix}{fault}"]
     #[allow(clippy::too_many_arguments)]
     pub fn status(
         language: Language,
@@ -1731,6 +1731,7 @@ pub mod live {
         p99: impl core::fmt::Display,
         ring: impl core::fmt::Display,
         underruns: impl core::fmt::Display,
+        gap: impl core::fmt::Display,
         restarts: impl core::fmt::Display,
         clock: impl core::fmt::Display,
         lost: impl core::fmt::Display,
@@ -1740,10 +1741,10 @@ pub mod live {
     ) -> String {
         match language {
             Language::Ko => format!(
-                "{second}초  지연 p50 {p50} ms p99 {p99} ms  링 최저 {ring} ms  끊김 {underruns}회  장치 재시작 {restarts}회  클럭 {clock} ppm  손실 {lost} B  tee 손실 {dropped} B{suffix}{fault}"
+                "{second}초  지연 p50 {p50} ms p99 {p99} ms  링 최저 {ring} ms  출력 끊김 {underruns}회  입력 공백 +{gap} ms  장치 재시작 {restarts}회  클럭 {clock} ppm  손실 {lost} B  tee 손실 {dropped} B{suffix}{fault}"
             ),
             Language::En => format!(
-                "{second} s  latency p50 {p50} ms p99 {p99} ms  ring trough {ring} ms  underruns {underruns}  device restarts {restarts}  clock {clock} ppm  lost {lost} B  tee-dropped {dropped} B{suffix}{fault}"
+                "{second} s  latency p50 {p50} ms p99 {p99} ms  ring trough {ring} ms  underruns {underruns}  input gap +{gap} ms  device restarts {restarts}  clock {clock} ppm  lost {lost} B  tee-dropped {dropped} B{suffix}{fault}"
             ),
         }
     }
@@ -1770,7 +1771,7 @@ pub mod live {
         }
     }
 
-    #[doc = "      끊김: 링 {ring}프레임, 표지 {markers}, 배치 {layout}, 필요 {needed}, 생성 {produced}, 마지막 블록 {ago} ms 전"]
+    #[doc = "      출력 끊김: 링 {ring}프레임, 표지 {markers}, 배치 {layout}, 필요 {needed}, 생성 {produced}, 마지막 블록 {ago} ms 전"]
     pub fn underrun(
         language: Language,
         ring: impl core::fmt::Display,
@@ -1782,7 +1783,7 @@ pub mod live {
     ) -> String {
         match language {
             Language::Ko => format!(
-                "      끊김: 링 {ring}프레임, 표지 {markers}, 배치 {layout}, 필요 {needed}, 생성 {produced}, 마지막 블록 {ago} ms 전"
+                "      출력 끊김: 링 {ring}프레임, 표지 {markers}, 배치 {layout}, 필요 {needed}, 생성 {produced}, 마지막 블록 {ago} ms 전"
             ),
             Language::En => format!(
                 "      underrun: ring {ring} frames, markers {markers}, layout {layout}, needed {needed}, produced {produced}, last block {ago} ms ago"

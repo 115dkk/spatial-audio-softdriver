@@ -335,7 +335,7 @@ fn simulate_clock_from(
 /// (a 1,536-frame E-AC-3 sync frame lands as three or four 480-frame blocks).
 fn simulated_setpoint_ms(block: usize, period: usize) -> f64 {
     let delivery = block.div_ceil(crate::MIX_FRAMES) * crate::MIX_FRAMES;
-    trough_setpoint_frames(480.0, period as f64, delivery as f64, f64::INFINITY) / 48.0
+    trough_setpoint_frames(480.0, period as f64, delivery as f64, 0.0, f64::INFINITY) / 48.0
 }
 
 /// Drives the production crossing producer and output state. Source time is
@@ -388,7 +388,7 @@ fn simulate_clock_with(
     let mut events = EventWriter::new(capture_events, Arc::clone(&shared));
     let samples = vec![0.25; crate::MIX_FRAMES];
     let mut residual = 0_usize;
-    let mut arrivals = ArrivalPeak::new();
+    let mut arrivals = Arrivals::new(&shared);
     // One capture step: the source frames that became visible, in whole mixer
     // blocks, recorded as the capture loop records a step.
     let mut capture_step =
@@ -414,10 +414,7 @@ fn simulate_clock_with(
                 );
             }
             if blocks != 0 {
-                shared.arrival_frames.store(
-                    arrivals.record((blocks * crate::MIX_FRAMES) as u64),
-                    Ordering::Release,
-                );
+                arrivals.record((blocks * crate::MIX_FRAMES) as u64, &shared);
             }
         };
     let initial_frames = (backlog_ms * f64::from(crate::MIX_RATE) / 1_000.0).round() as usize;
@@ -487,6 +484,11 @@ fn simulate_clock_with(
     let label = format!(
         "block {block} period {period} skew {skew_ppm} trim {trim} backlog {backlog_ms} late {late}"
     );
+    assert_eq!(
+        shared.stall_reserve_frames.load(Ordering::Acquire),
+        0,
+        "{label}: ordinary clock scenario learned a stall reserve"
+    );
     let expected_windows = seconds / 2.0 / CONTROL_WINDOW_SECONDS;
     assert!(
         f64::from(run.windows) >= 0.8 * expected_windows,
@@ -504,6 +506,161 @@ fn simulate_clock_with(
         "{label}: the ring refused blocks"
     );
     run
+}
+
+#[derive(Debug)]
+struct StallRun {
+    underruns: u64,
+    underruns_after_second_stall: u64,
+    late_min_level_ms: f64,
+    late_average_level_ms: f64,
+    late_clamped_ratio: f64,
+    first_reserve_level_ms: f64,
+    final_level_ms: f64,
+    final_reserve_frames: u64,
+}
+
+fn simulate_stalling_source(seconds: f64, stalls_until_seconds: f64) -> StallRun {
+    let period = crate::MIX_FRAMES;
+    let layout = OutputLayout {
+        channels: 1,
+        channel_mask: 1,
+    };
+    let capacity = capacity_frames(320.0, crate::MIX_RATE);
+    let shared = Arc::new(Shared::new());
+    shared.scene_rate.store(crate::MIX_RATE, Ordering::Release);
+    shared
+        .clock_mode
+        .store(ClockMode::Asrc.as_u32(), Ordering::Release);
+    shared.capture_started.store(true, Ordering::Release);
+    let (mut crossing, consumer) = crossing::channel(capacity, 1);
+    let (event_producer, _event_consumer) = RingBuffer::new(EVENT_QUEUE_CAPACITY);
+    let mut output = OutputState::new(
+        consumer,
+        crate::MIX_RATE,
+        period,
+        40.0,
+        DEFAULT_QPC_FREQUENCY,
+        event_producer,
+        Arc::clone(&shared),
+        layout,
+        capacity,
+    );
+    let (capture_events, _capture_event_consumer) = RingBuffer::new(EVENT_QUEUE_CAPACITY);
+    let mut events = EventWriter::new(capture_events, Arc::clone(&shared));
+    let samples = vec![0.25; crate::MIX_FRAMES];
+    let mut arrivals = Arrivals::new(&shared);
+    let mut capture_step =
+        |blocks: usize, crossing: &mut CrossingProducer, events: &mut EventWriter| {
+            for _ in 0..blocks {
+                crossing.push(
+                    crate::chain::BlockOut {
+                        epoch: 1,
+                        rate: crate::MIX_RATE,
+                        source_qpc: 0,
+                        channels: 1,
+                        channel_mask: 1,
+                        frames: crate::MIX_FRAMES,
+                        samples: &samples,
+                        silent: false,
+                        idle: false,
+                    },
+                    events,
+                    &shared,
+                );
+            }
+            if blocks != 0 {
+                arrivals.record((blocks * crate::MIX_FRAMES) as u64, &shared);
+            }
+        };
+
+    let period_seconds = period as f64 / f64::from(crate::MIX_RATE);
+    let periods = (seconds / period_seconds) as usize;
+    let late_start = periods / 2;
+    let mut period_buffer = vec![0.0; period];
+    let mut late_level_sum = 0.0;
+    let mut late_level_count = 0_u64;
+    let mut late_min_level_ms = f64::INFINITY;
+    let mut late_windows = 0_u64;
+    let mut late_clamped = 0_u64;
+    let mut underruns_after_second_stall = 0_u64;
+    let mut first_reserve_level_ms = None;
+    for index in 0..periods {
+        let elapsed = index as f64 * period_seconds;
+        let cycle = index % 200;
+        let blocks = if elapsed < stalls_until_seconds && (188..199).contains(&cycle) {
+            0
+        } else if elapsed < stalls_until_seconds && cycle == 199 {
+            12
+        } else {
+            1
+        };
+        capture_step(blocks, &mut crossing, &mut events);
+        output.fill(&mut period_buffer);
+        let playback_qpc =
+            ((index + 1) as f64 * period_seconds * DEFAULT_QPC_FREQUENCY as f64).round() as u64;
+        let completed = output.finish_period(playback_qpc);
+        if index == 400 {
+            underruns_after_second_stall = shared.underruns.load(Ordering::Acquire);
+        }
+        if first_reserve_level_ms.is_none()
+            && shared.stall_reserve_frames.load(Ordering::Acquire) != 0
+            && output.period_had_audio
+        {
+            first_reserve_level_ms = Some(output.crossing.queued_frames(1) as f64 / 48.0);
+        }
+        if index >= late_start {
+            let level_ms = output.crossing.queued_frames(1) as f64 / 48.0;
+            late_min_level_ms = late_min_level_ms.min(level_ms);
+            late_level_sum += level_ms;
+            late_level_count += 1;
+            if let Some((_, ppm)) = completed {
+                late_windows += 1;
+                late_clamped += u64::from(ppm.abs() >= PI_LIMIT_PPM);
+            }
+        }
+    }
+    let underruns = shared.underruns.load(Ordering::Acquire);
+    StallRun {
+        underruns,
+        underruns_after_second_stall: underruns.saturating_sub(underruns_after_second_stall),
+        late_min_level_ms,
+        late_average_level_ms: late_level_sum / late_level_count as f64,
+        late_clamped_ratio: late_clamped as f64 / late_windows as f64,
+        first_reserve_level_ms: first_reserve_level_ms.unwrap_or(f64::INFINITY),
+        final_level_ms: output.crossing.queued_frames(1) as f64 / 48.0,
+        final_reserve_frames: shared.stall_reserve_frames.load(Ordering::Acquire),
+    }
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "drives the real resampler for minutes of audio; run with --release (CI's release test jobs do)"
+)]
+fn a_source_that_stalls_and_catches_up_stops_underrunning() {
+    let run = simulate_stalling_source(120.0, 120.0);
+    println!("stall simulation: {run:?}");
+    assert!(run.underruns <= 2, "{run:?}");
+    assert_eq!(run.underruns_after_second_stall, 0, "{run:?}");
+    assert!(run.late_min_level_ms > 0.0, "{run:?}");
+    assert!(run.late_average_level_ms <= 170.0, "{run:?}");
+    // The window that holds a stall's dip reaches the limit: one window in
+    // ten at a stall every two seconds. Anything more is the controller
+    // fighting the reserve.
+    assert!(run.late_clamped_ratio <= 0.12, "{run:?}");
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "drives the real resampler for minutes of audio; run with --release (CI's release test jobs do)"
+)]
+fn the_stall_reserve_expires_after_the_source_recovers() {
+    let run = simulate_stalling_source(100.0, 60.0);
+    println!("stall recovery simulation: {run:?}");
+    assert_eq!(run.final_reserve_frames, 0, "{run:?}");
+    assert!(run.final_level_ms < run.first_reserve_level_ms, "{run:?}");
 }
 
 #[test]
@@ -870,21 +1027,66 @@ fn a_period_as_long_as_a_block_survives_phase_slips_and_late_blocks() {
 }
 
 #[test]
+fn stall_reserve_learns_only_a_catch_up_delivery_and_expires() {
+    let block = crate::MIX_FRAMES as u64;
+    let mut reserve = StallReserve::new();
+    assert_eq!(reserve.record(12 * block, block, 0.01), 11 * block);
+    assert_eq!(reserve.record(block, block, STALL_HOLD_SECONDS), 11 * block);
+    assert_eq!(reserve.record(block, block, 0.01), 0);
+
+    let mut empty = StallReserve::new();
+    assert_eq!(empty.record(12 * block, 0, 0.01), 0);
+}
+
+#[test]
+fn shorter_stalls_that_keep_coming_keep_the_reserve() {
+    let block = crate::MIX_FRAMES as u64;
+    let mut reserve = StallReserve::new();
+    assert_eq!(reserve.record(12 * block, block, 0.01), 11 * block);
+    for _ in 0..30 {
+        assert_eq!(reserve.record(block, block, 2.0), 11 * block);
+        // A 70 ms stall every two seconds, shorter than the first.
+        assert_eq!(reserve.record(8 * block, block, 0.01), 11 * block);
+    }
+}
+
+#[test]
+fn stall_reserve_ignores_one_late_pcm_or_dd_plus_delivery() {
+    let block = crate::MIX_FRAMES as u64;
+    let mut reserve = StallReserve::new();
+    assert_eq!(reserve.record(2 * block, block, 0.01), 0);
+    assert_eq!(reserve.record(8 * block, 4 * block, 0.01), 0);
+}
+
+#[test]
 fn trough_setpoint_keeps_one_late_delivery_beyond_the_target() {
     // The smaller of the take and the delivery: a 3 ms period loses one
     // take to a late 10 ms block, a 20 ms period loses one 10 ms block.
-    assert_eq!(trough_setpoint_frames(480.0, 144.0, 480.0, 9_600.0), 624.0);
-    assert_eq!(trough_setpoint_frames(480.0, 960.0, 480.0, 9_600.0), 960.0);
     assert_eq!(
-        trough_setpoint_frames(480.0, 480.0, 1_536.0, 9_600.0),
+        trough_setpoint_frames(480.0, 144.0, 480.0, 0.0, 9_600.0),
+        624.0
+    );
+    assert_eq!(
+        trough_setpoint_frames(480.0, 960.0, 480.0, 0.0, 9_600.0),
         960.0
+    );
+    assert_eq!(
+        trough_setpoint_frames(480.0, 480.0, 1_536.0, 0.0, 9_600.0),
+        960.0
+    );
+    assert_eq!(
+        trough_setpoint_frames(480.0, 480.0, 1_536.0, 5_760.0, 9_600.0),
+        6_720.0
     );
     // Never above what leaves room for a delivery after the take.
     assert_eq!(
-        trough_setpoint_frames(480.0, 960.0, 1_536.0, 2_976.0),
+        trough_setpoint_frames(480.0, 960.0, 1_536.0, 5_760.0, 2_976.0),
         480.0
     );
-    assert_eq!(trough_setpoint_frames(480.0, 960.0, 1_536.0, 1_000.0), 0.0);
+    assert_eq!(
+        trough_setpoint_frames(480.0, 960.0, 1_536.0, 5_760.0, 1_000.0),
+        0.0
+    );
 }
 
 #[test]
@@ -899,7 +1101,7 @@ fn the_default_ring_never_caps_the_setpoint_for_a_dd_plus_delivery() {
     let delivery = 4.0 * crate::MIX_FRAMES as f64;
     for take in [144.0, 480.0, 960.0, 1_920.0, 4_096.0] {
         assert_eq!(
-            trough_setpoint_frames(target, take, delivery, capacity),
+            trough_setpoint_frames(target, take, delivery, 0.0, capacity),
             target + f64::min(take, delivery),
             "{take}-frame period"
         );

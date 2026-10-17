@@ -45,8 +45,10 @@ class Expect:
 
 
 PRESETS = {
+    # lane_underrun_frames: a stalled and catching-up source filled with
+    # silence (ADR 0036) passed this preset while it crackled.
     "sal": Expect("sal", REQUESTED, REQUESTED, "forbidden", LATENCY_CEILING_MS, None,
-                  ("underruns", "output_restarts"), False),
+                  ("underruns", "output_restarts", "lane_underrun_frames"), False),
     "listen": Expect("driver", REQUESTED, REQUESTED, "forbidden", LATENCY_CEILING_MS,
                      (CADENCE_RATIO_MIN, CADENCE_RATIO_MAX), COMMON_LOSS_COUNTERS,
                      False, True),

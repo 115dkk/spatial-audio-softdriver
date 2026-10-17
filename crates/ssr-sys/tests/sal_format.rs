@@ -3,7 +3,9 @@
 mod common;
 use common::{header, read};
 use ssr_abi::{ENDPOINT_PRIMARY, Record, RecordWriter, records};
-use ssr_sys::sal_format::{SAL_STOP_IDLE_MS, SalError, SalTranslator, parse_header};
+use ssr_sys::sal_format::{
+    SAL_STOP_IDLE_MAX_MS, SAL_STOP_IDLE_MS, SalError, SalTranslator, parse_header,
+};
 use ssr_types::{BitstreamCodec, SampleType, SourceFormat};
 
 #[test]
@@ -335,6 +337,58 @@ fn sal_idle_stop_restart_resets_position_and_repeats_format() {
             ..
         }
     ));
+}
+
+fn translate_read(
+    t: &mut SalTranslator,
+    h: ssr_sys::sal_format::SalHeader,
+    payload_ms: u64,
+    qpc_ms: u64,
+) {
+    let payload_bytes = u64::from(h.rate) * u64::from(h.block_align) * payload_ms / 1_000;
+    let payload = vec![0; payload_bytes as usize];
+    let mut output = vec![0; payload.len() + 2_048];
+    t.translate(
+        &read(h, &payload),
+        qpc_ms,
+        &mut RecordWriter::new(&mut output),
+    )
+    .unwrap();
+}
+
+#[test]
+fn sal_delivery_delay_raises_stop_threshold_and_suppresses_shorter_stop() {
+    let mut t = SalTranslator::with_qpc_frequency(1_000);
+    let h = header();
+    translate_read(&mut t, h, 10, 0);
+    translate_read(&mut t, h, 0, 150);
+    translate_read(&mut t, h, 140, 150);
+    assert_eq!(t.stop_idle_ms(), 245);
+
+    let mut output = [0; 512];
+    let mut writer = RecordWriter::new(&mut output);
+    assert_eq!(t.translate(&read(h, &[]), 350, &mut writer), Ok(0));
+    assert!(writer.is_empty());
+}
+
+#[test]
+fn sal_real_stop_does_not_raise_stop_threshold() {
+    let mut t = SalTranslator::with_qpc_frequency(1_000);
+    let h = header();
+    translate_read(&mut t, h, 10, 0);
+    translate_read(&mut t, h, 0, 2_000);
+    translate_read(&mut t, h, 20, 2_000);
+    assert_eq!(t.stop_idle_ms(), SAL_STOP_IDLE_MS);
+}
+
+#[test]
+fn sal_learned_stop_threshold_is_capped() {
+    let mut t = SalTranslator::with_qpc_frequency(1_000);
+    let h = header();
+    translate_read(&mut t, h, 10, 0);
+    translate_read(&mut t, h, 0, 1_000);
+    translate_read(&mut t, h, 1_000, 1_000);
+    assert_eq!(t.stop_idle_ms(), SAL_STOP_IDLE_MAX_MS);
 }
 
 #[test]
