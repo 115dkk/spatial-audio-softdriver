@@ -259,7 +259,7 @@ note = "BS.2127-1 section 10.1 room-to-direction conversion; ETSI TS 103 420 OAM
 [[feature]]
 id = "decode.truehd"
 kind = "pipeline"
-milestone = "M3"
+milestone = "M6"
 status = "planned"
 tests = []
 
@@ -853,7 +853,7 @@ note = "ADR 0021 and ADR 0035 (2026-10-16 correction): on endpoints 0, 1 and 2 (
 [[feature]]
 id = "upmix.first_party"
 kind = "pipeline"
-milestone = "M4"
+milestone = "M6"
 status = "planned"
 tests = []
 note = "Rust rewrite of the upmixer posted in dcinside speakers 580088, as a derivative work once its repository and licence are published (ADR 0020); runs in the engine process, separation inference on a worker thread"
@@ -1190,7 +1190,7 @@ note = "tools/ci/exclusive-policy.ps1 writes private MMDevice properties {b3f8fa
 [[feature]]
 id = "sys.ks_output"
 kind = "platform"
-milestone = "M4"
+milestone = "M6"
 status = "planned"
 tests = []
 note = "ADR 0028: Spatial SoftReceiver opens the DAC's render pin through kernel streaming while the DAC endpoint is disabled, so no app can pick the DAC; falls back to WASAPI exclusive when the pin does not open; ssr-guard re-enables the endpoint"
@@ -1198,7 +1198,7 @@ note = "ADR 0028: Spatial SoftReceiver opens the DAC's render pin through kernel
 [[feature]]
 id = "supervisor.entrance_routing"
 kind = "app"
-milestone = "M4"
+milestone = "M6"
 status = "planned"
 tests = []
 note = "ADR 0028: sends known exclusive and bitstream players to the passthrough entrance with the per-app output device setting, and moves shared sessions off it"
@@ -1237,7 +1237,7 @@ note = "ADR 0021 control framing, deterministic deadlines, fallback and restart 
 [[feature]]
 id = "asio.entrance"
 kind = "app"
-milestone = "M4"
+milestone = "M6"
 status = "planned"
 tests = []
 note = "ssrasio.dll, a JACK Router style ASIO driver into the engine, paced by the DAC clock and mixed after the cross ring (ADR 0025). Only asio-sys touches the ASIO SDK and carries GPL-3.0-or-later SPDX headers; releases that ship ssrasio.dll are GPLv3 as a whole (ADR 0003, 0025)"

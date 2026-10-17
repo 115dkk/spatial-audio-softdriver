@@ -919,14 +919,15 @@ impl&lt;H: Host&gt; Supervisor&lt;H&gt; {
           <tr><td>M0 계약</td><td>저장소, ssr-types, ssr-abi 초안, 정책 게이트, CONTEXT.md, ADR</td><td>CI가 forbid·예산·기능 등록부를 검사</td><td>없음</td></tr>
           <tr><td>M1 리플레이</td><td>bitstream, decode(PCM·MAT·DD+), render, brir, convolver, ssr-replay</td><td>친구 덤프의 재생 결과가 블랙박스 골든과 허용 오차 안. Linux CI에서</td><td>없음</td></tr>
           <tr><td>M2 실시간</td><td>engine, speakers, ssr-sys(ring은 SAL 개발 어댑터, output), ssr-live</td><td>시험서명 PC에서 게임과 Apple Music을 헤드폰과 실제 스피커로 청취, 지연 숫자가 구축기 이하</td><td>SAL (개발용)</td></tr>
-          <tr><td>M3 드라이버</td><td>spatialsoftreceiver.sys(렌더 엔드포인트 셋), ABI v1, 쓰기 패킷 알림 측정</td><td>서명 전 검사 통과, ABI 동결</td><td>시험서명</td></tr>
+          <tr><td>M3 드라이버</td><td>spatialsoftreceiver.sys(렌더 엔드포인트 셋), ABI v1 초안, 쓰기 패킷 알림 측정</td><td>호스트 러너가 할 수 있는 서명 전 검사 통과(동결은 M5로, ADR 0027 고침)</td><td>시험서명</td></tr>
           <tr><td>M4 앱</td><td>supervisor, 화면, ssr-setup, Velopack</td><td>새 PC에서 마법사만으로 설치와 청취</td><td>시험서명</td></tr>
-          <tr><td>M5 서명·출시</td><td>EV 구입, Partner Center 등록, 증명 제출</td><td>Secure Boot를 켠 PC에서 설치</td><td>증명 서명</td></tr>
+          <tr><td>M5 서명·출시</td><td>ABI v1 동결, EV 구입, Partner Center 등록, 증명 제출</td><td>Secure Boot를 켠 PC에서 설치</td><td>증명 서명</td></tr>
+          <tr><td>M6 베타 뒤 확장</td><td>TrueHD 디코더, ASIO 입구, 커널 스트리밍 출력, 앱별 입구 배정, 자체 업믹서</td><td>기능마다 따로</td><td>증명 서명</td></tr>
         </tbody>
       </table>
     </div>
     <div class="prose">
-      <p>EV는 M3가 끝날 때 삽니다. 인증서의 1년이 드라이버를 고칠 수 있는 기간이므로, 초기 사용자의 버그 보고를 받는 동안 그 기간이 열려 있어야 합니다. M0부터 M2까지는 EV도 우리 드라이버도 없이 진행할 수 있고, 스폰서 목표가 차는 속도와 개발 속도를 맞출 여유가 여기서 생깁니다.</p>
+      <p>EV는 M5에 들어가 ABI v1을 동결한 뒤 삽니다(처음에는 M3가 끝날 때였고, ADR 0004의 수정으로 옮겼습니다). 인증서의 1년이 드라이버를 고칠 수 있는 기간이므로, 초기 사용자의 버그 보고를 받는 동안 그 기간이 열려 있어야 합니다. M0부터 M2까지는 EV도 우리 드라이버도 없이 진행할 수 있고, 스폰서 목표가 차는 속도와 개발 속도를 맞출 여유가 여기서 생깁니다.</p>
     </div>
   </section>
 

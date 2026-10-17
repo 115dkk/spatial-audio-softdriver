@@ -686,10 +686,10 @@ fn features_registry_is_well_formed() {
         }
         if !matches!(
             feature.milestone.as_str(),
-            "M0" | "M1" | "M2" | "M3" | "M4" | "M5"
+            "M0" | "M1" | "M2" | "M3" | "M4" | "M5" | "M6"
         ) {
             violations.push(format!(
-                "features.toml: feature '{}': milestone '{}' must be M0 through M5",
+                "features.toml: feature '{}': milestone '{}' must be M0 through M6",
                 feature.id, feature.milestone
             ));
         }
